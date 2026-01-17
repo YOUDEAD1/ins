@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running with Anti-Crash!"
+    return "🔥 The Ultimate Bot is Running (Fixed Auto-Reply)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -101,7 +101,7 @@ def get_main_menu():
     btn_reply = types.InlineKeyboardButton("🗣 رد تلقائي", callback_data="main_auto_reply")
     btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
     
-    # الزر الجديد: حذف غير المتابعين بالعدد
+    # ميزة الحذف
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
     
     # زر الإيقاف
@@ -118,8 +118,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل (Anti-Crash Ver)**\n"
-        "تم تحديث النظام ليعمل دون انقطاع، مع ميزة الحذف الجماعي.", 
+        "👋 **مرحباً بك في البوت الشامل (Final Fixed)**\n"
+        "تم إصلاح الرد التلقائي ليعمل بذكاء.", 
         reply_markup=get_main_menu()
     )
 
@@ -165,7 +165,7 @@ def handle_main_menu(call):
 
     elif action == "main_auto_reply":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "✍️ أرسل نص الرد التلقائي:")
+        msg = bot.send_message(chat_id, "✍️ أرسل نص الرد التلقائي للجروبات:")
         bot.register_next_step_handler(msg, start_auto_reply_thread)
 
     elif action == "main_follow":
@@ -173,7 +173,6 @@ def handle_main_menu(call):
         start_smart_follow_thread(chat_id, session)
         bot.answer_callback_query(call.id, "تم بدء المتابعة في الخلفية")
 
-    # 4. الميزة الجديدة: حذف غير المتابعين بالعدد
     elif action == "main_mass_unfollow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذف متابعته؟**\n(مثلاً: 50، 100، 200)\nاكتب الرقم فقط:")
@@ -287,7 +286,7 @@ def show_stats(chat_id):
     if not stats: bot.send_message(chat_id, "📭 لا يوجد نشر نشط.")
     else: bot.send_message(chat_id, f"📊 الحالة: {stats['status']}\n🔢 الجولة: {stats.get('round', 0)}")
 
-# --- دوال الستوري والرد والمتابعة ---
+# --- دوال الستوري ---
 def collect_photos(message):
     chat_id = message.chat.id
     if message.text in ['/done', 'تم']:
@@ -314,6 +313,7 @@ def run_story_uploader(chat_id, session):
     except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
     finally: shutil.rmtree(folder, ignore_errors=True)
 
+# --- (تم التعديل) الرد التلقائي الذكي ---
 def start_auto_reply_thread(message):
     text = message.text; chat_id = message.chat.id
     session = get_user_data(chat_id).get("session_id")
@@ -324,16 +324,32 @@ def start_auto_reply_thread(message):
 def run_auto_reply(chat_id, session, text):
     try:
         cl = Client(); cl.login_by_sessionid(session)
-        processed_threads = []
-        while not stop_flags.get(chat_id, False):
-            threads = cl.direct_threads(amount=10)
-            for t in threads:
-                if t.is_group and t.id not in processed_threads:
-                    if t.messages[0].user_id != cl.user_id:
-                        cl.direct_answer(t.id, text); processed_threads.append(t.id); time.sleep(5)
-            time.sleep(60)
-    except: pass
+        my_id = cl.user_id
+        replied_cache = [] # ذاكرة لتجنب التكرار
 
+        print(f"✅ Auto Reply Started for {chat_id}")
+
+        while not stop_flags.get(chat_id, False):
+            try:
+                threads = cl.direct_threads(amount=20)
+                for t in threads:
+                    if t.is_group:
+                        last_msg = t.messages[0]
+                        # الشرط: الرسالة ليست مني + لم أرد عليها سابقاً
+                        if last_msg.user_id != my_id and last_msg.id not in replied_cache:
+                            cl.direct_send(text, thread_ids=[t.id])
+                            replied_cache.append(last_msg.id)
+                            # تنظيف الذاكرة
+                            if len(replied_cache) > 100: replied_cache.pop(0)
+                            time.sleep(2)
+            except Exception as e:
+                print(f"Error in auto reply: {e}")
+                time.sleep(5)
+            time.sleep(15) # فحص كل 15 ثانية
+    except Exception as e:
+        print(f"❌ Critical Error Auto Reply: {e}")
+
+# --- المتابعة الذكية ---
 def start_smart_follow_thread(chat_id, session):
     stop_flags[chat_id] = False
     threading.Thread(target=run_smart_follow, args=(chat_id, session)).start()
@@ -353,41 +369,29 @@ def run_smart_follow(chat_id, session):
         bot.send_message(chat_id, "✅ انتهت المتابعة.")
     except Exception as e: bot.send_message(chat_id, f"خطأ: {e}")
 
-# ==========================================
-# 6. الميزة الجديدة: حذف غير المتابعين (Mass Unfollow)
-# ==========================================
-
+# --- الحذف الجماعي ---
 def ask_unfollow_count(message):
     try:
         count = int(message.text)
         chat_id = message.chat.id
         session = get_user_data(chat_id).get("session_id")
-        
-        bot.send_message(chat_id, f"⚙️ جاري تحليل المتابعين لحذف {count} شخص منهم... (قد يستغرق وقتاً)")
+        bot.send_message(chat_id, f"⚙️ جاري تحليل المتابعين لحذف {count} شخص... (انتظر)")
         stop_flags[chat_id] = False
-        
-        t = threading.Thread(target=run_mass_unfollow_logic, args=(chat_id, session, count))
-        t.start()
+        threading.Thread(target=run_mass_unfollow_logic, args=(chat_id, session, count)).start()
     except ValueError:
-        bot.send_message(message.chat.id, "❌ الرجاء كتابة رقم صحيح.")
+        bot.send_message(message.chat.id, "❌ رقم فقط.")
 
 def run_mass_unfollow_logic(chat_id, session, count):
     try:
-        cl = Client()
-        cl.login_by_sessionid(session)
-        
+        cl = Client(); cl.login_by_sessionid(session)
         my_id = cl.user_id
         following = cl.user_following(my_id)
         followers = cl.user_followers(my_id)
         
-        non_followers = []
-        for user_id in following:
-            if user_id not in followers:
-                non_followers.append(user_id)
-        
+        non_followers = [uid for uid in following if uid not in followers]
         targets = non_followers[:count]
         
-        bot.send_message(chat_id, f"🔎 وجدت {len(non_followers)} شخص لا يتابعك. سأقوم بحذف {len(targets)} منهم الآن بسرعة 0.5 ثانية.")
+        bot.send_message(chat_id, f"🔎 سأحذف {len(targets)} شخص لا يتابعك.")
         
         removed = 0
         for uid in targets:
@@ -395,30 +399,25 @@ def run_mass_unfollow_logic(chat_id, session, count):
             try:
                 cl.user_unfollow(uid)
                 removed += 1
-                time.sleep(0.5) # السرعة المطلوبة
-                
+                time.sleep(0.5) 
             except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
-                bot.send_message(chat_id, "🛑 توقف اضطراري (حظر مؤقت). سأنتظر 30 دقيقة.")
+                bot.send_message(chat_id, "🛑 حظر مؤقت. سأنتظر 30 دقيقة.")
                 time.sleep(1800)
                 cl.login_by_sessionid(session)
-            except Exception as e:
-                print(f"Error skipping: {e}")
+            except Exception: pass
 
-        bot.send_message(chat_id, f"🏁 تم الانتهاء. قمت بإلغاء متابعة {removed} شخص.")
-
+        bot.send_message(chat_id, f"🏁 تم حذف {removed} شخص.")
     except Exception as e:
-        bot.send_message(chat_id, f"❌ حدث خطأ أثناء العملية: {e}")
+        bot.send_message(chat_id, f"❌ حدث خطأ: {e}")
 
 # ==========================================
-# تشغيل البوت مع نظام إعادة الاتصال التلقائي (Anti-Crash)
+# تشغيل البوت (Anti-Crash System)
 # ==========================================
 print("Bot Started...")
 
-# هذا اللوب مهم جداً: لو انقطع الاتصال، يعيد تشغيل البوت تلقائياً
 while True:
     try:
-        # timeout=10 يقلل احتمالية الفصل
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
-        print(f"⚠️ انقطع الاتصال ({e})... جاري إعادة المحاولة بعد 5 ثواني.")
+        print(f"⚠️ Connection Error: {e}... Restarting in 5s")
         time.sleep(5)
