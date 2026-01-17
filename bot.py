@@ -3,7 +3,8 @@ from telebot import types
 from instagrapi import Client
 from instagrapi.exceptions import (
     FeedbackRequired, ChallengeRequired, 
-    PleaseWaitFewMinutes, RateLimitError
+    PleaseWaitFewMinutes, RateLimitError,
+    LoginRequired
 )
 import time
 import os
@@ -22,24 +23,21 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running (With Stop Button)!"
+    return "🔥 The Ultimate Bot is Running (Smart Login/Logout)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# تشغيل السيرفر في الخلفية
 t_server = threading.Thread(target=run_web_server)
 t_server.start()
 
-# جلب المفاتيح من متغيرات البيئة
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 
 if not BOT_TOKEN or not MONGO_URL:
-    print("❌ تنبيه: لم يتم العثور على BOT_TOKEN أو MONGO_URL")
+    print("❌ تنبيه: بيانات الاتصال ناقصة!")
 
-# الاتصال بقاعدة البيانات
 cluster = MongoClient(MONGO_URL)
 db = cluster["telegram_bot_db"]
 users_collection = db["users_data"]        
@@ -47,10 +45,9 @@ follows_collection = db["follows_history"]
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# متغيرات التشغيل الحية
 active_stats = {}  
 stop_flags = {}    
-auto_reply_active = {} # متغير جديد للتحكم في الرد التلقائي بشكل منفصل
+auto_reply_active = {} 
 
 # ==========================================
 # 2. دوال التعامل مع قاعدة البيانات
@@ -65,6 +62,13 @@ def update_user_data(chat_id, key, value):
         {"_id": str(chat_id)},
         {"$set": {key: value}},
         upsert=True
+    )
+
+def logout_user(chat_id):
+    """حذف بيانات الجلسة تماماً"""
+    users_collection.update_one(
+        {"_id": str(chat_id)},
+        {"$set": {"session_id": None, "groups": [], "selected_ids": []}}
     )
 
 def log_follow(chat_id, target_user_id):
@@ -91,27 +95,26 @@ def remove_follow_log(chat_id, target_user_id):
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # القسم الأول: الأساسيات
+    # === أزرار الحساب (تسجيل دخول / خروج) ===
     btn_login = types.InlineKeyboardButton("🔑 تسجيل دخول", callback_data="main_login")
+    btn_logout = types.InlineKeyboardButton("🔴 تسجيل خروج", callback_data="main_logout")
+    
     btn_groups = types.InlineKeyboardButton("📂 إدارة الجروبات", callback_data="main_groups")
     btn_post = types.InlineKeyboardButton("📨 نشر خاص", callback_data="main_post_dm")
     btn_stats = types.InlineKeyboardButton("📊 الإحصائيات", callback_data="main_stats")
     
-    # القسم الثاني: الميزات الذكية
     btn_story = types.InlineKeyboardButton("📸 نشر ستوري", callback_data="main_story")
-    
-    # زر تفعيل الرد
     btn_reply = types.InlineKeyboardButton("🗣 تفعيل الرد التلقائي", callback_data="main_auto_reply")
-    # زر إيقاف الرد (الجديد)
-    btn_stop_reply = types.InlineKeyboardButton("🔕 إيقاف الرد التلقائي", callback_data="main_stop_reply")
+    btn_stop_reply = types.InlineKeyboardButton("🔕 إيقاف الرد", callback_data="main_stop_reply")
     
     btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
     btn_stop = types.InlineKeyboardButton("⛔ إيقاف الكل", callback_data="main_stop")
     
-    markup.add(btn_login, btn_groups)
+    markup.add(btn_login, btn_logout) # وضعناهم بجانب بعض
+    markup.add(btn_groups)
     markup.add(btn_post, btn_stats)
-    markup.add(btn_reply, btn_stop_reply) # وضعناهم بجانب بعض
+    markup.add(btn_reply, btn_stop_reply)
     markup.add(btn_follow, btn_mass_unfollow)
     markup.add(btn_stop)
     return markup
@@ -120,8 +123,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل (نسخة التحكم الكامل)**\n"
-        "تمت إضافة زر لإيقاف الرد التلقائي وحذفه.", 
+        "👋 **مرحباً بك في البوت الشامل (Smart Login)**\n"
+        "الآن يمكنك تسجيل الخروج أو تغيير السيزن التالف بسهولة.", 
         reply_markup=get_main_menu()
     )
 
@@ -136,15 +139,36 @@ def handle_main_menu(call):
     user_data = get_user_data(chat_id)
     session = user_data.get("session_id")
     
-    # 1. تسجيل الدخول
+    # 1. تسجيل الدخول الذكي (Smart Login)
     if action == "main_login":
         if session:
-            bot.answer_callback_query(call.id, "أنت مسجل بالفعل!")
+            # إذا وجدنا سيزن، نفحصه أولاً
+            bot.answer_callback_query(call.id, "جاري فحص السيزن الحالي...")
+            try:
+                cl = Client()
+                cl.login_by_sessionid(session)
+                # إذا نجح الاتصال، يعني السيزن صالح
+                bot.send_message(chat_id, "✅ **أنت مسجل بالفعل والسيزن يعمل!**\nإذا أردت تغييره، اضغط على 'تسجيل خروج' أولاً.")
+            except Exception as e:
+                # إذا فشل الاتصال، يعني السيزن تالف
+                bot.send_message(chat_id, "⚠️ **السيزن القديم تالف أو منتهي الصلاحية.**\n📥 أرسل كود السيزن الجديد الآن:")
+                logout_user(chat_id) # نحذف القديم تلقائياً
+                bot.register_next_step_handler(call.message, process_login)
         else:
+            # لا يوجد سيزن أصلاً
             msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
             bot.register_next_step_handler(msg, process_login)
-            
-    # 2. الجروبات والنشر
+
+    # 2. تسجيل الخروج (Logout)
+    elif action == "main_logout":
+        if session:
+            logout_user(chat_id)
+            bot.answer_callback_query(call.id, "تم الخروج بنجاح")
+            bot.send_message(chat_id, "✅ **تم تسجيل الخروج وحذف البيانات.**\nيمكنك تسجيل الدخول بحساب جديد الآن.", reply_markup=get_main_menu())
+        else:
+            bot.answer_callback_query(call.id, "أنت غير مسجل أصلاً!")
+
+    # 3. الجروبات والنشر
     elif action == "main_groups":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         show_groups_menu(chat_id, call.message.message_id)
@@ -158,7 +182,7 @@ def handle_main_menu(call):
     elif action == "main_stats":
         show_stats(chat_id)
 
-    # 3. الميزات الجديدة
+    # 4. الميزات
     elif action == "main_story":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         os.makedirs(f"downloads/{chat_id}", exist_ok=True)
@@ -170,50 +194,53 @@ def handle_main_menu(call):
         msg = bot.send_message(chat_id, "✍️ **أرسل نص الرد:**\n(سيرد البوت فقط على من يرد عليك)")
         bot.register_next_step_handler(msg, start_auto_reply_thread)
 
-    # --- الزر الجديد: إيقاف الرد التلقائي ---
     elif action == "main_stop_reply":
         if chat_id in auto_reply_active and auto_reply_active[chat_id]:
-            auto_reply_active[chat_id] = False # إيقاف التفعيل
-            bot.send_message(chat_id, "🔕 **تم إيقاف الرد التلقائي وحذف الرسالة من الذاكرة.**")
+            auto_reply_active[chat_id] = False
+            bot.send_message(chat_id, "🔕 **تم إيقاف الرد التلقائي.**")
         else:
-            bot.answer_callback_query(call.id, "الرد التلقائي متوقف بالفعل.")
+            bot.answer_callback_query(call.id, "متوقف بالفعل.")
 
     elif action == "main_follow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         start_smart_follow_thread(chat_id, session)
-        bot.answer_callback_query(call.id, "تم بدء المتابعة في الخلفية")
+        bot.answer_callback_query(call.id, "تم بدء المتابعة")
 
     elif action == "main_mass_unfollow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذف متابعته؟**\n(مثلاً: 50، 100، 200)\nاكتب الرقم فقط:")
+        msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذفه؟** (اكتب الرقم):")
         bot.register_next_step_handler(msg, ask_unfollow_count)
 
-    # 5. إيقاف الكل
     elif action == "main_stop":
         stop_flags[chat_id] = True
-        auto_reply_active[chat_id] = False # نوقف الرد أيضاً
-        bot.answer_callback_query(call.id, "🛑 تم طلب الإيقاف الشامل")
+        auto_reply_active[chat_id] = False
+        bot.answer_callback_query(call.id, "🛑 تم الإيقاف")
         if chat_id in active_stats: active_stats[chat_id]['status'] = "Stopping..."
 
 # ==========================================
 # 5. منطق الميزات (Functions)
 # ==========================================
 
-# --- دوال تسجيل الدخول وإدارة الجروبات والنشر ---
+# --- تسجيل الدخول والجروبات ---
 def process_login(message):
     session_id = message.text
     chat_id = message.chat.id
+    msg_wait = bot.send_message(chat_id, "⏳ جاري التحقق من السيزن...")
     try:
         cl = Client()
         cl.login_by_sessionid(session_id)
         threads = cl.direct_threads(amount=40)
         groups_list = [{"id": t.id, "name": t.thread_title or "بدون اسم"} for t in threads if t.is_group]
+        
         update_user_data(chat_id, "session_id", session_id)
         update_user_data(chat_id, "groups", groups_list)
         update_user_data(chat_id, "selected_ids", [])
-        bot.send_message(chat_id, f"✅ تم الدخول! وجدنا {len(groups_list)} جروب.", reply_markup=get_main_menu())
+        
+        bot.delete_message(chat_id, msg_wait.message_id)
+        bot.send_message(chat_id, f"✅ **تم تسجيل الدخول بنجاح!**\nوجدنا {len(groups_list)} جروب.", reply_markup=get_main_menu())
     except Exception as e:
-        bot.send_message(chat_id, f"❌ خطأ: {e}")
+        bot.delete_message(chat_id, msg_wait.message_id)
+        bot.send_message(chat_id, f"❌ **فشل الدخول!**\nالسيزن غير صالح، تأكد منه وحاول مجدداً.\nالخطأ: {e}")
 
 def show_groups_menu(chat_id, message_id=None):
     user_data = get_user_data(chat_id)
@@ -226,7 +253,7 @@ def show_groups_menu(chat_id, message_id=None):
         markup.add(types.InlineKeyboardButton(f"{icon} {group['name']}", callback_data=f"toggle|{group['id']}"))
     markup.row(types.InlineKeyboardButton("الكل", callback_data="cmd|all"), types.InlineKeyboardButton("لا شيء", callback_data="cmd|none"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="cmd|back"))
-    text = f"👇 اختر الجروبات للنشر ({len(selected_ids)}/{len(groups)}):"
+    text = f"👇 اختر الجروبات ({len(selected_ids)}/{len(groups)}):"
     if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
     else: bot.send_message(chat_id, text, reply_markup=markup)
 
@@ -269,7 +296,7 @@ def start_dm_loop(message, msg_text):
     chat_id = message.chat.id
     stop_flags[chat_id] = False
     active_stats[chat_id] = {'status': 'Running', 'round': 0, 'interval': minutes}
-    bot.send_message(chat_id, "🚀 تم تشغيل النشر!", reply_markup=get_main_menu())
+    bot.send_message(chat_id, "🚀 تم التشغيل!", reply_markup=get_main_menu())
     threading.Thread(target=background_dm_sender, args=(chat_id, msg_text, delay)).start()
 
 def background_dm_sender(chat_id, text, wait_time):
@@ -294,14 +321,14 @@ def background_dm_sender(chat_id, text, wait_time):
 
 def show_stats(chat_id):
     stats = active_stats.get(chat_id)
-    if not stats: bot.send_message(chat_id, "📭 لا يوجد نشر نشط.")
+    if not stats: bot.send_message(chat_id, "📭 لا يوجد نشر.")
     else: bot.send_message(chat_id, f"📊 الحالة: {stats['status']}\n🔢 الجولة: {stats.get('round', 0)}")
 
-# --- دوال الستوري ---
+# --- الستوري ---
 def collect_photos(message):
     chat_id = message.chat.id
     if message.text in ['/done', 'تم']:
-        bot.send_message(chat_id, "🚀 جاري رفع الستوريات...")
+        bot.send_message(chat_id, "🚀 جاري الرفع...")
         session = get_user_data(chat_id).get("session_id")
         threading.Thread(target=run_story_uploader, args=(chat_id, session)).start()
         return
@@ -310,7 +337,7 @@ def collect_photos(message):
         downloaded_file = bot.download_file(file_info.file_path)
         path = f"downloads/{chat_id}/{datetime.now().timestamp()}.jpg"
         with open(path, 'wb') as f: f.write(downloaded_file)
-        bot.reply_to(message, "✅ صورة محفوظة. أرسل المزيد أو اكتب 'تم'.")
+        bot.reply_to(message, "✅ تم الحفظ. التالي...")
         bot.register_next_step_handler(message, collect_photos)
 
 def run_story_uploader(chat_id, session):
@@ -320,29 +347,25 @@ def run_story_uploader(chat_id, session):
         for img in os.listdir(folder):
             cl.photo_upload_to_story(os.path.join(folder, img))
             time.sleep(5)
-        bot.send_message(chat_id, "🎉 تم نشر الستوريات!")
+        bot.send_message(chat_id, "🎉 تم النشر!")
     except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
     finally: shutil.rmtree(folder, ignore_errors=True)
 
-# --- (تم تحديثه) الرد التلقائي مع زر الإيقاف ---
+# --- الرد التلقائي ---
 def start_auto_reply_thread(message):
     text = message.text; chat_id = message.chat.id
     session = get_user_data(chat_id).get("session_id")
-    
     stop_flags[chat_id] = False
-    auto_reply_active[chat_id] = True # تفعيل الميزة
-    
+    auto_reply_active[chat_id] = True
     threading.Thread(target=run_auto_reply, args=(chat_id, session, text)).start()
-    bot.send_message(chat_id, "✅ **تم التفعيل!**\nيمكنك إيقاف الرد في أي وقت من الزر الجديد.", reply_markup=get_main_menu())
+    bot.send_message(chat_id, "✅ تم التفعيل.", reply_markup=get_main_menu())
 
 def run_auto_reply(chat_id, session, text):
     try:
         cl = Client(); cl.login_by_sessionid(session)
         my_id = cl.user_id
         replied_cache = [] 
-
         print(f"✅ Auto Reply Started for {chat_id}")
-
         while not stop_flags.get(chat_id, False) and auto_reply_active.get(chat_id, False):
             try:
                 threads = cl.direct_threads(amount=20)
@@ -362,20 +385,15 @@ def run_auto_reply(chat_id, session, text):
                         except: pass
                         
                         if is_reply_to_me:
-                            print(f"🎯 شخص رد عليك! سأرد عليه.")
                             cl.direct_send(text, thread_ids=[t.id])
                             replied_cache.append(last_msg.id)
                             if len(replied_cache) > 100: replied_cache.pop(0)
                             time.sleep(2)
-            except Exception as e:
-                time.sleep(5)
+            except: time.sleep(5)
             time.sleep(15)
-        
-        print("Auto reply stopped.")
-    except Exception as e:
-        print(f"❌ Error Auto Reply: {e}")
+    except: pass
 
-# --- المتابعة الذكية ---
+# --- المتابعة والحذف ---
 def start_smart_follow_thread(chat_id, session):
     stop_flags[chat_id] = False
     threading.Thread(target=run_smart_follow, args=(chat_id, session)).start()
@@ -390,22 +408,20 @@ def run_smart_follow(chat_id, session):
             try:
                 cl.user_follow(uid); log_follow(chat_id, uid); time.sleep(0.5)
             except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
-                bot.send_message(chat_id, "⚠️ حظر مؤقت! انتظار 30 دقيقة..."); time.sleep(1800); cl.login_by_sessionid(session)
+                bot.send_message(chat_id, "⚠️ حظر مؤقت..."); time.sleep(1800); cl.login_by_sessionid(session)
             except: pass
-        bot.send_message(chat_id, "✅ انتهت المتابعة.")
+        bot.send_message(chat_id, "✅ انتهى.")
     except Exception as e: bot.send_message(chat_id, f"خطأ: {e}")
 
-# --- الحذف الجماعي ---
 def ask_unfollow_count(message):
     try:
         count = int(message.text)
         chat_id = message.chat.id
         session = get_user_data(chat_id).get("session_id")
-        bot.send_message(chat_id, f"⚙️ جاري الحذف... (انتظر)")
+        bot.send_message(chat_id, f"⚙️ جاري الحذف...")
         stop_flags[chat_id] = False
         threading.Thread(target=run_mass_unfollow_logic, args=(chat_id, session, count)).start()
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ رقم فقط.")
+    except: bot.send_message(message.chat.id, "❌ رقم فقط.")
 
 def run_mass_unfollow_logic(chat_id, session, count):
     try:
@@ -413,37 +429,28 @@ def run_mass_unfollow_logic(chat_id, session, count):
         my_id = cl.user_id
         following = cl.user_following(my_id)
         followers = cl.user_followers(my_id)
-        
         non_followers = [uid for uid in following if uid not in followers]
         targets = non_followers[:count]
         
-        bot.send_message(chat_id, f"🔎 سأحذف {len(targets)} شخص.")
-        
+        bot.send_message(chat_id, f"🔎 سيتم حذف {len(targets)} شخص.")
         removed = 0
         for uid in targets:
             if stop_flags.get(chat_id, False): break
             try:
-                cl.user_unfollow(uid)
-                removed += 1
-                time.sleep(0.5) 
+                cl.user_unfollow(uid); removed += 1; time.sleep(0.5)
             except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
-                bot.send_message(chat_id, "🛑 حظر مؤقت. سأنتظر 30 دقيقة.")
-                time.sleep(1800)
-                cl.login_by_sessionid(session)
-            except Exception: pass
-
-        bot.send_message(chat_id, f"🏁 تم حذف {removed} شخص.")
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ حدث خطأ: {e}")
+                bot.send_message(chat_id, "🛑 حظر مؤقت..."); time.sleep(1800); cl.login_by_sessionid(session)
+            except: pass
+        bot.send_message(chat_id, f"🏁 تم حذف {removed}.")
+    except Exception as e: bot.send_message(chat_id, f"خطأ: {e}")
 
 # ==========================================
-# تشغيل البوت (Anti-Crash System)
+# تشغيل البوت (Anti-Crash)
 # ==========================================
 print("Bot Started...")
-
 while True:
     try:
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
-        print(f"⚠️ Connection Error: {e}... Restarting in 5s")
+        print(f"⚠️ Error: {e}... Restarting.")
         time.sleep(5)
