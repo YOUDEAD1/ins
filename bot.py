@@ -23,7 +23,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running (Smart Login/Logout)!"
+    return "🔥 The Ultimate Bot is Running (Deep Scan Mode)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -65,7 +65,6 @@ def update_user_data(chat_id, key, value):
     )
 
 def logout_user(chat_id):
-    """حذف بيانات الجلسة تماماً"""
     users_collection.update_one(
         {"_id": str(chat_id)},
         {"$set": {"session_id": None, "groups": [], "selected_ids": []}}
@@ -95,7 +94,6 @@ def remove_follow_log(chat_id, target_user_id):
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # === أزرار الحساب (تسجيل دخول / خروج) ===
     btn_login = types.InlineKeyboardButton("🔑 تسجيل دخول", callback_data="main_login")
     btn_logout = types.InlineKeyboardButton("🔴 تسجيل خروج", callback_data="main_logout")
     
@@ -111,7 +109,7 @@ def get_main_menu():
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
     btn_stop = types.InlineKeyboardButton("⛔ إيقاف الكل", callback_data="main_stop")
     
-    markup.add(btn_login, btn_logout) # وضعناهم بجانب بعض
+    markup.add(btn_login, btn_logout) 
     markup.add(btn_groups)
     markup.add(btn_post, btn_stats)
     markup.add(btn_reply, btn_stop_reply)
@@ -123,8 +121,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل (Smart Login)**\n"
-        "الآن يمكنك تسجيل الخروج أو تغيير السيزن التالف بسهولة.", 
+        "👋 **مرحباً بك في البوت (Deep Scan)**\n"
+        "الآن البوت يرى آخر 10 رسائل لضمان التقاط الرد.", 
         reply_markup=get_main_menu()
     )
 
@@ -139,34 +137,30 @@ def handle_main_menu(call):
     user_data = get_user_data(chat_id)
     session = user_data.get("session_id")
     
-    # 1. تسجيل الدخول الذكي (Smart Login)
+    # 1. تسجيل الدخول
     if action == "main_login":
         if session:
-            # إذا وجدنا سيزن، نفحصه أولاً
-            bot.answer_callback_query(call.id, "جاري فحص السيزن الحالي...")
+            bot.answer_callback_query(call.id, "جاري فحص السيزن...")
             try:
                 cl = Client()
                 cl.login_by_sessionid(session)
-                # إذا نجح الاتصال، يعني السيزن صالح
-                bot.send_message(chat_id, "✅ **أنت مسجل بالفعل والسيزن يعمل!**\nإذا أردت تغييره، اضغط على 'تسجيل خروج' أولاً.")
+                bot.send_message(chat_id, "✅ **السيزن يعمل!**\nللخروج اضغط 'تسجيل خروج'.")
             except Exception as e:
-                # إذا فشل الاتصال، يعني السيزن تالف
-                bot.send_message(chat_id, "⚠️ **السيزن القديم تالف أو منتهي الصلاحية.**\n📥 أرسل كود السيزن الجديد الآن:")
-                logout_user(chat_id) # نحذف القديم تلقائياً
+                bot.send_message(chat_id, "⚠️ **السيزن تالف.**\n📥 أرسل الجديد:")
+                logout_user(chat_id)
                 bot.register_next_step_handler(call.message, process_login)
         else:
-            # لا يوجد سيزن أصلاً
             msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
             bot.register_next_step_handler(msg, process_login)
 
-    # 2. تسجيل الخروج (Logout)
+    # 2. تسجيل الخروج
     elif action == "main_logout":
         if session:
             logout_user(chat_id)
-            bot.answer_callback_query(call.id, "تم الخروج بنجاح")
-            bot.send_message(chat_id, "✅ **تم تسجيل الخروج وحذف البيانات.**\nيمكنك تسجيل الدخول بحساب جديد الآن.", reply_markup=get_main_menu())
+            bot.answer_callback_query(call.id, "تم الخروج")
+            bot.send_message(chat_id, "✅ **تم تسجيل الخروج.**", reply_markup=get_main_menu())
         else:
-            bot.answer_callback_query(call.id, "أنت غير مسجل أصلاً!")
+            bot.answer_callback_query(call.id, "أنت غير مسجل!")
 
     # 3. الجروبات والنشر
     elif action == "main_groups":
@@ -176,7 +170,7 @@ def handle_main_menu(call):
     elif action == "main_post_dm":
         if not session or not user_data.get("selected_ids"):
             return bot.answer_callback_query(call.id, "سجل دخول واختر الجروبات!")
-        msg = bot.send_message(chat_id, "📝 **أرسل الرسالة التي تريد نشرها:**")
+        msg = bot.send_message(chat_id, "📝 **أرسل الرسالة للنشر:**")
         bot.register_next_step_handler(msg, ask_time_for_dm)
 
     elif action == "main_stats":
@@ -186,12 +180,12 @@ def handle_main_menu(call):
     elif action == "main_story":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         os.makedirs(f"downloads/{chat_id}", exist_ok=True)
-        msg = bot.send_message(chat_id, "📸 **أرسل الصور الآن.**\nعند الانتهاء اكتب 'تم' أو اضغط /done")
+        msg = bot.send_message(chat_id, "📸 **أرسل الصور الآن.**\nاكتب 'تم' عند الانتهاء.")
         bot.register_next_step_handler(msg, collect_photos)
 
     elif action == "main_auto_reply":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "✍️ **أرسل نص الرد:**\n(سيرد البوت فقط على من يرد عليك)")
+        msg = bot.send_message(chat_id, "✍️ **أرسل نص الرد:**\n(سيرد البوت على من يرد عليك)")
         bot.register_next_step_handler(msg, start_auto_reply_thread)
 
     elif action == "main_stop_reply":
@@ -208,7 +202,7 @@ def handle_main_menu(call):
 
     elif action == "main_mass_unfollow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذفه؟** (اكتب الرقم):")
+        msg = bot.send_message(chat_id, "🔢 **العدد المطلوب حذفه؟**")
         bot.register_next_step_handler(msg, ask_unfollow_count)
 
     elif action == "main_stop":
@@ -225,7 +219,7 @@ def handle_main_menu(call):
 def process_login(message):
     session_id = message.text
     chat_id = message.chat.id
-    msg_wait = bot.send_message(chat_id, "⏳ جاري التحقق من السيزن...")
+    msg_wait = bot.send_message(chat_id, "⏳ فحص...")
     try:
         cl = Client()
         cl.login_by_sessionid(session_id)
@@ -237,10 +231,10 @@ def process_login(message):
         update_user_data(chat_id, "selected_ids", [])
         
         bot.delete_message(chat_id, msg_wait.message_id)
-        bot.send_message(chat_id, f"✅ **تم تسجيل الدخول بنجاح!**\nوجدنا {len(groups_list)} جروب.", reply_markup=get_main_menu())
+        bot.send_message(chat_id, f"✅ **تم الدخول!**\n{len(groups_list)} جروب.", reply_markup=get_main_menu())
     except Exception as e:
         bot.delete_message(chat_id, msg_wait.message_id)
-        bot.send_message(chat_id, f"❌ **فشل الدخول!**\nالسيزن غير صالح، تأكد منه وحاول مجدداً.\nالخطأ: {e}")
+        bot.send_message(chat_id, f"❌ **خطأ:** {e}")
 
 def show_groups_menu(chat_id, message_id=None):
     user_data = get_user_data(chat_id)
@@ -287,7 +281,7 @@ def handle_group_clicks(call):
 
 def ask_time_for_dm(message):
     msg_text = message.text
-    msg = bot.reply_to(message, "⏱ **كم دقيقة الانتظار بين كل جولة؟**")
+    msg = bot.reply_to(message, "⏱ **دقائق الانتظار؟**")
     bot.register_next_step_handler(msg, start_dm_loop, msg_text)
 
 def start_dm_loop(message, msg_text):
@@ -351,47 +345,72 @@ def run_story_uploader(chat_id, session):
     except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
     finally: shutil.rmtree(folder, ignore_errors=True)
 
-# --- الرد التلقائي ---
+# --- (تم التعديل جذرياً) الرد التلقائي العميق ---
 def start_auto_reply_thread(message):
     text = message.text; chat_id = message.chat.id
     session = get_user_data(chat_id).get("session_id")
     stop_flags[chat_id] = False
     auto_reply_active[chat_id] = True
     threading.Thread(target=run_auto_reply, args=(chat_id, session, text)).start()
-    bot.send_message(chat_id, "✅ تم التفعيل.", reply_markup=get_main_menu())
+    bot.send_message(chat_id, "✅ **تم تفعيل الفحص العميق!**\nسأبحث في آخر 10 رسائل عن ردود عليك.", reply_markup=get_main_menu())
 
 def run_auto_reply(chat_id, session, text):
     try:
         cl = Client(); cl.login_by_sessionid(session)
-        my_id = cl.user_id
+        # تحويل الآيدي لنص لتجنب مشاكل المطابقة
+        my_id = str(cl.user_id)
         replied_cache = [] 
-        print(f"✅ Auto Reply Started for {chat_id}")
+
+        print(f"✅ Auto Reply (Deep Scan) Started for {chat_id}")
+
         while not stop_flags.get(chat_id, False) and auto_reply_active.get(chat_id, False):
             try:
                 threads = cl.direct_threads(amount=20)
                 for t in threads:
                     if t.is_group:
-                        last_msg = t.messages[0]
-                        if last_msg.id in replied_cache: continue
-                        if last_msg.user_id == my_id: continue
+                        # --- التعديل: فحص آخر 10 رسائل وليس واحدة فقط ---
+                        # نحن نأخذ آخر 10 رسائل في هذا الجروب
+                        recent_messages = t.messages[:10]
                         
-                        is_reply_to_me = False
-                        try:
-                            if last_msg.reply_to_message and last_msg.reply_to_message.user_id == my_id:
-                                is_reply_to_me = True
-                            elif hasattr(last_msg, 'replied_to_message') and last_msg.replied_to_message:
-                                if last_msg.replied_to_message.user_id == my_id:
-                                    is_reply_to_me = True
-                        except: pass
-                        
-                        if is_reply_to_me:
-                            cl.direct_send(text, thread_ids=[t.id])
-                            replied_cache.append(last_msg.id)
-                            if len(replied_cache) > 100: replied_cache.pop(0)
-                            time.sleep(2)
-            except: time.sleep(5)
+                        for msg in recent_messages:
+                            # 1. هل هي في الذاكرة؟
+                            if msg.id in replied_cache: continue
+                            
+                            # 2. هل هي رسالتي أنا؟ (تجاهل)
+                            if str(msg.user_id) == my_id: continue
+                            
+                            # 3. الفحص الدقيق للرد
+                            is_reply_to_me = False
+                            try:
+                                # هل يوجد كائن رد؟
+                                if msg.reply_to_message:
+                                    # هل الآيدي الموجود في الرد هو الآيدي الخاص بي؟
+                                    original_sender_id = str(msg.reply_to_message.user_id)
+                                    if original_sender_id == my_id:
+                                        is_reply_to_me = True
+                            except: pass
+                            
+                            # إذا تحقق الشرط، نرد عليه
+                            if is_reply_to_me:
+                                print(f"🎯 وجدت رداً في {t.thread_title} من {msg.user_id}")
+                                cl.direct_send(text, thread_ids=[t.id])
+                                
+                                # نحفظ الرسالة في الذاكرة
+                                replied_cache.append(msg.id)
+                                if len(replied_cache) > 100: replied_cache.pop(0)
+                                
+                                time.sleep(3) # انتظار بين الردود
+                                
+            except Exception as e:
+                # أخطاء الشبكة، نتجاوزها
+                time.sleep(5)
+            
+            # فحص كل 15 ثانية
             time.sleep(15)
-    except: pass
+        
+        print("Auto reply stopped.")
+    except Exception as e:
+        print(f"❌ Critical Error Auto Reply: {e}")
 
 # --- المتابعة والحذف ---
 def start_smart_follow_thread(chat_id, session):
