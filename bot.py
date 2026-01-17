@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running (Fixed Auto-Reply)!"
+    return "🔥 The Ultimate Bot is Running (Reply-to-Me Only Mode)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -98,13 +98,12 @@ def get_main_menu():
     
     # القسم الثاني: الميزات الذكية
     btn_story = types.InlineKeyboardButton("📸 نشر ستوري", callback_data="main_story")
-    btn_reply = types.InlineKeyboardButton("🗣 رد تلقائي", callback_data="main_auto_reply")
+    
+    # تعديل اسم الزر ليكون واضحاً
+    btn_reply = types.InlineKeyboardButton("🗣 رد على من يرد علي", callback_data="main_auto_reply")
+    
     btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
-    
-    # ميزة الحذف
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
-    
-    # زر الإيقاف
     btn_stop = types.InlineKeyboardButton("⛔ إيقاف الكل", callback_data="main_stop")
     
     markup.add(btn_login, btn_groups)
@@ -118,8 +117,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل (Final Fixed)**\n"
-        "تم إصلاح الرد التلقائي ليعمل بذكاء.", 
+        "👋 **مرحباً بك في البوت الشامل (Special Reply Mode)**\n"
+        "الآن البوت سيرد فقط على الشخص الذي يعمل (Reply) على رسالتك.", 
         reply_markup=get_main_menu()
     )
 
@@ -165,7 +164,7 @@ def handle_main_menu(call):
 
     elif action == "main_auto_reply":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "✍️ أرسل نص الرد التلقائي للجروبات:")
+        msg = bot.send_message(chat_id, "✍️ **أرسل الكلمة (مثل: نقطة خاص):**\nسيرد البوت بها فقط على من يعمل Reply لرسالتك.")
         bot.register_next_step_handler(msg, start_auto_reply_thread)
 
     elif action == "main_follow":
@@ -313,21 +312,21 @@ def run_story_uploader(chat_id, session):
     except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
     finally: shutil.rmtree(folder, ignore_errors=True)
 
-# --- (تم التعديل) الرد التلقائي الذكي ---
+# --- (تم التعديل جذرياً) الرد فقط على من يرد علي ---
 def start_auto_reply_thread(message):
     text = message.text; chat_id = message.chat.id
     session = get_user_data(chat_id).get("session_id")
     stop_flags[chat_id] = False
     threading.Thread(target=run_auto_reply, args=(chat_id, session, text)).start()
-    bot.send_message(chat_id, "✅ تم تفعيل الرد التلقائي.", reply_markup=get_main_menu())
+    bot.send_message(chat_id, "✅ **تم التفعيل!**\nسيرد البوت فقط عندما يقوم شخص بعمل Reply على رسالتك.", reply_markup=get_main_menu())
 
 def run_auto_reply(chat_id, session, text):
     try:
         cl = Client(); cl.login_by_sessionid(session)
         my_id = cl.user_id
-        replied_cache = [] # ذاكرة لتجنب التكرار
+        replied_cache = [] 
 
-        print(f"✅ Auto Reply Started for {chat_id}")
+        print(f"✅ Auto Reply (Reply-to-Me Mode) Started for {chat_id}")
 
         while not stop_flags.get(chat_id, False):
             try:
@@ -335,17 +334,43 @@ def run_auto_reply(chat_id, session, text):
                 for t in threads:
                     if t.is_group:
                         last_msg = t.messages[0]
-                        # الشرط: الرسالة ليست مني + لم أرد عليها سابقاً
-                        if last_msg.user_id != my_id and last_msg.id not in replied_cache:
+                        
+                        # هل الرسالة موجودة في الذاكرة؟
+                        if last_msg.id in replied_cache: continue
+                        
+                        # هل هي مني؟
+                        if last_msg.user_id == my_id: continue
+                        
+                        # --- هنا المنطق الحاسم ---
+                        # هل تحتوي الرسالة على رد؟ وهل الرد موجه لي؟
+                        is_reply_to_me = False
+                        try:
+                            # فحص إذا كانت الرسالة رداً على رسالة أخرى
+                            if last_msg.reply_to_message:
+                                # فحص إذا كان صاحب الرسالة الأصلية هو أنا
+                                if last_msg.reply_to_message.user_id == my_id:
+                                    is_reply_to_me = True
+                            # بعض النسخ تستخدم replied_to_message
+                            elif hasattr(last_msg, 'replied_to_message') and last_msg.replied_to_message:
+                                if last_msg.replied_to_message.user_id == my_id:
+                                    is_reply_to_me = True
+                        except: pass
+                        
+                        if is_reply_to_me:
+                            print(f"🎯 شخص ما رد عليك في {t.thread_title}، سأرد عليه!")
                             cl.direct_send(text, thread_ids=[t.id])
                             replied_cache.append(last_msg.id)
-                            # تنظيف الذاكرة
+                            
                             if len(replied_cache) > 100: replied_cache.pop(0)
                             time.sleep(2)
+                            
             except Exception as e:
-                print(f"Error in auto reply: {e}")
+                # أخطاء بسيطة نتجاهلها
                 time.sleep(5)
-            time.sleep(15) # فحص كل 15 ثانية
+            
+            # فحص كل 15 ثانية
+            time.sleep(15) 
+            
     except Exception as e:
         print(f"❌ Critical Error Auto Reply: {e}")
 
