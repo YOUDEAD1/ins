@@ -1,195 +1,223 @@
 import telebot
 from telebot import types
 from instagrapi import Client
+from instagrapi.exceptions import (
+    FeedbackRequired, ChallengeRequired, 
+    PleaseWaitFewMinutes, RateLimitError
+)
 import time
 import os
 import threading
-from datetime import datetime
+import shutil
+import json
+from datetime import datetime, timedelta
 from pymongo import MongoClient
 from flask import Flask
 
-# ---------------- 1. إعدادات السيرفر الوهمي (لـ Render) ----------------
+# ==========================================
+# 1. إعدادات السيرفر والاتصال (Render + MongoDB)
+# ==========================================
+
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is alive!"
+    return "🔥 The Ultimate Bot is Running!"
 
 def run_web_server():
-    # ريندر يعطينا البورت في متغير بيئة، وإذا لم نكن في ريندر نستخدم 8080
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# تشغيل السيرفر في خيط منفصل فوراً عند تشغيل الملف
+# تشغيل السيرفر في الخلفية
 t_server = threading.Thread(target=run_web_server)
 t_server.start()
 
-# ---------------- 2. إعدادات البوت وقاعدة البيانات ----------------
-
-# جلب المعلومات الحساسة من متغيرات البيئة (سنضيفها في موقع ريندر)
+# جلب المفاتيح من متغيرات البيئة
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 
-# التأكد من وجود البيانات
 if not BOT_TOKEN or not MONGO_URL:
-    print("Error: BOT_TOKEN or MONGO_URL not found in environment variables!")
+    print("❌ تنبيه: لم يتم العثور على BOT_TOKEN أو MONGO_URL")
 
-# الاتصال بـ MongoDB
+# الاتصال بقاعدة البيانات
 cluster = MongoClient(MONGO_URL)
 db = cluster["telegram_bot_db"]
-collection = db["users_data"]
+users_collection = db["users_data"]        
+follows_collection = db["follows_history"] 
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# متغيرات التشغيل (في الذاكرة المؤقتة)
-active_stats = {} 
-stop_flags = {}
+# متغيرات التشغيل الحية
+active_stats = {}  
+stop_flags = {}    
 
-# ---------------- 3. دوال التعامل مع MongoDB ----------------
+# ==========================================
+# 2. دوال التعامل مع قاعدة البيانات
+# ==========================================
 
 def get_user_data(chat_id):
-    """جلب بيانات المستخدم من المونغو"""
-    user = collection.find_one({"_id": str(chat_id)})
-    if user:
-        return user
-    else:
-        return {}
+    user = users_collection.find_one({"_id": str(chat_id)})
+    return user if user else {}
 
 def update_user_data(chat_id, key, value):
-    """تحديث أو إنشاء بيانات المستخدم"""
-    str_id = str(chat_id)
-    # نستخدم upsert=True لإنشاء الوثيقة إذا لم تكن موجودة
-    collection.update_one(
-        {"_id": str_id},
+    users_collection.update_one(
+        {"_id": str(chat_id)},
         {"$set": {key: value}},
         upsert=True
     )
 
-def clear_user_data(chat_id):
-    """حذف بيانات السيزن والجروبات (تسجيل خروج)"""
-    # لا نحذف المستند بالكامل، بل نفرغ الحقول فقط
-    collection.update_one(
-        {"_id": str(chat_id)},
-        {"$set": {"session_id": None, "groups": [], "selected_ids": []}}
-    )
+def log_follow(chat_id, target_user_id):
+    follows_collection.insert_one({
+        "chat_id": str(chat_id),
+        "target_id": str(target_user_id),
+        "date": datetime.now()
+    })
 
-# ---------------- 4. القوائم والمنطق (نفس منطق البوت السابق) ----------------
+def get_old_follows(chat_id):
+    cutoff = datetime.now() - timedelta(hours=48)
+    return list(follows_collection.find({
+        "chat_id": str(chat_id),
+        "date": {"$lt": cutoff}
+    }))
+
+def remove_follow_log(chat_id, target_user_id):
+    follows_collection.delete_one({"chat_id": str(chat_id), "target_id": str(target_user_id)})
+
+# ==========================================
+# 3. القوائم ولوحة التحكم
+# ==========================================
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
+    # القسم الأول: الأساسيات
     btn_login = types.InlineKeyboardButton("🔑 تسجيل دخول", callback_data="main_login")
     btn_groups = types.InlineKeyboardButton("📂 إدارة الجروبات", callback_data="main_groups")
-    btn_post = types.InlineKeyboardButton("🚀 بدء النشر", callback_data="main_post")
+    btn_post = types.InlineKeyboardButton("📨 نشر خاص", callback_data="main_post_dm")
     btn_stats = types.InlineKeyboardButton("📊 الإحصائيات", callback_data="main_stats")
-    btn_stop = types.InlineKeyboardButton("⛔ إيقاف النشر", callback_data="main_stop")
+    
+    # القسم الثاني: الميزات الذكية
+    btn_story = types.InlineKeyboardButton("📸 نشر ستوري", callback_data="main_story")
+    btn_reply = types.InlineKeyboardButton("🗣 رد تلقائي", callback_data="main_auto_reply")
+    btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
+    
+    # === الزر الجديد الذي طلبته ===
+    btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
+    
+    # زر الإيقاف
+    btn_stop = types.InlineKeyboardButton("⛔ إيقاف الكل", callback_data="main_stop")
+    
     markup.add(btn_login, btn_groups)
     markup.add(btn_post, btn_stats)
+    markup.add(btn_reply, btn_story)
+    markup.add(btn_follow, btn_mass_unfollow) # تمت إضافة الزر هنا
     markup.add(btn_stop)
     return markup
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "جاري الاتصال بالسيرفر...", reply_markup=types.ReplyKeyboardRemove())
     bot.send_message(
         message.chat.id, 
-        "👋 **بوت النشر التلقائي (MongoDB + Render)**\n\nكل مستخدم له حساب خاص وبيانات منفصلة.", 
-        reply_markup=get_main_menu(),
-        parse_mode="Markdown"
+        "👋 **مرحباً بك في البوت الشامل المحدّث**\n"
+        "تمت إضافة ميزة حذف غير المتابعين حسب العدد.", 
+        reply_markup=get_main_menu()
     )
+
+# ==========================================
+# 4. معالج الأزرار الرئيسي
+# ==========================================
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("main_"))
 def handle_main_menu(call):
     chat_id = call.message.chat.id
     action = call.data
     user_data = get_user_data(chat_id)
+    session = user_data.get("session_id")
     
+    # 1. تسجيل الدخول
     if action == "main_login":
-        if user_data.get("session_id"):
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("نعم، خروج", callback_data="confirm_logout"),
-                       types.InlineKeyboardButton("إلغاء", callback_data="cancel_action"))
-            bot.send_message(chat_id, "⚠️ أنت مسجل بالفعل! هل تريد تغيير الحساب؟", reply_markup=markup)
+        if session:
+            bot.answer_callback_query(call.id, "أنت مسجل بالفعل!")
         else:
             msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
             bot.register_next_step_handler(msg, process_login)
-        
-    elif action == "main_groups":
-        show_groups_menu(chat_id, call.message.message_id)
-        
-    elif action == "main_post":
-        if active_stats.get(chat_id, {}).get('status') == 'Running':
-            bot.answer_callback_query(call.id, "البوت يعمل بالفعل!")
-        else:
-            start_post_process(chat_id)
             
+    # 2. الجروبات والنشر (قديم)
+    elif action == "main_groups":
+        if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
+        show_groups_menu(chat_id, call.message.message_id)
+
+    elif action == "main_post_dm":
+        if not session or not user_data.get("selected_ids"):
+            return bot.answer_callback_query(call.id, "سجل دخول واختر الجروبات!")
+        msg = bot.send_message(chat_id, "📝 **أرسل الرسالة التي تريد نشرها:**")
+        bot.register_next_step_handler(msg, ask_time_for_dm)
+
     elif action == "main_stats":
         show_stats(chat_id)
-        
+
+    # 3. الميزات الجديدة
+    elif action == "main_story":
+        if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
+        os.makedirs(f"downloads/{chat_id}", exist_ok=True)
+        msg = bot.send_message(chat_id, "📸 **أرسل الصور الآن.**\nعند الانتهاء اكتب 'تم' أو اضغط /done")
+        bot.register_next_step_handler(msg, collect_photos)
+
+    elif action == "main_auto_reply":
+        if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
+        msg = bot.send_message(chat_id, "✍️ أرسل نص الرد التلقائي:")
+        bot.register_next_step_handler(msg, start_auto_reply_thread)
+
+    elif action == "main_follow":
+        if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
+        start_smart_follow_thread(chat_id, session)
+        bot.answer_callback_query(call.id, "تم بدء المتابعة في الخلفية")
+
+    # === 4. الميزة الجديدة: حذف غير المتابعين بالعدد ===
+    elif action == "main_mass_unfollow":
+        if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
+        msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذف متابعته؟**\n(مثلاً: 50، 100، 200)\nاكتب الرقم فقط:")
+        bot.register_next_step_handler(msg, ask_unfollow_count)
+
+    # 5. إيقاف
     elif action == "main_stop":
         stop_flags[chat_id] = True
-        bot.answer_callback_query(call.id, "تم طلب الإيقاف")
+        bot.answer_callback_query(call.id, "🛑 تم طلب الإيقاف")
         if chat_id in active_stats: active_stats[chat_id]['status'] = "Stopping..."
 
-@bot.callback_query_handler(func=lambda call: call.data == "confirm_logout")
-def confirm_logout(call):
-    chat_id = call.message.chat.id
-    clear_user_data(chat_id)
-    bot.answer_callback_query(call.id, "تم الخروج")
-    msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن الجديد:**")
-    bot.register_next_step_handler(msg, process_login)
+# ==========================================
+# 5. منطق الميزات (Functions)
+# ==========================================
 
-@bot.callback_query_handler(func=lambda call: call.data == "cancel_action")
-def cancel_action(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-
+# --- دوال تسجيل الدخول وإدارة الجروبات والنشر ---
 def process_login(message):
-    if message.text.startswith("/"): return
     session_id = message.text
     chat_id = message.chat.id
-    msg_wait = bot.send_message(chat_id, "⏳ جاري الفحص...")
-    
     try:
         cl = Client()
         cl.login_by_sessionid(session_id)
-        threads = cl.direct_threads(amount=50)
-        groups_list = []
-        for thread in threads:
-            if thread.is_group: 
-                t_name = thread.thread_title if thread.thread_title else "بدون اسم"
-                groups_list.append({"id": thread.id, "name": t_name})
-            
+        threads = cl.direct_threads(amount=40)
+        groups_list = [{"id": t.id, "name": t.thread_title or "بدون اسم"} for t in threads if t.is_group]
         update_user_data(chat_id, "session_id", session_id)
         update_user_data(chat_id, "groups", groups_list)
-        update_user_data(chat_id, "selected_ids", []) # تصفير الاختيارات
-        
-        bot.delete_message(chat_id, msg_wait.message_id)
-        bot.send_message(chat_id, f"✅ تم الحفظ! لديك {len(groups_list)} جروب.", reply_markup=get_main_menu())
+        update_user_data(chat_id, "selected_ids", [])
+        bot.send_message(chat_id, f"✅ تم الدخول! وجدنا {len(groups_list)} جروب.", reply_markup=get_main_menu())
     except Exception as e:
-        bot.send_message(chat_id, f"❌ خطأ: {e}", reply_markup=get_main_menu())
+        bot.send_message(chat_id, f"❌ خطأ: {e}")
 
 def show_groups_menu(chat_id, message_id=None):
     user_data = get_user_data(chat_id)
     groups = user_data.get("groups", [])
     selected_ids = user_data.get("selected_ids", [])
-    
-    if not groups:
-        bot.send_message(chat_id, "⚠️ لا توجد جروبات.")
-        return
-
     markup = types.InlineKeyboardMarkup(row_width=1)
     for group in groups:
         is_selected = group['id'] in selected_ids
         icon = "✅" if is_selected else "⬜"
         markup.add(types.InlineKeyboardButton(f"{icon} {group['name']}", callback_data=f"toggle|{group['id']}"))
-    
     markup.row(types.InlineKeyboardButton("الكل", callback_data="cmd|all"), types.InlineKeyboardButton("لا شيء", callback_data="cmd|none"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="cmd|back"))
-
-    text = f"👇 لديك {len(groups)} جروب. اختر:"
-    if message_id:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
-    else:
-        bot.send_message(chat_id, text, reply_markup=markup)
+    text = f"👇 اختر الجروبات للنشر ({len(selected_ids)}/{len(groups)}):"
+    if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
+    else: bot.send_message(chat_id, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle|") or call.data.startswith("cmd|"))
 def handle_group_clicks(call):
@@ -198,7 +226,6 @@ def handle_group_clicks(call):
     user_data = get_user_data(chat_id)
     selected_ids = user_data.get("selected_ids", [])
     groups = user_data.get("groups", [])
-    
     need_refresh = False
     if data.startswith("toggle|"):
         gid = data.split("|")[1]
@@ -215,95 +242,182 @@ def handle_group_clicks(call):
         update_user_data(chat_id, "selected_ids", selected_ids)
         bot.edit_message_text("🏠 القائمة الرئيسية:", chat_id, call.message.message_id, reply_markup=get_main_menu())
         return
-
     if need_refresh:
         update_user_data(chat_id, "selected_ids", selected_ids)
-        try:
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            for group in groups:
-                is_selected = group['id'] in selected_ids
-                icon = "✅" if is_selected else "⬜"
-                markup.add(types.InlineKeyboardButton(f"{icon} {group['name']}", callback_data=f"toggle|{group['id']}"))
-            markup.row(types.InlineKeyboardButton("الكل", callback_data="cmd|all"), types.InlineKeyboardButton("لا شيء", callback_data="cmd|none"))
-            markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="cmd|back"))
-            bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
+        try: show_groups_menu(chat_id, call.message.message_id)
         except: pass
 
-def start_post_process(chat_id):
-    user_data = get_user_data(chat_id)
-    if not user_data.get("session_id") or not user_data.get("selected_ids"):
-        bot.send_message(chat_id, "⚠️ تأكد من تسجيل الدخول واختيار الجروبات.")
-        return
-    msg = bot.send_message(chat_id, "📝 **أرسل الرسالة:**")
-    bot.register_next_step_handler(msg, ask_time)
-
-def ask_time(message):
+def ask_time_for_dm(message):
     msg_text = message.text
-    msg = bot.reply_to(message, "⏱ **كم دقيقة الانتظار؟**")
-    bot.register_next_step_handler(msg, run_loop, msg_text)
+    msg = bot.reply_to(message, "⏱ **كم دقيقة الانتظار بين كل جولة؟**")
+    bot.register_next_step_handler(msg, start_dm_loop, msg_text)
 
-def run_loop(message, msg_text):
-    try:
-        minutes = float(message.text)
-        delay = minutes * 60
-    except:
-        bot.reply_to(message, "❌ رقم خطأ.")
-        return
-        
+def start_dm_loop(message, msg_text):
+    try: minutes = float(message.text); delay = minutes * 60
+    except: return bot.reply_to(message, "❌ أرقام فقط.")
     chat_id = message.chat.id
     stop_flags[chat_id] = False
-    active_stats[chat_id] = {'status': 'Running', 'round': 0, 'msg': msg_text, 'interval': minutes, 'start': datetime.now().strftime("%H:%M")}
-    
-    bot.send_message(chat_id, "🚀 تم التشغيل!", reply_markup=get_main_menu())
-    t = threading.Thread(target=background_sender, args=(chat_id, msg_text, delay))
-    t.start()
+    active_stats[chat_id] = {'status': 'Running', 'round': 0, 'interval': minutes}
+    bot.send_message(chat_id, "🚀 تم تشغيل النشر!", reply_markup=get_main_menu())
+    threading.Thread(target=background_dm_sender, args=(chat_id, msg_text, delay)).start()
 
-def background_sender(chat_id, text, wait_time):
+def background_dm_sender(chat_id, text, wait_time):
     user_data = get_user_data(chat_id)
-    all_groups = user_data.get("groups", [])
-    selected_ids = user_data.get("selected_ids", [])
     session = user_data.get("session_id")
-    
-    targets = [g for g in all_groups if g['id'] in selected_ids]
-    
-    try:
-        cl = Client()
-        cl.login_by_sessionid(session)
-    except:
-        active_stats[chat_id]['status'] = 'Login Error'
-        return
-
+    selected = user_data.get("selected_ids", [])
+    try: cl = Client(); cl.login_by_sessionid(session)
+    except: active_stats[chat_id]['status'] = 'Login Failed'; return
     round_num = 1
     while not stop_flags.get(chat_id, False):
         active_stats[chat_id]['round'] = round_num
         active_stats[chat_id]['status'] = 'Sending... 📤'
-        
-        for g in targets:
+        for gid in selected:
             if stop_flags.get(chat_id, False): break
-            try:
-                cl.direct_send(text, thread_ids=[g['id']])
-                time.sleep(2)
+            try: cl.direct_send(text, thread_ids=[gid]); time.sleep(3)
             except: pass
-            
         if stop_flags.get(chat_id, False): break
-        
         active_stats[chat_id]['status'] = 'Sleeping 💤'
-        slept = 0
-        while slept < wait_time:
-            if stop_flags.get(chat_id, False): break
-            time.sleep(5)
-            slept += 5
+        time.sleep(wait_time)
         round_num += 1
-    
     active_stats[chat_id]['status'] = 'Stopped 🛑'
 
 def show_stats(chat_id):
     stats = active_stats.get(chat_id)
-    if not stats:
-        bot.send_message(chat_id, "📭 لا يوجد نشر.")
-        return
-    text = f"📊 الحالة: {stats['status']}\n🔢 جولة: {stats['round']}\n⏱ كل: {stats['interval']}د"
-    bot.send_message(chat_id, text)
+    if not stats: bot.send_message(chat_id, "📭 لا يوجد نشر نشط.")
+    else: bot.send_message(chat_id, f"📊 الحالة: {stats['status']}\n🔢 الجولة: {stats.get('round', 0)}")
 
-print("Bot is ready for Render...")
+# --- دوال الستوري والرد والمتابعة ---
+def collect_photos(message):
+    chat_id = message.chat.id
+    if message.text in ['/done', 'تم']:
+        bot.send_message(chat_id, "🚀 جاري رفع الستوريات...")
+        session = get_user_data(chat_id).get("session_id")
+        threading.Thread(target=run_story_uploader, args=(chat_id, session)).start()
+        return
+    if message.photo:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        path = f"downloads/{chat_id}/{datetime.now().timestamp()}.jpg"
+        with open(path, 'wb') as f: f.write(downloaded_file)
+        bot.reply_to(message, "✅ صورة محفوظة. أرسل المزيد أو اكتب 'تم'.")
+        bot.register_next_step_handler(message, collect_photos)
+
+def run_story_uploader(chat_id, session):
+    folder = f"downloads/{chat_id}"
+    try:
+        cl = Client(); cl.login_by_sessionid(session)
+        for img in os.listdir(folder):
+            cl.photo_upload_to_story(os.path.join(folder, img))
+            time.sleep(5)
+        bot.send_message(chat_id, "🎉 تم نشر الستوريات!")
+    except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
+    finally: shutil.rmtree(folder, ignore_errors=True)
+
+def start_auto_reply_thread(message):
+    text = message.text; chat_id = message.chat.id
+    session = get_user_data(chat_id).get("session_id")
+    stop_flags[chat_id] = False
+    threading.Thread(target=run_auto_reply, args=(chat_id, session, text)).start()
+    bot.send_message(chat_id, "✅ تم تفعيل الرد التلقائي.", reply_markup=get_main_menu())
+
+def run_auto_reply(chat_id, session, text):
+    try:
+        cl = Client(); cl.login_by_sessionid(session)
+        processed_threads = []
+        while not stop_flags.get(chat_id, False):
+            threads = cl.direct_threads(amount=10)
+            for t in threads:
+                if t.is_group and t.id not in processed_threads:
+                    if t.messages[0].user_id != cl.user_id:
+                        cl.direct_answer(t.id, text); processed_threads.append(t.id); time.sleep(5)
+            time.sleep(60)
+    except: pass
+
+def start_smart_follow_thread(chat_id, session):
+    stop_flags[chat_id] = False
+    threading.Thread(target=run_smart_follow, args=(chat_id, session)).start()
+
+def run_smart_follow(chat_id, session):
+    try:
+        cl = Client(); cl.login_by_sessionid(session)
+        target_id = "460563723" 
+        users = cl.user_followers(target_id, amount=200)
+        for uid in users:
+            if stop_flags.get(chat_id, False): break
+            try:
+                cl.user_follow(uid); log_follow(chat_id, uid); time.sleep(0.5)
+            except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
+                bot.send_message(chat_id, "⚠️ حظر مؤقت! انتظار 30 دقيقة..."); time.sleep(1800); cl.login_by_sessionid(session)
+            except: pass
+        bot.send_message(chat_id, "✅ انتهت المتابعة.")
+    except Exception as e: bot.send_message(chat_id, f"خطأ: {e}")
+
+# ==========================================
+# 6. الميزة الجديدة: حذف غير المتابعين (Mass Unfollow)
+# ==========================================
+
+def ask_unfollow_count(message):
+    try:
+        count = int(message.text)
+        chat_id = message.chat.id
+        session = get_user_data(chat_id).get("session_id")
+        
+        bot.send_message(chat_id, f"⚙️ جاري تحليل المتابعين لحذف {count} شخص منهم... (قد يستغرق وقتاً)")
+        stop_flags[chat_id] = False
+        
+        t = threading.Thread(target=run_mass_unfollow_logic, args=(chat_id, session, count))
+        t.start()
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ الرجاء كتابة رقم صحيح.")
+
+def run_mass_unfollow_logic(chat_id, session, count):
+    try:
+        cl = Client()
+        cl.login_by_sessionid(session)
+        
+        # 1. جلب بياناتي
+        my_id = cl.user_id
+        
+        # 2. جلب من أتابعهم (Following) ومن يتابعوني (Followers)
+        # ملاحظة: جلب القوائم الكاملة قد يستغرق وقتاً للحسابات الكبيرة
+        following = cl.user_following(my_id)
+        followers = cl.user_followers(my_id)
+        
+        # 3. تحديد "الخونة" (أتابعهم ولا يتابعوني)
+        non_followers = []
+        for user_id in following:
+            if user_id not in followers:
+                non_followers.append(user_id)
+        
+        # 4. أخذ العدد المطلوب فقط
+        targets = non_followers[:count]
+        
+        bot.send_message(chat_id, f"🔎 وجدت {len(non_followers)} شخص لا يتابعك. سأقوم بحذف {len(targets)} منهم الآن بسرعة 0.5 ثانية.")
+        
+        removed = 0
+        for uid in targets:
+            if stop_flags.get(chat_id, False): break
+            
+            try:
+                cl.user_unfollow(uid)
+                removed += 1
+                # التوقيت المطلوب
+                time.sleep(0.5) 
+                
+            except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
+                bot.send_message(chat_id, "🛑 توقف اضطراري (حظر مؤقت). سأنتظر 30 دقيقة.")
+                time.sleep(1800) # حماية
+                cl.login_by_sessionid(session)
+            except Exception as e:
+                print(f"Error skipping: {e}")
+
+        bot.send_message(chat_id, f"🏁 تم الانتهاء. قمت بإلغاء متابعة {removed} شخص.")
+
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ حدث خطأ أثناء العملية: {e}")
+
+# ==========================================
+# التشغيل
+# ==========================================
+print("Bot Started...")
 bot.infinity_polling()
