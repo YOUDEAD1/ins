@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running!"
+    return "🔥 The Ultimate Bot is Running with Anti-Crash!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -89,6 +89,7 @@ def remove_follow_log(chat_id, target_user_id):
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
+    
     # القسم الأول: الأساسيات
     btn_login = types.InlineKeyboardButton("🔑 تسجيل دخول", callback_data="main_login")
     btn_groups = types.InlineKeyboardButton("📂 إدارة الجروبات", callback_data="main_groups")
@@ -100,7 +101,7 @@ def get_main_menu():
     btn_reply = types.InlineKeyboardButton("🗣 رد تلقائي", callback_data="main_auto_reply")
     btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
     
-    # === الزر الجديد الذي طلبته ===
+    # الزر الجديد: حذف غير المتابعين بالعدد
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
     
     # زر الإيقاف
@@ -109,7 +110,7 @@ def get_main_menu():
     markup.add(btn_login, btn_groups)
     markup.add(btn_post, btn_stats)
     markup.add(btn_reply, btn_story)
-    markup.add(btn_follow, btn_mass_unfollow) # تمت إضافة الزر هنا
+    markup.add(btn_follow, btn_mass_unfollow)
     markup.add(btn_stop)
     return markup
 
@@ -117,8 +118,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل المحدّث**\n"
-        "تمت إضافة ميزة حذف غير المتابعين حسب العدد.", 
+        "👋 **مرحباً بك في البوت الشامل (Anti-Crash Ver)**\n"
+        "تم تحديث النظام ليعمل دون انقطاع، مع ميزة الحذف الجماعي.", 
         reply_markup=get_main_menu()
     )
 
@@ -141,7 +142,7 @@ def handle_main_menu(call):
             msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
             bot.register_next_step_handler(msg, process_login)
             
-    # 2. الجروبات والنشر (قديم)
+    # 2. الجروبات والنشر
     elif action == "main_groups":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         show_groups_menu(chat_id, call.message.message_id)
@@ -172,7 +173,7 @@ def handle_main_menu(call):
         start_smart_follow_thread(chat_id, session)
         bot.answer_callback_query(call.id, "تم بدء المتابعة في الخلفية")
 
-    # === 4. الميزة الجديدة: حذف غير المتابعين بالعدد ===
+    # 4. الميزة الجديدة: حذف غير المتابعين بالعدد
     elif action == "main_mass_unfollow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
         msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذف متابعته؟**\n(مثلاً: 50، 100، 200)\nاكتب الرقم فقط:")
@@ -375,21 +376,15 @@ def run_mass_unfollow_logic(chat_id, session, count):
         cl = Client()
         cl.login_by_sessionid(session)
         
-        # 1. جلب بياناتي
         my_id = cl.user_id
-        
-        # 2. جلب من أتابعهم (Following) ومن يتابعوني (Followers)
-        # ملاحظة: جلب القوائم الكاملة قد يستغرق وقتاً للحسابات الكبيرة
         following = cl.user_following(my_id)
         followers = cl.user_followers(my_id)
         
-        # 3. تحديد "الخونة" (أتابعهم ولا يتابعوني)
         non_followers = []
         for user_id in following:
             if user_id not in followers:
                 non_followers.append(user_id)
         
-        # 4. أخذ العدد المطلوب فقط
         targets = non_followers[:count]
         
         bot.send_message(chat_id, f"🔎 وجدت {len(non_followers)} شخص لا يتابعك. سأقوم بحذف {len(targets)} منهم الآن بسرعة 0.5 ثانية.")
@@ -397,16 +392,14 @@ def run_mass_unfollow_logic(chat_id, session, count):
         removed = 0
         for uid in targets:
             if stop_flags.get(chat_id, False): break
-            
             try:
                 cl.user_unfollow(uid)
                 removed += 1
-                # التوقيت المطلوب
-                time.sleep(0.5) 
+                time.sleep(0.5) # السرعة المطلوبة
                 
             except (ChallengeRequired, FeedbackRequired, PleaseWaitFewMinutes):
                 bot.send_message(chat_id, "🛑 توقف اضطراري (حظر مؤقت). سأنتظر 30 دقيقة.")
-                time.sleep(1800) # حماية
+                time.sleep(1800)
                 cl.login_by_sessionid(session)
             except Exception as e:
                 print(f"Error skipping: {e}")
@@ -417,7 +410,15 @@ def run_mass_unfollow_logic(chat_id, session, count):
         bot.send_message(chat_id, f"❌ حدث خطأ أثناء العملية: {e}")
 
 # ==========================================
-# التشغيل
+# تشغيل البوت مع نظام إعادة الاتصال التلقائي (Anti-Crash)
 # ==========================================
 print("Bot Started...")
-bot.infinity_polling()
+
+# هذا اللوب مهم جداً: لو انقطع الاتصال، يعيد تشغيل البوت تلقائياً
+while True:
+    try:
+        # timeout=10 يقلل احتمالية الفصل
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        print(f"⚠️ انقطع الاتصال ({e})... جاري إعادة المحاولة بعد 5 ثواني.")
+        time.sleep(5)
