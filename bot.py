@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 The Ultimate Bot is Running (Reply-to-Me Only Mode)!"
+    return "🔥 The Ultimate Bot is Running (With Stop Button)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -50,6 +50,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # متغيرات التشغيل الحية
 active_stats = {}  
 stop_flags = {}    
+auto_reply_active = {} # متغير جديد للتحكم في الرد التلقائي بشكل منفصل
 
 # ==========================================
 # 2. دوال التعامل مع قاعدة البيانات
@@ -99,8 +100,10 @@ def get_main_menu():
     # القسم الثاني: الميزات الذكية
     btn_story = types.InlineKeyboardButton("📸 نشر ستوري", callback_data="main_story")
     
-    # تعديل اسم الزر ليكون واضحاً
-    btn_reply = types.InlineKeyboardButton("🗣 رد على من يرد علي", callback_data="main_auto_reply")
+    # زر تفعيل الرد
+    btn_reply = types.InlineKeyboardButton("🗣 تفعيل الرد التلقائي", callback_data="main_auto_reply")
+    # زر إيقاف الرد (الجديد)
+    btn_stop_reply = types.InlineKeyboardButton("🔕 إيقاف الرد التلقائي", callback_data="main_stop_reply")
     
     btn_follow = types.InlineKeyboardButton("➕ متابعة (0.5s)", callback_data="main_follow")
     btn_mass_unfollow = types.InlineKeyboardButton("🔥 حذف غير المتابعين", callback_data="main_mass_unfollow")
@@ -108,7 +111,7 @@ def get_main_menu():
     
     markup.add(btn_login, btn_groups)
     markup.add(btn_post, btn_stats)
-    markup.add(btn_reply, btn_story)
+    markup.add(btn_reply, btn_stop_reply) # وضعناهم بجانب بعض
     markup.add(btn_follow, btn_mass_unfollow)
     markup.add(btn_stop)
     return markup
@@ -117,8 +120,8 @@ def get_main_menu():
 def send_welcome(message):
     bot.send_message(
         message.chat.id, 
-        "👋 **مرحباً بك في البوت الشامل (Special Reply Mode)**\n"
-        "الآن البوت سيرد فقط على الشخص الذي يعمل (Reply) على رسالتك.", 
+        "👋 **مرحباً بك في البوت الشامل (نسخة التحكم الكامل)**\n"
+        "تمت إضافة زر لإيقاف الرد التلقائي وحذفه.", 
         reply_markup=get_main_menu()
     )
 
@@ -164,8 +167,16 @@ def handle_main_menu(call):
 
     elif action == "main_auto_reply":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
-        msg = bot.send_message(chat_id, "✍️ **أرسل الكلمة (مثل: نقطة خاص):**\nسيرد البوت بها فقط على من يعمل Reply لرسالتك.")
+        msg = bot.send_message(chat_id, "✍️ **أرسل نص الرد:**\n(سيرد البوت فقط على من يرد عليك)")
         bot.register_next_step_handler(msg, start_auto_reply_thread)
+
+    # --- الزر الجديد: إيقاف الرد التلقائي ---
+    elif action == "main_stop_reply":
+        if chat_id in auto_reply_active and auto_reply_active[chat_id]:
+            auto_reply_active[chat_id] = False # إيقاف التفعيل
+            bot.send_message(chat_id, "🔕 **تم إيقاف الرد التلقائي وحذف الرسالة من الذاكرة.**")
+        else:
+            bot.answer_callback_query(call.id, "الرد التلقائي متوقف بالفعل.")
 
     elif action == "main_follow":
         if not session: return bot.answer_callback_query(call.id, "سجل دخول أولاً")
@@ -177,10 +188,11 @@ def handle_main_menu(call):
         msg = bot.send_message(chat_id, "🔢 **كم شخص تريد حذف متابعته؟**\n(مثلاً: 50، 100، 200)\nاكتب الرقم فقط:")
         bot.register_next_step_handler(msg, ask_unfollow_count)
 
-    # 5. إيقاف
+    # 5. إيقاف الكل
     elif action == "main_stop":
         stop_flags[chat_id] = True
-        bot.answer_callback_query(call.id, "🛑 تم طلب الإيقاف")
+        auto_reply_active[chat_id] = False # نوقف الرد أيضاً
+        bot.answer_callback_query(call.id, "🛑 تم طلب الإيقاف الشامل")
         if chat_id in active_stats: active_stats[chat_id]['status'] = "Stopping..."
 
 # ==========================================
@@ -312,13 +324,16 @@ def run_story_uploader(chat_id, session):
     except Exception as e: bot.send_message(chat_id, f"❌ خطأ: {e}")
     finally: shutil.rmtree(folder, ignore_errors=True)
 
-# --- (تم التعديل جذرياً) الرد فقط على من يرد علي ---
+# --- (تم تحديثه) الرد التلقائي مع زر الإيقاف ---
 def start_auto_reply_thread(message):
     text = message.text; chat_id = message.chat.id
     session = get_user_data(chat_id).get("session_id")
+    
     stop_flags[chat_id] = False
+    auto_reply_active[chat_id] = True # تفعيل الميزة
+    
     threading.Thread(target=run_auto_reply, args=(chat_id, session, text)).start()
-    bot.send_message(chat_id, "✅ **تم التفعيل!**\nسيرد البوت فقط عندما يقوم شخص بعمل Reply على رسالتك.", reply_markup=get_main_menu())
+    bot.send_message(chat_id, "✅ **تم التفعيل!**\nيمكنك إيقاف الرد في أي وقت من الزر الجديد.", reply_markup=get_main_menu())
 
 def run_auto_reply(chat_id, session, text):
     try:
@@ -326,53 +341,39 @@ def run_auto_reply(chat_id, session, text):
         my_id = cl.user_id
         replied_cache = [] 
 
-        print(f"✅ Auto Reply (Reply-to-Me Mode) Started for {chat_id}")
+        print(f"✅ Auto Reply Started for {chat_id}")
 
-        while not stop_flags.get(chat_id, False):
+        while not stop_flags.get(chat_id, False) and auto_reply_active.get(chat_id, False):
             try:
                 threads = cl.direct_threads(amount=20)
                 for t in threads:
                     if t.is_group:
                         last_msg = t.messages[0]
-                        
-                        # هل الرسالة موجودة في الذاكرة؟
                         if last_msg.id in replied_cache: continue
-                        
-                        # هل هي مني؟
                         if last_msg.user_id == my_id: continue
                         
-                        # --- هنا المنطق الحاسم ---
-                        # هل تحتوي الرسالة على رد؟ وهل الرد موجه لي؟
                         is_reply_to_me = False
                         try:
-                            # فحص إذا كانت الرسالة رداً على رسالة أخرى
-                            if last_msg.reply_to_message:
-                                # فحص إذا كان صاحب الرسالة الأصلية هو أنا
-                                if last_msg.reply_to_message.user_id == my_id:
-                                    is_reply_to_me = True
-                            # بعض النسخ تستخدم replied_to_message
+                            if last_msg.reply_to_message and last_msg.reply_to_message.user_id == my_id:
+                                is_reply_to_me = True
                             elif hasattr(last_msg, 'replied_to_message') and last_msg.replied_to_message:
                                 if last_msg.replied_to_message.user_id == my_id:
                                     is_reply_to_me = True
                         except: pass
                         
                         if is_reply_to_me:
-                            print(f"🎯 شخص ما رد عليك في {t.thread_title}، سأرد عليه!")
+                            print(f"🎯 شخص رد عليك! سأرد عليه.")
                             cl.direct_send(text, thread_ids=[t.id])
                             replied_cache.append(last_msg.id)
-                            
                             if len(replied_cache) > 100: replied_cache.pop(0)
                             time.sleep(2)
-                            
             except Exception as e:
-                # أخطاء بسيطة نتجاهلها
                 time.sleep(5)
-            
-            # فحص كل 15 ثانية
-            time.sleep(15) 
-            
+            time.sleep(15)
+        
+        print("Auto reply stopped.")
     except Exception as e:
-        print(f"❌ Critical Error Auto Reply: {e}")
+        print(f"❌ Error Auto Reply: {e}")
 
 # --- المتابعة الذكية ---
 def start_smart_follow_thread(chat_id, session):
@@ -400,7 +401,7 @@ def ask_unfollow_count(message):
         count = int(message.text)
         chat_id = message.chat.id
         session = get_user_data(chat_id).get("session_id")
-        bot.send_message(chat_id, f"⚙️ جاري تحليل المتابعين لحذف {count} شخص... (انتظر)")
+        bot.send_message(chat_id, f"⚙️ جاري الحذف... (انتظر)")
         stop_flags[chat_id] = False
         threading.Thread(target=run_mass_unfollow_logic, args=(chat_id, session, count)).start()
     except ValueError:
@@ -416,7 +417,7 @@ def run_mass_unfollow_logic(chat_id, session, count):
         non_followers = [uid for uid in following if uid not in followers]
         targets = non_followers[:count]
         
-        bot.send_message(chat_id, f"🔎 سأحذف {len(targets)} شخص لا يتابعك.")
+        bot.send_message(chat_id, f"🔎 سأحذف {len(targets)} شخص.")
         
         removed = 0
         for uid in targets:
