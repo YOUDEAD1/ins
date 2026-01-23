@@ -4,3 +4,5 @@ flask
 pymongo
 dnspython
 pydantic
+typing-extensions
+requests
