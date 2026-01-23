@@ -4,4 +4,4 @@ flask
 pymongo
 dnspython
 requests
-pydantic
+pydantic>=2.5.0
