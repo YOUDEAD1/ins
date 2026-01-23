@@ -1,6 +1,7 @@
 pyTelegramBotAPI
-instagrapi
+instagrapi @ git+https://github.com/adw0rd/instagrapi.git
 flask
 pymongo
 dnspython
 requests
+pydantic
