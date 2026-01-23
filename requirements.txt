@@ -3,3 +3,4 @@ instagrapi
 flask
 pymongo
 dnspython
+pydantic
