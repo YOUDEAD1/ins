@@ -605,9 +605,22 @@ def run_mass_unfollow_logic(chat_id, session, count):
 # ==========================================
 # 6. التشغيل النهائي (Anti-Crash Loop)
 # ==========================================
+# ==========================================
+# 6. التشغيل النهائي (Anti-Crash Loop)
+# ==========================================
 print("Bot Started...")
+
+# ⚠️ هذا السطر الجديد يحل مشكلة عدم الاستجابة
+try:
+    bot.remove_webhook()
+    time.sleep(1)
+except:
+    pass
+
 while True:
     try:
+        # إضافة print للتأكد في السجلات أن البوت يحاول الاتصال
+        print("Checking for updates...") 
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
         print(f"⚠️ Connection Error: {e}... Restarting in 5s")
