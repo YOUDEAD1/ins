@@ -110,24 +110,18 @@ def force_story_upload(cl, file_path):
         print(f"🚀 Attempting force upload for {file_path}")
         
         # 1. استخدام دالة داخلية لرفع الملف فقط والحصول على upload_id
-        # نستخدم photo_rupload (Resumable Upload) لأنه أكثر استقراراً
         with open(file_path, 'rb') as f:
             data = f.read()
         
         upload_id = str(int(time.time() * 1000))
-        waterfall_id = str(int(time.time() * 1000))
         
         # محاولة الرفع بالطريقة القياسية للحصول على ID
-        # نستخدم photo_upload_to_story ولكن نلتقط الخطأ
         try:
-             # هذه الدالة تقوم بالرفع + الكونفجريشن. إذا فشلت في الكونفجريشن، تكون قد رفعت الصورة
-             # سنحاول الرفع اليدوي أفضل
              cl.photo_rupload(file_path, upload_id)
         except Exception as e:
             print(f"Upload step warning: {e}")
 
         # 2. إرسال أمر التكوين (Configure) يدوياً "Raw Request"
-        # هذا هو الجزء الذي يكسر عادة، فنقوم به يدوياً
         try:
             cl.private_request(
                 "media/configure_to_story/",
@@ -152,7 +146,6 @@ def force_story_upload(cl, file_path):
             return True, "Published via Standard Method"
             
     except Exception as e:
-        # إذا كان الخطأ هو pinned_channels، فهذا يعني النجاح غالباً
         if "pinned_channels" in str(e) or "ReplyMessage" in str(e):
             return True, "Published (Ignored Error)"
         return False, str(e)
@@ -213,7 +206,7 @@ def get_groups_menu(chat_id, user_data):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "👋 **البوت يعمل (Force Story Mode)**", reply_markup=get_main_menu())
+    bot.send_message(message.chat.id, "👋 **البوت يعمل (Fixed Login Mode)**", reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
@@ -230,7 +223,7 @@ def handle_all_callbacks(call):
             msg = bot.send_message(chat_id, "🔄 **جاري تحديث الجروبات...**")
             threading.Thread(target=refresh_groups_only, args=(chat_id, session, msg)).start()
         else:
-            msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
+            msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**\nتأكد من نسخه بشكل صحيح بدون مسافات.")
             bot.register_next_step_handler(msg, process_login)
             
     elif action == "main_logout":
@@ -306,21 +299,38 @@ def handle_all_callbacks(call):
 # ==========================================
 
 def process_login(message):
-    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال...**")
+    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال والتحقق...**")
     try:
+        # 1. تنظيف السيزن من أي مسافات أو علامات زائدة
+        clean_session = message.text.strip().replace('"', '').replace("'", "").replace(" ", "")
+        
         cl = Client()
-        cl.login_by_sessionid(message.text)
+        # تقليل وقت الانتظار لتجنب التعليق
+        cl.request_timeout = 15
+        
+        # 2. محاولة تسجيل الدخول
+        try:
+            cl.login_by_sessionid(clean_session)
+        except KeyError as e:
+            if 'data' in str(e):
+                raise Exception("السيزن غير صحيح أو منتهي (KeyError: data)")
+            raise e
+            
         bot.edit_message_text("🔄 **جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
         
         gs = get_safe_threads(cl)
         
-        update_user_data(message.chat.id, "session_id", message.text)
+        update_user_data(message.chat.id, "session_id", clean_session)
         update_user_data(message.chat.id, "groups", gs)
         
         bot.delete_message(message.chat.id, wait_msg.message_id)
-        bot.send_message(message.chat.id, f"✅ **تم الدخول!**\nالجروبات: {len(gs)}", reply_markup=get_main_menu())
+        bot.send_message(message.chat.id, f"✅ **تم الدخول بنجاح!**\nعدد الجروبات: {len(gs)}", reply_markup=get_main_menu())
+        
     except Exception as e:
-        bot.edit_message_text(f"❌ خطأ: {e}", message.chat.id, wait_msg.message_id)
+        error_text = str(e)
+        if "data" in error_text:
+            error_text = "تأكد أن السيزن (Session ID) صحيح وغير منتهي."
+        bot.edit_message_text(f"❌ فشل الدخول:\n{error_text}", message.chat.id, wait_msg.message_id)
 
 def refresh_groups_only(chat_id, session, msg_obj):
     try:
@@ -350,12 +360,11 @@ def handle_group_selection(call):
     try: bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_groups_menu(chat_id, get_user_data(chat_id)))
     except: pass
 
-# --- Story Logic (UPDATED) ---
+# --- Story Logic ---
 def process_add_story(message):
     if message.photo:
         add_recurring_story(message.chat.id, message.photo[-1].file_id)
         bot.send_message(message.chat.id, "✅ **تمت الجدولة!**\nجاري محاولة النشر فوراً للتجربة...", reply_markup=get_stories_menu())
-        # تشغيل فوري مع وضع Force
         threading.Thread(target=check_and_post_stories, args=(True,)).start()
     else: bot.send_message(message.chat.id, "❌ صورة فقط")
 
@@ -369,9 +378,6 @@ def show_active_stories(chat_id):
     bot.send_message(chat_id, "الستوريات:", reply_markup=markup)
 
 def check_and_post_stories(force_run=False):
-    """
-    يقوم بالفحص والنشر. إذا force_run=True ينشر فوراً (للتجربة)
-    """
     if force_run:
         try:
             stories_list = list(stories_collection.find({}))
@@ -380,7 +386,6 @@ def check_and_post_stories(force_run=False):
                     u = get_user_data(story['chat_id'])
                     if not u.get('session_id'): continue
                     
-                    # إرسال تنبيه للمستخدم
                     bot.send_message(story['chat_id'], "⏳ جاري محاولة رفع الستوري...")
                     
                     cl = Client()
@@ -391,7 +396,6 @@ def check_and_post_stories(force_run=False):
                     tp = f"s_{story['_id']}.jpg"
                     with open(tp, 'wb') as f: f.write(d)
                     
-                    # استخدام دالة القوة Force Upload
                     success, msg = force_story_upload(cl, tp)
                     
                     if success:
@@ -406,7 +410,6 @@ def check_and_post_stories(force_run=False):
         except: pass
         return
 
-    # الحلقة الدائمة
     while True:
         try:
             for story in list(stories_collection.find({})):
@@ -448,18 +451,16 @@ def run_link_share(chat_id, session, url):
         for gid in selected:
             if stop_flags.get(chat_id): break
             try:
-                # تجاهل أخطاء الرد (Pinned Channels)
                 cl.direct_send_photo(path, thread_ids=[gid])
                 count += 1
             except Exception as e:
-                # إذا كان الخطأ هو pinned_channels نعتبره نجاح
                 if "pinned" in str(e) or "ReplyMessage" in str(e):
                     count += 1
                 else:
                     print(f"Error {gid}: {e}")
             time.sleep(5)
             
-        bot.send_message(chat_id, f"✅ تم النشر في {count} جروب (مع تجاهل الأخطاء).")
+        bot.send_message(chat_id, f"✅ تم النشر في {count} جروب.")
     except Exception as e:
         bot.send_message(chat_id, f"❌ حدث خطأ: {e}")
     finally:
@@ -478,24 +479,20 @@ def run_auto_reply(chat_id, session, text):
         replied_cache = []
         while not stop_flags.get(chat_id) and auto_reply_active.get(chat_id):
             try:
-                threads = get_safe_threads(cl)
-                # للرد التلقائي، نحتاج المخاطرة بطلب الرسائل
-                try: 
-                    ts = cl.direct_threads(amount=20) 
-                    for t in ts:
-                        if stop_flags.get(chat_id): break
-                        if t.is_group:
-                            for m in t.messages[:5]:
-                                if m.id in replied_cache or str(m.user_id) == my_id: continue
-                                is_rep = False
-                                try: 
-                                    if m.reply_to_message and str(m.reply_to_message.user_id) == my_id: is_rep = True
-                                except: pass
-                                if is_rep:
-                                    cl.direct_send(text, thread_ids=[t.id])
-                                    replied_cache.append(m.id)
-                                    time.sleep(3)
-                except: pass
+                ts = cl.direct_threads(amount=20) 
+                for t in ts:
+                    if stop_flags.get(chat_id): break
+                    if t.is_group:
+                        for m in t.messages[:5]:
+                            if m.id in replied_cache or str(m.user_id) == my_id: continue
+                            is_rep = False
+                            try: 
+                                if m.reply_to_message and str(m.reply_to_message.user_id) == my_id: is_rep = True
+                            except: pass
+                            if is_rep:
+                                cl.direct_send(text, thread_ids=[t.id])
+                                replied_cache.append(m.id)
+                                time.sleep(3)
             except: time.sleep(5)
             time.sleep(15)
     except: pass
