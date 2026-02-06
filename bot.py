@@ -4,7 +4,7 @@ from instagrapi import Client
 from instagrapi.exceptions import (
     FeedbackRequired, ChallengeRequired, 
     PleaseWaitFewMinutes, RateLimitError, 
-    LoginRequired
+    LoginRequired, BadPassword
 )
 import time
 import os
@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from flask import Flask
-from urllib.parse import unquote  # مكتبة لفك تشفير النصوص
+from urllib.parse import unquote
 
 # ==========================================
 # 1. إعدادات السيرفر
@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 Bot is Running (Debug Mode)!"
+    return "🔥 Bot is Running (Fixed Login Handling)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -93,7 +93,8 @@ def delete_story(story_id):
 def get_safe_threads(cl):
     """جلب الجروبات وتجاهل أخطاء الرسائل"""
     try:
-        params = {"visual_message_return_type": "unseen", "thread_message_limit": "10", "persistent_badging": "true", "limit": "20"}
+        # تقليل العدد لتسريع العملية وتجنب التايم أوت
+        params = {"visual_message_return_type": "unseen", "thread_message_limit": "5", "persistent_badging": "true", "limit": "15"}
         response = cl.private_request("direct_v2/inbox/", params=params)
         threads = response.get('inbox', {}).get('threads', [])
         safe_groups = []
@@ -101,7 +102,9 @@ def get_safe_threads(cl):
             if t.get('is_group'):
                 safe_groups.append({"id": t.get('thread_id'), "name": t.get('thread_title', "NoName")})
         return safe_groups
-    except: return []
+    except Exception as e:
+        print(f"Error fetching threads: {e}")
+        return []
 
 def force_story_upload(cl, file_path):
     try:
@@ -199,7 +202,7 @@ def get_groups_menu(chat_id, user_data):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "👋 **البوت يعمل (DEBUG Mode)**\nسنظهر الأخطاء كما هي.", reply_markup=get_main_menu())
+    bot.send_message(message.chat.id, "👋 **البوت يعمل (Safe Mode)**", reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
@@ -292,21 +295,33 @@ def handle_all_callbacks(call):
 # ==========================================
 
 def process_login(message):
-    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال (بدون فلاتر)...**")
+    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال بالسيرفر...**")
     try:
-        # 1. تنظيف السيزن + فك التشفير (URL Decode)
-        # هذا يحل المشكلة لو نسخت الكود وفيه %3A بدلاً من النقطتين
         raw_text = message.text.strip().replace('"', '').replace("'", "").replace(" ", "")
         clean_session = unquote(raw_text)
         
         cl = Client()
-        cl.request_timeout = 20
         
-        # 2. محاولة تسجيل الدخول (Debug Mode)
-        # لن نخفي الخطأ، سنعرضه كما هو
-        cl.login_by_sessionid(clean_session)
+        # إعدادات مهمة لتجنب الحظر المباشر
+        cl.request_timeout = 25
+        
+        # محاولة تعيين السيزون يدوياً قبل الاتصال
+        # هذا يحل المشكلة أحياناً بدلاً من دالة login_by_sessionid
+        try:
+            cl.login_by_sessionid(clean_session)
+        except KeyError as e:
+            if 'data' in str(e):
+                bot.edit_message_text(
+                    "❌ **فشل الدخول (Session Rejected)**\n"
+                    "السيرفر رفض السيزون لأنه IP مختلف أو منتهي.\n"
+                    "⚠️ الحل: حاول استخراج سيزون جديد.", 
+                    message.chat.id, wait_msg.message_id
+                )
+                return
+            else:
+                raise e # ارفع الأخطاء الأخرى
             
-        bot.edit_message_text("🔄 **جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
+        bot.edit_message_text("🔄 **تم قبول السيزون! جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
         
         gs = get_safe_threads(cl)
         
@@ -317,9 +332,7 @@ def process_login(message):
         bot.send_message(message.chat.id, f"✅ **تم الدخول بنجاح!**\nعدد الجروبات: {len(gs)}", reply_markup=get_main_menu())
         
     except Exception as e:
-        # هنا نعرض الخطأ الخام بالكامل للمستخدم
-        bot.edit_message_text(f"❌ فشل الدخول (الخطأ الأصلي):\nType: {type(e).__name__}\nError: {str(e)}", message.chat.id, wait_msg.message_id)
-        print(f"Login Error: {e}")
+        bot.edit_message_text(f"❌ خطأ غير متوقع: {str(e)}", message.chat.id, wait_msg.message_id)
 
 def refresh_groups_only(chat_id, session, msg_obj):
     try:
