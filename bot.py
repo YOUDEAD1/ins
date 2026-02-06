@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 Bot is Running (Fixed Login Handling)!"
+    return "🔥 Bot is Running (Samsung Galaxy Mode)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -202,7 +202,7 @@ def get_groups_menu(chat_id, user_data):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "👋 **البوت يعمل (Safe Mode)**", reply_markup=get_main_menu())
+    bot.send_message(message.chat.id, "👋 **البوت يعمل (Samsung Emulation Mode)**", reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
@@ -295,33 +295,52 @@ def handle_all_callbacks(call):
 # ==========================================
 
 def process_login(message):
-    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال بالسيرفر...**")
+    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري محاكاة جهاز Samsung والاتصال...**")
     try:
         raw_text = message.text.strip().replace('"', '').replace("'", "").replace(" ", "")
         clean_session = unquote(raw_text)
         
         cl = Client()
+        cl.request_timeout = 30
         
-        # إعدادات مهمة لتجنب الحظر المباشر
-        cl.request_timeout = 25
+        # ========================================================
+        # 🔥 الحل السحري: إعدادات جهاز وهمي (Samsung Galaxy S9)
+        # ========================================================
+        # هذا يجعل إنستجرام يظن أن الطلب قادم من هاتف أندرويد حقيقي
+        # وليس من سيرفر بايثون.
         
-        # محاولة تعيين السيزون يدوياً قبل الاتصال
-        # هذا يحل المشكلة أحياناً بدلاً من دالة login_by_sessionid
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        
+        device_settings = {
+            "app_version": "269.0.0.18.75",
+            "android_version": 26,
+            "android_release": "8.0.0",
+            "dpi": "480dpi",
+            "resolution": "1080x1920",
+            "manufacturer": "Samsung",
+            "device": "SM-G960F",
+            "model": "Galaxy S9",
+            "cpu": "samsungexynos9810",
+            "version_code": "314665256"
+        }
+        cl.set_settings(device_settings)
+        # ========================================================
+
         try:
             cl.login_by_sessionid(clean_session)
         except KeyError as e:
             if 'data' in str(e):
                 bot.edit_message_text(
-                    "❌ **فشل الدخول (Session Rejected)**\n"
-                    "السيرفر رفض السيزون لأنه IP مختلف أو منتهي.\n"
-                    "⚠️ الحل: حاول استخراج سيزون جديد.", 
+                    "❌ **فشل الدخول رغم المحاكاة**\n"
+                    "للأسف، السيرفر الذي تستخدمه (IP) محظور تماماً من إنستجرام.\n"
+                    "الحل الوحيد المتبقي هو استخدام بروكسي (Proxy).", 
                     message.chat.id, wait_msg.message_id
                 )
                 return
             else:
-                raise e # ارفع الأخطاء الأخرى
+                raise e
             
-        bot.edit_message_text("🔄 **تم قبول السيزون! جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
+        bot.edit_message_text("🔄 **تم قبول الجهاز! جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
         
         gs = get_safe_threads(cl)
         
@@ -329,7 +348,7 @@ def process_login(message):
         update_user_data(message.chat.id, "groups", gs)
         
         bot.delete_message(message.chat.id, wait_msg.message_id)
-        bot.send_message(message.chat.id, f"✅ **تم الدخول بنجاح!**\nعدد الجروبات: {len(gs)}", reply_markup=get_main_menu())
+        bot.send_message(message.chat.id, f"✅ **تم الدخول بنجاح!**\n📱 الجهاز المحاكى: Samsung Galaxy S9\n📂 الجروبات: {len(gs)}", reply_markup=get_main_menu())
         
     except Exception as e:
         bot.edit_message_text(f"❌ خطأ غير متوقع: {str(e)}", message.chat.id, wait_msg.message_id)
@@ -337,6 +356,8 @@ def process_login(message):
 def refresh_groups_only(chat_id, session, msg_obj):
     try:
         cl = Client()
+        # محاكاة الجهاز عند التحديث أيضاً
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
         cl.login_by_sessionid(session)
         gs = get_safe_threads(cl)
         update_user_data(chat_id, "groups", gs)
@@ -391,6 +412,8 @@ def check_and_post_stories(force_run=False):
                     bot.send_message(story['chat_id'], "⏳ جاري محاولة رفع الستوري...")
                     
                     cl = Client()
+                    # إضافة المحاكاة هنا أيضاً
+                    cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
                     cl.login_by_sessionid(u['session_id'])
                     
                     fi = bot.get_file(story['file_id'])
@@ -419,7 +442,10 @@ def check_and_post_stories(force_run=False):
                     try:
                         u = get_user_data(story['chat_id'])
                         if not u.get('session_id'): continue
-                        cl = Client(); cl.login_by_sessionid(u['session_id'])
+                        cl = Client()
+                        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+                        cl.login_by_sessionid(u['session_id'])
+                        
                         fi = bot.get_file(story['file_id'])
                         d = bot.download_file(fi.file_path)
                         tp = f"s_{story['_id']}.jpg"
@@ -444,7 +470,9 @@ def run_link_share(chat_id, session, url):
     temp_path = f"temp_{chat_id}"
     path = None
     try:
-        cl = Client(); cl.login_by_sessionid(session)
+        cl = Client()
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        cl.login_by_sessionid(session)
         pk = cl.story_pk_from_url(url)
         path = cl.story_download(pk, filename=temp_path)
         
@@ -476,7 +504,9 @@ def start_auto_reply_thread(message):
 
 def run_auto_reply(chat_id, session, text):
     try:
-        cl = Client(); cl.login_by_sessionid(session)
+        cl = Client()
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        cl.login_by_sessionid(session)
         my_id = str(cl.user_id)
         replied_cache = []
         while not stop_flags.get(chat_id) and auto_reply_active.get(chat_id):
@@ -505,7 +535,9 @@ def start_broadcast_thread(message):
 
 def run_broadcast(cid, sid, txt):
     try:
-        cl = Client(); cl.login_by_sessionid(sid)
+        cl = Client()
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        cl.login_by_sessionid(sid)
         threads = get_safe_threads(cl)
         for t in threads:
             if stop_flags.get(cid): break
@@ -520,7 +552,9 @@ def ask_time_for_dm(m):
 
 def run_dm_post(cid, txt, dlay):
     u = get_user_data(cid)
-    cl = Client(); cl.login_by_sessionid(u['session_id'])
+    cl = Client()
+    cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+    cl.login_by_sessionid(u['session_id'])
     bot.send_message(cid, "🚀 بدأ.")
     for g in u.get("selected_ids", []):
         if stop_flags.get(cid): break
@@ -535,7 +569,9 @@ def start_smart_follow_thread(chat_id, session):
 
 def run_smart_follow(chat_id, session):
     try:
-        cl = Client(); cl.login_by_sessionid(session)
+        cl = Client()
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        cl.login_by_sessionid(session)
         for uid in cl.user_followers("460563723", amount=200):
             if stop_flags.get(chat_id): break
             try: cl.user_follow(uid); log_follow(chat_id, uid); time.sleep(0.5)
@@ -551,7 +587,9 @@ def ask_unfollow_count(message):
 
 def run_mass_unfollow(chat_id, session, count):
     try:
-        cl = Client(); cl.login_by_sessionid(session)
+        cl = Client()
+        cl.set_user_agent("Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; Samsung; SM-G960F; star2lte; samsungexynos9810; en_US; 314665256)")
+        cl.login_by_sessionid(session)
         my = cl.user_id
         targets = [u for u in cl.user_following(my) if u not in cl.user_followers(my)][:count]
         for uid in targets:
