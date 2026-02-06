@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from flask import Flask
+from urllib.parse import unquote  # مكتبة لفك تشفير النصوص
 
 # ==========================================
 # 1. إعدادات السيرفر
@@ -24,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🔥 Bot is Running (Force Story Fix Mode)!"
+    return "🔥 Bot is Running (Debug Mode)!"
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
@@ -86,7 +87,7 @@ def delete_story(story_id):
     stories_collection.delete_one({"_id": ObjectId(story_id)})
 
 # ==========================================
-# 3. الدوال السحرية (The Fixes)
+# 3. الدوال السحرية
 # ==========================================
 
 def get_safe_threads(cl):
@@ -103,25 +104,18 @@ def get_safe_threads(cl):
     except: return []
 
 def force_story_upload(cl, file_path):
-    """
-    دالة إجبارية لنشر الستوري عبر خطوتين منفصلتين لتجاوز أخطاء المكتبة
-    """
     try:
         print(f"🚀 Attempting force upload for {file_path}")
-        
-        # 1. استخدام دالة داخلية لرفع الملف فقط والحصول على upload_id
         with open(file_path, 'rb') as f:
             data = f.read()
         
         upload_id = str(int(time.time() * 1000))
         
-        # محاولة الرفع بالطريقة القياسية للحصول على ID
         try:
              cl.photo_rupload(file_path, upload_id)
         except Exception as e:
             print(f"Upload step warning: {e}")
 
-        # 2. إرسال أمر التكوين (Configure) يدوياً "Raw Request"
         try:
             cl.private_request(
                 "media/configure_to_story/",
@@ -140,7 +134,6 @@ def force_story_upload(cl, file_path):
             )
             return True, "Published via Force Method"
         except Exception as e:
-            # إذا فشل، نجرب الطريقة العادية كخطة بديلة
             print(f"Manual configure failed: {e}. Trying standard...")
             cl.photo_upload_to_story(file_path)
             return True, "Published via Standard Method"
@@ -206,7 +199,7 @@ def get_groups_menu(chat_id, user_data):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.send_message(message.chat.id, "👋 **البوت يعمل (Fixed Login Mode)**", reply_markup=get_main_menu())
+    bot.send_message(message.chat.id, "👋 **البوت يعمل (DEBUG Mode)**\nسنظهر الأخطاء كما هي.", reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_all_callbacks(call):
@@ -223,7 +216,7 @@ def handle_all_callbacks(call):
             msg = bot.send_message(chat_id, "🔄 **جاري تحديث الجروبات...**")
             threading.Thread(target=refresh_groups_only, args=(chat_id, session, msg)).start()
         else:
-            msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**\nتأكد من نسخه بشكل صحيح بدون مسافات.")
+            msg = bot.send_message(chat_id, "📥 **أرسل كود السيزن (Session ID):**")
             bot.register_next_step_handler(msg, process_login)
             
     elif action == "main_logout":
@@ -299,22 +292,19 @@ def handle_all_callbacks(call):
 # ==========================================
 
 def process_login(message):
-    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال والتحقق...**")
+    wait_msg = bot.send_message(message.chat.id, "⏳ **جاري الاتصال (بدون فلاتر)...**")
     try:
-        # 1. تنظيف السيزن من أي مسافات أو علامات زائدة
-        clean_session = message.text.strip().replace('"', '').replace("'", "").replace(" ", "")
+        # 1. تنظيف السيزن + فك التشفير (URL Decode)
+        # هذا يحل المشكلة لو نسخت الكود وفيه %3A بدلاً من النقطتين
+        raw_text = message.text.strip().replace('"', '').replace("'", "").replace(" ", "")
+        clean_session = unquote(raw_text)
         
         cl = Client()
-        # تقليل وقت الانتظار لتجنب التعليق
-        cl.request_timeout = 15
+        cl.request_timeout = 20
         
-        # 2. محاولة تسجيل الدخول
-        try:
-            cl.login_by_sessionid(clean_session)
-        except KeyError as e:
-            if 'data' in str(e):
-                raise Exception("السيزن غير صحيح أو منتهي (KeyError: data)")
-            raise e
+        # 2. محاولة تسجيل الدخول (Debug Mode)
+        # لن نخفي الخطأ، سنعرضه كما هو
+        cl.login_by_sessionid(clean_session)
             
         bot.edit_message_text("🔄 **جاري سحب الجروبات...**", message.chat.id, wait_msg.message_id)
         
@@ -327,10 +317,9 @@ def process_login(message):
         bot.send_message(message.chat.id, f"✅ **تم الدخول بنجاح!**\nعدد الجروبات: {len(gs)}", reply_markup=get_main_menu())
         
     except Exception as e:
-        error_text = str(e)
-        if "data" in error_text:
-            error_text = "تأكد أن السيزن (Session ID) صحيح وغير منتهي."
-        bot.edit_message_text(f"❌ فشل الدخول:\n{error_text}", message.chat.id, wait_msg.message_id)
+        # هنا نعرض الخطأ الخام بالكامل للمستخدم
+        bot.edit_message_text(f"❌ فشل الدخول (الخطأ الأصلي):\nType: {type(e).__name__}\nError: {str(e)}", message.chat.id, wait_msg.message_id)
+        print(f"Login Error: {e}")
 
 def refresh_groups_only(chat_id, session, msg_obj):
     try:
