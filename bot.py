@@ -36,7 +36,7 @@ try:
     OWNER_ID = int(os.getenv('OWNER_ID', '8286529656'))
 except ValueError:
     OWNER_ID = 8286529656
-OWNER_USER = os.getenv('OWNER_USER', 'ninto_dev') 
+OWNER_USER = os.getenv('OWNER_USER', 'lara_v2') 
 
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_KEY_HERE')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_SECRET_HERE')
