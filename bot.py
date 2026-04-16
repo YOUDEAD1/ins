@@ -157,7 +157,7 @@ def get_product_stock_count(pid):
         return len(res.data)
     except: return 0
 
-# 🔥 فحص الاشتراك الإجباري 🔥
+# 🔥 فحص الاشتراك الإجباري (تم إصلاح الثغرة الأمنية) 🔥
 def check_forced_sub(uid):
     if uid == OWNER_ID: return True
     try:
@@ -165,15 +165,19 @@ def check_forced_sub(uid):
         if user_db and user_db.get('is_admin') == 1: return True
         
         chans = supabase.table('required_channels').select('channel_id').execute().data
+        if not chans: return True # إذا لم يتم إضافة قنوات في الإدارة، اسمح بالدخول
+
         for c in chans:
             try:
                 status = bot.get_chat_member(c['channel_id'], uid).status
-                if status in ['left', 'kicked']: return False
+                if status in ['left', 'kicked']: 
+                    return False
             except Exception as e:
-                # إذا البوت انطرد من القناة أو القناة انحذفت، يتجاهلها مؤقتاً
-                continue
+                # 🔴 التعديل الصارم: أي خطأ (مثل عدم معرفة البوت للعميل الجديد) يُعتبر العميل غير مشترك فوراً!
+                return False
         return True
-    except: return True
+    except Exception as e: 
+        return False # حماية قصوى
 
 # ============================================================
 # 🏠 5. معالج البداية (Start)
@@ -420,7 +424,8 @@ def verify_binance_pay(message, lang):
         found = False; amt = 0.0; now = int(time.time() * 1000)
         pay_h = binance_client.get_pay_trade_history().get('data', [])
         for d in pay_h:
-            if tx_id == str(d.get('orderId', '')).lower():
+            api_txid = str(d.get('orderId', '')).lower()
+            if tx_id == api_txid:
                 if (now - int(d.get('transactionTime', 0))) > (24 * 60 * 60 * 1000):
                     bot.send_message(uid, LANG[lang]['time_error'], parse_mode="HTML"); return
                 found = True; amt = float(d.get('amount', 0.0)); break
@@ -456,9 +461,11 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     try:
         if supabase.table('used_transactions').select('*').eq('transaction_id', tx_id).execute().data:
             bot.reply_to(message, LANG[lang]['tx_used']); return
+            
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         url = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
         res = requests.get(url)
+        
         if res.status_code == 200:
             data = res.json()
             confirmations = data.get("confirmations", 0)
@@ -466,6 +473,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             for output in data.get("outputs", []):
                 if wallet_address in output.get("addresses", []):
                     received_ltc += float(output.get("value", 0)) / 100000000.0
+            
             if received_ltc > 0:
                 if confirmations >= 1:
                     try:
@@ -487,7 +495,7 @@ def credit_user(uid, amt, tx_id, lang):
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
 
 # ============================================================
-# 👑 10. لوحة الإدارة (إضافة القنوات الإجبارية)
+# 👑 10. لوحة الإدارة (قنوات الاشتراك)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -505,7 +513,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("📜 Records", callback_data="ad_logs_all"),
                    InlineKeyboardButton("📢 Broadcast", callback_data="ad_bc"))
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
-                   InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list")) # زر الاشتراك
+                   InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
@@ -518,7 +526,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("📜 السجلات", callback_data="ad_logs_all"),
                    InlineKeyboardButton("📢 برودكاست", callback_data="ad_bc"))
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
-                   InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list")) # زر الاشتراك
+                   InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu_refresh"))
         text = "👑 <b>لوحة القيادة (الإدارة):</b>"
         
@@ -546,7 +554,6 @@ def admin_fsub_save(message):
         bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
         return
     try:
-        # فحص هل البوت أدمن في هذه القناة فعلاً أم لا
         bot.get_chat_member(cid, bot.get_me().id)
         supabase.table('required_channels').insert({'channel_id': cid}).execute()
         bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
@@ -560,7 +567,6 @@ def del_fsub_btn(call):
     bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
     admin_fsub_list(call)
 
-# بقية أوامر الإدارة (إضافة منتج، حذف، رصيد إلخ)
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 def ad_p_step1(call):
     msg = bot.send_message(call.from_user.id, "📦 أرسل اسم المنتج (بالعربية فقط):")
