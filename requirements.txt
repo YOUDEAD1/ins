@@ -1,7 +1,6 @@
 pyTelegramBotAPI
-instagrapi @ git+https://github.com/adw0rd/instagrapi.git
-flask
-pymongo
-dnspython
+python-binance
+supabase
+deep-translator
 requests
-pydantic>=2.5.0
+postgrest
