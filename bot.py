@@ -52,7 +52,7 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(b"Bot is alive and running on Render! 🚀")
+self.wfile.write("Bot is alive and running on Render! 🚀".encode('utf-8'))
         
 def keep_alive():
     port = int(os.environ.get('PORT', 8080))
