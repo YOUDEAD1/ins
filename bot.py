@@ -39,19 +39,17 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
 # ============================================================
-# 🌐 السيرفر الوهمي (حل مشكلة بورت Render)
+# 🌐 السيرفر الوهمي (لحل مشكلة بورت Render)
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        # هنا التعديل الصحيح للترميز داخل الدالة بالضبط
         response_text = "Bot is alive and running on Render! 🚀"
         self.wfile.write(response_text.encode('utf-8'))
-
     def log_message(self, format, *args):
-        return # لإيقاف رسائل اللوج المزعجة في السيرفر الوهمي
+        return
 
 def keep_alive():
     port = int(os.environ.get('PORT', 8080))
@@ -59,7 +57,6 @@ def keep_alive():
     logger.info(f"🌐 Keep-alive server started on port {port}")
     server.serve_forever()
 
-# تشغيل السيرفر في Thread منفصل
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ============================================================
@@ -102,8 +99,7 @@ LANG = {
         'store_title': "🛒 <b>المنتجات المتوفرة:</b>", 'buy_now': "✅ شراء الآن",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك هي:\n{}",
         'no_balance': "❌ رصيدك غير كافٍ!", 'out_stock': "❌ نفد المخزون!",
-        'must_join': "❌ <b>يجب الاشتراك في القنوات:</b>", 'check_sub': "🔄 تحقق",
-        'crypto_error': "❌ خطأ في الاتصال بالشبكة.",
+        'must_join': "❌ <b>يجب الاشتراك في القنوات التالية لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
         'qty_not_enough': "❌ <b>المتوفر فقط {} قطعة!</b>"
@@ -114,7 +110,7 @@ LANG = {
         'invite_txt': "👥 <b>Referral System</b>\n\n🔗 Your Link:\n<code>https://t.me/{}?start={}</code>\n\n🎁 <b>Rule:</b> Earn <b>$0.10</b> after your friend's <b>first purchase</b>.",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here.",
-        'dep_crypto': "🟢 <b>{} Deposit</b>\n\nSend amount to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here.",
+        'dep_crypto': "🟢 <b>{} Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here.",
         'tx_used': "⚠️ ID already used!",
         'crypto_checking': "⏳ <b>Checking network...</b>",
         'dep_success': "✅ <b>Verified!</b> <b>${:.2f}</b> added.",
@@ -129,8 +125,7 @@ LANG = {
         'store_title': "🛒 <b>Available Products:</b>", 'buy_now': "✅ Buy Now",
         'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}",
         'no_balance': "❌ Low balance!", 'out_stock': "❌ Out of stock!",
-        'must_join': "❌ <b>Join channels first:</b>", 'check_sub': "🔄 Verify",
-        'crypto_error': "❌ Network error.",
+        'must_join': "❌ <b>You must join the following channels to use the bot:</b>", 'check_sub': "🔄 Verify Subscription",
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers greater than zero!</b>",
         'qty_not_enough': "❌ <b>Only {} pieces available!</b>"
@@ -138,7 +133,7 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 4. الدوال المساعدة وقاعدة البيانات
+# 🛠️ 4. دوال الاشتراك الإجباري وقاعدة البيانات
 # ============================================================
 def clean_name(text):
     if not text: return ""
@@ -162,13 +157,21 @@ def get_product_stock_count(pid):
         return len(res.data)
     except: return 0
 
+# 🔥 فحص الاشتراك الإجباري 🔥
 def check_forced_sub(uid):
     if uid == OWNER_ID: return True
     try:
+        user_db = get_user_data_full(uid)
+        if user_db and user_db.get('is_admin') == 1: return True
+        
         chans = supabase.table('required_channels').select('channel_id').execute().data
         for c in chans:
-            status = bot.get_chat_member(c['channel_id'], uid).status
-            if status in ['left', 'kicked']: return False
+            try:
+                status = bot.get_chat_member(c['channel_id'], uid).status
+                if status in ['left', 'kicked']: return False
+            except Exception as e:
+                # إذا البوت انطرد من القناة أو القناة انحذفت، يتجاهلها مؤقتاً
+                continue
         return True
     except: return True
 
@@ -196,6 +199,8 @@ def start_handler(message):
         supabase.table('users').update({'username': uname}).eq('user_id', uid).execute()
 
     lang = user['lang'] if user['lang'] in LANG else 'ar'
+    
+    # 🔒 تفعيل شاشة الاشتراك الإجباري 🔒
     if not check_forced_sub(uid):
         chans = supabase.table('required_channels').select('channel_id').execute().data
         markup = InlineKeyboardMarkup(row_width=1)
@@ -204,7 +209,7 @@ def start_handler(message):
             markup.add(InlineKeyboardButton(btn_txt, url=f"https://t.me/{c['channel_id'].replace('@','') }"))
         markup.add(InlineKeyboardButton(LANG[lang]['check_sub'], callback_data="main_menu_refresh"))
         bot.send_message(chat_id, LANG[lang]['must_join'], reply_markup=markup, parse_mode="HTML")
-        return
+        return # يوقف الكود هنا ما يخليه يكمل
 
     users_total = len(supabase.table('users').select('user_id').execute().data)
     markup = InlineKeyboardMarkup(row_width=2)
@@ -222,10 +227,11 @@ def start_handler(message):
     bot.send_message(chat_id, LANG[lang]['welcome'].format(uid, from_user.first_name, users_total, user['balance']), reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
-# 👤 6. الملف الشخصي والسجلات
+# 👤 6. الملف الشخصي والسجلات وإحالات
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_profile")
 def profile_ui(call):
+    if not check_forced_sub(call.from_user.id): start_handler(call); return
     uid = call.from_user.id; u = get_user_data_full(uid); l = u['lang']
     buy_count = len(supabase.table('orders').select('id').eq('user_id', uid).execute().data)
     d_res = supabase.table('used_transactions').select('amount').eq('user_id', uid).execute().data
@@ -267,11 +273,9 @@ def show_hist_detail(call):
     markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="history_menu_callback"))
     bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
-# ============================================================
-# 🤝 7. نظام الإحالات
-# ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
+    if not check_forced_sub(call.from_user.id): start_handler(call); return
     uid = call.from_user.id; u = get_user_data_full(uid); l = u['lang']; b_n = bot.get_me().username
     inv_res = supabase.table('users').select('user_id').eq('referred_by', str(uid)).execute().data
     inv_c = len(inv_res) if inv_res else 0
@@ -286,10 +290,11 @@ def invite_ui(call):
     bot.edit_message_text(LANG[l]['invite_txt'].format(b_n, uid, inv_c, actual_earned), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
-# 🛒 8. المتجر والشراء (تحديد الكمية)
+# 🛒 8. المتجر والشراء
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
+    if not check_forced_sub(call.from_user.id): start_handler(call); return
     l = get_user_data_full(call.from_user.id)['lang']
     prods = supabase.table('products').select('*').execute().data
     markup = InlineKeyboardMarkup(row_width=1)
@@ -319,8 +324,7 @@ def shop_detail_ui(call):
     
     text = f"📦 <b>{n}</b>\n\n📝 {d}\n\n💰 <b>Price:</b> ${p['price']:.2f}\n📊 <b>Stock:</b> {stk}" if l=='en' else f"📦 <b>{n}</b>\n\n📝 {d}\n\n💰 <b>السعر:</b> ${p['price']:.2f}\n📊 <b>المتوفر:</b> {stk} قطعة"
     markup = InlineKeyboardMarkup()
-    if stk > 0: 
-        markup.add(InlineKeyboardButton(LANG[l]['buy_now'], callback_data=f"buy_qty_{pid}"))
+    if stk > 0: markup.add(InlineKeyboardButton(LANG[l]['buy_now'], callback_data=f"buy_qty_{pid}"))
     markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="open_shop"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -328,9 +332,7 @@ def shop_detail_ui(call):
 def prompt_quantity(call):
     uid = call.from_user.id; l = get_user_data_full(uid)['lang']; pid = call.data.split('_')[2]
     stk = get_product_stock_count(pid)
-    
-    if stk == 0:
-        bot.answer_callback_query(call.id, LANG[l]['out_stock'], show_alert=True); return
+    if stk == 0: bot.answer_callback_query(call.id, LANG[l]['out_stock'], show_alert=True); return
         
     msg = bot.send_message(uid, LANG[l]['qty_prompt'], parse_mode="HTML")
     bot.register_next_step_handler(msg, execute_bulk_buy, pid, l)
@@ -345,7 +347,6 @@ def execute_bulk_buy(message, pid, lang):
 
     u = get_user_data_full(uid)
     p = supabase.table('products').select('*').eq('id', pid).execute().data[0]
-    
     stk_items = supabase.table('product_stock').select('*').eq('product_id', pid).eq('is_sold', False).limit(qty).execute().data
     if len(stk_items) < qty:
         bot.send_message(uid, LANG[lang]['qty_not_enough'].format(len(stk_items)), parse_mode="HTML"); return
@@ -355,7 +356,6 @@ def execute_bulk_buy(message, pid, lang):
         bot.send_message(uid, LANG[lang]['no_balance'], parse_mode="HTML"); return
         
     supabase.table('users').update({'balance': u['balance'] - total_price}).eq('user_id', uid).execute()
-    
     delivered_codes = []
     for item in stk_items:
         supabase.table('product_stock').update({'is_sold': True}).eq('id', item['id']).execute()
@@ -387,6 +387,7 @@ def execute_bulk_buy(message, pid, lang):
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
+    if not check_forced_sub(call.from_user.id): start_handler(call); return
     l = get_user_data_full(call.from_user.id)['lang']
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("🟡 Binance Pay", callback_data="dep_binance"))
@@ -408,11 +409,8 @@ def dep_crypto_ui(call):
     db_key = "usdt_address" if coin == "USDT" else "ltc_address"
     wallet = get_setting(db_key)
     msg = bot.send_message(uid, LANG[l]['dep_crypto'].format(coin, wallet), parse_mode="HTML")
-    
-    if coin == "LTC":
-        bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
-    else:
-        bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
+    if coin == "LTC": bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
+    else: bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
 def verify_binance_pay(message, lang):
     uid = message.from_user.id; tx_id = message.text.strip().lower()
@@ -422,8 +420,7 @@ def verify_binance_pay(message, lang):
         found = False; amt = 0.0; now = int(time.time() * 1000)
         pay_h = binance_client.get_pay_trade_history().get('data', [])
         for d in pay_h:
-            api_txid = str(d.get('orderId', '')).lower()
-            if tx_id == api_txid:
+            if tx_id == str(d.get('orderId', '')).lower():
                 if (now - int(d.get('transactionTime', 0))) > (24 * 60 * 60 * 1000):
                     bot.send_message(uid, LANG[lang]['time_error'], parse_mode="HTML"); return
                 found = True; amt = float(d.get('amount', 0.0)); break
@@ -459,32 +456,26 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     try:
         if supabase.table('used_transactions').select('*').eq('transaction_id', tx_id).execute().data:
             bot.reply_to(message, LANG[lang]['tx_used']); return
-            
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         url = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
         res = requests.get(url)
-        
         if res.status_code == 200:
             data = res.json()
             confirmations = data.get("confirmations", 0)
             received_ltc = 0.0
-            
             for output in data.get("outputs", []):
                 if wallet_address in output.get("addresses", []):
                     received_ltc += float(output.get("value", 0)) / 100000000.0
-            
             if received_ltc > 0:
                 if confirmations >= 1:
                     try:
                         ltc_price = float(binance_client.get_symbol_ticker(symbol="LTCUSDT")['price'])
                         usd_amount = received_ltc * ltc_price
                     except: usd_amount = received_ltc * 80.0
-                        
                     credit_user(uid, usd_amount, tx_id, lang)
                 else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
             else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-            
     except Exception as e:
         logger.error(f"LTC Error: {e}")
         bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
@@ -496,7 +487,7 @@ def credit_user(uid, amt, tx_id, lang):
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
 
 # ============================================================
-# 👑 10. لوحة الإدارة (ترجمة AI للأسماء)
+# 👑 10. لوحة الإدارة (إضافة القنوات الإجبارية)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -513,7 +504,8 @@ def admin_main_ui(call):
                    InlineKeyboardButton("💰 Gift Balance", callback_data="ad_gift"))
         markup.add(InlineKeyboardButton("📜 Records", callback_data="ad_logs_all"),
                    InlineKeyboardButton("📢 Broadcast", callback_data="ad_bc"))
-        markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"))
+        markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
+                   InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list")) # زر الاشتراك
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
@@ -525,12 +517,50 @@ def admin_main_ui(call):
                    InlineKeyboardButton("💰 شحن رصيد", callback_data="ad_gift"))
         markup.add(InlineKeyboardButton("📜 السجلات", callback_data="ad_logs_all"),
                    InlineKeyboardButton("📢 برودكاست", callback_data="ad_bc"))
-        markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"))
+        markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
+                   InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list")) # زر الاشتراك
         markup.add(InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu_refresh"))
         text = "👑 <b>لوحة القيادة (الإدارة):</b>"
         
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
+# 🔥 إدارة قنوات الاشتراك الإجباري 🔥
+@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
+def admin_fsub_list(call):
+    chans = supabase.table('required_channels').select('*').execute().data
+    markup = InlineKeyboardMarkup(row_width=1)
+    if chans:
+        for c in chans: markup.add(InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}"))
+    markup.add(InlineKeyboardButton("➕ إضافة قناة باليوزر (@)", callback_data="ad_fsub_add"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    bot.edit_message_text("📢 <b>إدارة قنوات الاشتراك الإجباري:</b>\n\nاضغط على القناة لحذفها، أو أضف قناة جديدة.", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
+def admin_fsub_add(call):
+    msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه مهم:</b> يجب أن ترفع البوت كـ (مشرف/أدمن) في القناة أولاً حتى يتمكن من الفحص!", parse_mode="HTML")
+    bot.register_next_step_handler(msg, admin_fsub_save)
+
+def admin_fsub_save(message):
+    cid = message.text.strip()
+    if not cid.startswith('@') and not cid.startswith('-100'):
+        bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
+        return
+    try:
+        # فحص هل البوت أدمن في هذه القناة فعلاً أم لا
+        bot.get_chat_member(cid, bot.get_me().id)
+        supabase.table('required_channels').insert({'channel_id': cid}).execute()
+        bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!\nيرجى ترقية البوت في القناة ثم المحاولة مجدداً.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
+def del_fsub_btn(call):
+    ch = call.data.replace("del_fsub_", "")
+    supabase.table('required_channels').delete().eq('channel_id', ch).execute()
+    bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
+    admin_fsub_list(call)
+
+# بقية أوامر الإدارة (إضافة منتج، حذف، رصيد إلخ)
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 def ad_p_step1(call):
     msg = bot.send_message(call.from_user.id, "📦 أرسل اسم المنتج (بالعربية فقط):")
@@ -740,11 +770,12 @@ def toggle_lang(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
 def refresh_main(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
     start_handler(call)
 
 # ============================================================
-# 🚀 تشغيل البوت (نظام محمي ضد السقوط)
+# 🚀 تشغيل البوت
 # ============================================================
 def run_bot():
     while True:
