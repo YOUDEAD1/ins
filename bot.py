@@ -9,7 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ============================================================
-# ⚙️ 1. نظام الحماية الصارم (منع تعليق المكتبة)
+# ⚙️ 1. نظام الحماية الصارم
 # ============================================================
 try:
     import telebot
@@ -17,70 +17,68 @@ try:
     from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
     from telebot.apihelper import ApiTelegramException
 except AttributeError:
-    print("❌ خطأ: تأكد من عدم وجود ملف telebot.py في مجلدك.")
+    print("❌ خطأ: تأكد من حذف أي ملف اسمه telebot.py في مجلدك.")
     sys.exit(1)
 
 from binance.client import Client
 from deep_translator import GoogleTranslator
 from supabase import create_client, Client as SupabaseClient
 
-# ضبط تسجيل الأخطاء يدوياً
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 2. الإعدادات ومتغيرات البيئة (Render Environment Variables)
+# 🔑 2. الإعدادات (Environment Variables)
 # ============================================================
-TOKEN = os.getenv('TOKEN', 'YOUR_BOT_TOKEN_HERE') 
-try:
-    OWNER_ID = int(os.getenv('OWNER_ID', '8286529656'))
-except ValueError:
-    OWNER_ID = 8286529656
-OWNER_USER = os.getenv('OWNER_USER', 'lara_v2') 
-
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_KEY_HERE')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_SECRET_HERE')
-
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'YOUR_SUPABASE_URL_HERE')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'YOUR_SUPABASE_KEY_HERE')
+TOKEN = os.getenv('TOKEN')
+OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+OWNER_USER = os.getenv('OWNER_USER')
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 
 # ============================================================
-# 🌐 السيرفر الوهمي لمنع Render من إيقاف البوت (Keep-Alive)
+# 🌐 السيرفر الوهمي (حل مشكلة بورت Render)
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-self.wfile.write("Bot is alive and running on Render! 🚀".encode('utf-8'))
-        
+        # هنا التعديل الصحيح للترميز داخل الدالة بالضبط
+        response_text = "Bot is alive and running on Render! 🚀"
+        self.wfile.write(response_text.encode('utf-8'))
+
+    def log_message(self, format, *args):
+        return # لإيقاف رسائل اللوج المزعجة في السيرفر الوهمي
+
 def keep_alive():
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
-    logger.info(f"🌐 Dummy web server running on port {port} for Render...")
+    logger.info(f"🌐 Keep-alive server started on port {port}")
     server.serve_forever()
 
-# تشغيل السيرفر في خلفية البوت
+# تشغيل السيرفر في Thread منفصل
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ============================================================
 # 🚀 تهيئة البوت وقاعدة البيانات
 # ============================================================
-bot = telebot.TeleBot(TOKEN, num_threads=100)
+bot = telebot.TeleBot(TOKEN, num_threads=50)
 supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 try:
     binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-    print("✅ Binance API Connected")
-except Exception as e:
-    print(f"❌ Binance API Error: {e}")
+    print("✅ Binance Connected")
+except:
+    print("⚠️ Binance Error")
 
 REFERRAL_REWARD = 0.10
-user_states = {}
 temp_product = {}
 
 # ============================================================
-# 🌟 3. القاموس الكامل (عربي + إنجليزي)
+# 🌟 3. القاموس الكامل
 # ============================================================
 LANG = {
     'ar': {
@@ -89,7 +87,7 @@ LANG = {
         'invite_txt': "👥 <b>نظام الإحالات</b>\n\n🔗 رابط الدعوة الخاص بك:\n<code>https://t.me/{}?start={}</code>\n\n🎁 <b>طريقة الربح:</b>\nستحصل على <b>$0.10</b> رصيد مجاني عندما يقوم صديقك بـ <b>أول عملية شراء ناجحة</b>.",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ بعد التحويل، أرسل رقم العملية <b>(Order ID)</b> هنا.",
-        'dep_crypto': "🟢 <b>شحن عبر {}</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ بعد التحويل، أرسل الهاش <b>(TxID)</b> هنا.",
+        'dep_crypto': "🟢 <b>شحن عبر {}</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ أرسل الهاش <b>(TxID)</b> هنا.",
         'tx_used': "⚠️ عذراً، هذا الرقم مستخدم مسبقاً!",
         'crypto_checking': "⏳ <b>جاري فحص البلوكتشين...</b>",
         'dep_success': "✅ <b>تم التحقق!</b> تم إضافة <b>${:.2f}</b> إلى رصيدك.",
@@ -144,10 +142,7 @@ LANG = {
 # ============================================================
 def clean_name(text):
     if not text: return ""
-    clean = re.sub(r'<[^>]+>', '', text)
-    clean = re.sub(r'custom:\d+', '', clean)
-    clean = re.sub(r'standard:', '', clean)
-    return clean.strip()
+    return re.sub(r'<[^>]+>', '', text).strip()
 
 def get_setting(key, default="Not Set"):
     try:
@@ -291,7 +286,7 @@ def invite_ui(call):
     bot.edit_message_text(LANG[l]['invite_txt'].format(b_n, uid, inv_c, actual_earned), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
-# 🛒 8. المتجر والشراء (نظام تحديد الكميات)
+# 🛒 8. المتجر والشراء (تحديد الكمية)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
@@ -388,7 +383,7 @@ def execute_bulk_buy(message, pid, lang):
                 except: pass
 
 # ============================================================
-# 🏦 9. بوابات الدفع (LTC Blockchain + Binance)
+# 🏦 9. بوابات الدفع
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -501,7 +496,7 @@ def credit_user(uid, amt, tx_id, lang):
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
 
 # ============================================================
-# 👑 10. لوحة الإدارة (إضافة منتج بترجمة تلقائية)
+# 👑 10. لوحة الإدارة (ترجمة AI للأسماء)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -536,7 +531,6 @@ def admin_main_ui(call):
         
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
-# --- الترجمة التلقائية عند إضافة منتج ---
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 def ad_p_step1(call):
     msg = bot.send_message(call.from_user.id, "📦 أرسل اسم المنتج (بالعربية فقط):")
@@ -657,7 +651,7 @@ def admin_del_exec(call):
         bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
         admin_main_ui(call)
     except Exception as e:
-        bot.answer_callback_query(call.id, "❌ Error occurred.", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ Cannot delete product.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_s_fill")
 def admin_stock_list_ui(call):
@@ -693,6 +687,27 @@ def admin_stock_save(message, pid):
 
     bot.send_message(message.chat.id, f"✅ <b>{count} Codes added! Broadcast sent.</b>", parse_mode="HTML")
 
+@bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
+def admin_all_logs(call):
+    recs = supabase.table('used_transactions').select('*').order('id', desc=True).limit(10).execute().data
+    txt = "📜 <b>Last 10 Deposits:</b>\n\n"
+    if not recs: txt = "📭 No records."
+    for r in recs: txt += f"👤 <code>{r['user_id']}</code> | 💰 <b>${r['amount']}</b> | 🆔 <code>{r['transaction_id']}</code>\n"
+    markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+    bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_bc")
+def admin_bc_init(call):
+    msg = bot.send_message(call.from_user.id, "📢 Send Broadcast Message:")
+    bot.register_next_step_handler(msg, admin_bc_exe)
+
+def admin_bc_exe(message):
+    users = supabase.table('users').select('user_id').execute().data
+    for u in users:
+        try: bot.copy_message(u['user_id'], message.chat.id, message.message_id); time.sleep(0.05)
+        except: continue
+    bot.send_message(message.chat.id, "✅ Broadcast Sent.")
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
 def admin_shop_settings(call):
     markup = InlineKeyboardMarkup(row_width=1)
@@ -715,27 +730,6 @@ def admin_save_setting(message, mode):
     supabase.table('settings').upsert({'key': keys[mode], 'value': val}).execute()
     bot.send_message(message.chat.id, "✅ Updated.")
 
-@bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
-def admin_all_logs(call):
-    recs = supabase.table('used_transactions').select('*').order('id', desc=True).limit(10).execute().data
-    txt = "📜 <b>Last 10 Deposits:</b>\n\n"
-    if not recs: txt = "📭 No records."
-    for r in recs: txt += f"👤 <code>{r['user_id']}</code> | 💰 <b>${r['amount']}</b> | 🆔 <code>{r['transaction_id']}</code>\n"
-    markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
-    bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_bc")
-def admin_bc_init(call):
-    msg = bot.send_message(call.from_user.id, "📢 Send Broadcast Message:")
-    bot.register_next_step_handler(msg, admin_bc_exe)
-
-def admin_bc_exe(message):
-    users = supabase.table('users').select('user_id').execute().data
-    for u in users:
-        try: bot.copy_message(u['user_id'], message.chat.id, message.message_id); time.sleep(0.05)
-        except: continue
-    bot.send_message(message.chat.id, "✅ Broadcast Sent.")
-
 @bot.callback_query_handler(func=lambda call: call.data == "toggle_language")
 def toggle_lang(call):
     uid = call.from_user.id; u = get_user_data_full(uid)
@@ -750,7 +744,7 @@ def refresh_main(call):
     start_handler(call)
 
 # ============================================================
-# 🚀 تشغيل البوت
+# 🚀 تشغيل البوت (نظام محمي ضد السقوط)
 # ============================================================
 def run_bot():
     while True:
