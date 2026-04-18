@@ -19,6 +19,7 @@ except AttributeError:
 from binance.client import Client
 from deep_translator import GoogleTranslator
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,22 +56,29 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ============================================================
-# 🚀 3. تهيئة البوت وقاعدة بيانات MongoDB
+# 🚀 3. تهيئة البوت وقاعدة بيانات MongoDB (مع كشف الأعطال)
 # ============================================================
-bot = telebot.TeleBot(TOKEN, num_threads=50)
+bot = telebot.TeleBot(TOKEN)
 
+print("⏳ جاري الاتصال بقاعدة البيانات MongoDB...")
 try:
-    mongo_client = MongoClient(MONGO_URI)
+    # تحديد وقت للاتصال عشان ما يعلق البوت للأبد
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_client.server_info() # فحص الاتصال الفعلي
     db = mongo_client['shop_db']
-    print("✅ MongoDB Connected")
+    print("✅ تم الاتصال بقاعدة البيانات MongoDB بنجاح!")
+except ServerSelectionTimeoutError:
+    print("❌ عاجل: MongoDB ترفض الاتصال! تأكد من إضافة 0.0.0.0/0 في الـ Network Access بموقع MongoDB.")
+    sys.exit(1)
 except Exception as e:
-    print(f"❌ MongoDB Error: {e}")
+    print(f"❌ خطأ في MongoDB: {e}")
+    sys.exit(1)
 
 try:
     binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-    print("✅ Binance Connected")
-except:
-    print("⚠️ Binance Error")
+    print("✅ تم الاتصال بـ Binance بنجاح!")
+except Exception as e:
+    print(f"⚠️ تحذير: خطأ في اتصال Binance. السبب: {e}")
 
 REFERRAL_REWARD = 0.10
 temp_product = {}
@@ -89,9 +97,8 @@ LANG = {
         'tx_used': "⚠️ عذراً، هذا الرقم مستخدم مسبقاً!",
         'crypto_checking': "⏳ <b>جاري فحص العملية بأمان... الرجاء الانتظار.</b>",
         'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك. نشكر ثقتك بنا.",
-        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم ومرور 5 دقائق، وأرسله كنص (وليس صورة).",
+        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص.",
         'dep_pending': "⏳ <b>قيد المعالجة!</b> لم يتم تأكيد الحوالة في البلوكتشين بعد، يرجى المحاولة بعد قليل.",
-        'time_error': "❌ <b>مرفوض!</b> الحوالة قديمة جداً.",
         'history_title': "📜 <b>سجلاتك المالية:</b>",
         'products': "🛒 المنتجات", 'deposit': "💳 شحن الرصيد", 'profile': "👤 الملف الشخصي", 
         'invite': "👥 الإحالات", 'support': "👨‍💻 الدعم الفني", 'lang_btn': "🌐 English", 
@@ -104,7 +111,7 @@ LANG = {
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
         'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
-        'crypto_error': "❌ <b>حدث خطأ في الاتصال بالسيرفر!</b>"
+        'crypto_error': "❌ <b>حدث خطأ في الاتصال بباينانس/السيرفر. يرجى إبلاغ الإدارة.</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -116,9 +123,8 @@ LANG = {
         'tx_used': "⚠️ ID already used!",
         'crypto_checking': "⏳ <b>Verifying securely... Please wait.</b>",
         'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance. Thank you!",
-        'dep_fail': "❌ <b>Not found!</b> Check ID and wait 5 min. Send text, not image.",
+        'dep_fail': "❌ <b>Not found!</b> Check ID and send text, not an image.",
         'dep_pending': "⏳ <b>Pending!</b> Not confirmed on blockchain yet. Try again shortly.",
-        'time_error': "❌ <b>Rejected!</b> Transaction too old.",
         'history_title': "📜 <b>Your Financial Records:</b>",
         'products': "🛒 Products", 'deposit': "💳 Deposit", 'profile': "👤 Profile", 
         'invite': "👥 Referrals", 'support': "👨‍💻 Support", 'lang_btn': "🌐 العربية", 
@@ -131,7 +137,7 @@ LANG = {
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
         'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
-        'crypto_error': "❌ <b>Server connection error!</b>"
+        'crypto_error': "❌ <b>Server connection error with Binance!</b>"
     }
 }
 
@@ -148,6 +154,10 @@ def get_setting(key, default="Not Set"):
 def get_user_data_full(uid):
     return db.users.find_one({'user_id': uid})
 
+def get_lang(uid):
+    u = get_user_data_full(uid)
+    return u.get('lang', 'ar') if u else 'ar'
+
 def get_product_stock_count(pid):
     return db.product_stock.count_documents({'product_id': str(pid), 'is_sold': False})
 
@@ -163,22 +173,23 @@ def check_forced_sub(uid):
         try:
             status = bot.get_chat_member(c['channel_id'], uid).status
             if status in ['left', 'kicked']: return False
-        except Exception: return False
+        except Exception: 
+            return False
     return True
 
 # ============================================================
-# 🏠 6. معالج البداية واللغة
+# 🏠 6. معالج البداية واللغة والاشتراك
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     chat_id = message.chat.id if not isinstance(message, types.CallbackQuery) else message.message.chat.id
     from_user = message.from_user
-    full_text = message.text if not isinstance(message, types.CallbackQuery) else (message.message.text or "")
     uid = from_user.id
     uname = from_user.username.lower() if from_user.username else ""
     
     user = get_user_data_full(uid)
     if not user:
+        full_text = message.text if not isinstance(message, types.CallbackQuery) else (message.message.text or "")
         args = full_text.split()
         ref = args[1] if len(args) > 1 and args[1].isdigit() else None
         db.users.insert_one({
@@ -189,6 +200,7 @@ def start_handler(message):
     else:
         db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
 
+    # إذا لم يختر لغته (تظهر مرة واحدة فقط)
     if not user.get('lang_chosen'):
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -200,6 +212,7 @@ def start_handler(message):
 
     lang = user.get('lang', 'ar')
     
+    # فحص الاشتراك الإجباري بلغة المستخدم!
     if not check_forced_sub(uid):
         chans = list(db.required_channels.find())
         markup = InlineKeyboardMarkup(row_width=1)
@@ -233,12 +246,12 @@ def init_lang_selection(call):
     start_handler(call)
 
 # ============================================================
-# 👤 7. الملف الشخصي والسجلات الأنيقة والإحالات
+# 👤 7. الملف الشخصي والسجلات وإحالات
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_profile")
 def profile_ui(call):
     if not check_forced_sub(call.from_user.id): start_handler(call); return
-    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar')
+    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
     d_res = list(db.used_transactions.find({'user_id': uid}))
     dep_total = sum([float(d.get('amount', 0)) for d in d_res])
@@ -248,11 +261,11 @@ def profile_ui(call):
     markup.add(InlineKeyboardButton(history_btn, callback_data="history_menu_callback"))
     markup.add(InlineKeyboardButton(LANG[l]['deposit'], callback_data="open_deposit"),
                InlineKeyboardButton(LANG[l]['main_menu'], callback_data="main_menu_refresh"))
-    bot.edit_message_text(LANG[l]['profile_txt'].format(uid, u['name'], u.get('balance', 0.0), buy_count, dep_total), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    bot.edit_message_text(LANG[l]['profile_txt'].format(uid, u.get('name','User'), u.get('balance', 0.0), buy_count, dep_total), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "history_menu_callback")
 def history_menu_ui(call):
-    l = get_user_data_full(call.from_user.id).get('lang', 'ar')
+    l = get_lang(call.from_user.id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton(LANG[l]['buy_hist'], callback_data="h_view_buy"),
                InlineKeyboardButton(LANG[l]['dep_hist'], callback_data="h_view_dep"))
@@ -261,7 +274,7 @@ def history_menu_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("h_view_"))
 def show_hist_detail(call):
-    uid = call.from_user.id; l = get_user_data_full(uid).get('lang', 'ar'); mode = call.data.split('_')[2]
+    uid = call.from_user.id; l = get_lang(uid); mode = call.data.split('_')[2]
     out = ""
     try:
         if mode == "buy":
@@ -283,7 +296,7 @@ def show_hist_detail(call):
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
     if not check_forced_sub(call.from_user.id): start_handler(call); return
-    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar'); b_n = bot.get_me().username
+    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     inv_res = list(db.users.find({'referred_by': str(uid)}))
     inv_c = len(inv_res)
     actual_earned = 0.0
@@ -301,7 +314,7 @@ def invite_ui(call):
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
     if not check_forced_sub(call.from_user.id): start_handler(call); return
-    l = get_user_data_full(call.from_user.id).get('lang', 'ar')
+    l = get_lang(call.from_user.id)
     prods = list(db.products.find())
     markup = InlineKeyboardMarkup(row_width=1)
     
@@ -319,8 +332,9 @@ def shop_list_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vi_p_"))
 def shop_detail_ui(call):
-    uid = call.from_user.id; l = get_user_data_full(uid).get('lang', 'ar'); pid = call.data.split('_')[2]
+    uid = call.from_user.id; l = get_lang(uid); pid = call.data.split('_')[2]
     p = db.products.find_one({'id': str(pid)})
+    if not p: return
     stk = get_product_stock_count(pid)
     n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
     d = clean_name(p.get('desc_en') if l == 'en' else p.get('desc_ar'))
@@ -333,7 +347,7 @@ def shop_detail_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_qty_"))
 def prompt_quantity(call):
-    uid = call.from_user.id; l = get_user_data_full(uid).get('lang', 'ar'); pid = call.data.split('_')[2]
+    uid = call.from_user.id; l = get_lang(uid); pid = call.data.split('_')[2]
     if get_product_stock_count(pid) == 0:
         bot.answer_callback_query(call.id, LANG[l]['out_stock'], show_alert=True); return
         
@@ -371,7 +385,8 @@ def execute_bulk_buy(message, pid, lang):
     codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
     bot.send_message(uid, LANG[lang]['buy_success'].format(codes_str), parse_mode="HTML")
 
-    buyer_m = f"@{u['username']}" if u.get('username') else f"ID: <code>{uid}</code>"
+    # إشعار الإدارة بالشراء
+    buyer_m = f"@{u['username']}" if u and u.get('username') else f"ID: <code>{uid}</code>"
     log_ch = get_setting('log_channel')
     if log_ch and log_ch != "Not Set":
         try: 
@@ -379,6 +394,7 @@ def execute_bulk_buy(message, pid, lang):
             bot.send_message(log_ch, log_msg, parse_mode="HTML")
         except: pass
 
+    # نظام الإحالات
     buy_cnt = db.orders.count_documents({'user_id': uid})
     if buy_cnt == qty and u.get('referred_by'):
         ref_id = int(u['referred_by'])
@@ -391,12 +407,12 @@ def execute_bulk_buy(message, pid, lang):
                 except: pass
 
 # ============================================================
-# 🏦 9. بوابات الدفع (إشعار الإدارة)
+# 🏦 9. بوابات الدفع (الإصدار القديم الصامد 100%)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
     if not check_forced_sub(call.from_user.id): start_handler(call); return
-    l = get_user_data_full(call.from_user.id).get('lang', 'ar')
+    l = get_lang(call.from_user.id)
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("🟡 Binance Pay", callback_data="dep_binance"))
     markup.add(InlineKeyboardButton("🟢 USDT (TRC20 / BEP20)", callback_data="dep_crypto_USDT"))
@@ -406,14 +422,14 @@ def dep_init_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
-    uid = call.from_user.id; l = get_user_data_full(uid).get('lang', 'ar')
+    uid = call.from_user.id; l = get_lang(uid)
     wallet = get_setting('wallet_address')
     msg = bot.send_message(uid, LANG[l]['dep_pay'].format(wallet), parse_mode="HTML")
     bot.register_next_step_handler(msg, verify_binance_pay, l)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
 def dep_crypto_ui(call):
-    uid = call.from_user.id; l = get_user_data_full(uid).get('lang', 'ar'); coin = call.data.split('_')[2]
+    uid = call.from_user.id; l = get_lang(uid); coin = call.data.split('_')[2]
     db_key = "usdt_address" if coin == "USDT" else "ltc_address"
     wallet = get_setting(db_key)
     c_name = "USDT (TRC20/BEP20)" if coin == "USDT" else "Litecoin (LTC)"
@@ -426,17 +442,22 @@ def verify_binance_pay(message, lang):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip()
+    tx_id = message.text.strip().lower()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
-        pay_h = binance_client.get_pay_trade_history().get('data', [])
+        try:
+            pay_h = binance_client.get_pay_trade_history().get('data', [])
+        except Exception as e:
+            logger.error(f"Binance Error: {e}")
+            bot.send_message(uid, LANG[lang]['crypto_error'] + f"\n\n<code>[Error Log: {e}]</code>", parse_mode="HTML")
+            return
+
         found = False; amt = 0.0
-        
         for d in pay_h:
-            if tx_id.lower() == str(d.get('orderId', '')).lower():
+            if tx_id == str(d.get('orderId', '')).lower():
                 found = True
                 amt = float(d.get('amount', 0.0))
                 break
@@ -450,18 +471,23 @@ def verify_crypto_tx(message, lang, coin):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip()
+    tx_id = message.text.strip().lower()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
-        res = binance_client.get_deposit_history(coin=coin)
+        try:
+            res = binance_client.get_deposit_history(coin=coin)
+        except Exception as e:
+            logger.error(f"Crypto Error: {e}")
+            bot.send_message(uid, LANG[lang]['crypto_error'] + f"\n\n<code>[Error Log: {e}]</code>", parse_mode="HTML")
+            return
+
         found = False; status = -1; amt = 0.0
-        
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
-            if tx_id.lower() in api_txid:
+            if tx_id in api_txid:
                 found = True
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
@@ -511,6 +537,7 @@ def credit_user(uid, amt, tx_id, lang, method):
     db.used_transactions.insert_one({'transaction_id': tx_id, 'amount': amt, 'user_id': uid})
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
     
+    # إشعار الإدارة بالإيداع
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"ID: <code>{uid}</code>"
     log_ch = get_setting('log_channel')
@@ -525,9 +552,7 @@ def credit_user(uid, amt, tx_id, lang, method):
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
-    u = get_user_data_full(call.from_user.id)
-    l = u.get('lang', 'ar') if u else 'ar'
-    
+    l = get_lang(call.from_user.id)
     markup = InlineKeyboardMarkup(row_width=2)
     if l == 'en':
         markup.add(InlineKeyboardButton("➕ Add Product", callback_data="ad_p_add"),
@@ -697,6 +722,7 @@ def admin_save_edit(message, field, pid):
             db.products.update_one({'id': str(pid)}, {'$set': {'price': new_price}})
             bot.send_message(message.chat.id, "✅ Updated.")
             
+            # برودكاست التخفيض!
             if new_price < old_price: 
                 alert_msg = f"📉 <b>تخفيض مذهل! / Price Drop!</b> 🔥\n\nالمنتج: <b>{p['name_ar']}</b>\nالسعر القديم: <strike>${old_price}</strike>\nالسعر الجديد: <b>${new_price}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒"
                 users = list(db.users.find())
@@ -811,30 +837,30 @@ def toggle_lang(call):
     new_l = 'en' if u.get('lang', 'ar') == 'ar' else 'ar'
     db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l}})
     bot.delete_message(call.message.chat.id, call.message.message_id)
-    start_handler(call)
+    start_handler(call.message)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
 def refresh_main(call):
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
-    start_handler(call)
+    start_handler(call.message)
 
 # ============================================================
 # 🚀 11. تشغيل البوت (تعديل Webhook الحاسم لـ Render)
 # ============================================================
 def run_bot():
     try:
-        # مسح الـ Webhook إذا كان معلقاً في تليجرام عشان الـ Polling يشتغل
-        bot.remove_webhook()
+        # مسح الـ Webhook القديم لضمان عمل البوت
+        bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ تم مسح Webhook القديم بنجاح!")
         time.sleep(1)
     except Exception as e:
-        logger.warning(f"⚠️ لم يتم مسح Webhook: {e}")
+        pass
 
     logger.info("🚀 جاري تشغيل البوت الآن بنظام Polling...")
     while True:
         try:
-            bot.infinity_polling(timeout=90, long_polling_timeout=5)
+            bot.polling(non_stop=True, skip_pending=True)
         except Exception as e:
             logger.error(f"Polling Error: {e}")
             time.sleep(5)
