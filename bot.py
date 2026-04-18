@@ -25,17 +25,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 1. الإعدادات (Environment Variables)
+# 🔑 1. الإعدادات (مع تنظيف المسافات والأسطر المخفية) 🧹
 # ============================================================
-TOKEN = os.getenv('TOKEN')
+TOKEN = os.getenv('TOKEN', '').strip()
 try:
-    OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+    OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
 except ValueError:
     OWNER_ID = 0
-OWNER_USER = os.getenv('OWNER_USER')
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
-MONGO_URI = os.getenv('MONGO_URI')
+OWNER_USER = os.getenv('OWNER_USER', '').strip()
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
+MONGO_URI = os.getenv('MONGO_URI', '').strip()
 
 # ============================================================
 # 🌐 2. السيرفر الوهمي (Render Keep-Alive)
@@ -56,29 +56,30 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 # ============================================================
-# 🚀 3. تهيئة البوت وقاعدة بيانات MongoDB (مع كشف الأعطال)
+# 🚀 3. تهيئة البوت وقواعد البيانات
 # ============================================================
 bot = telebot.TeleBot(TOKEN)
 
 print("⏳ جاري الاتصال بقاعدة البيانات MongoDB...")
 try:
-    # تحديد وقت للاتصال عشان ما يعلق البوت للأبد
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    mongo_client.server_info() # فحص الاتصال الفعلي
+    mongo_client.server_info()
     db = mongo_client['shop_db']
     print("✅ تم الاتصال بقاعدة البيانات MongoDB بنجاح!")
-except ServerSelectionTimeoutError:
-    print("❌ عاجل: MongoDB ترفض الاتصال! تأكد من إضافة 0.0.0.0/0 في الـ Network Access بموقع MongoDB.")
-    sys.exit(1)
 except Exception as e:
     print(f"❌ خطأ في MongoDB: {e}")
     sys.exit(1)
 
-try:
-    binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-    print("✅ تم الاتصال بـ Binance بنجاح!")
-except Exception as e:
-    print(f"⚠️ تحذير: خطأ في اتصال Binance. السبب: {e}")
+# ✅ تهيئة أداة باينانس بشكل آمن 
+binance_client = None
+if BINANCE_API_KEY and BINANCE_API_SECRET:
+    try:
+        binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+        print("✅ تم الاتصال بـ Binance بنجاح!")
+    except Exception as e:
+        print(f"⚠️ تحذير: خطأ في اتصال Binance (تأكد من منطقة السيرفر). السبب: {e}")
+else:
+    print("⚠️ تحذير: مفاتيح Binance غير موجودة في إعدادات Render!")
 
 REFERRAL_REWARD = 0.10
 temp_product = {}
@@ -111,7 +112,7 @@ LANG = {
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
         'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
-        'crypto_error': "❌ <b>حدث خطأ في الاتصال بباينانس/السيرفر. يرجى إبلاغ الإدارة.</b>"
+        'crypto_error': "❌ <b>نظام الدفع معطل حالياً (يوجد خلل في ربط باينانس من الإدارة).</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -137,7 +138,7 @@ LANG = {
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
         'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
-        'crypto_error': "❌ <b>Server connection error with Binance!</b>"
+        'crypto_error': "❌ <b>Payment system is currently disabled (Binance connection issue).</b>"
     }
 }
 
@@ -200,7 +201,6 @@ def start_handler(message):
     else:
         db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
 
-    # إذا لم يختر لغته (تظهر مرة واحدة فقط)
     if not user.get('lang_chosen'):
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -212,7 +212,6 @@ def start_handler(message):
 
     lang = user.get('lang', 'ar')
     
-    # فحص الاشتراك الإجباري بلغة المستخدم!
     if not check_forced_sub(uid):
         chans = list(db.required_channels.find())
         markup = InlineKeyboardMarkup(row_width=1)
@@ -407,7 +406,7 @@ def execute_bulk_buy(message, pid, lang):
                 except: pass
 
 # ============================================================
-# 🏦 9. بوابات الدفع (الإصدار القديم الصامد 100%)
+# 🏦 9. بوابات الدفع (آمنة من أخطاء الـ API)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -442,7 +441,10 @@ def verify_binance_pay(message, lang):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip().lower()
+    if binance_client is None:
+        bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML"); return
+
+    tx_id = message.text.strip()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
@@ -451,13 +453,13 @@ def verify_binance_pay(message, lang):
         try:
             pay_h = binance_client.get_pay_trade_history().get('data', [])
         except Exception as e:
-            logger.error(f"Binance Error: {e}")
-            bot.send_message(uid, LANG[lang]['crypto_error'] + f"\n\n<code>[Error Log: {e}]</code>", parse_mode="HTML")
+            logger.error(f"Binance API Error: {e}")
+            bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
             return
 
         found = False; amt = 0.0
         for d in pay_h:
-            if tx_id == str(d.get('orderId', '')).lower():
+            if tx_id.lower() == str(d.get('orderId', '')).lower():
                 found = True
                 amt = float(d.get('amount', 0.0))
                 break
@@ -470,8 +472,11 @@ def verify_crypto_tx(message, lang, coin):
     uid = message.from_user.id
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
+
+    if binance_client is None:
+        bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip().lower()
+    tx_id = message.text.strip()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
@@ -480,14 +485,14 @@ def verify_crypto_tx(message, lang, coin):
         try:
             res = binance_client.get_deposit_history(coin=coin)
         except Exception as e:
-            logger.error(f"Crypto Error: {e}")
-            bot.send_message(uid, LANG[lang]['crypto_error'] + f"\n\n<code>[Error Log: {e}]</code>", parse_mode="HTML")
+            logger.error(f"Crypto API Error: {e}")
+            bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
             return
 
         found = False; status = -1; amt = 0.0
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
-            if tx_id in api_txid:
+            if tx_id.lower() in api_txid:
                 found = True
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
@@ -722,7 +727,6 @@ def admin_save_edit(message, field, pid):
             db.products.update_one({'id': str(pid)}, {'$set': {'price': new_price}})
             bot.send_message(message.chat.id, "✅ Updated.")
             
-            # برودكاست التخفيض!
             if new_price < old_price: 
                 alert_msg = f"📉 <b>تخفيض مذهل! / Price Drop!</b> 🔥\n\nالمنتج: <b>{p['name_ar']}</b>\nالسعر القديم: <strike>${old_price}</strike>\nالسعر الجديد: <b>${new_price}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒"
                 users = list(db.users.find())
@@ -846,18 +850,14 @@ def refresh_main(call):
     start_handler(call.message)
 
 # ============================================================
-# 🚀 11. تشغيل البوت (تعديل Webhook الحاسم لـ Render)
+# 🚀 11. تشغيل البوت 
 # ============================================================
 def run_bot():
     try:
-        # مسح الـ Webhook القديم لضمان عمل البوت
         bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ تم مسح Webhook القديم بنجاح!")
         time.sleep(1)
-    except Exception as e:
-        pass
+    except: pass
 
-    logger.info("🚀 جاري تشغيل البوت الآن بنظام Polling...")
     while True:
         try:
             bot.polling(non_stop=True, skip_pending=True)
