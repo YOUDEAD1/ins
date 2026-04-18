@@ -1,12 +1,11 @@
 import sys
 import os
 import time
-import datetime
 import re
 import logging
 import requests
 import threading
-import html  # 👈 المكتبة الجديدة لحماية الأزرار من التعليق
+from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 try:
@@ -20,7 +19,6 @@ except AttributeError:
 from binance.client import Client
 from deep_translator import GoogleTranslator
 from pymongo import MongoClient
-from pymongo.errors import ServerSelectionTimeoutError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -74,9 +72,6 @@ except Exception as e:
 REFERRAL_REWARD = 0.10
 temp_product = {}
 
-# ============================================================
-# 🌟 4. القاموس الكامل والمطور
-# ============================================================
 LANG = {
     'ar': {
         'welcome': "👋 <b>أهلاً بك في المتجر الاحترافي!</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n👥 المستخدمين: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>",
@@ -133,13 +128,42 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 5. دوال مساعدة وحماية الـ HTML (السر هنا 👈)
+# 🛠️ 5. دوال مساعدة معالجة وحماية ضد التعليق
 # ============================================================
 def clean_name(text):
-    if not text: return ""
-    # نزيل أي أكواد HTML خبيثة أو غير مقصودة، ثم نشفرها عشان ما يعلق البوت
+    if not text: return "بدون اسم"
     cleaned = re.sub(r'<[^>]+>', '', str(text)).strip()
-    return html.escape(cleaned)
+    return cleaned.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+def find_product(pid):
+    pid_str = str(pid)
+    # البحث كنص
+    p = db.products.find_one({'id': pid_str})
+    if p: return p
+    # البحث كرقم
+    if pid_str.isdigit():
+        p = db.products.find_one({'id': int(pid_str)})
+        if p: return p
+    # البحث كـ Float
+    try:
+        p = db.products.find_one({'id': float(pid_str)})
+        if p: return p
+    except: pass
+    # البحث كـ ObjectId لو كان منقول بطريقة مختلفة
+    if len(pid_str) == 24:
+        try:
+            p = db.products.find_one({'_id': ObjectId(pid_str)})
+            if p: return p
+        except: pass
+    return None
+
+def get_product_stock_count(pid):
+    pid_str = str(pid)
+    queries = [{'product_id': pid_str}]
+    if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+    try: queries.append({'product_id': float(pid_str)})
+    except: pass
+    return db.product_stock.count_documents({'$or': queries, 'is_sold': False})
 
 def get_setting(key, default="Not Set"):
     res = db.settings.find_one({'key': key})
@@ -156,30 +180,23 @@ def is_user_banned(uid):
     u = get_user_data_full(uid)
     return True if u and u.get('is_banned') == 1 else False
 
-def get_product_stock_count(pid):
-    return db.product_stock.count_documents({'product_id': str(pid), 'is_sold': False})
-
 def check_forced_sub(uid):
     if uid == OWNER_ID: return True
     user_db = get_user_data_full(uid)
     if user_db and user_db.get('is_admin') == 1: return True
-    
     chans = list(db.required_channels.find())
     if not chans: return True
-
     for c in chans:
         try:
             status = bot.get_chat_member(c['channel_id'], uid).status
             if status in ['left', 'kicked']: return False
-        except Exception: 
-            return False
+        except: return False
     return True
 
 def notify_admins(message_text):
     if OWNER_ID:
         try: bot.send_message(OWNER_ID, message_text, parse_mode="HTML")
         except: pass
-    
     admins = list(db.users.find({'is_admin': 1}))
     for admin in admins:
         if admin['user_id'] != OWNER_ID:
@@ -187,7 +204,7 @@ def notify_admins(message_text):
             except: pass
 
 # ============================================================
-# 🏠 6. معالج البداية واللغة
+# 🏠 6. معالج البداية
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -297,14 +314,14 @@ def show_hist_detail(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); mode = call.data.split('_')[2]
+    l = get_lang(uid); mode = call.data.replace("h_view_", "")
     out = ""
     try:
         if mode == "buy":
             recs = list(db.orders.find({'user_id': uid}).sort('_id', -1).limit(5))
             if not recs: out = LANG[l]['no_hist']
             for r in recs:
-                p = db.products.find_one({'id': str(r['product_id'])})
+                p = find_product(r['product_id'])
                 n = clean_name(p['name_en'] if l == 'en' else p['name_ar']) if p else "Product"
                 out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📦 المنتج: <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n────────────\n"
         else:
@@ -312,9 +329,11 @@ def show_hist_detail(call):
             if not recs: out = LANG[l]['no_hist']
             for r in recs: 
                 out += f"💳 <b>إيصال إيداع | Deposit Receipt</b>\n💰 المبلغ: <b>${r.get('amount', 0):.2f}</b>\n🆔 العملية: <code>{r.get('transaction_id', '')}</code>\n────────────\n"
-    except: out = "❌ Error"
+    except Exception as e: out = f"❌ Error: {e}"
+    
     markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="history_menu_callback"))
-    bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    try: bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: bot.answer_callback_query(call.id, "حدث خطأ أثناء العرض.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
@@ -336,7 +355,7 @@ def invite_ui(call):
     bot.edit_message_text(LANG[l]['invite_txt'].format(b_n, uid, inv_c, actual_earned), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
-# 🛒 8. المتجر (التصميم الجديد المانع لاختفاء الستوك) 🔥
+# 🛒 8. المتجر والشراء
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
@@ -351,35 +370,39 @@ def shop_list_ui(call):
     
     for p in prods:
         is_manual = p.get('is_manual', False)
-        st = get_product_stock_count(p['id'])
+        pid = p.get('id', str(p.get('_id', '')))
+        st = get_product_stock_count(pid)
         
         icon = '✅' if is_manual or st > 0 else '❌'
         st_text = ("يدوي" if l == 'ar' else "Manual") if is_manual else str(st)
         
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-        
-        # 👈 السر هنا: إذا الاسم طويل نقصه عشان الستوك يظل ظاهر دايماً
         short_n = n[:25] + ".." if len(n) > 25 else n
-        
-        # 👈 السر الثاني: الستوك والسعر في اليسار، والاسم في اليمين!
         btn_text = f"📦 {st_text} | 💰 ${p.get('price', 0):.2f} | {icon} {short_n}"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{p['id']}"))
+        
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{pid}"))
         
     markup.add(InlineKeyboardButton("🔄 Refresh" if l=='en' else "🔄 تحديث", callback_data="open_shop"))
     markup.add(InlineKeyboardButton(LANG[l]['main_menu'], callback_data="main_menu_refresh"))
     
-    try: bot.edit_message_text(LANG[l]['store_title'], call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    try: 
+        bot.edit_message_text(LANG[l]['store_title'], call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e: 
+        if "message is not modified" not in str(e):
+            bot.answer_callback_query(call.id, f"خطأ في عرض المتجر: {str(e)[:40]}", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vi_p_"))
 def shop_detail_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); pid = call.data.split('_')[2]
+    l = get_lang(uid)
+    pid = call.data.replace('vi_p_', '') # الحل الجذري لمنع مشكلة الأيدي المعقد
     
-    p = db.products.find_one({'id': str(pid)})
-    if not p: return
+    p = find_product(pid)
+    if not p: 
+        bot.answer_callback_query(call.id, "❌ عذراً، لا يمكن العثور على هذا المنتج في قاعدة البيانات!", show_alert=True)
+        return
     
     is_manual = p.get('is_manual', False)
     st = get_product_stock_count(pid)
@@ -395,21 +418,28 @@ def shop_detail_ui(call):
         markup.add(InlineKeyboardButton(LANG[l]['buy_now'], callback_data=f"buy_qty_{pid}"))
     markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="open_shop"))
     
-    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except Exception as e: logger.error(f"Error viewing product: {e}")
+    try: 
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e: 
+        bot.answer_callback_query(call.id, f"خطأ عرض: تأكد من عدم وجود رموز ممنوعة في الوصف.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_qty_"))
 def prompt_quantity(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); pid = call.data.split('_')[2]
+    l = get_lang(uid)
+    pid = call.data.replace('buy_qty_', '')
     
-    p = db.products.find_one({'id': str(pid)})
+    p = find_product(pid)
+    if not p: 
+        bot.answer_callback_query(call.id, "❌ خطأ: المنتج غير موجود.", show_alert=True)
+        return
+    
     is_manual = p.get('is_manual', False)
     
     if not is_manual and get_product_stock_count(pid) == 0:
-        bot.send_message(uid, LANG[l]['out_stock'], parse_mode="HTML"); return
+        bot.answer_callback_query(call.id, LANG[l]['out_stock'], show_alert=True); return
         
     msg = bot.send_message(uid, LANG[l]['qty_prompt'], parse_mode="HTML")
     bot.register_next_step_handler(msg, execute_bulk_buy, pid, l)
@@ -425,11 +455,14 @@ def execute_bulk_buy(message, pid, lang):
         bot.send_message(uid, LANG[lang]['qty_invalid'], parse_mode="HTML"); return
 
     u = get_user_data_full(uid)
-    p = db.products.find_one({'id': str(pid)})
+    p = find_product(pid)
     is_manual = p.get('is_manual', False)
     
     if not is_manual:
-        stk_items = list(db.product_stock.find({'product_id': str(pid), 'is_sold': False}).limit(qty))
+        pid_str = str(pid)
+        queries = [{'product_id': pid_str}]
+        if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+        stk_items = list(db.product_stock.find({'$or': queries, 'is_sold': False}).limit(qty))
         if len(stk_items) < qty:
             bot.send_message(uid, LANG[lang]['qty_not_enough'].format(len(stk_items)), parse_mode="HTML"); return
         
@@ -522,7 +555,7 @@ def dep_crypto_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); coin = call.data.split('_')[2]
+    l = get_lang(uid); coin = call.data.replace('dep_crypto_', '')
     db_key = "usdt_address" if coin == "USDT" else "ltc_address"
     wallet = get_setting(db_key)
     c_name = "USDT (TRC20/BEP20)" if coin == "USDT" else "Litecoin (LTC)"
@@ -637,7 +670,7 @@ def credit_user(uid, amt, tx_id, lang, method):
     notify_admins(admin_msg)
 
 # ============================================================
-# 👑 10. لوحة الإدارة
+# 👑 10. لوحة الإدارة 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -650,7 +683,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("📝 Edit Product", callback_data="ad_p_edit"),
                    InlineKeyboardButton("🗑 Delete Product", callback_data="ad_p_del"))
         markup.add(InlineKeyboardButton("👥 Users & Balances", callback_data="ad_users_main"),
-                   InlineKeyboardButton("🚫 Ban / Unban", callback_data="ad_ban_user"))
+                   InlineKeyboardButton("🚫 Ban / Unban User", callback_data="ad_ban_user"))
         markup.add(InlineKeyboardButton("👑 Promote Admin", callback_data="ad_new_admin"),
                    InlineKeyboardButton("💰 Gift Balance", callback_data="ad_gift"))
         markup.add(InlineKeyboardButton("📜 Records", callback_data="ad_logs_all"),
@@ -664,7 +697,7 @@ def admin_main_ui(call):
                    InlineKeyboardButton("📦 شحن ستوك", callback_data="ad_s_fill"))
         markup.add(InlineKeyboardButton("📝 تعديل منتج", callback_data="ad_p_edit"),
                    InlineKeyboardButton("🗑 حذف منتج", callback_data="ad_p_del"))
-        markup.add(InlineKeyboardButton("👥 إدارة العملاء", callback_data="ad_users_main"),
+        markup.add(InlineKeyboardButton("👥 إدارة العملاء والأرصدة", callback_data="ad_users_main"),
                    InlineKeyboardButton("🚫 حظر / فك حظر", callback_data="ad_ban_user"))
         markup.add(InlineKeyboardButton("👑 ترقية مدير", callback_data="ad_new_admin"),
                    InlineKeyboardButton("💰 شحن رصيد", callback_data="ad_gift"))
@@ -732,7 +765,119 @@ def ad_p_final(call):
     type_txt = "التسليم اليدوي 🤝" if is_manual else "التسليم التلقائي ⚡"
     bot.edit_message_text(f"✅ <b>تم إضافة المنتج بنجاح بنظام ({type_txt})!</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
 
-# --- بقية الدوال (بدون تغيير) ---
+@bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
+def admin_edit_list(call):
+    bot.answer_callback_query(call.id)
+    prods = list(db.products.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in prods:
+        pid = p.get('id', str(p.get('_id', '')))
+        markup.add(InlineKeyboardButton(f"📝 {clean_name(p.get('name_en'))}", callback_data=f"edit_p_{pid}"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+    bot.edit_message_text("👇 Select Product:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("edit_p_"))
+def admin_edit_opts(call):
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("edit_p_", "")
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{pid}"),
+               InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{pid}"),
+               InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
+               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"),
+               InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit"))
+    bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_"))
+def admin_edit_prompt(call):
+    bot.answer_callback_query(call.id)
+    parts = call.data.split('_', 2)
+    field = parts[1]
+    pid = parts[2]
+    msg = bot.send_message(call.message.chat.id, "Send new value:")
+    bot.register_next_step_handler(msg, admin_save_edit, field, pid)
+
+def admin_save_edit(message, field, pid):
+    val = message.text
+    keys = {"price": "price", "dar": "desc_ar", "nar": "name_ar", "nen": "name_en"}
+    
+    p = find_product(pid)
+    if not p:
+        bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
+        return
+
+    if field == "price":
+        try:
+            new_price = float(val)
+            db.products.update_one({'_id': p['_id']}, {'$set': {'price': new_price}})
+            bot.send_message(message.chat.id, "✅ Updated.")
+        except: bot.send_message(message.chat.id, "❌ خطأ في السعر.")
+    else:
+        db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: val}})
+        bot.send_message(message.chat.id, "✅ Updated.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
+def admin_del_list(call):
+    bot.answer_callback_query(call.id)
+    prods = list(db.products.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in prods:
+        pid = p.get('id', str(p.get('_id', '')))
+        markup.add(InlineKeyboardButton(f"🗑 {clean_name(p.get('name_en'))}", callback_data=f"del_p_{pid}"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+    bot.edit_message_text("👇 Select Product to Delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_"))
+def admin_del_exec(call):
+    pid = call.data.replace("del_p_", "")
+    try:
+        p = find_product(pid)
+        if not p:
+            bot.answer_callback_query(call.id, "❌ المنتج غير موجود.", show_alert=True)
+            return
+            
+        pid_str = str(pid)
+        query_stk = {'$or': [{'product_id': pid_str}, {'product_id': int(pid_str) if pid_str.isdigit() else pid_str}]}
+        db.product_stock.delete_many(query_stk)
+        db.orders.delete_many(query_stk)
+        
+        db.products.delete_one({'_id': p['_id']})
+        
+        bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
+        admin_main_ui(call)
+    except Exception as e: bot.answer_callback_query(call.id, f"❌ Error: {e}", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_s_fill")
+def admin_stock_list_ui(call):
+    bot.answer_callback_query(call.id)
+    prods = list(db.products.find({'is_manual': {'$ne': True}}))
+    markup = InlineKeyboardMarkup(row_width=1)
+    if not prods:
+        bot.answer_callback_query(call.id, "❌ لا يوجد منتجات تسليم تلقائي تحتاج شحن.", show_alert=True)
+        return
+    for p in prods:
+        pid = p.get('id', str(p.get('_id', '')))
+        markup.add(InlineKeyboardButton(f"📦 {clean_name(p.get('name_en'))}", callback_data=f"stk_add_{pid}"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+    bot.edit_message_text("👇 Select Product:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("stk_add_"))
+def admin_stock_input(call):
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("stk_add_", "")
+    msg = bot.send_message(call.from_user.id, "📥 <b>Send Codes (one per line):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, admin_stock_save, pid)
+
+def admin_stock_save(message, pid):
+    lines = message.text.split('\n')
+    count = 0
+    for l in lines:
+        if l.strip():
+            db.product_stock.insert_one({'product_id': str(pid), 'code_line': l.strip(), 'is_sold': False})
+            count += 1
+    bot.send_message(message.chat.id, f"✅ <b>{count} Codes added!</b>", parse_mode="HTML")
+
+# --- إدارة المستخدمين ---
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ban_user")
 def ad_ban_start(call):
     bot.answer_callback_query(call.id)
@@ -801,7 +946,7 @@ def ad_u_search_exec(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_u_det_"))
 def ad_u_det_router(call):
     bot.answer_callback_query(call.id)
-    target_uid = int(call.data.split('_')[3])
+    target_uid = int(call.data.replace("ad_u_det_", ""))
     show_user_admin_profile(call.message.chat.id, target_uid, call.message.message_id)
 
 def show_user_admin_profile(chat_id, target_uid, message_id=None):
@@ -837,7 +982,7 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_"))
 def show_admin_hist_detail(call):
     bot.answer_callback_query(call.id)
-    parts = call.data.split('_'); mode = parts[2]; target_uid = int(parts[3])
+    parts = call.data.split('_', 3); mode = parts[2]; target_uid = int(parts[3])
     out = f"📂 <b>سجلات العميل (<code>{target_uid}</code>):</b>\n\n"
     
     try:
@@ -845,7 +990,7 @@ def show_admin_hist_detail(call):
             recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1).limit(10))
             if not recs: out += "📭 لا يوجد مشتريات."
             for r in recs:
-                p = db.products.find_one({'id': str(r['product_id'])})
+                p = find_product(r['product_id'])
                 n = clean_name(p['name_ar']) if p else "منتج محذوف"
                 out += f"🛍 <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n---\n"
         else:
@@ -853,7 +998,7 @@ def show_admin_hist_detail(call):
             if not recs: out += "📭 لا يوجد إيداعات."
             for r in recs: 
                 out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 🆔 <code>{r.get('transaction_id', '')}</code>\n"
-    except: out = "❌ Error"
+    except Exception as e: out = f"❌ Error: {e}"
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🔙 رجوع لملف العميل", callback_data=f"ad_u_det_{target_uid}"))
@@ -863,7 +1008,7 @@ def show_admin_hist_detail(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_ugift_"))
 def ad_ugift_prompt(call):
     bot.answer_callback_query(call.id)
-    target_uid = int(call.data.split('_')[2])
+    target_uid = int(call.data.replace("ad_ugift_", ""))
     msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل المبلغ المراد إضافته (أو خصمه باستخدام سالب -):</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_ugift_exec, target_uid)
 
@@ -875,97 +1020,81 @@ def ad_ugift_exec(message, target_uid):
         show_user_admin_profile(message.chat.id, target_uid)
     except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
 
-@bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
-def admin_edit_list(call):
+# --- قنوات الاشتراك وغيرها ---
+@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
+def admin_fsub_list(call):
     bot.answer_callback_query(call.id)
-    prods = list(db.products.find())
+    chans = list(db.required_channels.find())
     markup = InlineKeyboardMarkup(row_width=1)
-    for p in prods: markup.add(InlineKeyboardButton(f"📝 {clean_name(p.get('name_en'))}", callback_data=f"edit_p_{p['id']}"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
-    bot.edit_message_text("👇 Select Product:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    if chans:
+        for c in chans: markup.add(InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}"))
+    markup.add(InlineKeyboardButton("➕ إضافة قناة باليوزر (@)", callback_data="ad_fsub_add"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    bot.edit_message_text("📢 <b>إدارة قنوات الاشتراك الإجباري:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("edit_p_"))
-def admin_edit_opts(call):
+@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
+def admin_fsub_add(call):
     bot.answer_callback_query(call.id)
-    pid = call.data.split('_')[2]
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{pid}"),
-               InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{pid}"),
-               InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
-               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"),
-               InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit"))
-    bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه:</b> ارفع البوت مشرف أولاً!", parse_mode="HTML")
+    bot.register_next_step_handler(msg, admin_fsub_save)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_"))
-def admin_edit_prompt(call):
-    bot.answer_callback_query(call.id)
-    field = call.data.split('_')[1]; pid = call.data.split('_')[2]
-    msg = bot.send_message(call.message.chat.id, "Send new value:")
-    bot.register_next_step_handler(msg, admin_save_edit, field, pid)
-
-def admin_save_edit(message, field, pid):
-    val = message.text
-    keys = {"price": "price", "dar": "desc_ar", "nar": "name_ar", "nen": "name_en"}
-    
-    if field == "price":
-        try:
-            new_price = float(val)
-            p = db.products.find_one({'id': str(pid)})
-            old_price = float(p.get('price', 0))
-            db.products.update_one({'id': str(pid)}, {'$set': {'price': new_price}})
-            bot.send_message(message.chat.id, "✅ Updated.")
-        except: bot.send_message(message.chat.id, "❌ خطأ في السعر.")
-    else:
-        db.products.update_one({'id': str(pid)}, {'$set': {keys[field]: val}})
-        bot.send_message(message.chat.id, "✅ Updated.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
-def admin_del_list(call):
-    bot.answer_callback_query(call.id)
-    prods = list(db.products.find())
-    markup = InlineKeyboardMarkup(row_width=1)
-    for p in prods: markup.add(InlineKeyboardButton(f"🗑 {clean_name(p.get('name_en'))}", callback_data=f"del_p_{p['id']}"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
-    bot.edit_message_text("👇 Select Product to Delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_"))
-def admin_del_exec(call):
-    pid = call.data.split('_')[2]
-    try:
-        db.product_stock.delete_many({'product_id': str(pid)})
-        db.orders.delete_many({'product_id': str(pid)})
-        db.products.delete_one({'id': str(pid)})
-        bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
-        admin_main_ui(call)
-    except: bot.answer_callback_query(call.id, "❌ Error occurred.", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_s_fill")
-def admin_stock_list_ui(call):
-    bot.answer_callback_query(call.id)
-    prods = list(db.products.find({'is_manual': False}))
-    markup = InlineKeyboardMarkup(row_width=1)
-    if not prods:
-        bot.answer_callback_query(call.id, "❌ لا يوجد منتجات تسليم تلقائي تحتاج شحن.", show_alert=True)
+def admin_fsub_save(message):
+    cid = message.text.strip()
+    if not cid.startswith('@') and not cid.startswith('-100'):
+        bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
         return
-    for p in prods: markup.add(InlineKeyboardButton(f"📦 {clean_name(p.get('name_en'))}", callback_data=f"stk_add_{p['id']}"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
-    bot.edit_message_text("👇 Select Product:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    try:
+        bot.get_chat_member(cid, bot.get_me().id)
+        db.required_channels.insert_one({'channel_id': cid})
+        bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
+    except Exception:
+        bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("stk_add_"))
-def admin_stock_input(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
+def del_fsub_btn(call):
+    ch = call.data.replace("del_fsub_", "")
+    db.required_channels.delete_one({'channel_id': ch})
+    bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
+    admin_fsub_list(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_new_admin")
+def admin_add_admin_start(call):
     bot.answer_callback_query(call.id)
-    pid = call.data.split('_')[2]
-    msg = bot.send_message(call.from_user.id, "📥 <b>Send Codes (one per line):</b>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, admin_stock_save, pid)
+    msg = bot.send_message(call.from_user.id, "👑 Send <b>ID</b> or <b>@username</b>:")
+    bot.register_next_step_handler(msg, admin_add_admin_save)
 
-def admin_stock_save(message, pid):
-    lines = message.text.split('\n')
-    count = 0
-    for l in lines:
-        if l.strip():
-            db.product_stock.insert_one({'product_id': str(pid), 'code_line': l.strip(), 'is_sold': False})
-            count += 1
-    bot.send_message(message.chat.id, f"✅ <b>{count} Codes added!</b>", parse_mode="HTML")
+def admin_add_admin_save(message):
+    target = message.text.strip()
+    if target.startswith('@') or not target.replace('-', '').isdigit():
+        u = db.users.find_one({'username': target.replace('@', '').lower()})
+    else: u = get_user_data_full(int(target))
+    if u:
+        db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_admin': 1}})
+        bot.send_message(message.chat.id, "✅ User promoted.")
+    else: bot.send_message(message.chat.id, "❌ Not found.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_gift")
+def ad_gift_start(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id, "👤 <b>Send User ID or @username:</b>")
+    bot.register_next_step_handler(msg, ad_gift_val)
+
+def ad_gift_val(message):
+    target = message.text.strip()
+    if target.startswith('@') or not target.replace('-', '').isdigit():
+        u = db.users.find_one({'username': target.replace('@', '').lower()})
+    else: u = get_user_data_full(int(target))
+    if u:
+        msg = bot.send_message(message.from_user.id, f"💰 Amount for {u.get('name')}:")
+        bot.register_next_step_handler(msg, ad_gift_finish, u['user_id'])
+    else: bot.send_message(message.chat.id, "❌ Not found.")
+
+def ad_gift_finish(message, tid):
+    try:
+        val = float(message.text)
+        db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
+        bot.send_message(message.from_user.id, "✅ Done.")
+    except: bot.send_message(message.from_user.id, "❌ Error.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
 def admin_all_logs(call):
@@ -1031,42 +1160,6 @@ def refresh_main(call):
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
     start_handler(call.message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
-def admin_fsub_list(call):
-    bot.answer_callback_query(call.id)
-    chans = list(db.required_channels.find())
-    markup = InlineKeyboardMarkup(row_width=1)
-    if chans:
-        for c in chans: markup.add(InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}"))
-    markup.add(InlineKeyboardButton("➕ إضافة قناة باليوزر (@)", callback_data="ad_fsub_add"))
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
-    bot.edit_message_text("📢 <b>إدارة قنوات الاشتراك الإجباري:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
-def admin_fsub_add(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه:</b> ارفع البوت مشرف أولاً!", parse_mode="HTML")
-    bot.register_next_step_handler(msg, admin_fsub_save)
-
-def admin_fsub_save(message):
-    cid = message.text.strip()
-    if not cid.startswith('@') and not cid.startswith('-100'):
-        bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
-        return
-    try:
-        bot.get_chat_member(cid, bot.get_me().id)
-        db.required_channels.insert_one({'channel_id': cid})
-        bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
-    except Exception:
-        bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
-def del_fsub_btn(call):
-    ch = call.data.replace("del_fsub_", "")
-    db.required_channels.delete_one({'channel_id': ch})
-    bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
-    admin_fsub_list(call)
 
 # ============================================================
 # 🚀 11. تشغيل البوت
