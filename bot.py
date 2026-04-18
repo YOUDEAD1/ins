@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 1. الإعدادات 
+# 🔑 1. الإعدادات
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
 try:
@@ -100,7 +100,8 @@ LANG = {
         'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
-        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>"
+        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
+        'banned': "❌ <b>عذراً، تم حظرك من استخدام هذا البوت نهائياً لمخالفتك القوانين.</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -125,12 +126,13 @@ LANG = {
         'must_join': "🔒 <b>You must join our channels first to use the bot:</b>", 'check_sub': "🔄 Verify Subscription",
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
-        'qty_not_enough': "❌ <b>Only {} pieces available!</b>"
+        'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
+        'banned': "❌ <b>Sorry, you have been permanently banned from using this bot.</b>"
     }
 }
 
 # ============================================================
-# 🛠️ 5. دوال مساعدة
+# 🛠️ 5. دوال مساعدة وإشعارات وحظر
 # ============================================================
 def clean_name(text):
     return re.sub(r'<[^>]+>', '', text).strip() if text else ""
@@ -145,6 +147,10 @@ def get_user_data_full(uid):
 def get_lang(uid):
     u = get_user_data_full(uid)
     return u.get('lang', 'ar') if u else 'ar'
+
+def is_user_banned(uid):
+    u = get_user_data_full(uid)
+    return True if u and u.get('is_banned') == 1 else False
 
 def get_product_stock_count(pid):
     return db.product_stock.count_documents({'product_id': str(pid), 'is_sold': False})
@@ -165,8 +171,19 @@ def check_forced_sub(uid):
             return False
     return True
 
+def notify_admins(message_text):
+    if OWNER_ID:
+        try: bot.send_message(OWNER_ID, message_text, parse_mode="HTML")
+        except: pass
+    
+    admins = list(db.users.find({'is_admin': 1}))
+    for admin in admins:
+        if admin['user_id'] != OWNER_ID:
+            try: bot.send_message(admin['user_id'], message_text, parse_mode="HTML")
+            except: pass
+
 # ============================================================
-# 🏠 6. معالج البداية واللغة والاشتراك
+# 🏠 6. معالج البداية واللغة والاشتراك والحظر
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -175,6 +192,12 @@ def start_handler(message):
     uid = from_user.id
     uname = from_user.username.lower() if from_user.username else ""
     
+    # 🚫 فحص الحظر أولاً 🚫
+    if is_user_banned(uid):
+        l = get_lang(uid)
+        bot.send_message(chat_id, LANG[l]['banned'], parse_mode="HTML")
+        return
+
     user = get_user_data_full(uid)
     if not user:
         full_text = message.text if not isinstance(message, types.CallbackQuery) else (message.message.text or "")
@@ -182,7 +205,7 @@ def start_handler(message):
         ref = args[1] if len(args) > 1 and args[1].isdigit() else None
         db.users.insert_one({
             'user_id': uid, 'name': from_user.first_name, 'username': uname, 
-            'referred_by': ref, 'balance': 0.0, 'lang_chosen': False, 'lang': 'ar', 'is_admin': 0
+            'referred_by': ref, 'balance': 0.0, 'lang_chosen': False, 'lang': 'ar', 'is_admin': 0, 'is_banned': 0
         })
         user = get_user_data_full(uid)
     else:
@@ -236,8 +259,11 @@ def init_lang_selection(call):
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_profile")
 def profile_ui(call):
-    if not check_forced_sub(call.from_user.id): start_handler(call); return
-    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
+    uid = call.from_user.id
+    if is_user_banned(uid): bot.answer_callback_query(call.id, LANG[get_lang(uid)]['banned'], show_alert=True); return
+    if not check_forced_sub(uid): start_handler(call); return
+    
+    u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
     d_res = list(db.used_transactions.find({'user_id': uid}))
     dep_total = sum([float(d.get('amount', 0)) for d in d_res])
@@ -251,7 +277,9 @@ def profile_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "history_menu_callback")
 def history_menu_ui(call):
-    l = get_lang(call.from_user.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton(LANG[l]['buy_hist'], callback_data="h_view_buy"),
                InlineKeyboardButton(LANG[l]['dep_hist'], callback_data="h_view_dep"))
@@ -260,7 +288,9 @@ def history_menu_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("h_view_"))
 def show_hist_detail(call):
-    uid = call.from_user.id; l = get_lang(uid); mode = call.data.split('_')[2]
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid); mode = call.data.split('_')[2]
     out = ""
     try:
         if mode == "buy":
@@ -281,8 +311,11 @@ def show_hist_detail(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
-    if not check_forced_sub(call.from_user.id): start_handler(call); return
-    uid = call.from_user.id; u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
+    uid = call.from_user.id
+    if is_user_banned(uid): bot.answer_callback_query(call.id, LANG[get_lang(uid)]['banned'], show_alert=True); return
+    if not check_forced_sub(uid): start_handler(call); return
+    
+    u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     inv_res = list(db.users.find({'referred_by': str(uid)}))
     inv_c = len(inv_res)
     actual_earned = 0.0
@@ -299,8 +332,11 @@ def invite_ui(call):
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
-    if not check_forced_sub(call.from_user.id): start_handler(call); return
-    l = get_lang(call.from_user.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): bot.answer_callback_query(call.id, LANG[get_lang(uid)]['banned'], show_alert=True); return
+    if not check_forced_sub(uid): start_handler(call); return
+    
+    l = get_lang(uid)
     prods = list(db.products.find())
     markup = InlineKeyboardMarkup(row_width=1)
     
@@ -318,7 +354,9 @@ def shop_list_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vi_p_"))
 def shop_detail_ui(call):
-    uid = call.from_user.id; l = get_lang(uid); pid = call.data.split('_')[2]
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid); pid = call.data.split('_')[2]
     p = db.products.find_one({'id': str(pid)})
     if not p: return
     stk = get_product_stock_count(pid)
@@ -333,7 +371,9 @@ def shop_detail_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_qty_"))
 def prompt_quantity(call):
-    uid = call.from_user.id; l = get_lang(uid); pid = call.data.split('_')[2]
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid); pid = call.data.split('_')[2]
     if get_product_stock_count(pid) == 0:
         bot.answer_callback_query(call.id, LANG[l]['out_stock'], show_alert=True); return
         
@@ -342,6 +382,7 @@ def prompt_quantity(call):
 
 def execute_bulk_buy(message, pid, lang):
     uid = message.from_user.id
+    if is_user_banned(uid): return
     if not message.text or not message.text.isdigit():
         bot.send_message(uid, LANG[lang]['qty_invalid'], parse_mode="HTML"); return
         
@@ -371,22 +412,44 @@ def execute_bulk_buy(message, pid, lang):
     codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
     bot.send_message(uid, LANG[lang]['buy_success'].format(codes_str), parse_mode="HTML")
 
-    # إشعار الإدارة بالشراء
-    buyer_m = f"@{u['username']}" if u and u.get('username') else f"ID: <code>{uid}</code>"
+    buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
     log_ch = get_setting('log_channel')
+    
     if log_ch and log_ch != "Not Set":
         try: 
-            log_msg = f"🛒 <b>عملية شراء جديدة!</b>\n\n👤 العميل: {buyer_m}\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n🔢 الكمية: {qty}\n💰 القيمة الإجمالية: ${total_price:.2f}"
-            bot.send_message(log_ch, log_msg, parse_mode="HTML")
+            pub_msg = f"🛒 <b>عملية شراء جديدة!</b> 🛍\n\n👤 العميل: {buyer_m}\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n🔢 الكمية: {qty}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
         except: pass
 
+    admin_msg = f"🔐 <b>إشعار إدارة (شراء)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_en'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
+    notify_admins(admin_msg)
+
+    buy_cnt = db.orders.count_documents({'user_id': uid})
+    if buy_cnt == qty and u.get('referred_by'):
+        ref_id = int(u['referred_by'])
+        ref_u = get_user_data_full(ref_id)
+        if ref_u:
+            db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
+            ref_m = f"@{ref_u['username']}" if ref_u.get('username') else f"مستخدم {ref_id}"
+            
+            if log_ch and log_ch != "Not Set":
+                try: 
+                    ref_pub = f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة {ref_m} ربح <b>$0.10</b> رصيد مجاني بفضل دعوة العميل {buyer_m} 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>"
+                    bot.send_message(log_ch, ref_pub, parse_mode="HTML")
+                except: pass
+            
+            notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: $0.10")
+
 # ============================================================
-# 🏦 9. بوابات الدفع (تحديثات لكشف الخلل وطباعته)
+# 🏦 9. بوابات الدفع 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
-    if not check_forced_sub(call.from_user.id): start_handler(call); return
-    l = get_lang(call.from_user.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): bot.answer_callback_query(call.id, LANG[get_lang(uid)]['banned'], show_alert=True); return
+    if not check_forced_sub(uid): start_handler(call); return
+    
+    l = get_lang(uid)
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("🟡 Binance Pay", callback_data="dep_binance"))
     markup.add(InlineKeyboardButton("🟢 USDT (TRC20 / BEP20)", callback_data="dep_crypto_USDT"))
@@ -396,14 +459,18 @@ def dep_init_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
-    uid = call.from_user.id; l = get_lang(uid)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
     wallet = get_setting('wallet_address')
     msg = bot.send_message(uid, LANG[l]['dep_pay'].format(wallet), parse_mode="HTML")
     bot.register_next_step_handler(msg, verify_binance_pay, l)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
 def dep_crypto_ui(call):
-    uid = call.from_user.id; l = get_lang(uid); coin = call.data.split('_')[2]
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid); coin = call.data.split('_')[2]
     db_key = "usdt_address" if coin == "USDT" else "ltc_address"
     wallet = get_setting(db_key)
     c_name = "USDT (TRC20/BEP20)" if coin == "USDT" else "Litecoin (LTC)"
@@ -413,24 +480,23 @@ def dep_crypto_ui(call):
 
 def verify_binance_pay(message, lang):
     uid = message.from_user.id
+    if is_user_banned(uid): return
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
     tx_id = message.text.strip()
-    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        bot.send_message(uid, "❌ <b>خطأ:</b> مفاتيح باينانس غير موجودة أو مكتوبة بشكل خاطئ في إعدادات Render.", parse_mode="HTML")
-        return
-
-    if db.used_transactions.find_one({'transaction_id': tx_id.lower()}):
-        bot.reply_to(message, LANG[lang]['tx_used']); return
-
     try:
-        # إنشاء الاتصال في نفس لحظة الدفع عشان نطبع الخطأ المباشر
-        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        pay_h = client.get_pay_trade_history().get('data', [])
-        
+        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+            
+        try:
+            client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+            pay_h = client.get_pay_trade_history().get('data', [])
+        except Exception as e:
+            bot.send_message(uid, f"❌ حدث خطأ من سيرفر باينانس. يرجى مراجعة الإدارة.", parse_mode="HTML")
+            return
+
         found = False; amt = 0.0
         for d in pay_h:
             if tx_id.lower() == str(d.get('orderId', '')).lower():
@@ -440,29 +506,27 @@ def verify_binance_pay(message, lang):
                 
         if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ <b>حدث خطأ من باينانس:</b>\n<code>{e}</code>\n\n<i>(إذا كان الخطأ يتعلق بـ IP، فهذا يعني أن سيرفر Render في أمريكا، يجب تغييره إلى فرانكفورت أو سنغافورة)</i>", parse_mode="HTML")
+    except: pass
 
 def verify_crypto_tx(message, lang, coin):
     uid = message.from_user.id
+    if is_user_banned(uid): return
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
     tx_id = message.text.strip().lower()
-    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-
-    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        bot.send_message(uid, "❌ <b>خطأ:</b> مفاتيح باينانس غير موجودة.", parse_mode="HTML")
-        return
-
-    if db.used_transactions.find_one({'transaction_id': tx_id}):
-        bot.reply_to(message, LANG[lang]['tx_used']); return
-
     try:
-        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        res = client.get_deposit_history(coin=coin)
-        
+        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+            
+        try:
+            client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+            res = client.get_deposit_history(coin=coin)
+        except Exception as e:
+            bot.send_message(uid, f"❌ حدث خطأ من سيرفر باينانس. يرجى مراجعة الإدارة.", parse_mode="HTML")
+            return
+
         found = False; status = -1; amt = 0.0
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
@@ -476,22 +540,20 @@ def verify_crypto_tx(message, lang, coin):
             if status == 1: credit_user(uid, amt, tx_id, lang, f"Crypto {coin}")
             else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Crypto API Error: {e}")
-        bot.send_message(uid, f"❌ <b>حدث خطأ من باينانس:</b>\n<code>{e}</code>", parse_mode="HTML")
+    except: pass
 
 def verify_ltc_public_blockchain(message, lang, wallet_address):
     uid = message.from_user.id
+    if is_user_banned(uid): return
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
     tx_id = message.text.strip()
-    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-    
-    if db.used_transactions.find_one({'transaction_id': tx_id}):
-        bot.reply_to(message, LANG[lang]['tx_used']); return
-        
     try:
+        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+            
         url = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
         res = requests.get(url)
         if res.status_code == 200:
@@ -504,38 +566,32 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             
             if received_ltc > 0:
                 if confirmations >= 1:
-                    # تحويل LTC إلى دولار (يعمل حتى لو باينانس متعطلة)
                     try:
                         client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
                         ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
                     except:
-                        ltc_price = 80.0 # سعر افتراضي في حال فشل باينانس
-                        
+                        ltc_price = 80.0
                     usd_amount = received_ltc * ltc_price
                     credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
                 else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
             else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
-        bot.send_message(uid, f"❌ حدث خطأ في البلوكتشين: {e}", parse_mode="HTML")
+        bot.send_message(uid, f"❌ حدث خطأ في الشبكة.", parse_mode="HTML")
 
 def credit_user(uid, amt, tx_id, lang, method):
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
     db.used_transactions.insert_one({'transaction_id': tx_id, 'amount': amt, 'user_id': uid})
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
     
-    # إشعار الإدارة بالإيداع
     u = get_user_data_full(uid)
-    buyer_m = f"@{u['username']}" if u and u.get('username') else f"ID: <code>{uid}</code>"
-    log_ch = get_setting('log_channel')
-    if log_ch and log_ch != "Not Set":
-        try: 
-            log_msg = f"💸 <b>إيداع جديد!</b>\n\n👤 العميل: {buyer_m}\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية: <code>{tx_id}</code>"
-            bot.send_message(log_ch, log_msg, parse_mode="HTML")
-        except: pass
+    buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
+    
+    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id}</code>"
+    notify_admins(admin_msg)
 
 # ============================================================
-# 👑 10. لوحة الإدارة
+# 👑 10. لوحة الإدارة الشاملة (مع نظام الحظر وإدارة العملاء)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -546,6 +602,8 @@ def admin_main_ui(call):
                    InlineKeyboardButton("📦 Refill Stock", callback_data="ad_s_fill"))
         markup.add(InlineKeyboardButton("📝 Edit Product", callback_data="ad_p_edit"),
                    InlineKeyboardButton("🗑 Delete Product", callback_data="ad_p_del"))
+        markup.add(InlineKeyboardButton("👥 Users & Balances", callback_data="ad_users_main"),
+                   InlineKeyboardButton("🚫 Ban / Unban User", callback_data="ad_ban_user"))
         markup.add(InlineKeyboardButton("👑 Promote Admin", callback_data="ad_new_admin"),
                    InlineKeyboardButton("💰 Gift Balance", callback_data="ad_gift"))
         markup.add(InlineKeyboardButton("📜 Records", callback_data="ad_logs_all"),
@@ -559,6 +617,8 @@ def admin_main_ui(call):
                    InlineKeyboardButton("📦 شحن ستوك", callback_data="ad_s_fill"))
         markup.add(InlineKeyboardButton("📝 تعديل منتج", callback_data="ad_p_edit"),
                    InlineKeyboardButton("🗑 حذف منتج", callback_data="ad_p_del"))
+        markup.add(InlineKeyboardButton("👥 إدارة العملاء والأرصدة", callback_data="ad_users_main"),
+                   InlineKeyboardButton("🚫 حظر / فك حظر", callback_data="ad_ban_user"))
         markup.add(InlineKeyboardButton("👑 ترقية مدير", callback_data="ad_new_admin"),
                    InlineKeyboardButton("💰 شحن رصيد", callback_data="ad_gift"))
         markup.add(InlineKeyboardButton("📜 السجلات", callback_data="ad_logs_all"),
@@ -570,6 +630,141 @@ def admin_main_ui(call):
         
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
+# 🔥 نظام الحظر (Blacklist) 🔥
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ban_user")
+def ad_ban_start(call):
+    msg = bot.send_message(call.message.chat.id, "🚫 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username) للحظر أو فك الحظر:</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_ban_exec)
+
+def ad_ban_exec(message):
+    target = message.text.strip()
+    if target.startswith('@') or not target.replace('-', '').isdigit():
+        u = db.users.find_one({'username': target.replace('@', '').lower()})
+    else: 
+        u = get_user_data_full(int(target))
+        
+    if u:
+        if u['user_id'] == OWNER_ID:
+            bot.send_message(message.chat.id, "❌ لا يمكنك حظر المالك الأساسي!")
+            return
+            
+        current_status = u.get('is_banned', 0)
+        new_status = 1 if current_status == 0 else 0
+        db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_banned': new_status}})
+        
+        status_text = "تم حظر 🚫" if new_status == 1 else "تم فك حظر ✅"
+        bot.send_message(message.chat.id, f"✅ {status_text} المستخدم (<code>{u['user_id']}</code>) بنجاح.", parse_mode="HTML")
+    else:
+        bot.send_message(message.chat.id, "❌ لم يتم العثور على المستخدم في قاعدة البيانات.")
+
+# 🔥 نظام إدارة العملاء الشامل (CRM) 🔥
+@bot.callback_query_handler(func=lambda call: call.data == "ad_users_main")
+def ad_users_main_ui(call):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="ad_u_search"),
+               InlineKeyboardButton("🏆 أعلى 10 أرصدة", callback_data="ad_u_top"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    bot.edit_message_text("👥 <b>إدارة العملاء والأرصدة:</b>\nاختر العملية المطلوبة:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_u_top")
+def ad_u_top_ui(call):
+    top_users = list(db.users.find().sort('balance', -1).limit(10))
+    markup = InlineKeyboardMarkup(row_width=1)
+    for tu in top_users:
+        uname_display = f"@{tu['username']}" if tu.get('username') else tu['name']
+        btn_text = f"💰 ${tu.get('balance', 0):.2f} | 👤 {uname_display}"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"ad_u_det_{tu['user_id']}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_users_main"))
+    bot.edit_message_text("🏆 <b>أعلى 10 مستخدمين رصيداً:</b>\nاضغط على أي مستخدم لفتح ملفه:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_u_search")
+def ad_u_search_prompt(call):
+    msg = bot.send_message(call.message.chat.id, "🔍 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_u_search_exec)
+
+def ad_u_search_exec(message):
+    target = message.text.strip()
+    u = None
+    if target.startswith('@') or not target.replace('-', '').isdigit():
+        u = db.users.find_one({'username': target.replace('@', '').lower()})
+    else: 
+        u = get_user_data_full(int(target))
+        
+    if u: show_user_admin_profile(message.chat.id, u['user_id'])
+    else: bot.send_message(message.chat.id, "❌ لم يتم العثور على المستخدم.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_u_det_"))
+def ad_u_det_router(call):
+    target_uid = int(call.data.split('_')[3])
+    show_user_admin_profile(call.message.chat.id, target_uid, call.message.message_id)
+
+def show_user_admin_profile(chat_id, target_uid, message_id=None):
+    u = get_user_data_full(target_uid)
+    if not u: return
+    
+    buy_count = db.orders.count_documents({'user_id': target_uid})
+    d_res = list(db.used_transactions.find({'user_id': target_uid}))
+    dep_total = sum([float(d.get('amount', 0)) for d in d_res])
+    uname_str = f"@{u['username']}" if u.get('username') else "لا يوجد"
+    ban_str = "محظور 🚫" if u.get('is_banned') == 1 else "نشط ✅"
+    
+    text = f"📂 <b>ملف العميل (نظرة الإدارة)</b>\n\n"
+    text += f"👤 الاسم: <b>{u.get('name', 'بدون')}</b>\n"
+    text += f"🔗 المعرف: {uname_str}\n"
+    text += f"🆔 الأيدي: <code>{target_uid}</code>\n"
+    text += f"🛡️ الحالة: <b>{ban_str}</b>\n\n"
+    text += f"💰 الرصيد الحالي: <b>${u.get('balance', 0):.2f}</b>\n"
+    text += f"✅ عدد المشتريات: <b>{buy_count}</b>\n"
+    text += f"📦 إجمالي الإيداعات: <b>${dep_total:.2f}</b>"
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton("🛍 إيصالات مشترياته", callback_data=f"ad_uh_buy_{target_uid}"),
+               InlineKeyboardButton("💳 إيصالات إيداعاته", callback_data=f"ad_uh_dep_{target_uid}"))
+    markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
+    
+    if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
+    else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_"))
+def show_admin_hist_detail(call):
+    parts = call.data.split('_'); mode = parts[2]; target_uid = int(parts[3])
+    out = f"📂 <b>سجلات العميل (<code>{target_uid}</code>):</b>\n\n"
+    
+    try:
+        if mode == "buy":
+            recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1).limit(10))
+            if not recs: out += "📭 لا يوجد مشتريات."
+            for r in recs:
+                p = db.products.find_one({'id': str(r['product_id'])})
+                n = clean_name(p['name_ar']) if p else "منتج محذوف"
+                out += f"🛍 <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n---\n"
+        else:
+            recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1).limit(10))
+            if not recs: out += "📭 لا يوجد إيداعات."
+            for r in recs: 
+                out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 🆔 <code>{r.get('transaction_id', '')}</code>\n"
+    except: out = "❌ Error"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 رجوع لملف العميل", callback_data=f"ad_u_det_{target_uid}"))
+    bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_ugift_"))
+def ad_ugift_prompt(call):
+    target_uid = int(call.data.split('_')[2])
+    msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل المبلغ المراد إضافته (أو خصمه باستخدام سالب -):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_ugift_exec, target_uid)
+
+def ad_ugift_exec(message, target_uid):
+    try:
+        val = float(message.text)
+        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
+        bot.send_message(message.chat.id, "✅ تم تعديل الرصيد بنجاح.")
+        show_user_admin_profile(message.chat.id, target_uid)
+    except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
+
+# --- بقية دوال الإدارة (تعديل منتج، برودكاست، إعدادات الخ) ---
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
 def admin_fsub_list(call):
     chans = list(db.required_channels.find())
@@ -819,7 +1014,9 @@ def admin_save_setting(message, mode):
 
 @bot.callback_query_handler(func=lambda call: call.data == "toggle_language")
 def toggle_lang(call):
-    uid = call.from_user.id; u = get_user_data_full(uid)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    u = get_user_data_full(uid)
     new_l = 'en' if u.get('lang', 'ar') == 'ar' else 'ar'
     db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l}})
     bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -832,7 +1029,7 @@ def refresh_main(call):
     start_handler(call.message)
 
 # ============================================================
-# 🚀 11. تشغيل البوت 
+# 🚀 11. تشغيل البوت
 # ============================================================
 def run_bot():
     try:
