@@ -103,7 +103,8 @@ LANG = {
         'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
-        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>"
+        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
+        'crypto_error': "❌ <b>حدث خطأ في الاتصال بالسيرفر!</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -129,7 +130,8 @@ LANG = {
         'must_join': "🔒 <b>You must join our channels first to use the bot:</b>", 'check_sub': "🔄 Verify Subscription",
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
-        'qty_not_enough': "❌ <b>Only {} pieces available!</b>"
+        'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
+        'crypto_error': "❌ <b>Server connection error!</b>"
     }
 }
 
@@ -179,7 +181,6 @@ def start_handler(message):
     if not user:
         args = full_text.split()
         ref = args[1] if len(args) > 1 and args[1].isdigit() else None
-        # إدخال المستخدم بدون لغة مختارة
         db.users.insert_one({
             'user_id': uid, 'name': from_user.first_name, 'username': uname, 
             'referred_by': ref, 'balance': 0.0, 'lang_chosen': False, 'lang': 'ar', 'is_admin': 0
@@ -188,7 +189,6 @@ def start_handler(message):
     else:
         db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
 
-    # إذا كانت هذه أول مرة يدخل ولم يحدد لغته، نعرض أزرار اللغة قبل كل شيء
     if not user.get('lang_chosen'):
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -200,7 +200,6 @@ def start_handler(message):
 
     lang = user.get('lang', 'ar')
     
-    # فحص الاشتراك الإجباري بعد اختيار اللغة
     if not check_forced_sub(uid):
         chans = list(db.required_channels.find())
         markup = InlineKeyboardMarkup(row_width=1)
@@ -392,7 +391,7 @@ def execute_bulk_buy(message, pid, lang):
                 except: pass
 
 # ============================================================
-# 🏦 9. بوابات الدفع (دعم TRC20/BEP20 و Logs الإدارة)
+# 🏦 9. بوابات الدفع (إشعار الإدارة)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -427,7 +426,7 @@ def verify_binance_pay(message, lang):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip().lower()
+    tx_id = message.text.strip()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
@@ -437,7 +436,7 @@ def verify_binance_pay(message, lang):
         found = False; amt = 0.0
         
         for d in pay_h:
-            if tx_id == str(d.get('orderId', '')).lower():
+            if tx_id.lower() == str(d.get('orderId', '')).lower():
                 found = True
                 amt = float(d.get('amount', 0.0))
                 break
@@ -451,7 +450,7 @@ def verify_crypto_tx(message, lang, coin):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip().lower()
+    tx_id = message.text.strip()
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
@@ -462,7 +461,7 @@ def verify_crypto_tx(message, lang, coin):
         
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
-            if tx_id in api_txid:
+            if tx_id.lower() in api_txid:
                 found = True
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
@@ -512,7 +511,6 @@ def credit_user(uid, amt, tx_id, lang, method):
     db.used_transactions.insert_one({'transaction_id': tx_id, 'amount': amt, 'user_id': uid})
     bot.send_message(uid, LANG[lang]['dep_success'].format(amt), parse_mode="HTML")
     
-    # إرسال إشعار للإدارة
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"ID: <code>{uid}</code>"
     log_ch = get_setting('log_channel')
@@ -523,7 +521,7 @@ def credit_user(uid, amt, tx_id, lang, method):
         except: pass
 
 # ============================================================
-# 👑 10. لوحة الإدارة (برودكاست تخفيض السعر)
+# 👑 10. لوحة الإدارة
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -690,7 +688,6 @@ def admin_save_edit(message, field, pid):
     val = message.text
     keys = {"price": "price", "dar": "desc_ar", "nar": "name_ar", "nen": "name_en"}
     
-    # ميزة إشعار التخفيض 🔥
     if field == "price":
         try:
             new_price = float(val)
@@ -700,7 +697,7 @@ def admin_save_edit(message, field, pid):
             db.products.update_one({'id': str(pid)}, {'$set': {'price': new_price}})
             bot.send_message(message.chat.id, "✅ Updated.")
             
-            if new_price < old_price: # إذا كان السعر الجديد أرخص، أرسل برودكاست للكل!
+            if new_price < old_price: 
                 alert_msg = f"📉 <b>تخفيض مذهل! / Price Drop!</b> 🔥\n\nالمنتج: <b>{p['name_ar']}</b>\nالسعر القديم: <strike>${old_price}</strike>\nالسعر الجديد: <b>${new_price}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒"
                 users = list(db.users.find())
                 for u in users:
@@ -822,7 +819,19 @@ def refresh_main(call):
     except: pass
     start_handler(call)
 
+# ============================================================
+# 🚀 11. تشغيل البوت (تعديل Webhook الحاسم لـ Render)
+# ============================================================
 def run_bot():
+    try:
+        # مسح الـ Webhook إذا كان معلقاً في تليجرام عشان الـ Polling يشتغل
+        bot.remove_webhook()
+        logger.info("✅ تم مسح Webhook القديم بنجاح!")
+        time.sleep(1)
+    except Exception as e:
+        logger.warning(f"⚠️ لم يتم مسح Webhook: {e}")
+
+    logger.info("🚀 جاري تشغيل البوت الآن بنظام Polling...")
     while True:
         try:
             bot.infinity_polling(timeout=90, long_polling_timeout=5)
