@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 1. الإعدادات (مع تنظيف المسافات والأسطر المخفية) 🧹
+# 🔑 1. الإعدادات 
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
 try:
@@ -70,17 +70,6 @@ except Exception as e:
     print(f"❌ خطأ في MongoDB: {e}")
     sys.exit(1)
 
-# ✅ تهيئة أداة باينانس بشكل آمن 
-binance_client = None
-if BINANCE_API_KEY and BINANCE_API_SECRET:
-    try:
-        binance_client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        print("✅ تم الاتصال بـ Binance بنجاح!")
-    except Exception as e:
-        print(f"⚠️ تحذير: خطأ في اتصال Binance (تأكد من منطقة السيرفر). السبب: {e}")
-else:
-    print("⚠️ تحذير: مفاتيح Binance غير موجودة في إعدادات Render!")
-
 REFERRAL_REWARD = 0.10
 temp_product = {}
 
@@ -96,9 +85,9 @@ LANG = {
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ بعد التحويل، <b>أرسل رقم العملية (Order ID) كنص هنا.</b>",
         'dep_crypto': "🟢 <b>شحن عبر {}</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
         'tx_used': "⚠️ عذراً، هذا الرقم مستخدم مسبقاً!",
-        'crypto_checking': "⏳ <b>جاري فحص العملية بأمان... الرجاء الانتظار.</b>",
+        'crypto_checking': "⏳ <b>جاري فحص العملية بأمان... الرجاء الانتظار ثواني.</b>",
         'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك. نشكر ثقتك بنا.",
-        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص.",
+        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص (وليس صورة).",
         'dep_pending': "⏳ <b>قيد المعالجة!</b> لم يتم تأكيد الحوالة في البلوكتشين بعد، يرجى المحاولة بعد قليل.",
         'history_title': "📜 <b>سجلاتك المالية:</b>",
         'products': "🛒 المنتجات", 'deposit': "💳 شحن الرصيد", 'profile': "👤 الملف الشخصي", 
@@ -111,8 +100,7 @@ LANG = {
         'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
-        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
-        'crypto_error': "❌ <b>نظام الدفع معطل حالياً (يوجد خلل في ربط باينانس من الإدارة).</b>"
+        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -137,8 +125,7 @@ LANG = {
         'must_join': "🔒 <b>You must join our channels first to use the bot:</b>", 'check_sub': "🔄 Verify Subscription",
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
-        'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
-        'crypto_error': "❌ <b>Payment system is currently disabled (Binance connection issue).</b>"
+        'qty_not_enough': "❌ <b>Only {} pieces available!</b>"
     }
 }
 
@@ -308,7 +295,7 @@ def invite_ui(call):
     bot.edit_message_text(LANG[l]['invite_txt'].format(b_n, uid, inv_c, actual_earned), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ============================================================
-# 🛒 8. المتجر والشراء (مع تحديد الكمية)
+# 🛒 8. المتجر والشراء
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
@@ -393,20 +380,8 @@ def execute_bulk_buy(message, pid, lang):
             bot.send_message(log_ch, log_msg, parse_mode="HTML")
         except: pass
 
-    # نظام الإحالات
-    buy_cnt = db.orders.count_documents({'user_id': uid})
-    if buy_cnt == qty and u.get('referred_by'):
-        ref_id = int(u['referred_by'])
-        ref_u = get_user_data_full(ref_id)
-        if ref_u:
-            db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
-            if log_ch and log_ch != "Not Set":
-                ref_m = f"@{ref_u['username']}" if ref_u.get('username') else f"ID: <code>{ref_id}</code>"
-                try: bot.send_message(log_ch, f"🎁 <b>مكافأة إحالة!</b>\nالعميل {ref_m} ربح $0.10 بفضل شراء {buyer_m}", parse_mode="HTML")
-                except: pass
-
 # ============================================================
-# 🏦 9. بوابات الدفع (آمنة من أخطاء الـ API)
+# 🏦 9. بوابات الدفع (تحديثات لكشف الخلل وطباعته)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -440,23 +415,22 @@ def verify_binance_pay(message, lang):
     uid = message.from_user.id
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
-        
-    if binance_client is None:
-        bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML"); return
 
     tx_id = message.text.strip()
-    try:
-        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
-        try:
-            pay_h = binance_client.get_pay_trade_history().get('data', [])
-        except Exception as e:
-            logger.error(f"Binance API Error: {e}")
-            bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
-            return
+    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
 
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        bot.send_message(uid, "❌ <b>خطأ:</b> مفاتيح باينانس غير موجودة أو مكتوبة بشكل خاطئ في إعدادات Render.", parse_mode="HTML")
+        return
+
+    if db.used_transactions.find_one({'transaction_id': tx_id.lower()}):
+        bot.reply_to(message, LANG[lang]['tx_used']); return
+
+    try:
+        # إنشاء الاتصال في نفس لحظة الدفع عشان نطبع الخطأ المباشر
+        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+        pay_h = client.get_pay_trade_history().get('data', [])
+        
         found = False; amt = 0.0
         for d in pay_h:
             if tx_id.lower() == str(d.get('orderId', '')).lower():
@@ -464,35 +438,35 @@ def verify_binance_pay(message, lang):
                 amt = float(d.get('amount', 0.0))
                 break
                 
-        if found: credit_user(uid, amt, tx_id, lang, "Binance Pay")
+        if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-    except: bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Binance API Error: {e}")
+        bot.send_message(uid, f"❌ <b>حدث خطأ من باينانس:</b>\n<code>{e}</code>\n\n<i>(إذا كان الخطأ يتعلق بـ IP، فهذا يعني أن سيرفر Render في أمريكا، يجب تغييره إلى فرانكفورت أو سنغافورة)</i>", parse_mode="HTML")
 
 def verify_crypto_tx(message, lang, coin):
     uid = message.from_user.id
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
-    if binance_client is None:
-        bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML"); return
-        
-    tx_id = message.text.strip()
-    try:
-        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
-        try:
-            res = binance_client.get_deposit_history(coin=coin)
-        except Exception as e:
-            logger.error(f"Crypto API Error: {e}")
-            bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
-            return
+    tx_id = message.text.strip().lower()
+    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
 
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        bot.send_message(uid, "❌ <b>خطأ:</b> مفاتيح باينانس غير موجودة.", parse_mode="HTML")
+        return
+
+    if db.used_transactions.find_one({'transaction_id': tx_id}):
+        bot.reply_to(message, LANG[lang]['tx_used']); return
+
+    try:
+        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+        res = client.get_deposit_history(coin=coin)
+        
         found = False; status = -1; amt = 0.0
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
-            if tx_id.lower() in api_txid:
+            if tx_id in api_txid:
                 found = True
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
@@ -502,7 +476,9 @@ def verify_crypto_tx(message, lang, coin):
             if status == 1: credit_user(uid, amt, tx_id, lang, f"Crypto {coin}")
             else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-    except: bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Crypto API Error: {e}")
+        bot.send_message(uid, f"❌ <b>حدث خطأ من باينانس:</b>\n<code>{e}</code>", parse_mode="HTML")
 
 def verify_ltc_public_blockchain(message, lang, wallet_address):
     uid = message.from_user.id
@@ -510,11 +486,12 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
     tx_id = message.text.strip()
+    bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
+    
+    if db.used_transactions.find_one({'transaction_id': tx_id}):
+        bot.reply_to(message, LANG[lang]['tx_used']); return
+        
     try:
-        bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
         url = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
         res = requests.get(url)
         if res.status_code == 200:
@@ -527,15 +504,20 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             
             if received_ltc > 0:
                 if confirmations >= 1:
+                    # تحويل LTC إلى دولار (يعمل حتى لو باينانس متعطلة)
                     try:
-                        ltc_price = float(binance_client.get_symbol_ticker(symbol="LTCUSDT")['price'])
-                        usd_amount = received_ltc * ltc_price
-                    except: usd_amount = received_ltc * 80.0
+                        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+                        ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
+                    except:
+                        ltc_price = 80.0 # سعر افتراضي في حال فشل باينانس
+                        
+                    usd_amount = received_ltc * ltc_price
                     credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
                 else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
             else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
-    except: bot.send_message(uid, LANG[lang]['crypto_error'], parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(uid, f"❌ حدث خطأ في البلوكتشين: {e}", parse_mode="HTML")
 
 def credit_user(uid, amt, tx_id, lang, method):
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
