@@ -17,7 +17,7 @@ load_dotenv()
 try:
     import telebot
     from telebot import types
-    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 except AttributeError:
     print("❌ خطأ: تأكد من حذف أي ملف اسمه telebot.py في مجلدك.")
     sys.exit(1)
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 1. الإعدادات
+# 🔑 1. الإعدادات (جلب المتغيرات الحساسة من ملف .env)
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
 try:
@@ -38,13 +38,21 @@ try:
 except ValueError:
     OWNER_ID = 0
 OWNER_USER = os.getenv('OWNER_USER', '').strip()
+
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
-MONGO_URI = os.getenv('MONGO_URI', '').strip()
 
-# 🔐 إعدادات GitHub المحمية
+MONGO_URI = os.getenv('MONGO_URI', '').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
+
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
+
+# سعر صرف النجوم (الافتراضي 130 نجمة = 1 دولار)
+try:
+    STARS_RATE = int(os.getenv('STARS_RATE', '130').strip())
+except ValueError:
+    STARS_RATE = 130
 
 # ============================================================
 # 🌐 2. السيرفر الوهمي (Render Keep-Alive)
@@ -73,7 +81,7 @@ logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB..
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_client.server_info()
-    db = mongo_client['shop_db'] 
+    db = mongo_client[MONGO_DB_NAME] 
     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
 except Exception as e:
     logger.error(f"❌ خطأ حرج في MongoDB: {e}")
@@ -82,10 +90,10 @@ except Exception as e:
 REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
-temp_github_data = {} # 🎓 مساحة الحفظ المؤقت لبيانات GitHub
+temp_github_data = {} 
 
 # ============================================================
-# 🌍 4. قاموس اللغات (شامل تحديثات التنسيق والـ 2FA)
+# 🌍 4. قاموس اللغات
 # ============================================================
 LANG = {
     'ar': {
@@ -122,7 +130,6 @@ LANG = {
         'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين (Copilot, DigitalOcean, Canva وغيرها).\n✅ يتم التفعيل عبر نظام آلي سريع.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ البدء في التفعيل (${:.2f})",
         
-        # 🛡️ نصوص الخطوات المحدثة مع التنسيق القوي
         'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
         'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
         'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
@@ -171,7 +178,6 @@ LANG = {
         'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Features:</b>\n✅ 100% official and legal subscription for 2 full years.\n✅ Full access to developer tools (Copilot, DigitalOcean, Canva, etc).\n✅ Automated fast API activation.\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ Start Activation (${:.2f})",
         
-        # 🛡️ English Step Texts
         'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
         'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
         'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
@@ -197,7 +203,7 @@ def clean_name(text):
     return html.escape(cleaned)
 
 def obscure_text(text):
-    """دالة لإخفاء الإيميل أو اليوزر نيم (مثل a***d@gmail.com أو a***d)"""
+    """دالة لإخفاء الإيميل أو اليوزر نيم للحفاظ على الخصوصية"""
     if not text: return "***"
     if '@' in text:
         parts = text.split('@')
@@ -389,34 +395,24 @@ def github_buy_prompt(call):
         bot.send_message(uid, LANG[l]['no_balance'], parse_mode="HTML")
         return
         
-    # تهيئة مساحة للحفظ المؤقت لبيانات هذا العميل
     temp_github_data[uid] = {'price': gh_price, 'lang': l}
     
-    # 🎓 طلب الخطوة الأولى (اليوزر)
     msg = bot.send_message(uid, LANG[l]['gh_prompt_user'], parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_user)
 
 def process_gh_step_user(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
-    
-    # حفظ اليوزر
     temp_github_data[uid]['user'] = message.text.strip()
     l = temp_github_data[uid]['lang']
-    
-    # 🔑 طلب الخطوة الثانية (الباسوورد)
     msg = bot.send_message(uid, LANG[l]['gh_prompt_pass'], parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_pass)
 
 def process_gh_step_pass(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
-    
-    # حفظ الباسوورد
     temp_github_data[uid]['pass'] = message.text.strip()
     l = temp_github_data[uid]['lang']
-    
-    # 🛡️ طلب الخطوة الثالثة (كود 2FA)
     msg = bot.send_message(uid, LANG[l]['gh_prompt_2fa'], parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_2fa)
 
@@ -425,8 +421,6 @@ def process_gh_step_2fa(message):
     if uid not in temp_github_data: return
     
     two_factor = message.text.strip()
-        
-    # استخراج جميع البيانات من القاموس المؤقت وحذفه
     data = temp_github_data.pop(uid)
     
     price = data['price']
@@ -435,9 +429,6 @@ def process_gh_step_2fa(message):
     g_pass = data['pass']
     g_totp = two_factor
     
-    # ===============================
-    # بدء عملية الدفع والتواصل مع الـ API
-    # ===============================
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': -price}})
     status_msg = bot.send_message(uid, LANG[lang]['gh_deducted'], parse_mode="HTML")
     
@@ -484,19 +475,11 @@ def process_gh_step_2fa(message):
                             status = s_data.get("status", "").lower()
                             
                             if status == "submitted":
-                                # ✅ تم التفعيل بنجاح!
                                 app_id = s_data.get("app_id", "N/A")
-                                
-                                # تسجيل الإيصال في المتجر ليرتبط بالمشتريات
                                 db.orders.insert_one({'user_id': uid, 'product_id': 'GitHub_Student', 'code_delivered': f"Account: {g_user} | AppID: {app_id}"})
-                                
-                                # إرسال رسالة النجاح للعميل
                                 bot.edit_message_text(LANG[lang]['gh_success'].format(g_user), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
-                                
-                                # إرسال إشعار للإدارة بكامل التفاصيل
                                 notify_admins(f"🔐 <b>إشعار إدارة (تفعيل GitHub) ⚡</b>\n\n👤 العميل: <code>{uid}</code>\n📦 الحساب: {g_user}\n🔖 رقم الطلب: <code>{job_id}</code>\n✅ الحالة: تم التفعيل بنجاح!")
                                 
-                                # 📢 الإشعار العام (Public Log) + إخفاء الإيميل/اليوزر لحماية الخصوصية
                                 log_ch = get_setting('log_channel')
                                 if log_ch and log_ch != "Not Set":
                                     obs_user = obscure_text(g_user)
@@ -505,12 +488,10 @@ def process_gh_step_2fa(message):
                                         bot.send_message(log_ch, pub_msg, parse_mode="HTML")
                                     except: pass
                                 
-                                # 👥 نظام الإحالة (إعطاء مكافأة لصاحب الدعوة إذا كان هذا أول طلب)
                                 u = get_user_data_full(uid)
                                 buyer_m = f"@{u['username']}" if u and u.get('username') else f"العميل {uid}"
                                 buy_cnt = db.orders.count_documents({'user_id': uid})
                                 
-                                # إذا كان هذا هو الطلب الأول للعميل، وكان قد تم دعوته من شخص
                                 if buy_cnt == 1 and u.get('referred_by'):
                                     ref_id = int(u['referred_by'])
                                     ref_u = get_user_data_full(ref_id)
@@ -525,7 +506,7 @@ def process_gh_step_2fa(message):
                                             except: pass
                                         notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: ${REFERRAL_REWARD:.2f}")
 
-                                return # خروج من الـ Loop بعد النجاح
+                                return 
                                 
                             elif status in ["failed", "error"]:
                                 err_reason = s_data.get("error", s_data.get("refund_reason", "بيانات تسجيل الدخول أو الـ 2FA غير صحيحة"))
@@ -671,9 +652,8 @@ def shop_list_ui(call):
         icon = '✅' if is_manual or st > 0 else '❌'
         
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-        short_n = n[:35] + ".." if len(n) > 35 else n # زيادة مساحة الاسم
+        short_n = n[:35] + ".." if len(n) > 35 else n 
         
-        # 🛒 تم إزالة الستوك من الزر كما طلبت
         btn_text = f"{icon} | 💰 ${p.get('price', 0):.2f} | {short_n}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{pid}"))
         
@@ -801,7 +781,8 @@ def execute_bulk_buy(message, pid, lang):
 
     if log_ch and log_ch != "Not Set":
         try: 
-            pub_msg = f"🛒 <b>عملية شراء جديدة!</b> 🛍\n\n👤 العميل: {buyer_m}\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n🔢 الكمية: {qty}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+            obs_user = obscure_text(u.get('username') or str(uid))
+            pub_msg = f"🛒 <b>عملية شراء جديدة!</b> 🛍\n\n👤 العميل: <b>{obs_user}</b>\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n🔢 الكمية: {qty}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
             bot.send_message(log_ch, pub_msg, parse_mode="HTML")
         except: pass
 
@@ -821,7 +802,7 @@ def execute_bulk_buy(message, pid, lang):
             notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: $0.10")
 
 # ============================================================
-# 🏦 9. بوابات الدفع 
+# 🏦 9. بوابات الدفع (شاملة نجوم تيليجرام)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -832,12 +813,78 @@ def dep_init_ui(call):
     
     l = get_lang(uid)
     markup = InlineKeyboardMarkup(row_width=1)
+    # ⭐️ إضافة زر نجوم تيليجرام
+    stars_btn_text = "⭐️ نجوم تيليجرام (Telegram Stars)" if l == 'ar' else "⭐️ Telegram Stars"
+    markup.add(InlineKeyboardButton(stars_btn_text, callback_data="dep_stars"))
+    
     markup.add(InlineKeyboardButton("🟡 Binance Pay", callback_data="dep_binance"))
     markup.add(InlineKeyboardButton("🟢 USDT (TRC-20)", callback_data="dep_crypto_USDT"))
     markup.add(InlineKeyboardButton("🔵 Litecoin (LTC)", callback_data="dep_crypto_LTC"))
     markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="open_profile"))
     try: bot.edit_message_text(LANG[l]['dep_choose'], call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+# --- بداية نظام نجوم تيليجرام ---
+@bot.callback_query_handler(func=lambda call: call.data == "dep_stars")
+def dep_stars_ui(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    l = get_lang(uid)
+    
+    prompt = f"⭐️ <b>أرسل المبلغ الذي تريد شحنه بالدولار ($):</b>\n<i>(سيتم تحويله تلقائياً، 1$ = {STARS_RATE} نجمة)</i>" if l == 'ar' else f"⭐️ <b>Send the amount you want to deposit in USD ($):</b>\n<i>(Will be converted automatically, 1$ = {STARS_RATE} Stars)</i>"
+    
+    msg = bot.send_message(uid, prompt, parse_mode="HTML")
+    bot.register_next_step_handler(msg, process_stars_amount, l)
+
+def process_stars_amount(message, lang):
+    uid = message.from_user.id
+    try:
+        usd_amount = float(message.text.strip())
+        if usd_amount < 0.1:
+            err = "❌ الحد الأدنى للشحن هو 0.1$" if lang == 'ar' else "❌ Minimum deposit is $0.1"
+            bot.send_message(uid, err, parse_mode="HTML")
+            return
+            
+        stars_amount = int(usd_amount * STARS_RATE)
+        
+        title = "شحن رصيد المتجر" if lang == 'ar' else "Shop Balance Deposit"
+        desc = f"شحن حسابك بمبلغ ${usd_amount:.2f}" if lang == 'ar' else f"Deposit ${usd_amount:.2f} to your account"
+        
+        prices = [LabeledPrice(label=f"Deposit ${usd_amount:.2f}", amount=stars_amount)]
+        
+        bot.send_invoice(
+            chat_id=uid,
+            title=title,
+            description=desc,
+            invoice_payload=f"dep_{uid}_{usd_amount}",
+            provider_token="", # فارغ دائماً للنجوم
+            currency="XTR",
+            prices=prices
+        )
+    except ValueError:
+        err = "❌ الرجاء إرسال أرقام فقط." if lang == 'ar' else "❌ Please send numbers only."
+        bot.send_message(uid, err, parse_mode="HTML")
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def checkout(pre_checkout_query):
+    # الموافقة على الدفع من طرف تيليجرام
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    uid = message.from_user.id
+    pay_info = message.successful_payment
+    payload = pay_info.invoice_payload
+
+    if payload.startswith("dep_"):
+        parts = payload.split('_')
+        usd_amount = float(parts[2])
+        tx_id = pay_info.telegram_payment_charge_id
+        l = get_lang(uid)
+        
+        # إضافة الرصيد وإرسال الإشعارات
+        credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
+# --- نهاية نظام نجوم تيليجرام ---
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
@@ -1024,8 +1071,19 @@ def credit_user(uid, amt, tx_id, lang, method):
     
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
+    
+    # إشعار الإدارة
     admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id}</code>"
     notify_admins(admin_msg)
+    
+    # 📢 الإشعار العام في القناة (تشفير اسم العميل)
+    log_ch = get_setting('log_channel')
+    if log_ch and log_ch != "Not Set":
+        obs_user = obscure_text(u.get('username') or str(uid))
+        try: 
+            pub_msg = f"💳 <b>عملية إيداع جديدة!</b> 💵\n\n👤 العميل: <b>{obs_user}</b>\n💰 المبلغ: <b>${amt:.2f}</b>\n🟢 الطريقة: <b>{method}</b>\n\n<i>تم الإيداع تلقائياً عبر البوت ⚡</i>"
+            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except: pass
 
 # ============================================================
 # 👑 10. لوحة الإدارة 
