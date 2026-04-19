@@ -11,6 +11,9 @@ import io
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from dotenv import load_dotenv
+load_dotenv()
+
 try:
     import telebot
     from telebot import types
@@ -23,7 +26,6 @@ from binance.client import Client
 from deep_translator import GoogleTranslator
 from pymongo import MongoClient
 
-# تفعيل نظام كشف الأخطاء لطباعتها في تيرمينال ريندر
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,10 @@ OWNER_USER = os.getenv('OWNER_USER', '').strip()
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
+
+# 🔐 إعدادات GitHub المحمية
+GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
+GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
 # ============================================================
 # 🌐 2. السيرفر الوهمي (Render Keep-Alive)
@@ -67,8 +73,8 @@ logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB..
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_client.server_info()
-    db = mongo_client['shop_db']
-    logger.info("✅ تم الاتصال بقاعدة البيانات MongoDB بنجاح!")
+    db = mongo_client['shop_test_db'] 
+    logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
 except Exception as e:
     logger.error(f"❌ خطأ حرج في MongoDB: {e}")
     sys.exit(1)
@@ -76,7 +82,11 @@ except Exception as e:
 REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
+temp_github_data = {} # 🎓 مساحة الحفظ المؤقت لبيانات GitHub
 
+# ============================================================
+# 🌍 4. قاموس اللغات (شامل تحديثات التنسيق والـ 2FA)
+# ============================================================
 LANG = {
     'ar': {
         'welcome': "👋 <b>أهلاً بك في المتجر الاحترافي!</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n👥 المستخدمين: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>",
@@ -84,8 +94,9 @@ LANG = {
         'invite_txt': "👥 <b>نظام الإحالات الذكي</b>\n\n🔗 <b>رابط الدعوة الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك:</b>\n👥 عدد المدعوين: <b>{}</b>\n💰 إجمالي أرباحك: <b>${:.2f}</b>\n\n🎁 <b>القوانين:</b> ستحصل على <b>$0.10</b> رصيد مجاني فور قيام صديقك بأول عملية شراء.",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>\n<i>جميع بواباتنا آمنة وتتم معالجتها تلقائياً ⚡️</i>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ بعد التحويل، <b>أرسل رقم العملية (Order ID) كنص هنا.</b>",
-        'dep_crypto': "🟢 <b>شحن عبر {}</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
-        'tx_used': "⚠️ عذراً، هذا الرقم مستخدم مسبقاً!",
+        'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ <b>الشبكة المقبولة: TRC-20 فقط.</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
+        'dep_ltc': "🔵 <b>شحن عبر Litecoin (LTC)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ <b>تأكد من الإرسال عبر شبكة اللايتكوين الأساسية (Litecoin Network).</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
+        'tx_used': "⚠️ <b>عذراً، هذا الرقم مستخدم مسبقاً!</b>",
         'crypto_checking': "⏳ <b>جاري فحص العملية بأمان... الرجاء الانتظار.</b>",
         'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك. نشكر ثقتك بنا.",
         'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص (وليس صورة).",
@@ -97,14 +108,34 @@ LANG = {
         'dep_hist': "💳 الإيداعات", 'no_hist': "📭 لا يوجد سجلات حتى الآن.",
         'store_title': "🛒 <b>المنتجات المتوفرة:</b>", 'buy_now': "✅ شراء الآن",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
-        'no_balance': "❌ رصيدك غير كافٍ! يرجى شحن حسابك.", 'out_stock': "❌ نفد المخزون! يرجى الانتظار لحين التوفر.",
+        'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى شحن حسابك أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b> يرجى الانتظار لحين التوفر.",
         'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
         'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
         'banned': "❌ <b>عذراً، تم حظرك من استخدام هذا البوت نهائياً.</b>",
         'new_stock': "🔔 <b>توفر ستوك جديد!</b>\n\n🛍 <b>المنتج:</b> {}\n📦 <b>المتوفر الآن:</b> {}\n\n<i>سارع بالشراء الآن من المتجر! 🛒</i>",
-        'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒"
+        'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒",
+        
+        # 🎓 إضافة GitHub
+        'gh_btn': "🎓 تفعيل حساب طالب (GitHub) 🎓",
+        'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين (Copilot, DigitalOcean, Canva وغيرها).\n✅ يتم التفعيل عبر نظام آلي سريع.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
+        'gh_buy_btn': "✅ البدء في التفعيل (${:.2f})",
+        
+        # 🛡️ نصوص الخطوات المحدثة مع التنسيق القوي
+        'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
+        'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
+        'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
+        
+        'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق والاتصال بالسيرفر، يرجى الانتظار...",
+        'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن في الخلفية.",
+        'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم الطلب: <code>{}</code>)</b>\n⏳ <i>جاري معالجة الحساب...</i>",
+        'gh_success': "🎉 <b>اكتمل التفعيل بنجاح!</b> 🎓\n✅ تم تفعيل اشتراك <b>GitHub Student</b> للحساب: <code>{}</code>\n\n<i>شكراً لثقتك بمتجرنا 🛡️ يمكنك رؤية تفاصيل الطلب في قسم 'المشتريات'.</i>",
+        'gh_fail': "❌ <b>فشل التفعيل!</b>\nالسبب: <b>{}</b>\n\nتم إرجاع <b>${:.2f}</b> إلى رصيدك. تأكد من صحة بياناتك أو حاول لاحقاً.",
+        'gh_processing': "🔄 <b>الطلب قيد التنفيذ (رقم: <code>{}</code>)</b>\n⏳ <i>الخطوة الحالية: <b>{}</b> {} (فحص {}/35)</i>",
+        'gh_timeout': "⚠️ <b>انتهى وقت الانتظار!</b> الطلب استغرق وقتاً طويلاً ومستمر في الخلفية. راجع الإدارة إذا لم يتفعل الحساب.",
+        'gh_api_err': "❌ <b>عذراً، سيرفر التفعيل لا يستجيب.</b> (الخطأ: <code>{}</code>)\nتم إرجاع الرصيد لحسابك.",
+        'gh_conn_err': "❌ <b>حدث خطأ في الاتصال بالسيرفر:</b>\n<code>{}</code>\nتم إرجاع الرصيد."
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
@@ -112,8 +143,9 @@ LANG = {
         'invite_txt': "👥 <b>Smart Referrals</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Stats:</b>\n👥 Invited: <b>{}</b>\n💰 Earned: <b>${:.2f}</b>\n\n🎁 <b>Rule:</b> Earn <b>$0.10</b> free balance after your friend's first purchase.",
         'dep_choose': "💳 <b>Choose payment method:</b>\n<i>All gateways are 100% secure and automated ⚡️</i>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
-        'dep_crypto': "🟢 <b>{} Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
-        'tx_used': "⚠️ ID already used!",
+        'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ <b>Network: TRC-20 ONLY.</b>\n⚠️ Send <b>TxID (Hash)</b> here as text.",
+        'dep_ltc': "🔵 <b>Litecoin (LTC) Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ <b>Network: Litecoin Native.</b>\n⚠️ Send <b>TxID (Hash)</b> here as text.",
+        'tx_used': "⚠️ <b>ID already used!</b>",
         'crypto_checking': "⏳ <b>Verifying securely... Please wait.</b>",
         'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance. Thank you!",
         'dep_fail': "❌ <b>Not found!</b> Check ID and send text, not an image.",
@@ -125,14 +157,34 @@ LANG = {
         'dep_hist': "💳 Deposits", 'no_hist': "📭 No records yet.",
         'store_title': "🛒 <b>Available Products:</b>", 'buy_now': "✅ Buy Now",
         'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}\n\n<i>Thank you for choosing us 🛡️</i>",
-        'no_balance': "❌ Low balance! Please deposit.", 'out_stock': "❌ Out of stock!",
+        'no_balance': "❌ <b>Low balance!</b> Please deposit.", 'out_stock': "❌ <b>Out of stock!</b>",
         'must_join': "🔒 <b>You must join our channels first to use the bot:</b>", 'check_sub': "🔄 Verify Subscription",
         'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
         'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
         'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
         'banned': "❌ <b>Sorry, you have been permanently banned from using this bot.</b>",
         'new_stock': "🔔 <b>New Stock Available!</b>\n\n🛍 <b>Product:</b> {}\n📦 <b>Available Now:</b> {}\n\n<i>Hurry up and buy now! 🛒</i>",
-        'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: Only <b>${}</b>!\n\nHurry up and buy now! 🛒"
+        'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: Only <b>${}</b>!\n\nHurry up and buy now! 🛒",
+        
+        # 🎓 Add GitHub
+        'gh_btn': "🎓 GitHub Student Pack 🎓",
+        'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Features:</b>\n✅ 100% official and legal subscription for 2 full years.\n✅ Full access to developer tools (Copilot, DigitalOcean, Canva, etc).\n✅ Automated fast API activation.\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
+        'gh_buy_btn': "✅ Start Activation (${:.2f})",
+        
+        # 🛡️ English Step Texts
+        'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
+        'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
+        'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
+        
+        'gh_deducted': "⏳ <b>Data received!</b> Verifying and connecting to the server, please wait...",
+        'gh_submitted': "✅ <b>Request submitted successfully!</b> Activation is processing.",
+        'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>\n⏳ <i>Processing account...</i>",
+        'gh_success': "🎉 <b>Activation Completed!</b> 🎓\n✅ <b>GitHub Student</b> activated for: <code>{}</code>\n\n<i>Thank you for choosing us 🛡️ You can view the receipt in 'Purchases'.</i>",
+        'gh_fail': "❌ <b>Activation Failed!</b>\nReason: <b>{}</b>\n\n<b>${:.2f}</b> has been refunded. Check your details or try again later.",
+        'gh_processing': "🔄 <b>Processing request (ID: <code>{}</code>)</b>\n⏳ <i>Current Step: <b>{}</b> {} (Check {}/35)</i>",
+        'gh_timeout': "⚠️ <b>Timeout!</b> The request is taking too long but running in the background. Contact support if not activated.",
+        'gh_api_err': "❌ <b>Server is not responding.</b> (Error: <code>{}</code>)\nBalance refunded.",
+        'gh_conn_err': "❌ <b>Connection error:</b>\n<code>{}</code>\nBalance refunded."
     }
 }
 
@@ -143,6 +195,22 @@ def clean_name(text):
     if not text: return "بدون اسم"
     cleaned = re.sub(r'<[^>]+>', '', str(text)).strip()
     return html.escape(cleaned)
+
+def obscure_text(text):
+    """دالة لإخفاء الإيميل أو اليوزر نيم (مثل a***d@gmail.com أو a***d)"""
+    if not text: return "***"
+    if '@' in text:
+        parts = text.split('@')
+        name = parts[0]
+        domain = parts[1]
+        if len(name) > 2:
+            return name[0] + "***" + name[-1] + "@" + domain
+        else:
+            return name[0] + "***@" + domain
+    else:
+        if len(text) > 2:
+            return text[0] + "***" + text[-1]
+        return text[0] + "***"
 
 def find_product(pid):
     pid_str = str(pid)
@@ -184,7 +252,7 @@ def get_user_data_full(uid):
 
 def get_lang(uid):
     u = get_user_data_full(uid)
-    return u.get('lang', 'ar') if u else 'ar'
+    return u.get('lang', 'ar') if u else 'en'
 
 def is_user_banned(uid):
     u = get_user_data_full(uid)
@@ -214,11 +282,12 @@ def notify_admins(message_text):
             except: pass
 
 # ============================================================
-# 🏠 6. معالج البداية
+# 🏠 6. معالج البداية 
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    chat_id = message.chat.id if not isinstance(message, types.CallbackQuery) else message.message.chat.id
+    is_callback = isinstance(message, types.CallbackQuery)
+    chat_id = message.message.chat.id if is_callback else message.chat.id
     from_user = message.from_user
     uid = from_user.id
     uname = from_user.username.lower() if from_user.username else ""
@@ -229,7 +298,7 @@ def start_handler(message):
 
     user = get_user_data_full(uid)
     if not user:
-        full_text = message.text if not isinstance(message, types.CallbackQuery) else (message.message.text or "")
+        full_text = "" if is_callback else (message.text or "")
         args = full_text.split()
         ref = args[1] if len(args) > 1 and args[1].isdigit() else None
         db.users.insert_one({
@@ -250,6 +319,7 @@ def start_handler(message):
         return
 
     lang = user.get('lang', 'ar')
+    if lang not in ['ar', 'en']: lang = 'en'
     
     if not check_forced_sub(uid):
         chans = list(db.required_channels.find())
@@ -263,6 +333,9 @@ def start_handler(message):
 
     users_total = db.users.count_documents({})
     markup = InlineKeyboardMarkup(row_width=2)
+    
+    markup.add(InlineKeyboardButton(LANG[lang]['gh_btn'], callback_data="github_pack_info"))
+    
     markup.add(InlineKeyboardButton(LANG[lang]['products'], callback_data="open_shop"),
                InlineKeyboardButton(LANG[lang]['deposit'], callback_data="open_deposit"))
     markup.add(InlineKeyboardButton(LANG[lang]['profile'], callback_data="open_profile"),
@@ -283,7 +356,211 @@ def init_lang_selection(call):
     db.users.update_one({'user_id': call.from_user.id}, {'$set': {'lang': lang, 'lang_chosen': True}})
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
-    start_handler(call.message)
+    start_handler(call)
+
+# ============================================================
+# 🎓 وحدة GitHub Student Developer Pack 
+# ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "github_pack_info")
+def github_info_ui(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    l = get_lang(uid)
+    gh_price = float(get_setting("github_price", 15.0))
+    
+    text = LANG[l]['gh_desc'].format(gh_price)
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(LANG[l]['gh_buy_btn'].format(gh_price), callback_data="github_buy_prompt"))
+    markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="main_menu_refresh"))
+    
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == "github_buy_prompt")
+def github_buy_prompt(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    l = get_lang(uid)
+    gh_price = float(get_setting("github_price", 15.0))
+    u = get_user_data_full(uid)
+    
+    if float(u.get('balance', 0)) < gh_price:
+        bot.send_message(uid, LANG[l]['no_balance'], parse_mode="HTML")
+        return
+        
+    # تهيئة مساحة للحفظ المؤقت لبيانات هذا العميل
+    temp_github_data[uid] = {'price': gh_price, 'lang': l}
+    
+    # 🎓 طلب الخطوة الأولى (اليوزر)
+    msg = bot.send_message(uid, LANG[l]['gh_prompt_user'], parse_mode="HTML")
+    bot.register_next_step_handler(msg, process_gh_step_user)
+
+def process_gh_step_user(message):
+    uid = message.from_user.id
+    if uid not in temp_github_data: return
+    
+    # حفظ اليوزر
+    temp_github_data[uid]['user'] = message.text.strip()
+    l = temp_github_data[uid]['lang']
+    
+    # 🔑 طلب الخطوة الثانية (الباسوورد)
+    msg = bot.send_message(uid, LANG[l]['gh_prompt_pass'], parse_mode="HTML")
+    bot.register_next_step_handler(msg, process_gh_step_pass)
+
+def process_gh_step_pass(message):
+    uid = message.from_user.id
+    if uid not in temp_github_data: return
+    
+    # حفظ الباسوورد
+    temp_github_data[uid]['pass'] = message.text.strip()
+    l = temp_github_data[uid]['lang']
+    
+    # 🛡️ طلب الخطوة الثالثة (كود 2FA)
+    msg = bot.send_message(uid, LANG[l]['gh_prompt_2fa'], parse_mode="HTML")
+    bot.register_next_step_handler(msg, process_gh_step_2fa)
+
+def process_gh_step_2fa(message):
+    uid = message.from_user.id
+    if uid not in temp_github_data: return
+    
+    two_factor = message.text.strip()
+        
+    # استخراج جميع البيانات من القاموس المؤقت وحذفه
+    data = temp_github_data.pop(uid)
+    
+    price = data['price']
+    lang = data['lang']
+    g_user = data['user']
+    g_pass = data['pass']
+    g_totp = two_factor
+    
+    # ===============================
+    # بدء عملية الدفع والتواصل مع الـ API
+    # ===============================
+    db.users.update_one({'user_id': uid}, {'$inc': {'balance': -price}})
+    status_msg = bot.send_message(uid, LANG[lang]['gh_deducted'], parse_mode="HTML")
+    
+    def api_worker():
+        try:
+            if not GITHUB_API_KEY:
+                raise Exception("API Key not found in .env")
+                
+            headers = {
+                "X-API-Key": GITHUB_API_KEY,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            
+            payload = {
+                "github_username": g_user,
+                "github_password": g_pass,
+                "totp_secret": g_totp
+            }
+                
+            api_url = f"{GITHUB_BASE_URL}/api/run"
+            
+            res = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            
+            if res.status_code in [200, 201, 202]:
+                res_data = res.json()
+                job_id = res_data.get("job_id")
+                
+                if not job_id:
+                    bot.edit_message_text(LANG[lang]['gh_submitted'], chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                    return
+
+                bot.edit_message_text(LANG[lang]['gh_received'].format(job_id), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                
+                for i in range(1, 35):
+                    time.sleep(5) 
+                    status_url = f"{GITHUB_BASE_URL}/api/job/{job_id}"
+                    
+                    try:
+                        status_res = requests.get(status_url, headers=headers, timeout=15)
+                        
+                        if status_res.status_code == 200:
+                            s_data = status_res.json()
+                            status = s_data.get("status", "").lower()
+                            
+                            if status == "submitted":
+                                # ✅ تم التفعيل بنجاح!
+                                app_id = s_data.get("app_id", "N/A")
+                                
+                                # تسجيل الإيصال في المتجر ليرتبط بالمشتريات
+                                db.orders.insert_one({'user_id': uid, 'product_id': 'GitHub_Student', 'code_delivered': f"Account: {g_user} | AppID: {app_id}"})
+                                
+                                # إرسال رسالة النجاح للعميل
+                                bot.edit_message_text(LANG[lang]['gh_success'].format(g_user), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                
+                                # إرسال إشعار للإدارة بكامل التفاصيل
+                                notify_admins(f"🔐 <b>إشعار إدارة (تفعيل GitHub) ⚡</b>\n\n👤 العميل: <code>{uid}</code>\n📦 الحساب: {g_user}\n🔖 رقم الطلب: <code>{job_id}</code>\n✅ الحالة: تم التفعيل بنجاح!")
+                                
+                                # 📢 الإشعار العام (Public Log) + إخفاء الإيميل/اليوزر لحماية الخصوصية
+                                log_ch = get_setting('log_channel')
+                                if log_ch and log_ch != "Not Set":
+                                    obs_user = obscure_text(g_user)
+                                    try: 
+                                        pub_msg = f"🎓 <b>تفعيل GitHub Student جديد!</b> 🚀\n\n👤 حساب: <b>{obs_user}</b>\n✅ الحالة: <b>مفعل بنجاح</b>\n\n<i>تم التفعيل تلقائياً عبر البوت ⚡</i>"
+                                        bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+                                    except: pass
+                                
+                                # 👥 نظام الإحالة (إعطاء مكافأة لصاحب الدعوة إذا كان هذا أول طلب)
+                                u = get_user_data_full(uid)
+                                buyer_m = f"@{u['username']}" if u and u.get('username') else f"العميل {uid}"
+                                buy_cnt = db.orders.count_documents({'user_id': uid})
+                                
+                                # إذا كان هذا هو الطلب الأول للعميل، وكان قد تم دعوته من شخص
+                                if buy_cnt == 1 and u.get('referred_by'):
+                                    ref_id = int(u['referred_by'])
+                                    ref_u = get_user_data_full(ref_id)
+                                    if ref_u:
+                                        db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
+                                        ref_m = f"@{ref_u['username']}" if ref_u.get('username') else f"مستخدم {ref_id}"
+                                        
+                                        if log_ch and log_ch != "Not Set":
+                                            try: 
+                                                ref_pub = f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة {ref_m} ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة عميل جديد 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>"
+                                                bot.send_message(log_ch, ref_pub, parse_mode="HTML")
+                                            except: pass
+                                        notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: ${REFERRAL_REWARD:.2f}")
+
+                                return # خروج من الـ Loop بعد النجاح
+                                
+                            elif status in ["failed", "error"]:
+                                err_reason = s_data.get("error", s_data.get("refund_reason", "بيانات تسجيل الدخول أو الـ 2FA غير صحيحة"))
+                                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+                                bot.edit_message_text(LANG[lang]['gh_fail'].format(err_reason, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                return
+                                
+                            else:
+                                step = s_data.get("step", "processing")
+                                dots = "." * (i % 3 + 1)
+                                step_ar = step if lang == 'en' else step.replace("login", "تسجيل الدخول").replace("2fa", "التحقق الثنائي").replace("identity", "الهوية").replace("submit", "تقديم الطلب")
+                                progress_text = LANG[lang]['gh_processing'].format(job_id, step_ar, dots, i)
+                                try: bot.edit_message_text(progress_text, chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                except: pass
+                                
+                    except requests.exceptions.Timeout:
+                        continue
+                        
+                bot.edit_message_text(LANG[lang]['gh_timeout'], chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+
+            else:
+                try: error_msg = res.json().get("error", "Unknown Error")
+                except: error_msg = f"HTTP {res.status_code}"
+                
+                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+                bot.edit_message_text(LANG[lang]['gh_fail'].format(error_msg, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                logger.error(f"GitHub API Fast Error: {res.status_code} - {res.text}")
+                
+        except Exception as e:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+            try: bot.edit_message_text(LANG[lang]['gh_conn_err'].format(e), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+            except: pass
+            logger.error(f"GitHub Connection Error: {e}")
+
+    threading.Thread(target=api_worker, daemon=True).start()
 
 # ============================================================
 # 👤 7. الملف الشخصي
@@ -293,7 +570,7 @@ def profile_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if not check_forced_sub(uid): start_handler(call); return
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
@@ -333,6 +610,9 @@ def show_hist_detail(call):
             recs = list(db.orders.find({'user_id': uid}).sort('_id', -1).limit(5))
             if not recs: out = LANG[l]['no_hist']
             for r in recs:
+                if r.get('product_id') == 'GitHub_Student':
+                    out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📦 المنتج: <b>GitHub Student</b>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n────────────\n"
+                    continue
                 p = find_product(r['product_id'])
                 n = clean_name(p['name_en'] if l == 'en' else p['name_ar']) if p else "Product"
                 out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📦 المنتج: <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n────────────\n"
@@ -352,7 +632,7 @@ def invite_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if not check_forced_sub(uid): start_handler(call); return
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     inv_res = list(db.users.find({'referred_by': str(uid)}))
@@ -368,32 +648,33 @@ def invite_ui(call):
     except: pass
 
 # ============================================================
-# 🛒 8. المتجر والشراء (ترتيب الأزرار ووصف المنتج)
+# 🛒 8. المتجر والشراء
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if not check_forced_sub(uid): start_handler(call); return
     
     l = get_lang(uid)
     prods = list(db.products.find())
     markup = InlineKeyboardMarkup(row_width=1)
+    
+    markup.add(InlineKeyboardButton(LANG[l]['gh_btn'], callback_data="github_pack_info"))
     
     for p in prods:
         is_manual = p.get('is_manual', False)
         pid = p.get('id', str(p.get('_id', '')))
         st = get_product_stock_count(pid)
         
-        # ترتيب الزر لحل الجليتش: ✅ | السعر | العدد | الاسم
         icon = '✅' if is_manual or st > 0 else '❌'
-        st_text = "∞" if is_manual else str(st)
         
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-        short_n = n[:25] + ".." if len(n) > 25 else n
+        short_n = n[:35] + ".." if len(n) > 35 else n # زيادة مساحة الاسم
         
-        btn_text = f"{icon} | 💰 ${p.get('price', 0):.2f} | 📦 {st_text} | {short_n}"
+        # 🛒 تم إزالة الستوك من الزر كما طلبت
+        btn_text = f"{icon} | 💰 ${p.get('price', 0):.2f} | {short_n}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{pid}"))
         
     markup.add(InlineKeyboardButton("🔄 Refresh" if l=='en' else "🔄 تحديث", callback_data="open_shop"))
@@ -417,7 +698,6 @@ def shop_detail_ui(call):
     is_manual = p.get('is_manual', False)
     st = get_product_stock_count(pid)
     
-    # نقل نوع التسليم للوصف بشكل واضح
     if l == 'ar':
         delivery_type = "يدوي 🤝 (تواصل مع الإدارة بعد الدفع)" if is_manual else "تلقائي ⚡ (تسليم فوري)"
         st_text = "غير محدود" if is_manual else f"{st} قطعة"
@@ -538,6 +818,7 @@ def execute_bulk_buy(message, pid, lang):
                     ref_pub = f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة {ref_m} ربح <b>$0.10</b> رصيد مجاني بفضل دعوة العميل {buyer_m} 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>"
                     bot.send_message(log_ch, ref_pub, parse_mode="HTML")
                 except: pass
+            notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: $0.10")
 
 # ============================================================
 # 🏦 9. بوابات الدفع 
@@ -552,7 +833,7 @@ def dep_init_ui(call):
     l = get_lang(uid)
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("🟡 Binance Pay", callback_data="dep_binance"))
-    markup.add(InlineKeyboardButton("🟢 USDT (TRC20 / BEP20)", callback_data="dep_crypto_USDT"))
+    markup.add(InlineKeyboardButton("🟢 USDT (TRC-20)", callback_data="dep_crypto_USDT"))
     markup.add(InlineKeyboardButton("🔵 Litecoin (LTC)", callback_data="dep_crypto_LTC"))
     markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="open_profile"))
     try: bot.edit_message_text(LANG[l]['dep_choose'], call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -576,8 +857,10 @@ def dep_crypto_ui(call):
     l = get_lang(uid); coin = call.data.replace('dep_crypto_', '')
     db_key = "usdt_address" if coin == "USDT" else "ltc_address"
     wallet = get_setting(db_key)
-    c_name = "USDT (TRC20/BEP20)" if coin == "USDT" else "Litecoin (LTC)"
-    msg = bot.send_message(uid, LANG[l]['dep_crypto'].format(c_name, wallet), parse_mode="HTML")
+    
+    lang_key = 'dep_usdt' if coin == "USDT" else 'dep_ltc'
+    msg = bot.send_message(uid, LANG[l][lang_key].format(wallet), parse_mode="HTML")
+    
     if coin == "LTC": bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
     else: bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
@@ -597,8 +880,14 @@ def verify_binance_pay(message, lang):
         pay_h = client.get_pay_trade_history().get('data', [])
 
         found = False; amt = 0.0
+        current_time_ms = int(time.time() * 1000)
+        
         for d in pay_h:
             if tx_id.lower() == str(d.get('orderId', '')).lower():
+                tx_time = int(d.get('transactionTime', 0))
+                if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
+                    bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+                    return
                 found = True
                 amt = float(d.get('amount', 0.0))
                 break
@@ -624,9 +913,15 @@ def verify_crypto_tx(message, lang, coin):
         res = client.get_deposit_history(coin=coin)
 
         found = False; status = -1; amt = 0.0
+        current_time_ms = int(time.time() * 1000)
+        
         for d in res:
             api_txid = str(d.get('txId', '')).lower()
             if tx_id in api_txid:
+                tx_time = int(d.get('insertTime', 0))
+                if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
+                    bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+                    return
                 found = True
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
@@ -646,35 +941,81 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
     tx_id = message.text.strip()
+    if wallet_address == "Not Set" or len(wallet_address) < 10:
+        bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
+        return
+        
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
-        url = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
-        res = requests.get(url)
-        if res.status_code == 200:
-            data = res.json()
-            confirmations = data.get("confirmations", 0)
-            received_ltc = 0.0
-            for output in data.get("outputs", []):
-                if wallet_address in output.get("addresses", []):
-                    received_ltc += float(output.get("value", 0)) / 100000000.0
-            
-            if received_ltc > 0:
-                if confirmations >= 1:
-                    try:
-                        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
-                        ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
-                    except:
-                        ltc_price = 80.0
-                    usd_amount = received_ltc * ltc_price
-                    credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
-                else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
-            else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
+        received_ltc = 0.0
+        confirmations = 0
+        is_sender = False
+        is_old = False
+        current_time = int(time.time())
+        
+        try:
+            url = f"https://litecoinspace.org/api/tx/{tx_id}"
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                block_time = data.get("status", {}).get("block_time", 0)
+                if block_time > 0 and (current_time - block_time) > 24 * 60 * 60:
+                    is_old = True
+                for vin in data.get("vin", []):
+                    if vin.get("prevout", {}).get("scriptpubkey_address") == wallet_address:
+                        is_sender = True
+                        break
+                if data.get("status", {}).get("confirmed"): confirmations = 1
+                for vout in data.get("vout", []):
+                    if vout.get("scriptpubkey_address") == wallet_address:
+                        received_ltc += float(vout.get("value", 0)) / 100000000.0
+        except: pass
+
+        if received_ltc == 0.0 and not is_sender and not is_old:
+            try:
+                url2 = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
+                res2 = requests.get(url2, timeout=10)
+                if res2.status_code == 200:
+                    data2 = res2.json()
+                    confirmed_str = data2.get("confirmed")
+                    if confirmed_str:
+                        try:
+                            tx_t = datetime.datetime.strptime(confirmed_str[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+                            if (current_time - tx_t) > 24 * 60 * 60: is_old = True
+                        except: pass
+                    for inp in data2.get("inputs", []):
+                        if wallet_address in inp.get("addresses", []):
+                            is_sender = True; break
+                    confirmations = data2.get("confirmations", 0)
+                    for output in data2.get("outputs", []):
+                        if wallet_address in output.get("addresses", []):
+                            received_ltc += float(output.get("value", 0)) / 100000000.0
+            except: pass
+
+        if is_old:
+            bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+            return
+        if is_sender:
+            bot.send_message(uid, "❌ <b>مرفوض:</b> هذه الحوالة صادرة من محفظتنا وليست إيداعاً.", parse_mode="HTML")
+            return
+
+        if received_ltc > 0:
+            if confirmations >= 1:
+                try:
+                    client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+                    ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
+                except:
+                    ltc_price = 80.0
+                usd_amount = received_ltc * ltc_price
+                credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
+            else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
+            
     except Exception as e:
-        bot.send_message(uid, f"❌ حدث خطأ في الشبكة.", parse_mode="HTML")
+        bot.send_message(uid, f"❌ حدث خطأ أثناء فحص الشبكة.", parse_mode="HTML")
 
 def credit_user(uid, amt, tx_id, lang, method):
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
@@ -683,12 +1024,11 @@ def credit_user(uid, amt, tx_id, lang, method):
     
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
-    
     admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id}</code>"
     notify_admins(admin_msg)
 
 # ============================================================
-# 👑 10. لوحة الإدارة
+# 👑 10. لوحة الإدارة 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -708,6 +1048,7 @@ def admin_main_ui(call):
                    InlineKeyboardButton("📢 Broadcast", callback_data="ad_bc"))
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
+        markup.add(InlineKeyboardButton("🎓 GitHub Settings", callback_data="ad_github_main"))
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
@@ -723,11 +1064,70 @@ def admin_main_ui(call):
                    InlineKeyboardButton("📢 برودكاست", callback_data="ad_bc"))
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
+        markup.add(InlineKeyboardButton("🎓 إعدادات GitHub", callback_data="ad_github_main"))
         markup.add(InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu_refresh"))
         text = "👑 <b>لوحة القيادة (الإدارة):</b>"
         
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_github_main")
+def admin_github_main(call):
+    bot.answer_callback_query(call.id)
+    gh_price = float(get_setting("github_price", 15.0))
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("💳 فحص رصيد API (AhsanLabs)", callback_data="ad_gh_credits"))
+    markup.add(InlineKeyboardButton(f"💰 تعديل سعر البيع (الحالي: ${gh_price:.2f})", callback_data="ad_gh_price"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    bot.edit_message_text("🎓 <b>إعدادات تفعيل GitHub Student:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_gh_credits")
+def admin_github_credits(call):
+    bot.answer_callback_query(call.id, "⏳ جاري الاتصال بـ AhsanLabs...")
+    try:
+        if not GITHUB_API_KEY:
+            bot.send_message(call.message.chat.id, "❌ لم يتم العثور على GITHUB_API_KEY في ملف .env")
+            return
+            
+        headers = {
+            "X-API-Key": GITHUB_API_KEY,
+            "User-Agent": "Mozilla/5.0"
+        }
+        
+        api_url = f"{GITHUB_BASE_URL}/api/me" 
+        
+        res = requests.get(api_url, headers=headers, timeout=30)
+        
+        if res.status_code == 200:
+            try:
+                data = res.json()
+                bal = data.get("credits", "Unknown") 
+                api_cost = data.get("api_cost", 1)
+                bot.send_message(call.message.chat.id, f"💳 <b>معلومات حسابك في AhsanLabs:</b>\n💰 الرصيد المتوفر: <b>{bal}</b> Credits\n⚡ تكلفة التفعيل: <b>{api_cost}</b> Credit", parse_mode="HTML")
+            except Exception as e:
+                bot.send_message(call.message.chat.id, "❌ فشل تحليل الرد من السيرفر.")
+                logger.error(f"Parse error: {e}")
+        else:
+            bot.send_message(call.message.chat.id, f"❌ <b>فشل الاتصال.</b>\nالرابط: <code>{api_url}</code>\nكود الخطأ: {res.status_code}\n<i>تأكد من صحة الـ API Key.</i>", parse_mode="HTML")
+            logger.error(f"API Failed: Status {res.status_code} | Response: {res.text}")
+            
+    except Exception as e:
+        err_str = html.escape(str(e))
+        bot.send_message(call.message.chat.id, f"❌ خطأ داخلي: <code>{err_str}</code>", parse_mode="HTML")
+        
+@bot.callback_query_handler(func=lambda call: call.data == "ad_gh_price")
+def admin_github_price(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل السعر الجديد لتفعيل GitHub بالدولار ($):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, admin_github_price_save)
+
+def admin_github_price_save(message):
+    try:
+        val = float(message.text)
+        db.settings.update_one({'key': 'github_price'}, {'$set': {'value': val}}, upsert=True)
+        bot.send_message(message.chat.id, f"✅ تم تحديث السعر إلى <b>${val:.2f}</b>.", parse_mode="HTML")
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في كتابة السعر.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 def ad_p_step1(call):
@@ -815,11 +1215,8 @@ def admin_edit_prompt(call):
 def admin_save_edit(message, field, pid):
     val = message.text
     keys = {"price": "price", "dar": "desc_ar", "nar": "name_ar", "nen": "name_en"}
-    
     p = find_product(pid)
-    if not p:
-        bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
-        return
+    if not p: return
 
     if field == "price":
         try:
@@ -827,9 +1224,7 @@ def admin_save_edit(message, field, pid):
             old_price = float(p.get('price', 0))
             db.products.update_one({'_id': p['_id']}, {'$set': {'price': new_price}})
             bot.send_message(message.chat.id, "✅ Updated.")
-            
             if new_price < old_price:
-                # 🌐 برودكاست تخفيض السعر في الخلفية 🌐
                 def broadcast_price_drop():
                     users = list(db.users.find())
                     for u in users:
@@ -863,35 +1258,25 @@ def admin_del_exec(call):
     pid = call.data.replace("del_p_", "")
     try:
         p = find_product(pid)
-        if not p:
-            bot.answer_callback_query(call.id, "❌ المنتج غير موجود.", show_alert=True)
-            return
-            
+        if not p: return
         pid_str = str(pid)
         queries = [{'product_id': pid_str}]
         if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
         try: queries.append({'product_id': float(pid_str)})
         except: pass
-        
         db.product_stock.delete_many({'$or': queries})
         db.orders.delete_many({'$or': queries})
         db.products.delete_one({'_id': p['_id']})
-        
         bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
         admin_main_ui(call)
     except: bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-# ============================================================
-# 📦 إدارة الستوك (والبرودكاست في الخلفية) 🌐
-# ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "ad_s_list")
 def admin_stock_list_ui(call):
     bot.answer_callback_query(call.id)
     prods = list(db.products.find({'is_manual': {'$ne': True}}))
     markup = InlineKeyboardMarkup(row_width=1)
-    if not prods:
-        bot.answer_callback_query(call.id, "❌ لا يوجد منتجات تسليم تلقائي في المتجر.", show_alert=True)
-        return
+    if not prods: return
     for p in prods:
         pid = p.get('id', str(p.get('_id', '')))
         stk_count = get_product_stock_count(pid)
@@ -905,10 +1290,8 @@ def admin_stock_opts_ui(call):
     pid = call.data.replace("ad_s_opts_", "")
     p = find_product(pid)
     if not p: return
-    
     stk_count = get_product_stock_count(pid)
     text = f"⚙️ <b>إدارة ستوك:</b> {clean_name(p.get('name_ar'))}\n📊 <b>المتوفر حالياً:</b> {stk_count} كود"
-    
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("➕ إضافة أكواد", callback_data=f"stk_add_{pid}"))
     markup.add(InlineKeyboardButton("👁️ عرض الأكواد (ملف txt)", callback_data=f"stk_view_{pid}"))
@@ -916,7 +1299,6 @@ def admin_stock_opts_ui(call):
                InlineKeyboardButton("🗑️ حذف كود", callback_data=f"stk_delcode_{pid}"))
     markup.add(InlineKeyboardButton("🧨 مسح كل الستوك", callback_data=f"stk_clear_{pid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_s_list"))
-    
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_add_"))
@@ -934,48 +1316,26 @@ def admin_stock_save(message, pid):
             db.product_stock.insert_one({'product_id': str(pid), 'code_line': l.strip(), 'is_sold': False})
             count += 1
             
-    bot.send_message(message.chat.id, f"✅ <b>تم إضافة {count} كود بنجاح!</b>\n⏳ <i>جاري إرسال الإشعارات للعملاء في الخلفية... (ستصلك رسالة بالتقرير النهائي بعد قليل).</i>", parse_mode="HTML")
+    bot.send_message(message.chat.id, f"✅ <b>تم إضافة {count} كود بنجاح!</b>\n⏳ <i>جاري إرسال الإشعارات للعملاء في الخلفية...</i>", parse_mode="HTML")
 
-    # 🌐 تشغيل البرودكاست في الخلفية عشان البوت ما يعلق بيدك
     def broadcast_new_stock(pid_for_thread):
         try:
             p = find_product(pid_for_thread)
             if not p: return
-
             stk_total = get_product_stock_count(pid_for_thread)
             users = list(db.users.find())
-            sent_count = 0
-            blocked_count = 0
-            error_count = 0
-            
             for u in users:
                 try: 
                     u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                     if u_lang not in ['ar', 'en']: u_lang = 'en'
-                    
                     p_name = clean_name(p.get(f'name_{u_lang}', p.get('name_en')))
                     alert_msg = LANG[u_lang]['new_stock'].format(p_name, stk_total)
-                    
                     bot.send_message(u['user_id'], alert_msg, parse_mode="HTML")
-                    sent_count += 1
-                    time.sleep(0.05) # حماية من حظر تيليجرام
-                except Exception as e: 
-                    err_str = str(e).lower()
-                    # فحص إذا كان العميل مسوي بلوك للبوت
-                    if "forbidden" in err_str or "blocked" in err_str or "deactivated" in err_str or "not found" in err_str:
-                        blocked_count += 1
-                    else:
-                        error_count += 1
-                        logger.error(f"Broadcast error for {u.get('user_id')}: {e}")
-
-            # 📊 إرسال التقرير النهائي للإدارة
-            p_name_report = clean_name(p.get('name_ar', p.get('name_en', 'المنتج')))
-            report = f"📢 <b>تقرير إشعار توفر الستوك:</b>\n🛍 المنتج: {p_name_report}\n\n✅ استلموا الإشعار: <b>{sent_count}</b> مستخدم\n🚫 حظروا البوت: <b>{blocked_count}</b> مستخدم\n⚠️ أخطاء أخرى: <b>{error_count}</b>"
-            bot.send_message(message.chat.id, report, parse_mode="HTML")
+                    time.sleep(0.05) 
+                except: pass
         except Exception as e:
             logger.error(f"Thread Error: {e}")
 
-    # بدء العملية في الخلفية
     threading.Thread(target=broadcast_new_stock, args=(pid,), daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_view_"))
@@ -986,12 +1346,10 @@ def admin_stock_view(call):
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
     try: queries.append({'product_id': float(pid_str)})
     except: pass
-    
     items = list(db.product_stock.find({'$or': queries, 'is_sold': False}))
     if not items:
         bot.answer_callback_query(call.id, "📭 الستوك فارغ لهذا المنتج!", show_alert=True)
         return
-        
     bot.answer_callback_query(call.id, "⏳ جاري تجهيز ملف الأكواد...")
     content = "\n".join([item['code_line'] for item in items])
     f = io.BytesIO(content.encode('utf-8'))
@@ -1012,12 +1370,11 @@ def admin_stock_delcode_exec(message, pid):
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
     try: queries.append({'product_id': float(pid_str)})
     except: pass
-    
     res = db.product_stock.delete_one({'$or': queries, 'code_line': code_to_del, 'is_sold': False})
     if res.deleted_count > 0:
         bot.send_message(message.chat.id, "✅ <b>تم حذف الكود بنجاح من الستوك!</b>", parse_mode="HTML")
     else:
-        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على هذا الكود في الستوك (تأكد من الحروف أو قد يكون مباعاً).</b>", parse_mode="HTML")
+        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على هذا الكود في الستوك.</b>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_clear_"))
 def admin_stock_clear_exec(call):
@@ -1027,7 +1384,6 @@ def admin_stock_clear_exec(call):
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
     try: queries.append({'product_id': float(pid_str)})
     except: pass
-    
     res = db.product_stock.delete_many({'$or': queries, 'is_sold': False})
     bot.answer_callback_query(call.id, f"🧨 تم مسح {res.deleted_count} كود من الستوك بنجاح!", show_alert=True)
     admin_stock_opts_ui(call)
@@ -1046,12 +1402,10 @@ def admin_stock_edit_step2(message, pid):
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
     try: queries.append({'product_id': float(pid_str)})
     except: pass
-    
     item = db.product_stock.find_one({'$or': queries, 'code_line': old_code, 'is_sold': False})
     if not item:
-        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على الكود القديم في الستوك المتوفر!</b>", parse_mode="HTML")
+        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على الكود القديم!</b>", parse_mode="HTML")
         return
-        
     temp_stock_edit[message.from_user.id] = item['_id']
     msg = bot.send_message(message.chat.id, "✅ تم العثور على الكود.\n\n✨ <b>أرسل الكود الجديد الآن لتبديله:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_stock_edit_step3)
@@ -1065,7 +1419,6 @@ def admin_stock_edit_step3(message):
     else:
         bot.send_message(message.chat.id, "❌ حدث خطأ، يرجى المحاولة مرة أخرى.", parse_mode="HTML")
 
-# --- إدارة المستخدمين ---
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ban_user")
 def ad_ban_start(call):
     bot.answer_callback_query(call.id)
@@ -1076,18 +1429,14 @@ def ad_ban_exec(message):
     target = message.text.strip()
     if target.startswith('@') or not target.replace('-', '').isdigit():
         u = db.users.find_one({'username': target.replace('@', '').lower()})
-    else: 
-        u = get_user_data_full(int(target))
-        
+    else: u = get_user_data_full(int(target))
     if u:
         if u['user_id'] == OWNER_ID:
             bot.send_message(message.chat.id, "❌ لا يمكنك حظر المالك الأساسي!")
             return
-            
         current_status = u.get('is_banned', 0)
         new_status = 1 if current_status == 0 else 0
         db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_banned': new_status}})
-        
         status_text = "تم حظر 🚫" if new_status == 1 else "تم فك حظر ✅"
         bot.send_message(message.chat.id, f"✅ {status_text} المستخدم (<code>{u['user_id']}</code>) بنجاح.", parse_mode="HTML")
     else:
@@ -1127,9 +1476,7 @@ def ad_u_search_exec(message):
     u = None
     if target.startswith('@') or not target.replace('-', '').isdigit():
         u = db.users.find_one({'username': target.replace('@', '').lower()})
-    else: 
-        u = get_user_data_full(int(target))
-        
+    else: u = get_user_data_full(int(target))
     if u: show_user_admin_profile(message.chat.id, u['user_id'])
     else: bot.send_message(message.chat.id, "❌ لم يتم العثور على المستخدم.")
 
@@ -1142,28 +1489,18 @@ def ad_u_det_router(call):
 def show_user_admin_profile(chat_id, target_uid, message_id=None):
     u = get_user_data_full(target_uid)
     if not u: return
-    
     buy_count = db.orders.count_documents({'user_id': target_uid})
     d_res = list(db.used_transactions.find({'user_id': target_uid}))
     dep_total = sum([float(d.get('amount', 0)) for d in d_res])
     uname_str = f"@{u['username']}" if u.get('username') else "لا يوجد"
     ban_str = "محظور 🚫" if u.get('is_banned') == 1 else "نشط ✅"
     
-    text = f"📂 <b>ملف العميل (نظرة الإدارة)</b>\n\n"
-    text += f"👤 الاسم: <b>{clean_name(u.get('name', 'بدون'))}</b>\n"
-    text += f"🔗 المعرف: {uname_str}\n"
-    text += f"🆔 الأيدي: <code>{target_uid}</code>\n"
-    text += f"🛡️ الحالة: <b>{ban_str}</b>\n\n"
-    text += f"💰 الرصيد الحالي: <b>${u.get('balance', 0):.2f}</b>\n"
-    text += f"✅ عدد المشتريات: <b>{buy_count}</b>\n"
-    text += f"📦 إجمالي الإيداعات: <b>${dep_total:.2f}</b>"
-
+    text = f"📂 <b>ملف العميل (نظرة الإدارة)</b>\n\n👤 الاسم: <b>{clean_name(u.get('name', 'بدون'))}</b>\n🔗 المعرف: {uname_str}\n🆔 الأيدي: <code>{target_uid}</code>\n🛡️ الحالة: <b>{ban_str}</b>\n\n💰 الرصيد الحالي: <b>${u.get('balance', 0):.2f}</b>\n✅ المشتريات: <b>{buy_count}</b>\n📦 إجمالي الإيداعات: <b>${dep_total:.2f}</b>"
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("🛍 إيصالات مشترياته", callback_data=f"ad_uh_buy_{target_uid}"),
-               InlineKeyboardButton("💳 إيصالات إيداعاته", callback_data=f"ad_uh_dep_{target_uid}"))
+    markup.add(InlineKeyboardButton("🛍 إيصالات المشتريات", callback_data=f"ad_uh_buy_{target_uid}"),
+               InlineKeyboardButton("💳 إيصالات الإيداع", callback_data=f"ad_uh_dep_{target_uid}"))
     markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
-    
     try:
         if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
         else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
@@ -1174,22 +1511,22 @@ def show_admin_hist_detail(call):
     bot.answer_callback_query(call.id)
     parts = call.data.split('_', 3); mode = parts[2]; target_uid = int(parts[3])
     out = f"📂 <b>سجلات العميل (<code>{target_uid}</code>):</b>\n\n"
-    
     try:
         if mode == "buy":
             recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1).limit(10))
             if not recs: out += "📭 لا يوجد مشتريات."
             for r in recs:
+                if r.get('product_id') == 'GitHub_Student':
+                    out += f"🛍 <b>GitHub Student</b>\n🔑 <code>{r.get('code_delivered', '')}</code>\n---\n"
+                    continue
                 p = find_product(r['product_id'])
                 n = clean_name(p['name_ar']) if p else "منتج محذوف"
-                out += f"🛍 <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n---\n"
+                out += f"🛍 <b>{n}</b>\n🔑 <code>{r.get('code_delivered', '')}</code>\n---\n"
         else:
             recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1).limit(10))
             if not recs: out += "📭 لا يوجد إيداعات."
-            for r in recs: 
-                out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 🆔 <code>{r.get('transaction_id', '')}</code>\n"
-    except Exception as e: out = f"❌ Error"
-    
+            for r in recs: out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 🆔 <code>{r.get('transaction_id', '')}</code>\n"
+    except: out = f"❌ Error"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🔙 رجوع لملف العميل", callback_data=f"ad_u_det_{target_uid}"))
     try: bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -1210,7 +1547,6 @@ def ad_ugift_exec(message, target_uid):
         show_user_admin_profile(message.chat.id, target_uid)
     except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
 
-# --- قنوات الاشتراك وغيرها ---
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
 def admin_fsub_list(call):
     bot.answer_callback_query(call.id)
@@ -1238,7 +1574,7 @@ def admin_fsub_save(message):
         bot.get_chat_member(cid, bot.get_me().id)
         db.required_channels.insert_one({'channel_id': cid})
         bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
-    except Exception:
+    except:
         bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
@@ -1346,30 +1682,24 @@ def toggle_lang(call):
     db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l}})
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
-    start_handler(call.message)
+    start_handler(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
 def refresh_main(call):
     bot.answer_callback_query(call.id)
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
-    start_handler(call.message)
+    start_handler(call)
 
 # ============================================================
 # 🚀 11. تشغيل البوت
 # ============================================================
 def run_bot():
-    try:
-        bot.delete_webhook(drop_pending_updates=True)
-        time.sleep(1)
+    try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
     except: pass
-
     while True:
-        try:
-            bot.polling(non_stop=True, skip_pending=True)
-        except Exception as e:
-            logger.error(f"Polling Error Critical: {e}")
-            time.sleep(5)
+        try: bot.polling(non_stop=True, skip_pending=True)
+        except Exception as e: logger.error(f"Polling Error Critical: {e}"); time.sleep(5)
 
 if __name__ == "__main__":
     run_bot()
