@@ -73,7 +73,7 @@ logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB..
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_client.server_info()
-    db = mongo_client['shop_test_db'] 
+    db = mongo_client['shop_db'] 
     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
 except Exception as e:
     logger.error(f"❌ خطأ حرج في MongoDB: {e}")
