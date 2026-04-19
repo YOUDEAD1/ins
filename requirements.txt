@@ -3,3 +3,4 @@ python-binance
 pymongo
 deep-translator
 requests
+python-dotenv
