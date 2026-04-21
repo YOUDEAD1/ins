@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 🔑 1. الإعدادات (جلب المتغيرات الحساسة من ملف .env)
+# 🔑 1. الإعدادات الأساسية
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
 try:
@@ -56,14 +56,13 @@ MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
-# سعر صرف النجوم (الافتراضي 100 نجمة = 1 دولار)
 try:
     STARS_RATE = int(os.getenv('STARS_RATE', '100').strip())
 except ValueError:
     STARS_RATE = 100
 
 # ============================================================
-# 🌐 2. السيرفر الوهمي (Render Keep-Alive)
+# 🌐 2. السيرفر الوهمي
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -105,7 +104,7 @@ def get_setting(key, default="Not Set"):
     return res['value'] if res else default
 
 # ============================================================
-# 🤖 4. تهيئة اليوزربوت الديناميكي (Telethon) - Gemini
+# 🤖 4. تهيئة اليوزربوت (Telethon) - Gemini
 # ============================================================
 client = None
 USERBOT_LOOP = None
@@ -139,25 +138,21 @@ def start_dynamic_userbot():
         uid = ACTIVE_GEMINI_SESSION['uid']
         price = ACTIVE_GEMINI_SESSION['price']
         
-        # نظام الترجمة الفورية للمستخدم حسب لغته
+        # الترجمة الذكية
         l = get_lang(uid)
         display_text = text
         if l == 'ar':
-            try:
-                display_text = GoogleTranslator(source='auto', target='ar').translate(text)
-            except Exception as e:
-                logger.error(f"Translation Error: {e}")
+            try: display_text = GoogleTranslator(source='auto', target='ar').translate(text)
+            except Exception as e: logger.error(f"Translation Error: {e}")
 
         formatted_text = f"📩 <b>{html.escape(display_text)}</b>"
         provider_msg_id = event.message.id
 
-        # منع السبام: تعديل الرسالة إذا كانت مُعدلة من المزود، وإرسال جديدة إذا كانت جديدة
         if isinstance(event, events.MessageEdited.Event):
             if provider_msg_id in ACTIVE_GEMINI_SESSION.get('msg_map', {}):
                 user_msg_id = ACTIVE_GEMINI_SESSION['msg_map'][provider_msg_id]
-                try: 
-                    bot.edit_message_text(formatted_text, chat_id=uid, message_id=user_msg_id, parse_mode="HTML")
-                except: pass # يتم التجاهل إذا لم يتغير النص
+                try: bot.edit_message_text(formatted_text, chat_id=uid, message_id=user_msg_id, parse_mode="HTML")
+                except: pass 
         else:
             try: 
                 sent_msg = bot.send_message(uid, formatted_text, parse_mode="HTML")
@@ -165,29 +160,26 @@ def start_dynamic_userbot():
                 ACTIVE_GEMINI_SESSION['msg_map'][provider_msg_id] = sent_msg.message_id
             except: pass
 
-        # الفحص الذكي للردود (باللغة الأصلية الإنجليزية لتجنب أخطاء الترجمة)
         if "✅ Status: SUCCEEDED" in text:
             db.orders.insert_one({'user_id': uid, 'product_id': 'Gemini_Activation', 'code_delivered': f"تم التفعيل بنجاح (Gemini)"})
             bot.send_message(uid, "🎉 <b>اكتمل التفعيل بنجاح!</b>\nتم خصم الرصيد وتوثيق الطلب. يمكنك رؤية الإيصال في المشتريات.", parse_mode="HTML")
             
             log_ch = get_setting('log_channel')
+            u_data = db.users.find_one({'user_id': uid})
+            obs_user = obscure_text(u_data.get('username') or str(uid))
             if log_ch and log_ch != "Not Set":
-                u_data = db.users.find_one({'user_id': uid})
-                obs_user = obscure_text(u_data.get('username') or str(uid))
                 try: bot.send_message(log_ch, f"✨ <b>تفعيل Gemini Advanced جديد!</b> 🚀\n\n👤 حساب: <b>{obs_user}</b>\n✅ الحالة: <b>مفعل بنجاح</b>\n\n<i>تم التفعيل تلقائياً عبر البوت ⚡</i>", parse_mode="HTML")
                 except: pass
             
-            u = db.users.find_one({'user_id': uid})
             buy_cnt = db.orders.count_documents({'user_id': uid})
-            if buy_cnt == 1 and u.get('referred_by'):
-                ref_id = int(u['referred_by'])
+            if buy_cnt == 1 and u_data.get('referred_by'):
+                ref_id = int(u_data['referred_by'])
                 ref_u = db.users.find_one({'user_id': ref_id})
                 if ref_u:
                     db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
                     if log_ch and log_ch != "Not Set":
                         obs_ref = obscure_text(ref_u.get('username') or str(ref_id))
-                        obs_buyer = obscure_text(u.get('username') or str(uid))
-                        try: bot.send_message(log_ch, f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_buyer}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>", parse_mode="HTML")
+                        try: bot.send_message(log_ch, f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_user}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>", parse_mode="HTML")
                         except: pass
                     notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\nالعميل الجديد: {uid}\nتم منح المكافأة.")
 
@@ -291,7 +283,7 @@ LANG = {
         'back': "🔙 رجوع", 'main_menu': "🏠 القائمة الرئيسية", 'buy_hist': "🛍 المشتريات", 
         'dep_hist': "💳 الإيداعات", 'no_hist': "📭 لا يوجد سجلات حتى الآن.",
         'store_title': "🛒 <b>المنتجات المتوفرة:</b>", 'buy_now': "✅ شراء الآن",
-        'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيار متجرنا 🛡️</i>",
+        'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
         'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى شحن حسابك أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b> يرجى الانتظار لحين التوفر.",
         'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>", 'check_sub': "🔄 تحقق من الاشتراك",
         'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
@@ -305,11 +297,9 @@ LANG = {
         'gh_btn': "🎓 تفعيل حساب طالب (GitHub)",
         'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ البدء في التفعيل (${:.2f})",
-        
         'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
         'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
         'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
-        
         'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق والاتصال بالسيرفر، يرجى الانتظار...",
         'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن في الخلفية.",
         'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم الطلب: <code>{}</code>)</b>\n⏳ <i>جاري معالجة الحساب...</i>",
@@ -358,11 +348,9 @@ LANG = {
         'gh_btn': "🎓 GitHub Student Pack",
         'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ Start Activation (${:.2f})",
-        
         'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
         'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
         'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
-        
         'gh_deducted': "⏳ <b>Data received!</b> Verifying and connecting to the server, please wait...",
         'gh_submitted': "✅ <b>Request submitted successfully!</b> Activation is processing.",
         'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>\n⏳ <i>Processing account...</i>",
@@ -543,7 +531,7 @@ def init_lang_selection(call):
     start_handler(call)
 
 # ============================================================
-# ✨ 8. وحدة تفعيل Gemini (Proxy Userbot)
+# ✨ 8. وحدة تفعيل Gemini 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "gemini_pack_info")
 def gemini_info_ui(call):
@@ -715,32 +703,29 @@ def process_gh_step_2fa(message):
                                 notify_admins(f"🔐 <b>إشعار إدارة (تفعيل GitHub) ⚡</b>\n\n👤 العميل: <code>{uid}</code>\n📦 الحساب: {g_user}\n🔖 رقم الطلب: <code>{job_id}</code>\n✅ الحالة: تم التفعيل بنجاح!")
                                 
                                 log_ch = get_setting('log_channel')
+                                u_data = db.users.find_one({'user_id': uid})
+                                obs_user = obscure_text(u_data.get('username') or str(uid))
+                                
                                 if log_ch and log_ch != "Not Set":
-                                    obs_user = obscure_text(g_user)
                                     try: 
                                         pub_msg = f"🎓 <b>تفعيل GitHub Student جديد!</b> 🚀\n\n👤 حساب: <b>{obs_user}</b>\n✅ الحالة: <b>مفعل بنجاح</b>\n\n<i>تم التفعيل تلقائياً عبر البوت ⚡</i>"
                                         bot.send_message(log_ch, pub_msg, parse_mode="HTML")
                                     except: pass
                                 
-                                u = get_user_data_full(uid)
-                                buyer_m = f"@{u['username']}" if u and u.get('username') else f"العميل {uid}"
                                 buy_cnt = db.orders.count_documents({'user_id': uid})
-                                
-                                if buy_cnt == 1 and u.get('referred_by'):
-                                    ref_id = int(u['referred_by'])
-                                    ref_u = get_user_data_full(ref_id)
+                                if buy_cnt == 1 and u_data.get('referred_by'):
+                                    ref_id = int(u_data['referred_by'])
+                                    ref_u = db.users.find_one({'user_id': ref_id})
                                     if ref_u:
                                         db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
-                                        ref_m = f"@{ref_u['username']}" if ref_u.get('username') else f"مستخدم {ref_id}"
+                                        obs_ref = obscure_text(ref_u.get('username') or str(ref_id))
                                         
                                         if log_ch and log_ch != "Not Set":
-                                            obs_ref = obscure_text(ref_u.get('username') or str(ref_id))
-                                            obs_buyer = obscure_text(u.get('username') or str(uid))
                                             try: 
-                                                ref_pub = f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_buyer}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>"
+                                                ref_pub = f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_user}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>"
                                                 bot.send_message(log_ch, ref_pub, parse_mode="HTML")
                                             except: pass
-                                        notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: ${REFERRAL_REWARD:.2f}")
+                                        notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\nصاحب الدعوة: {ref_u.get('username') or ref_id}\nالعميل: {u_data.get('username') or uid}\nالمكافأة: ${REFERRAL_REWARD:.2f}")
 
                                 return 
                                 
@@ -1026,7 +1011,7 @@ def execute_bulk_buy(message, pid, lang):
     buy_cnt = db.orders.count_documents({'user_id': uid})
     if buy_cnt == qty and u.get('referred_by'):
         ref_id = int(u['referred_by'])
-        ref_u = get_user_data_full(ref_id)
+        ref_u = db.users.find_one({'user_id': ref_id})
         if ref_u:
             db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
             
@@ -1435,30 +1420,24 @@ def admin_set_price(call):
             db.settings.update_one({'key': key}, {'$set': {'value': new_price}}, upsert=True)
             bot.send_message(message.chat.id, f"✅ تم تحديث السعر بنجاح إلى <b>${new_price:.2f}</b>.", parse_mode="HTML")
             
-           if key == 'gemini_price':
+            if key == 'gemini_price':
                 def broadcast_gemini():
-                    # الرسالة باللغة العربية
                     msg_ar = f"🎉 <b>تحديث هام للمتجر!</b>\n\n✨ تم تحديث سعر تفعيل <b>Gemini Advanced</b> ليصبح الآن بـ <b>${new_price:.2f}</b> فقط!\n\n🔹 <b>المميزات التي ستحصل عليها:</b>\n✅ مساحة تخزين 5 تيرابايت (5TB).\n✅ اشتراك لمدة سنة كاملة.\n✅ ذكاء اصطناعي متقدم (Gemini Pro).\n✅ تفعيل فوري ومباشر (عرض بيكسل).\n\nسارع بطلب التفعيل الآن من قائمة المتجر! 🛒"
-                    
-                    # الرسالة باللغة الإنجليزية
                     msg_en = f"🎉 <b>Important Store Update!</b>\n\n✨ The price for <b>Gemini Advanced</b> activation has been updated to only <b>${new_price:.2f}</b>!\n\n🔹 <b>Features you get:</b>\n✅ 5 Terabytes (5TB) of storage.\n✅ Full 1-Year subscription.\n✅ Advanced AI (Gemini Pro).\n✅ Instant & direct activation (Pixel promo).\n\nHurry up and order your activation now from the store menu! 🛒"
 
                     users = list(db.users.find())
                     for u in users:
                         try:
-                            # تحديد لغة العميل (افتراضي إنجليزي إذا لم يختر أو كانت لغته الإنجليزية)
                             u_lang = u.get('lang', 'en')
                             if not u.get('lang_chosen'):
                                 u_lang = 'en'
-                            
-                            # اختيار الرسالة المناسبة
                             b_msg = msg_ar if u_lang == 'ar' else msg_en
-                            
                             bot.send_message(u['user_id'], b_msg, parse_mode="HTML")
                             time.sleep(0.05)
                         except: continue
                 threading.Thread(target=broadcast_gemini, daemon=True).start()
                 bot.send_message(message.chat.id, "📢 تم إطلاق رسالة إعلان (برودكاست) لجميع الأعضاء باللغتين العربية والإنجليزية.")
+        except Exception as e:
             bot.send_message(message.chat.id, "❌ خطأ في إدخال الرقم.")
             
     bot.register_next_step_handler(msg, save_price)
