@@ -322,7 +322,7 @@ LANG = {
 
         # ✨ Gemini
         'gemini_btn': "✨ تفعيل Gemini Advanced 🤖",
-        'gemini_desc': "🤖 <b>تفعيل اشتراك Gemini Advanced</b>\n\n✅ <b>تفعيل عادي (لا يحتاج إضافة فيزا أو بطاقة بنكية)</b>\n✅ تفعيل مباشر وتلقائي بالكامل.\n\n⚠️ <b>شرط أساسي:</b> يجب تفعيل (التحقق بخطوتين) في حساب جوجل قبل الطلب.\n\n💰 <b>السعر:</b> <b>${:.2f}</b>",
+        'gemini_desc': "🤖 <b>تفعيل اشتراك Gemini Advanced</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ تفعيل رسمي عبر عرض (Google Pixel).\n✅ مساحة تخزين سحابية <b>5 تيرابايت (5TB)</b>.\n✅ اشتراك طويل ومضمون لمدة <b>سنة كاملة</b>.\n✅ وصول كامل لذكاء <b>Gemini Pro</b> المتقدم.\n\n⚠️ <b>شرط أساسي:</b> يجب تفعيل (التحقق بخطوتين 2FA) في حساب جوجل قبل الطلب.\n\n💰 <b>السعر:</b> <b>${:.2f}</b>",
         'gemini_buy_btn': "✅ تفعيل الآن (${:.2f})"
     },
     'en': {
@@ -375,7 +375,7 @@ LANG = {
 
         # ✨ Gemini
         'gemini_btn': "✨ Activate Gemini Advanced 🤖",
-        'gemini_desc': "🤖 <b>Gemini Advanced Activation</b>\n\n✅ <b>Normal Activation (No Visa required)</b>\n✅ Direct live automated connection.\n\n⚠️ <b>Important:</b> Enable 2FA on your Google account before ordering.\n\n💰 <b>Price:</b> <b>${:.2f}</b>",
+        'gemini_desc': "🤖 <b>Gemini Advanced Activation</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Features:</b>\n✅ Official activation via (Google Pixel) promo.\n✅ Huge <b>5 Terabytes (5TB)</b> cloud storage.\n✅ Full <b>1-Year</b> subscription.\n✅ Full access to advanced <b>Gemini Pro</b> AI.\n\n⚠️ <b>Important:</b> Enable 2FA on your Google account before ordering.\n\n💰 <b>Price:</b> <b>${:.2f}</b>",
         'gemini_buy_btn': "✅ Activate Now (${:.2f})"
     }
 }
@@ -1435,15 +1435,30 @@ def admin_set_price(call):
             db.settings.update_one({'key': key}, {'$set': {'value': new_price}}, upsert=True)
             bot.send_message(message.chat.id, f"✅ تم تحديث السعر بنجاح إلى <b>${new_price:.2f}</b>.", parse_mode="HTML")
             
-            if key == 'gemini_price':
+           if key == 'gemini_price':
                 def broadcast_gemini():
-                    b_msg = f"🎉 <b>تحديث هام للمتجر!</b>\n\n✨ تم تحديث سعر تفعيل <b>Gemini Advanced</b> ليصبح الآن بـ <b>${new_price:.2f}</b> فقط!\n\n✅ <b>تفعيل فوري وتلقائي بالكامل</b> 🤖\n✅ <b>تفعيل عادي (لا يحتاج إضافة فيزا أو بطاقة بنكية)</b> 💳❌\n\nسارع بطلب التفعيل الآن من قائمة المتجر! 🛒"
-                    for u in list(db.users.find()):
-                        try: bot.send_message(u['user_id'], b_msg, parse_mode="HTML"); time.sleep(0.05)
+                    # الرسالة باللغة العربية
+                    msg_ar = f"🎉 <b>تحديث هام للمتجر!</b>\n\n✨ تم تحديث سعر تفعيل <b>Gemini Advanced</b> ليصبح الآن بـ <b>${new_price:.2f}</b> فقط!\n\n🔹 <b>المميزات التي ستحصل عليها:</b>\n✅ مساحة تخزين 5 تيرابايت (5TB).\n✅ اشتراك لمدة سنة كاملة.\n✅ ذكاء اصطناعي متقدم (Gemini Pro).\n✅ تفعيل فوري ومباشر (عرض بيكسل).\n\nسارع بطلب التفعيل الآن من قائمة المتجر! 🛒"
+                    
+                    # الرسالة باللغة الإنجليزية
+                    msg_en = f"🎉 <b>Important Store Update!</b>\n\n✨ The price for <b>Gemini Advanced</b> activation has been updated to only <b>${new_price:.2f}</b>!\n\n🔹 <b>Features you get:</b>\n✅ 5 Terabytes (5TB) of storage.\n✅ Full 1-Year subscription.\n✅ Advanced AI (Gemini Pro).\n✅ Instant & direct activation (Pixel promo).\n\nHurry up and order your activation now from the store menu! 🛒"
+
+                    users = list(db.users.find())
+                    for u in users:
+                        try:
+                            # تحديد لغة العميل (افتراضي إنجليزي إذا لم يختر أو كانت لغته الإنجليزية)
+                            u_lang = u.get('lang', 'en')
+                            if not u.get('lang_chosen'):
+                                u_lang = 'en'
+                            
+                            # اختيار الرسالة المناسبة
+                            b_msg = msg_ar if u_lang == 'ar' else msg_en
+                            
+                            bot.send_message(u['user_id'], b_msg, parse_mode="HTML")
+                            time.sleep(0.05)
                         except: continue
                 threading.Thread(target=broadcast_gemini, daemon=True).start()
-                bot.send_message(message.chat.id, "📢 تم إطلاق رسالة إعلان (برودكاست) لجميع الأعضاء بالسعر الجديد والمميزات.")
-        except:
+                bot.send_message(message.chat.id, "📢 تم إطلاق رسالة إعلان (برودكاست) لجميع الأعضاء باللغتين العربية والإنجليزية.")
             bot.send_message(message.chat.id, "❌ خطأ في إدخال الرقم.")
             
     bot.register_next_step_handler(msg, save_price)
