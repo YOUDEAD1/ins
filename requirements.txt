@@ -4,3 +4,7 @@ pymongo
 deep-translator
 requests
 python-dotenv
+telethon
+cryptg
+pillow
+bson
