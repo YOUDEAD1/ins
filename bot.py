@@ -51,7 +51,7 @@ BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
-MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
 
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
@@ -99,12 +99,15 @@ temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
 
+# متغير الذاكرة لقفل العمليات المكررة (منع ثغرة السبام والإيداع المزدوج)
+PROCESSING_TXS = set()
+
 def get_setting(key, default="Not Set"):
     res = db.settings.find_one({'key': key})
     return res['value'] if res else default
 
 # ============================================================
-# 🤖 4. تهيئة اليوزربوت (Telethon) - Gemini
+# 🤖 4. تهيئة اليوزربوت الديناميكي (Telethon) - Gemini
 # ============================================================
 client = None
 USERBOT_LOOP = None
@@ -138,7 +141,6 @@ def start_dynamic_userbot():
         uid = ACTIVE_GEMINI_SESSION['uid']
         price = ACTIVE_GEMINI_SESSION['price']
         
-        # الترجمة الذكية
         l = get_lang(uid)
         display_text = text
         if l == 'ar':
@@ -165,21 +167,23 @@ def start_dynamic_userbot():
             bot.send_message(uid, "🎉 <b>اكتمل التفعيل بنجاح!</b>\nتم خصم الرصيد وتوثيق الطلب. يمكنك رؤية الإيصال في المشتريات.", parse_mode="HTML")
             
             log_ch = get_setting('log_channel')
-            u_data = db.users.find_one({'user_id': uid})
-            obs_user = obscure_text(u_data.get('username') or str(uid))
             if log_ch and log_ch != "Not Set":
+                u_data = db.users.find_one({'user_id': uid})
+                obs_user = obscure_text(u_data.get('username') or str(uid))
                 try: bot.send_message(log_ch, f"✨ <b>تفعيل Gemini Advanced جديد!</b> 🚀\n\n👤 حساب: <b>{obs_user}</b>\n✅ الحالة: <b>مفعل بنجاح</b>\n\n<i>تم التفعيل تلقائياً عبر البوت ⚡</i>", parse_mode="HTML")
                 except: pass
             
+            u = db.users.find_one({'user_id': uid})
             buy_cnt = db.orders.count_documents({'user_id': uid})
-            if buy_cnt == 1 and u_data.get('referred_by'):
-                ref_id = int(u_data['referred_by'])
+            if buy_cnt == 1 and u.get('referred_by'):
+                ref_id = int(u['referred_by'])
                 ref_u = db.users.find_one({'user_id': ref_id})
                 if ref_u:
                     db.users.update_one({'user_id': ref_id}, {'$inc': {'balance': REFERRAL_REWARD}})
                     if log_ch and log_ch != "Not Set":
                         obs_ref = obscure_text(ref_u.get('username') or str(ref_id))
-                        try: bot.send_message(log_ch, f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_user}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>", parse_mode="HTML")
+                        obs_buyer = obscure_text(u.get('username') or str(uid))
+                        try: bot.send_message(log_ch, f"🎁 <b>مكافأة إحالة!</b> 🎊\n\nصاحب الدعوة <b>{obs_ref}</b> ربح <b>${REFERRAL_REWARD:.2f}</b> رصيد مجاني بفضل دعوة العميل <b>{obs_buyer}</b> 👏\n\n<i>شارك رابطك واربح أنت أيضاً!</i>", parse_mode="HTML")
                         except: pass
                     notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\nالعميل الجديد: {uid}\nتم منح المكافأة.")
 
@@ -297,9 +301,11 @@ LANG = {
         'gh_btn': "🎓 تفعيل حساب طالب (GitHub)",
         'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ البدء في التفعيل (${:.2f})",
+        
         'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
         'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
         'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
+        
         'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق والاتصال بالسيرفر، يرجى الانتظار...",
         'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن في الخلفية.",
         'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم الطلب: <code>{}</code>)</b>\n⏳ <i>جاري معالجة الحساب...</i>",
@@ -348,9 +354,11 @@ LANG = {
         'gh_btn': "🎓 GitHub Student Pack",
         'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ Start Activation (${:.2f})",
+        
         'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
         'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
         'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
+        
         'gh_deducted': "⏳ <b>Data received!</b> Verifying and connecting to the server, please wait...",
         'gh_submitted': "✅ <b>Request submitted successfully!</b> Activation is processing.",
         'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>\n⏳ <i>Processing account...</i>",
@@ -531,7 +539,7 @@ def init_lang_selection(call):
     start_handler(call)
 
 # ============================================================
-# ✨ 8. وحدة تفعيل Gemini 
+# ✨ 8. وحدة تفعيل Gemini (Proxy Userbot)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "gemini_pack_info")
 def gemini_info_ui(call):
@@ -1138,11 +1146,17 @@ def verify_binance_pay(message, lang):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
     tx_id = message.text.strip()
+    if tx_id in PROCESSING_TXS:
+        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+        return
+        
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
+        PROCESSING_TXS.add(tx_id)
+        
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         pay_h = client.get_pay_trade_history().get('data', [])
 
@@ -1163,6 +1177,8 @@ def verify_binance_pay(message, lang):
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
+    finally:
+        PROCESSING_TXS.discard(tx_id)
 
 def verify_crypto_tx(message, lang, coin):
     uid = message.from_user.id
@@ -1171,11 +1187,17 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
     tx_id = message.text.strip().lower()
+    if tx_id in PROCESSING_TXS:
+        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+        return
+        
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
+        PROCESSING_TXS.add(tx_id)
+        
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         res = client.get_deposit_history(coin=coin)
 
@@ -1200,6 +1222,8 @@ def verify_crypto_tx(message, lang, coin):
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
+    finally:
+        PROCESSING_TXS.discard(tx_id)
 
 def verify_ltc_public_blockchain(message, lang, wallet_address):
     uid = message.from_user.id
@@ -1212,11 +1236,17 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
         return
         
+    if tx_id in PROCESSING_TXS:
+        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+        return
+        
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, LANG[lang]['tx_used']); return
             
+        PROCESSING_TXS.add(tx_id)
+        
         received_ltc = 0.0
         confirmations = 0
         is_sender = False
@@ -1283,6 +1313,8 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ أثناء فحص الشبكة.", parse_mode="HTML")
+    finally:
+        PROCESSING_TXS.discard(tx_id)
 
 def credit_user(uid, amt, tx_id, lang, method):
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
