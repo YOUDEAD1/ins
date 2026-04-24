@@ -97,7 +97,10 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
-PROCESSING_TXS = set() # نظام القفل لمنع السبام ومضاعفة الشحن
+
+# نظام القفل الذكي (Threading Lock) لمنع السبام ومضاعفة الشحن بشكل جذري
+PROCESSING_TXS = set()
+tx_lock = threading.Lock()
 
 def get_setting(key, default="Not Set"):
     res = db.settings.find_one({'key': key})
@@ -294,9 +297,11 @@ LANG = {
         'gh_btn': "🎓 تفعيل حساب طالب (GitHub)",
         'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ البدء في التفعيل (${:.2f})",
+        
         'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
         'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
         'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
+        
         'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق والاتصال بالسيرفر، يرجى الانتظار...",
         'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن في الخلفية.",
         'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم الطلب: <code>{}</code>)</b>\n⏳ <i>جاري معالجة الحساب...</i>",
@@ -345,9 +350,11 @@ LANG = {
         'gh_btn': "🎓 GitHub Student Pack",
         'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
         'gh_buy_btn': "✅ Start Activation (${:.2f})",
+        
         'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
         'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
         'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
+        
         'gh_deducted': "⏳ <b>Data received!</b> Verifying and connecting to the server, please wait...",
         'gh_submitted': "✅ <b>Request submitted successfully!</b> Activation is processing.",
         'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>\n⏳ <i>Processing account...</i>",
@@ -835,7 +842,6 @@ def invite_ui(call):
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     
-    # Fast Referral Loading
     inv_res = list(db.users.find({'referred_by': str(uid)}))
     inv_c = len(inv_res)
     referred_ids = [int(r['user_id']) for r in inv_res]
@@ -1067,6 +1073,9 @@ def dep_stars_ui(call):
     uid = call.from_user.id
     l = get_lang(uid)
     
+    # مسح الأوامر المعلقة لمنع تداخل الرسائل
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+    
     prompt = f"⭐️ <b>أرسل المبلغ الذي تريد شحنه بالدولار ($):</b>\n<i>(سيتم تحويله تلقائياً، 1$ = {STARS_RATE} نجمة)</i>" if l == 'ar' else f"⭐️ <b>Send the amount you want to deposit in USD ($):</b>\n<i>(Will be converted automatically, 1$ = {STARS_RATE} Stars)</i>"
     
     msg = bot.send_message(uid, prompt, parse_mode="HTML")
@@ -1082,10 +1091,8 @@ def process_stars_amount(message, lang):
             return
             
         stars_amount = int(usd_amount * STARS_RATE)
-        
         title = "شحن رصيد المتجر" if lang == 'ar' else "Shop Balance Deposit"
         desc = f"شحن حسابك بمبلغ ${usd_amount:.2f}" if lang == 'ar' else f"Deposit ${usd_amount:.2f} to your account"
-        
         prices = [LabeledPrice(label=f"Deposit ${usd_amount:.2f}", amount=stars_amount)]
         
         bot.send_invoice(
@@ -1124,6 +1131,8 @@ def dep_binance_ui(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+    
     wallet = get_setting('wallet_address')
     msg = bot.send_message(uid, LANG[l]['dep_pay'].format(wallet), parse_mode="HTML")
     bot.register_next_step_handler(msg, verify_binance_pay, l)
@@ -1134,6 +1143,7 @@ def dep_crypto_ui(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid); coin = call.data.replace('dep_crypto_', '')
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
     
     if coin == "USDT": db_key = "usdt_address"
     elif coin == "USDT_BEP20": db_key = "usdt_bep20_address"
@@ -1164,18 +1174,18 @@ def verify_binance_pay(message, lang):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
-    tx_id = message.text.strip()
-    if tx_id in PROCESSING_TXS:
-        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
-        return
+    tx_id = message.text.strip().lower()
+    
+    with tx_lock:
+        if tx_id in PROCESSING_TXS:
+            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            return
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+        PROCESSING_TXS.add(tx_id)
         
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
-        PROCESSING_TXS.add(tx_id)
-        
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         pay_h = client.get_pay_trade_history().get('data', [])
 
@@ -1183,7 +1193,7 @@ def verify_binance_pay(message, lang):
         current_time_ms = int(time.time() * 1000)
         
         for d in pay_h:
-            if tx_id.lower() == str(d.get('orderId', '')).lower():
+            if tx_id == str(d.get('orderId', '')).lower():
                 tx_time = int(d.get('transactionTime', 0))
                 if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
                     bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
@@ -1192,7 +1202,7 @@ def verify_binance_pay(message, lang):
                 amt = float(d.get('amount', 0.0))
                 break
                 
-        if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
+        if found: credit_user(uid, amt, tx_id, lang, "Binance Pay")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
@@ -1206,17 +1216,17 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
     tx_id = message.text.strip().lower()
-    if tx_id in PROCESSING_TXS:
-        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
-        return
+    
+    with tx_lock:
+        if tx_id in PROCESSING_TXS:
+            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            return
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+        PROCESSING_TXS.add(tx_id)
         
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
-        PROCESSING_TXS.add(tx_id)
-        
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         res = client.get_deposit_history(coin=coin)
 
@@ -1250,22 +1260,21 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
-    tx_id = message.text.strip()
+    tx_id = message.text.strip().lower()
     if wallet_address == "Not Set" or len(wallet_address) < 10:
         bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
         return
         
-    if tx_id in PROCESSING_TXS:
-        bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
-        return
+    with tx_lock:
+        if tx_id in PROCESSING_TXS:
+            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            return
+        if db.used_transactions.find_one({'transaction_id': tx_id}):
+            bot.reply_to(message, LANG[lang]['tx_used']); return
+        PROCESSING_TXS.add(tx_id)
         
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
-            bot.reply_to(message, LANG[lang]['tx_used']); return
-            
-        PROCESSING_TXS.add(tx_id)
-        
         received_ltc = 0.0
         confirmations = 0
         is_sender = False
@@ -1482,7 +1491,6 @@ def admin_set_price(call):
                             u_lang = u.get('lang', 'en')
                             if not u.get('lang_chosen'):
                                 u_lang = 'en'
-                            
                             b_msg = msg_ar if u_lang == 'ar' else msg_en
                             bot.send_message(u['user_id'], b_msg, parse_mode="HTML")
                             time.sleep(0.05)
