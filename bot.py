@@ -59,10 +59,10 @@ GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').s
 try:
     STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError:
-    STARS_RATE = 100
+    STARS_RATE = 120
 
 # ============================================================
-# 🌐 2. السيرفر الوهمي
+# 🌐 2. السيرفر الوهمي (للحفاظ على تشغيل البوت)
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -97,9 +97,7 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
-
-# نظام القفل الذكي (Threading Lock) لمنع السبام ومضاعفة الشحن بشكل جذري
-PROCESSING_TXS = set()
+PROCESSING_TXS = set() # نظام القفل لمنع السبام
 tx_lock = threading.Lock()
 
 def get_setting(key, default="Not Set"):
@@ -277,11 +275,11 @@ LANG = {
         'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك. نشكر ثقتك بنا.",
         'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص (وليس صورة).",
         'dep_pending': "⏳ <b>قيد المعالجة!</b> لم يتم تأكيد الحوالة في البلوكتشين بعد، يرجى المحاولة بعد قليل.",
-        'history_title': "📜 <b>سجلاتك المالية:</b>",
+        'history_title': "📜 <b>سجلاتك المالية (أحدث 5 عمليات):</b>",
         'products': "🛒 المنتجات", 'deposit': "💳 شحن الرصيد", 'profile': "👤 الملف الشخصي", 
         'invite': "👥 الإحالات", 'support': "👨‍💻 الدعم الفني", 'lang_btn': "🌐 English", 
         'back': "🔙 رجوع", 'main_menu': "🏠 القائمة الرئيسية", 'buy_hist': "🛍 المشتريات", 
-        'dep_hist': "💳 الإيداعات", 'no_hist': "📭 لا يوجد سجلات حتى الآن.",
+        'dep_hist': "💳 الإيداعات", 'no_hist': "📭 لا توجد سجلات حتى الآن.",
         'store_title': "🛒 <b>المنتجات المتوفرة:</b>", 'buy_now': "✅ شراء الآن",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
         'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى شحن حسابك أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b> يرجى الانتظار لحين التوفر.",
@@ -330,7 +328,7 @@ LANG = {
         'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance. Thank you!",
         'dep_fail': "❌ <b>Not found!</b> Check ID and send text, not an image.",
         'dep_pending': "⏳ <b>Pending!</b> Not confirmed on blockchain yet. Try again shortly.",
-        'history_title': "📜 <b>Your Financial Records:</b>",
+        'history_title': "📜 <b>Your Financial Records (Last 5):</b>",
         'products': "🛒 Products", 'deposit': "💳 Deposit", 'profile': "👤 Profile", 
         'invite': "👥 Referrals", 'support': "👨‍💻 Support", 'lang_btn': "🌐 العربية", 
         'back': "🔙 Back", 'main_menu': "🏠 Main Menu", 'buy_hist': "🛍 Purchases", 
@@ -769,7 +767,7 @@ def process_gh_step_2fa(message):
     threading.Thread(target=api_worker, daemon=True).start()
 
 # ============================================================
-# 👤 10. الملف الشخصي
+# 👤 10. الملف الشخصي وتاريخ العمليات (تحسين الإيصالات والملفات)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_profile")
 def profile_ui(call):
@@ -800,9 +798,52 @@ def history_menu_ui(call):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton(LANG[l]['buy_hist'], callback_data="h_view_buy"),
                InlineKeyboardButton(LANG[l]['dep_hist'], callback_data="h_view_dep"))
+    
+    # الزر الجديد لتحميل المشتريات في ملف
+    dl_txt = "📄 Download Purchases (File)" if l == 'en' else "📄 تحميل كل المشتريات (ملف txt)"
+    markup.add(InlineKeyboardButton(dl_txt, callback_data="h_dl_buy"))
+    
     markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="open_profile"))
     try: bot.edit_message_text(LANG[l]['history_title'], call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == "h_dl_buy")
+def user_download_buy_hist(call):
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    uid = call.from_user.id
+    recs = list(db.orders.find({'user_id': uid}).sort('_id', -1))
+    l = get_lang(uid)
+    
+    if not recs:
+        empty_msg = "📭 No purchases found." if l == 'en' else "📭 لا يوجد سجل مشتريات."
+        bot.send_message(uid, empty_msg)
+        return
+        
+    content = "=== Your Purchase History ===\n\n" if l == 'en' else "=== سجل المشتريات الخاص بك ===\n\n"
+    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
+    
+    for i, r in enumerate(recs, 1):
+        # سحب التاريخ مباشرة من كود الـ ObjectId (طريقة عبقرية لمعرفة وقت العملية بدقة)
+        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+        pid = str(r.get('product_id'))
+        p = all_prods.get(pid)
+        
+        if pid in ['GitHub_Student', 'Gemini_Activation']:
+            n = pid.replace('_', ' ')
+        else:
+            n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar')) if p else "Unknown Product"
+            
+        code = r.get('code_delivered', '')
+        
+        if l == 'en':
+            content += f"{i}. Date: {date_str}\nProduct: {n}\nCode/Details: {code}\n{'-'*30}\n"
+        else:
+            content += f"{i}. التاريخ: {date_str}\nالمنتج: {n}\nالكود/التفاصيل: {code}\n{'-'*30}\n"
+        
+    f = io.BytesIO(content.encode('utf-8'))
+    f.name = f"My_Purchases_{uid}.txt"
+    caption = "📄 Here are all your purchases." if l == 'en' else "📄 ملف يحتوي على جميع مشترياتك وتواريخها."
+    bot.send_document(call.message.chat.id, f, caption=caption)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("h_view_"))
 def show_hist_detail(call):
@@ -816,17 +857,20 @@ def show_hist_detail(call):
             recs = list(db.orders.find({'user_id': uid}).sort('_id', -1).limit(5))
             if not recs: out = LANG[l]['no_hist']
             for r in recs:
+                # إضافة التاريخ للإيصال
+                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
                 if r.get('product_id') in ['GitHub_Student', 'Gemini_Activation']:
-                    out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📦 المنتج: <b>{r.get('product_id').replace('_', ' ')}</b>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n────────────\n"
+                    out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n📦 المنتج: <b>{r.get('product_id').replace('_', ' ')}</b>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n────────────\n"
                     continue
                 p = find_product(r['product_id'])
                 n = clean_name(p['name_en'] if l == 'en' else p['name_ar']) if p else "Product"
-                out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📦 المنتج: <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n────────────\n"
+                out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n📦 المنتج: <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n────────────\n"
         else:
             recs = list(db.used_transactions.find({'user_id': uid}).sort('_id', -1).limit(5))
             if not recs: out = LANG[l]['no_hist']
             for r in recs: 
-                out += f"💳 <b>إيصال إيداع | Deposit Receipt</b>\n💰 المبلغ: <b>${r.get('amount', 0):.2f}</b>\n🆔 العملية: <code>{r.get('transaction_id', '')}</code>\n────────────\n"
+                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+                out += f"💳 <b>إيصال إيداع | Deposit Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n💰 المبلغ: <b>${r.get('amount', 0):.2f}</b>\n🆔 العملية: <code>{r.get('transaction_id', '')}</code>\n────────────\n"
     except Exception as e: out = f"❌ Error"
     
     markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton(LANG[l]['back'], callback_data="history_menu_callback"))
@@ -842,6 +886,7 @@ def invite_ui(call):
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     
+    # حل مشكلة بطء الإحالات (Fast Query)
     inv_res = list(db.users.find({'referred_by': str(uid)}))
     inv_c = len(inv_res)
     referred_ids = [int(r['user_id']) for r in inv_res]
@@ -1011,8 +1056,24 @@ def execute_bulk_buy(message, pid, lang):
             db.orders.insert_one({'user_id': uid, 'product_id': str(pid), 'code_delivered': item['code_line']})
             delivered_codes.append(item['code_line'])
             
-        codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
-        bot.send_message(uid, LANG[lang]['buy_success'].format(codes_str), parse_mode="HTML")
+        # إرسال الأكواد كملف إذا كان العدد أكبر من 3
+        if qty > 3:
+            file_content = ""
+            for i, code in enumerate(delivered_codes, 1):
+                file_content += f"{i}. {code}\n"
+            
+            f = io.BytesIO(file_content.encode('utf-8'))
+            f.name = f"Your_Codes_{pid}.txt"
+            
+            if lang == 'ar':
+                success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+            else:
+                success_msg = f"✅ <b>Purchase Successful!</b>\n\nSince you bought {qty} codes, they are attached in this file for easy copying 📄\n\n<i>Thank you for choosing us 🛡️</i>"
+                
+            bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+        else:
+            codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
+            bot.send_message(uid, LANG[lang]['buy_success'].format(codes_str), parse_mode="HTML")
         
         admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
         notify_admins(admin_msg)
@@ -1073,7 +1134,6 @@ def dep_stars_ui(call):
     uid = call.from_user.id
     l = get_lang(uid)
     
-    # مسح الأوامر المعلقة لمنع تداخل الرسائل
     bot.clear_step_handler_by_chat_id(chat_id=uid)
     
     prompt = f"⭐️ <b>أرسل المبلغ الذي تريد شحنه بالدولار ($):</b>\n<i>(سيتم تحويله تلقائياً، 1$ = {STARS_RATE} نجمة)</i>" if l == 'ar' else f"⭐️ <b>Send the amount you want to deposit in USD ($):</b>\n<i>(Will be converted automatically, 1$ = {STARS_RATE} Stars)</i>"
@@ -1202,7 +1262,7 @@ def verify_binance_pay(message, lang):
                 amt = float(d.get('amount', 0.0))
                 break
                 
-        if found: credit_user(uid, amt, tx_id, lang, "Binance Pay")
+        if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
@@ -1227,6 +1287,7 @@ def verify_crypto_tx(message, lang, coin):
         
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
+        # ملاحظة: هذا السطر سيقرأ محفظة حساب بينانس الخاص بك المرتبط بالمفاتيح في الأعلى فقط.
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         res = client.get_deposit_history(coin=coin)
 
@@ -1700,11 +1761,26 @@ def admin_stock_opts_ui(call):
 def admin_stock_input(call):
     bot.answer_callback_query(call.id)
     pid = call.data.replace("stk_add_", "")
-    msg = bot.send_message(call.from_user.id, "📥 <b>أرسل الأكواد (كود في كل سطر):</b>", parse_mode="HTML")
+    msg = bot.send_message(call.from_user.id, "📥 <b>أرسل الأكواد (كود في كل سطر) أو قم برفع ملف (.txt) يحتوي على الأكواد:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_stock_save, pid)
 
 def admin_stock_save(message, pid):
-    lines = message.text.split('\n')
+    lines = []
+    if message.document:
+        try:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            content = downloaded_file.decode('utf-8')
+            lines = content.split('\n')
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ حدث خطأ في قراءة الملف: {e}")
+            return
+    elif message.text:
+        lines = message.text.split('\n')
+    else:
+        bot.send_message(message.chat.id, "❌ الرجاء إرسال نص أو ملف (.txt) فقط.")
+        return
+
     count = 0
     for l in lines:
         if l.strip():
@@ -1894,6 +1970,7 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("🛍 إيصالات المشتريات", callback_data=f"ad_uh_buy_{target_uid}"),
                InlineKeyboardButton("💳 إيصالات الإيداع", callback_data=f"ad_uh_dep_{target_uid}"))
+    markup.add(InlineKeyboardButton("📄 تحميل سجل المشتريات (ملف)", callback_data=f"ad_dlbuy_{target_uid}"))
     markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
     try:
@@ -1901,27 +1978,56 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
         else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
     except: pass
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
+def admin_download_buy_hist(call):
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    target_uid = int(call.data.replace("ad_dlbuy_", ""))
+    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
+    if not recs:
+        bot.send_message(call.message.chat.id, "📭 العميل لم يقم بأي عمليات شراء.")
+        return
+        
+    content = f"=== سجل مشتريات العميل {target_uid} ===\n\n"
+    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
+    
+    for i, r in enumerate(recs, 1):
+        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+        pid = str(r.get('product_id'))
+        p = all_prods.get(pid)
+        
+        if pid in ['GitHub_Student', 'Gemini_Activation']: n = pid.replace('_', ' ')
+        else: n = clean_name(p.get('name_ar', p.get('name_en'))) if p else "Unknown Product"
+            
+        code = r.get('code_delivered', '')
+        content += f"{i}. التاريخ: {date_str}\nالمنتج: {n}\nالكود/التفاصيل: {code}\n{'-'*30}\n"
+        
+    f = io.BytesIO(content.encode('utf-8'))
+    f.name = f"Purchases_User_{target_uid}.txt"
+    bot.send_document(call.message.chat.id, f, caption=f"📄 سجل مشتريات العميل {target_uid}.")
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_"))
 def show_admin_hist_detail(call):
     bot.answer_callback_query(call.id)
     parts = call.data.split('_', 3); mode = parts[2]; target_uid = int(parts[3])
-    out = f"📂 <b>سجلات العميل (<code>{target_uid}</code>):</b>\n\n"
+    out = f"📂 <b>سجلات العميل (<code>{target_uid}</code>) - أحدث 5:</b>\n\n"
     try:
         if mode == "buy":
-            recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1).limit(10))
+            recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1).limit(5))
             if not recs: out += "📭 لا يوجد مشتريات."
             for r in recs:
+                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
                 if r.get('product_id') in ['GitHub_Student', 'Gemini_Activation']:
-                    out += f"🛍 <b>{r.get('product_id').replace('_', ' ')}</b>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n---\n"
+                    out += f"🛍 <b>{r.get('product_id').replace('_', ' ')}</b>\n📅 <code>{date_str}</code>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n---\n"
                     continue
                 p = find_product(r['product_id'])
                 n = clean_name(p['name_en'] if get_lang(call.from_user.id) == 'en' else p['name_ar']) if p else "Product"
-                out += f"🛍 <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n---\n"
+                out += f"🛍 <b>{n}</b>\n📅 <code>{date_str}</code>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n---\n"
         else:
-            recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1).limit(10))
+            recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1).limit(5))
             if not recs: out += "📭 لا يوجد إيداعات."
             for r in recs: 
-                out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 🆔 <code>{r.get('transaction_id', '')}</code>\n"
+                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+                out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 📅 <code>{date_str}</code>\n🆔 <code>{r.get('transaction_id', '')}</code>\n"
     except Exception as e: out = f"❌ Error"
     
     markup = InlineKeyboardMarkup(); markup.add(InlineKeyboardButton("🔙 رجوع لملف العميل", callback_data=f"ad_u_det_{target_uid}"))
