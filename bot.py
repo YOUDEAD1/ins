@@ -1265,7 +1265,8 @@ def verify_binance_pay(message, lang):
         if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
-        bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
+        logger.error(f"Binance API Error: {e}")
+        bot.send_message(uid, f"❌ حدث خطأ في الاتصال ببينانس:\n<code>{e}</code>", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
