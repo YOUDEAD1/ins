@@ -51,18 +51,18 @@ BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
-MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
 
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
 try:
-    STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
+    STARS_RATE = int(os.getenv('STARS_RATE', '100').strip())
 except ValueError:
-    STARS_RATE = 120
+    STARS_RATE = 100
 
 # ============================================================
-# 🌐 2. السيرفر الوهمي (للحفاظ على تشغيل البوت)
+# 🌐 2. السيرفر الوهمي
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -97,7 +97,9 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
-PROCESSING_TXS = set() # نظام القفل لمنع السبام
+
+# نظام القفل الذكي (Threading Lock) لمنع السبام ومضاعفة الشحن بشكل جذري
+PROCESSING_TXS = set()
 tx_lock = threading.Lock()
 
 def get_setting(key, default="Not Set"):
@@ -256,7 +258,7 @@ def add_to_gemini_queue(uid, price):
         start_gemini_session(uid, price)
     else:
         GEMINI_QUEUE.append({'uid': uid, 'price': price})
-        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
+        bot.send_message(uid, f"⏳ <b>تم وضعك في ط طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
 
 # ============================================================
 # 🌍 5. قاموس اللغات
@@ -328,7 +330,7 @@ LANG = {
         'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance. Thank you!",
         'dep_fail': "❌ <b>Not found!</b> Check ID and send text, not an image.",
         'dep_pending': "⏳ <b>Pending!</b> Not confirmed on blockchain yet. Try again shortly.",
-        'history_title': "📜 <b>Your Financial Records (Last 5):</b>",
+        'history_title': "📜 <b>Your Financial Records:</b>",
         'products': "🛒 Products", 'deposit': "💳 Deposit", 'profile': "👤 Profile", 
         'invite': "👥 Referrals", 'support': "👨‍💻 Support", 'lang_btn': "🌐 العربية", 
         'back': "🔙 Back", 'main_menu': "🏠 Main Menu", 'buy_hist': "🛍 Purchases", 
@@ -823,7 +825,6 @@ def user_download_buy_hist(call):
     all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
     
     for i, r in enumerate(recs, 1):
-        # سحب التاريخ مباشرة من كود الـ ObjectId (طريقة عبقرية لمعرفة وقت العملية بدقة)
         date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
         pid = str(r.get('product_id'))
         p = all_prods.get(pid)
@@ -886,7 +887,6 @@ def invite_ui(call):
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
     
-    # حل مشكلة بطء الإحالات (Fast Query)
     inv_res = list(db.users.find({'referred_by': str(uid)}))
     inv_c = len(inv_res)
     referred_ids = [int(r['user_id']) for r in inv_res]
@@ -1234,8 +1234,12 @@ def verify_binance_pay(message, lang):
     if not message.text:
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
 
-    tx_id = message.text.strip().lower()
+    tx_id = message.text.strip()
     
+    if len(tx_id) < 15:
+        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
+        return
+        
     with tx_lock:
         if tx_id in PROCESSING_TXS:
             bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
@@ -1253,7 +1257,7 @@ def verify_binance_pay(message, lang):
         current_time_ms = int(time.time() * 1000)
         
         for d in pay_h:
-            if tx_id == str(d.get('orderId', '')).lower():
+            if tx_id.lower() == str(d.get('orderId', '')).lower():
                 tx_time = int(d.get('transactionTime', 0))
                 if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
                     bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
@@ -1266,7 +1270,7 @@ def verify_binance_pay(message, lang):
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
         logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ حدث خطأ في الاتصال ببينانس:\n<code>{e}</code>", parse_mode="HTML")
+        bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -1278,6 +1282,10 @@ def verify_crypto_tx(message, lang, coin):
 
     tx_id = message.text.strip().lower()
     
+    if len(tx_id) < 20:
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+        return
+        
     with tx_lock:
         if tx_id in PROCESSING_TXS:
             bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
@@ -1288,7 +1296,6 @@ def verify_crypto_tx(message, lang, coin):
         
     try:
         bot.send_message(uid, LANG[lang]['crypto_checking'], parse_mode="HTML")
-        # ملاحظة: هذا السطر سيقرأ محفظة حساب بينانس الخاص بك المرتبط بالمفاتيح في الأعلى فقط.
         client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
         res = client.get_deposit_history(coin=coin)
 
@@ -1312,6 +1319,7 @@ def verify_crypto_tx(message, lang, coin):
             else: bot.send_message(uid, LANG[lang]['dep_pending'], parse_mode="HTML")
         else: bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML")
     except Exception as e:
+        logger.error(f"Binance API Error: {e}")
         bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
@@ -1323,6 +1331,11 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, LANG[lang]['dep_fail'], parse_mode="HTML"); return
         
     tx_id = message.text.strip().lower()
+    
+    if len(tx_id) < 20:
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+        return
+        
     if wallet_address == "Not Set" or len(wallet_address) < 10:
         bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
         return
