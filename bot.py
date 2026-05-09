@@ -268,7 +268,7 @@ def add_to_gemini_queue(uid, price):
 # ============================================================
 DEFAULT_BUTTONS = {
     'ar': {
-        'btn_products': '🔵 المنتجات',
+        'btn_products': 'المنتجات',
         'btn_deposit': '💳 شحن الرصيد',
         'btn_profile': '👤 الملف الشخصي',
         'btn_invite': '👥 الإحالات',
@@ -293,7 +293,7 @@ DEFAULT_BUTTONS = {
         'btn_check_sub': '🔄 تحقق من الاشتراك'
     },
     'en': {
-        'btn_products': '🔵 Products',
+        'btn_products': 'Products',
         'btn_deposit': '💳 Deposit',
         'btn_profile': '👤 Profile',
         'btn_invite': '👥 Referrals',
@@ -404,16 +404,16 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
+# 🛠️ 6. محرك الـ CMS 
 # ============================================================
 
-def clean_old_emojis(text):
-    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
-    for emj in old_emojis:
-        text = text.replace(emj, '')
-    return text.strip()
-
 def safe_translate_for_cms(text, target_lang='en'):
+    """
+    ترجمة آمنة 100% تحمي:
+    - رموز Premium Emoji (<tg-emoji>...</tg-emoji>)
+    - المتغيرات ({0}, {1}, {name}, ...)
+    - وسوم HTML (<b>, <code>, <i>, <strike>, ...)
+    """
     if not text or not text.strip():
         return text
     try:
@@ -423,10 +423,14 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
+        # استخراج Premium Emojis أولاً (أهم شيء)
         temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
+        # ثم المتغيرات بصيغة {var}
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
+        # ثم باقي وسوم HTML
         temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
+        # إذا لم يتبقَ شيء للترجمة (كل النص رموز/وسوم) أرجع الأصل
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         if not clean_check:
             return text
@@ -436,6 +440,7 @@ def safe_translate_for_cms(text, target_lang='en'):
         if not translated:
             return text
         
+        # تنظيف الأرقام العربية
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def clean_arabic_digits(match):
             return match.group(0).translate(arabic_to_eng)
@@ -446,6 +451,7 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
+        # الاستبدال العكسي
         for i in range(len(placeholders) - 1, -1, -1):
             ph = placeholders[i]
             pattern = re.compile(
@@ -461,7 +467,7 @@ def safe_translate_for_cms(text, target_lang='en'):
         return translated.strip()
     except Exception as e:
         logger.error(f"Safe translation error: {e}")
-        return text 
+        return text
 
 def extract_custom_emojis_to_html(message):
     if not message.text or not message.entities:
@@ -515,6 +521,7 @@ def get_text(uid, key, *args):
         try:
             return base_text.format(*args)
         except Exception as e:
+            logger.error(f"Error formatting string for key {key}: {e}")
             return base_text
     return base_text
 
@@ -533,7 +540,7 @@ def get_btn_data(uid, key):
                 return default_text, emoji_id
             return text, emoji_id
     except Exception as e:
-        pass
+        logger.error(f"get_btn_data DB error: {e}")
     
     default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
     return default_text, None
@@ -579,8 +586,7 @@ def find_product(pid):
                 p = db.products.find_one({'_id': ObjectId(pid_str)})
                 if p: return p
             except: pass
-    except Exception as e:
-        pass
+    except: pass
     return None
 
 def get_product_stock_count(pid):
@@ -1128,19 +1134,19 @@ def shop_list_ui(call):
         pid = p.get('id', str(p.get('_id', '')))
         st = get_product_stock_count(pid)
         
-        # 🟢 خضراء للمتوفر ، 🔴 حمراء للمنتهي
-        status_emoji = "🟢" if (is_manual or st > 0) else "🔴"
+        btn_style = "success" if (is_manual or st > 0) else "danger"
         
         hidden_icon = " 👻(مخفي)" if is_hidden else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n 
         
         st_text = "FW" if is_manual else str(st)
-        btn_text = f"{status_emoji} {short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+        btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
         
         btn_kwargs = {
             'text': btn_text,
-            'callback_data': f"vi_p_{pid}"
+            'callback_data': f"vi_p_{pid}",
+            'style': btn_style
         }
         
         custom_emoji_id = p.get('custom_emoji_id')
@@ -1455,9 +1461,8 @@ def verify_binance_pay(message, lang):
 
     tx_id = message.text.strip()
     
-    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح أو قصير جداً! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1502,9 +1507,8 @@ def verify_crypto_tx(message, lang, coin):
 
     tx_id = message.text.strip().lower()
     
-    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1553,9 +1557,8 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         
     tx_id = message.text.strip().lower()
     
-    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
         return
         
     if wallet_address == "Not Set" or len(wallet_address) < 10:
@@ -1764,7 +1767,7 @@ def ad_cms_btns_list(call):
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cms_btns_cats"))
     bot.edit_message_text("👇 <b>اختر الزر الذي تريد تغيير اسمه أو الإيموجي الخاص به:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
-# ----------- دوال تعديل النصوص (الرسائل) -----------
+# ----------- دوال تعديل النصوص والأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_txt_"))
 def ad_edit_txt_prompt(call):
     bot.answer_callback_query(call.id)
@@ -1798,8 +1801,7 @@ def ad_save_custom_text(message, key):
             )
             if simple_translation:
                 final_text_en = simple_translation
-        except:
-            pass
+        except: pass
             
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
@@ -1809,7 +1811,6 @@ def ad_save_custom_text(message, key):
     
     bot.send_message(message.chat.id, f"✅ <b>تم الحفظ بنجاح!</b>\n\n🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>", parse_mode="HTML")
 
-# ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
 def ad_edit_btn_prompt(call):
     bot.answer_callback_query(call.id)
@@ -1847,14 +1848,59 @@ def ad_save_custom_btn(message, key):
             simple = GoogleTranslator(source='ar', target='en').translate(text_ar)
             if simple and simple != text_ar:
                 text_en = simple
-        except:
-            text_en = text_ar 
+        except: text_en = text_ar 
             
     db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
     db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
     
     emoji_status = f"<code>{emoji_id}</code>" if emoji_id else "لا يوجد"
     bot.send_message(message.chat.id, f"✅ <b>تم الحفظ! وتم تنظيف الرموز القديمة.</b>\n\n🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n🌟 الأيدي للرمز: {emoji_status}", parse_mode="HTML")
+
+# ----------- تعيين أيقونة لمنتج -----------
+@bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
+def ad_prod_emoji_start(call):
+    bot.answer_callback_query(call.id) 
+    prods = list(db.products.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    
+    for p in prods: 
+        p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+        p_id = p.get('id', str(p.get('_id', '')))
+        markup.add(InlineKeyboardButton(f"📦 {clean_name(p_name)}", callback_data=f"set_pemj_{p_id}"))
+        
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    bot.edit_message_text("👇 <b>اختر المنتج الذي تريد تعيين أيقونة له:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_pemj_"))
+def ad_prod_emoji_ask(call):
+    bot.answer_callback_query(call.id) 
+    pid = call.data.replace("set_pemj_", "")
+    msg = bot.send_message(call.message.chat.id, "🌟 <b>أرسل الآن الإيموجي المميز (Premium Emoji) لهذا المنتج:</b>\n(أرسله كرسالة عادية وسأقوم بالتقاطه)", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_prod_emoji_save, pid)
+
+def ad_prod_emoji_save(message, pid):
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ الرجاء إرسال إيموجي.")
+        return
+        
+    emoji_id = None
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == 'custom_emoji':
+                emoji_id = ent.custom_emoji_id
+                break
+                
+    if not emoji_id: 
+        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على رمز Premium (تأكد أنك تستخدم إيموجي مخصص من تيليجرام وليس إيموجي عادي).</b>", parse_mode="HTML")
+        return
+        
+    p = find_product(pid)
+    if p:
+        db.products.update_one({'_id': p['_id']}, {'$set': {'custom_emoji_id': emoji_id}})
+        p_name = p.get('name_ar') or p.get('name_en') or 'المنتج'
+        bot.send_message(message.chat.id, f"✅ <b>تم تعيين الأيقونة بنجاح لمنتج [{p_name}]!</b>\nستظهر الآن بجانب اسمه في قائمة المتجر.", parse_mode="HTML")
+    else:
+        bot.send_message(message.chat.id, "❌ عذراً، لم يتم العثور على المنتج في قاعدة البيانات.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
 def admin_api_main(call):
@@ -2037,8 +2083,6 @@ def admin_edit_opts(call):
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"))
     
-    markup.add(InlineKeyboardButton("🌟 أيقونة المنتج", callback_data=f"ep_icon_{pid}"))
-    
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}"))
     
@@ -2065,30 +2109,8 @@ def admin_edit_prompt(call):
     parts = call.data.split('_', 2)
     field = parts[1]; pid = parts[2]
     
-    if field == "icon":
-        msg = bot.send_message(call.message.chat.id, "🌟 <b>أرسل الرمز التعبيري المميز (Premium Emoji) كرسالة ليتم وضعه كأيقونة للمنتج:</b>", parse_mode="HTML")
-        bot.register_next_step_handler(msg, admin_save_prod_icon, pid)
-        return
-        
     msg = bot.send_message(call.message.chat.id, "Send new value:")
     bot.register_next_step_handler(msg, admin_save_edit, field, pid)
-
-def admin_save_prod_icon(message, pid):
-    emoji_id = None
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == 'custom_emoji':
-                emoji_id = entity.custom_emoji_id
-                break
-                
-    if not emoji_id:
-        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على رمز Premium.</b>", parse_mode="HTML")
-        return
-        
-    p = find_product(pid)
-    if p:
-        db.products.update_one({'_id': p['_id']}, {'$set': {'custom_emoji_id': emoji_id}})
-        bot.send_message(message.chat.id, f"✅ <b>تم تعيين الأيقونة بنجاح لمنتج {p.get('name_ar')}</b>", parse_mode="HTML")
 
 # ----------- إشعار تغيير السعر بتقرير -----------
 def admin_save_edit(message, field, pid):
@@ -2146,6 +2168,7 @@ def admin_del_list(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_"))
 def admin_del_exec(call):
+    bot.answer_callback_query(call.id)
     pid = call.data.replace("del_p_", "")
     try:
         p = find_product(pid)
@@ -2257,6 +2280,7 @@ def admin_stock_save(message, pid):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_view_"))
 def admin_stock_view(call):
+    bot.answer_callback_query(call.id)
     pid = call.data.replace("stk_view_", "")
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
@@ -2295,6 +2319,7 @@ def admin_stock_delcode_exec(message, pid):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_clear_"))
 def admin_stock_clear_exec(call):
+    bot.answer_callback_query(call.id)
     pid = call.data.replace("stk_clear_", "")
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
@@ -2527,6 +2552,7 @@ def admin_fsub_save(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
 def del_fsub_btn(call):
+    bot.answer_callback_query(call.id)
     ch = call.data.replace("del_fsub_", "")
     db.required_channels.delete_one({'channel_id': ch})
     bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
