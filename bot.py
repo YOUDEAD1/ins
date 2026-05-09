@@ -41,48 +41,25 @@ logger = logging.getLogger(__name__)
 # 🔑 1. الإعدادات الأساسية
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
-try:
-    OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
-except ValueError:
-    OWNER_ID = 0
+try: OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
+except ValueError: OWNER_ID = 0
 OWNER_USER = os.getenv('OWNER_USER', '').strip()
 
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
-MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
 
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
-try:
-    STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
-except ValueError:
-    STARS_RATE = 120
+try: STARS_RATE = int(os.getenv('STARS_RATE', '100').strip())
+except ValueError: STARS_RATE = 100
 
 # ============================================================
-# 🌐 2. السيرفر الوهمي
+# 🎨 2. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
 # ============================================================
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write("Bot is alive! 🚀".encode('utf-8'))
-    def log_message(self, format, *args): pass
-
-def keep_alive():
-    port = int(os.environ.get('PORT', 8080))
-    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
-
-threading.Thread(target=keep_alive, daemon=True).start()
-
-# ============================================================
-# 🚀 3. تهيئة البوت وقواعد البيانات وفئة الأزرار المخصصة
-# ============================================================
-bot = telebot.TeleBot(TOKEN)
-
 class CustomInlineButton(InlineKeyboardButton):
     def __init__(self, text, style=None, icon_custom_emoji_id=None, **kwargs):
         super().__init__(text, **kwargs)
@@ -91,11 +68,28 @@ class CustomInlineButton(InlineKeyboardButton):
 
     def to_dict(self):
         d = super().to_dict()
-        if self.style:
-            d['style'] = self.style
-        if self.icon_custom_emoji_id:
-            d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
+        if self.style: d['style'] = self.style
+        if self.icon_custom_emoji_id: d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
+
+# ============================================================
+# 🌐 3. السيرفر الوهمي وقاعدة البيانات
+# ============================================================
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write("Bot is running! 🚀".encode('utf-8'))
+    def log_message(self, format, *args): pass
+
+def keep_alive():
+    port = int(os.environ.get('PORT', 8080))
+    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
+
+threading.Thread(target=keep_alive, daemon=True).start()
+
+bot = telebot.TeleBot(TOKEN)
 
 logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB...")
 try:
@@ -111,7 +105,6 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
-
 PROCESSING_TXS = set()
 tx_lock = threading.Lock()
 
@@ -120,7 +113,7 @@ def get_setting(key, default="Not Set"):
     return res['value'] if res else default
 
 # ============================================================
-# 🤖 4. تهيئة اليوزربوت (Telethon)
+# 🤖 4. تهيئة اليوزربوت (Telethon) - للتفعيلات التلقائية
 # ============================================================
 client = None
 USERBOT_LOOP = None
@@ -202,7 +195,7 @@ def start_dynamic_userbot():
             
         elif "❌ Status: FAILED" in text or "❌ Error" in text:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من تفعيل (التحقق بخطوتين) والبيانات الصحيحة.", parse_mode="HTML")
+            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من البيانات.", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
 
@@ -223,7 +216,6 @@ def start_gemini_session(uid, price):
     global ACTIVE_GEMINI_SESSION
     provider_bot = get_setting("provider_bot", "").replace("@", "")
     ACTIVE_GEMINI_SESSION = {'uid': uid, 'price': price, 'ready': False, 'msg_map': {}}
-    
     bot.send_message(uid, "⏳ <b>جاري تحضير طلبك والاتصال بالنظام...</b>\nيرجى الانتظار قليلاً...", parse_mode="HTML")
     
     async def _init_chat():
@@ -247,14 +239,14 @@ def start_gemini_session(uid, price):
             if not clicked: await client.send_message(provider_bot, "✨ Create verify")
         except Exception as e:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>\nالخطأ البرمجي: <code>{e}</code>", parse_mode="HTML")
+            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
             
     if client and USERBOT_LOOP: asyncio.run_coroutine_threadsafe(_init_chat(), USERBOT_LOOP)
     else:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-        bot.send_message(uid, "❌ <b>النظام غير متصل (اليوزربوت معطل).</b> تم إرجاع رصيدك.", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>النظام غير متصل.</b> تم إرجاع رصيدك.", parse_mode="HTML")
         ACTIVE_GEMINI_SESSION = None
         process_next_gemini()
 
@@ -269,61 +261,31 @@ def add_to_gemini_queue(uid, price):
         start_gemini_session(uid, price)
     else:
         GEMINI_QUEUE.append({'uid': uid, 'price': price})
-        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
+        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}", parse_mode="HTML")
 
 # ============================================================
 # 🌍 5. القواميس الأساسية والنصوص الافتراضية
 # ============================================================
 DEFAULT_BUTTONS = {
     'ar': {
-        'btn_products': '🛒 المنتجات',
-        'btn_deposit': '💳 شحن الرصيد',
-        'btn_profile': '👤 الملف الشخصي',
-        'btn_invite': '👥 الإحالات',
-        'btn_support': '👨‍💻 الدعم الفني',
-        'btn_lang': '🌐 English',
-        'btn_admin': '👑 لوحة الإدارة',
-        'btn_stars': '⭐️ نجوم تيليجرام',
-        'btn_binance': '🟡 Binance Pay',
-        'btn_usdt_trc20': '🟢 USDT (TRC-20)',
-        'btn_usdt_bep20': '🟡 USDT (BEP-20)',
-        'btn_ton': '💎 Toncoin (TON)',
-        'btn_ltc': '🔵 Litecoin (LTC)',
-        'btn_buy_hist': '🛍 المشتريات',
-        'btn_dep_hist': '💳 الإيداعات',
-        'btn_dl_buy': '📄 تحميل المشتريات',
-        'btn_gh': '🎓 تفعيل GitHub',
-        'btn_gemini': '✨ تفعيل Gemini',
-        'btn_refresh': '🔄 تحديث',
-        'btn_main_menu': '🏠 القائمة الرئيسية',
-        'btn_back': '🔙 رجوع',
-        'btn_buy_now': '✅ شراء الآن',
-        'btn_check_sub': '🔄 تحقق من الاشتراك'
+        'btn_products': '🛒 المنتجات', 'btn_deposit': '💳 شحن الرصيد', 'btn_profile': '👤 الملف الشخصي',
+        'btn_invite': '👥 الإحالات', 'btn_support': '👨‍💻 الدعم الفني', 'btn_lang': '🌐 English',
+        'btn_admin': '👑 لوحة الإدارة', 'btn_stars': '⭐️ نجوم تيليجرام', 'btn_binance': '🟡 Binance Pay',
+        'btn_usdt_trc20': '🟢 USDT (TRC-20)', 'btn_usdt_bep20': '🟡 USDT (BEP-20)', 'btn_ton': '💎 Toncoin (TON)',
+        'btn_ltc': '🔵 Litecoin (LTC)', 'btn_buy_hist': '🛍 المشتريات', 'btn_dep_hist': '💳 الإيداعات',
+        'btn_dl_buy': '📄 تحميل المشتريات', 'btn_gh': '🎓 تفعيل GitHub', 'btn_gemini': '✨ تفعيل Gemini',
+        'btn_refresh': '🔄 تحديث', 'btn_main_menu': '🏠 القائمة الرئيسية', 'btn_back': '🔙 رجوع',
+        'btn_buy_now': '✅ شراء الآن', 'btn_check_sub': '🔄 تحقق من الاشتراك'
     },
     'en': {
-        'btn_products': '🛒 Products',
-        'btn_deposit': '💳 Deposit',
-        'btn_profile': '👤 Profile',
-        'btn_invite': '👥 Referrals',
-        'btn_support': '👨‍💻 Support',
-        'btn_lang': '🌐 العربية',
-        'btn_admin': '👑 Admin Panel',
-        'btn_stars': '⭐️ Telegram Stars',
-        'btn_binance': '🟡 Binance Pay',
-        'btn_usdt_trc20': '🟢 USDT (TRC-20)',
-        'btn_usdt_bep20': '🟡 USDT (BEP-20)',
-        'btn_ton': '💎 Toncoin (TON)',
-        'btn_ltc': '🔵 Litecoin (LTC)',
-        'btn_buy_hist': '🛍 Purchases',
-        'btn_dep_hist': '💳 Deposits',
-        'btn_dl_buy': '📄 Download Purchases',
-        'btn_gh': '🎓 GitHub Pack',
-        'btn_gemini': '✨ Gemini Advanced',
-        'btn_refresh': '🔄 Refresh',
-        'btn_main_menu': '🏠 Main Menu',
-        'btn_back': '🔙 Back',
-        'btn_buy_now': '✅ Buy Now',
-        'btn_check_sub': '🔄 Verify Sub'
+        'btn_products': '🛒 Products', 'btn_deposit': '💳 Deposit', 'btn_profile': '👤 Profile',
+        'btn_invite': '👥 Referrals', 'btn_support': '👨‍💻 Support', 'btn_lang': '🌐 العربية',
+        'btn_admin': '👑 Admin Panel', 'btn_stars': '⭐️ Telegram Stars', 'btn_binance': '🟡 Binance Pay',
+        'btn_usdt_trc20': '🟢 USDT (TRC-20)', 'btn_usdt_bep20': '🟡 USDT (BEP-20)', 'btn_ton': '💎 Toncoin (TON)',
+        'btn_ltc': '🔵 Litecoin (LTC)', 'btn_buy_hist': '🛍 Purchases', 'btn_dep_hist': '💳 Deposits',
+        'btn_dl_buy': '📄 Download Purchases', 'btn_gh': '🎓 GitHub Pack', 'btn_gemini': '✨ Gemini Advanced',
+        'btn_refresh': '🔄 Refresh', 'btn_main_menu': '🏠 Main Menu', 'btn_back': '🔙 Back',
+        'btn_buy_now': '✅ Buy Now', 'btn_check_sub': '🔄 Verify Sub'
     }
 }
 
@@ -415,7 +377,7 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 6. دوال مساعدة، الترجمة الآمنة، وتنظيف الرموز
+# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
 # ============================================================
 
 def clean_old_emojis(text):
@@ -426,48 +388,42 @@ def clean_old_emojis(text):
     return text.strip()
 
 def safe_translate(text, target_lang='en'):
+    """الترجمة الآمنة جداً باستخدام صناديق وهمية قوية لحماية الرموز والمتغيرات"""
     try:
-        emoji_pattern = r'<tg-emoji[^>]*>.*?</tg-emoji>'
-        var_pattern = r'\{[^}]+\}'
+        placeholders = []
         
-        emojis = re.findall(emoji_pattern, text)
-        for i, emj in enumerate(emojis):
-            text = text.replace(emj, f' XEMOJIX{i}X ')
-            
-        vars_list = re.findall(var_pattern, text)
-        for i, var in enumerate(vars_list):
-            text = text.replace(var, f' XVARX{i}X ')
-            
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
+        def replacer(match):
+            placeholders.append(match.group(0))
+            return f" 998877{len(placeholders)-1} "
         
-        for i, emj in enumerate(emojis):
-            translated = translated.replace(f' XEMOJIX{i}X ', emj).replace(f'XEMOJIX{i}X', emj)
-            
-        for i, var in enumerate(vars_list):
-            translated = translated.replace(f' XVARX{i}X ', var).replace(f'XVARX{i}X', var)
+        temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
+        temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
+        temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
+        
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_text)
+        
+        for i, ph in enumerate(placeholders):
+            translated = re.sub(fr'\s*998877\s*{i}\s*', ph, translated)
             
         return translated.strip()
     except Exception as e:
         logger.error(f"Safe translation error: {e}")
-        return text
+        return text 
 
 def extract_custom_emojis_to_html(message):
-    if not message.text: return ""
-    if not message.entities: return message.text
-        
-    encoded_text = message.text.encode('utf-16-le')
-    custom_emojis = [e for e in message.entities if e.type == 'custom_emoji']
+    if not message.text or not message.entities:
+        return message.text or ""
     
-    if not custom_emojis: return message.text
-        
-    custom_emojis.sort(key=lambda x: x.offset, reverse=True)
+    text = message.text
+    entities = sorted([e for e in message.entities if e.type == 'custom_emoji'], key=lambda x: x.offset, reverse=True)
     
-    for entity in custom_emojis:
-        start = entity.offset * 2
-        end = (entity.offset + entity.length) * 2
+    encoded_text = text.encode('utf-16-le')
+    for ent in entities:
+        start = ent.offset * 2
+        end = start + (ent.length * 2)
         emoji_char = encoded_text[start:end].decode('utf-16-le')
-        replacement = f'<tg-emoji emoji-id="{entity.custom_emoji_id}">{emoji_char}</tg-emoji>'
-        encoded_text = encoded_text[:start] + replacement.encode('utf-16-le') + encoded_text[end:]
+        html_emoji = f'<tg-emoji emoji-id="{ent.custom_emoji_id}">{emoji_char}</tg-emoji>'
+        encoded_text = encoded_text[:start] + html_emoji.encode('utf-16-le') + encoded_text[end:]
         
     return encoded_text.decode('utf-16-le')
 
@@ -569,7 +525,7 @@ def get_user_data_full(uid):
 
 def get_lang(uid):
     u = get_user_data_full(uid)
-    return u.get('lang', 'ar') if u else 'en'
+    return u.get('lang', 'ar') if u else 'ar' 
 
 def is_user_banned(uid):
     u = get_user_data_full(uid)
@@ -636,7 +592,7 @@ def start_handler(message):
         return
 
     lang = user.get('lang', 'ar')
-    if lang not in ['ar', 'en']: lang = 'en'
+    if lang not in ['ar', 'en']: lang = 'ar'
     
     if not check_forced_sub(uid):
         chans = list(db.required_channels.find())
@@ -654,7 +610,8 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
     markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
     
-    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop"),
+    # زر المنتجات مبرمج ليأخذ اللون الأزرق دائمًا في شاشة البداية 🔵
+    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
     markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"),
                create_btn(uid, 'btn_invite', callback_data="open_invite"))
@@ -1042,7 +999,7 @@ def invite_ui(call):
     except: pass
 
 # ============================================================
-# 🛒 11. المتجر والشراء والترتيب الأبجدي للمنتجات
+# 🛒 11. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
@@ -1072,7 +1029,8 @@ def shop_list_ui(call):
         pid = p.get('id', str(p.get('_id', '')))
         st = get_product_stock_count(pid)
         
-        btn_style = "primary"
+        # 🟢 خضراء للمتوفر ، 🔴 حمراء للمنتهي
+        btn_style = "success" if (is_manual or st > 0) else "danger"
         custom_emoji_id = p.get('custom_emoji_id')
         
         hidden_icon = " 👻(مخفي)" if is_hidden else ""
@@ -1601,7 +1559,7 @@ def credit_user(uid, amt, tx_id, lang, method):
         except: pass
 
 # ============================================================
-# 👑 13. لوحة الإدارة 
+# 👑 13. لوحة الإدارة ونظام التقارير 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -1678,7 +1636,7 @@ def ad_cms_btns_cats_ui(call):
     markup.add(InlineKeyboardButton("🏠 أزرار القائمة الرئيسية", callback_data="ad_cms_b_start"))
     markup.add(InlineKeyboardButton("💳 أزرار الشحن والدفع", callback_data="ad_cms_b_dep"))
     markup.add(InlineKeyboardButton("👤 أزرار الملف والمشتريات", callback_data="ad_cms_b_prof"))
-    markup.add(InlineKeyboardButton("🛒 أزرار المتجر والتنقل", callback_data="ad_cms_b_shop"))
+    markup.add(InlineKeyboardButton("🛒 أزرار المتجر", callback_data="ad_cms_b_shop"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("🎛 <b>تخصيص أزرار البوت:</b>\nاختر القسم:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -1687,7 +1645,6 @@ def ad_cms_btns_list(call):
     bot.answer_callback_query(call.id)
     cat = call.data.replace("ad_cms_b_", "")
     
-    # قاموس لتصنيف الأزرار حسب القسم لسهولة الوصول لها وتعديلها
     btn_categories = {
         'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_admin'],
         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc'],
@@ -1750,7 +1707,6 @@ def ad_save_custom_btn(message, key):
         
     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة التلقائية للزر...")
     
-    # التقاط النص والإيموجي المميز بعد تنظيفه من الرموز العادية القديمة
     text_ar, emoji_id = parse_button_input(message)
     
     current_text, current_emoji = get_btn_data(message.from_user.id, key)
@@ -2405,137 +2361,8 @@ def ad_ugift_exec(message, target_uid):
         show_user_admin_profile(message.chat.id, target_uid)
     except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
 
-@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
-def admin_fsub_list(call):
-    bot.answer_callback_query(call.id)
-    chans = list(db.required_channels.find())
-    markup = InlineKeyboardMarkup(row_width=1)
-    if chans:
-        for c in chans: markup.add(InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}"))
-    markup.add(InlineKeyboardButton("➕ إضافة قناة باليوزر (@)", callback_data="ad_fsub_add"))
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
-    try: bot.edit_message_text("📢 <b>إدارة قنوات الاشتراك الإجباري:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
-def admin_fsub_add(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه:</b> ارفع البوت مشرف أولاً!", parse_mode="HTML")
-    bot.register_next_step_handler(msg, admin_fsub_save)
-
-def admin_fsub_save(message):
-    cid = message.text.strip()
-    if not cid.startswith('@') and not cid.startswith('-100'):
-        bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
-        return
-    try:
-        bot.get_chat_member(cid, bot.get_me().id)
-        db.required_channels.insert_one({'channel_id': cid})
-        bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
-    except:
-        bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
-def del_fsub_btn(call):
-    ch = call.data.replace("del_fsub_", "")
-    db.required_channels.delete_one({'channel_id': ch})
-    bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
-    admin_fsub_list(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_new_admin")
-def admin_add_admin_start(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "👑 Send <b>ID</b> or <b>@username</b>:")
-    bot.register_next_step_handler(msg, admin_add_admin_save)
-
-def admin_add_admin_save(message):
-    target = message.text.strip()
-    if target.startswith('@') or not target.replace('-', '').isdigit():
-        u = db.users.find_one({'username': target.replace('@', '').lower()})
-    else: u = get_user_data_full(int(target))
-    if u:
-        db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_admin': 1}})
-        bot.send_message(message.chat.id, "✅ User promoted.")
-    else: bot.send_message(message.chat.id, "❌ Not found.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_gift")
-def ad_gift_start(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "👤 <b>Send User ID or @username:</b>")
-    bot.register_next_step_handler(msg, ad_gift_val)
-
-def ad_gift_val(message):
-    target = message.text.strip()
-    if target.startswith('@') or not target.replace('-', '').isdigit():
-        u = db.users.find_one({'username': target.replace('@', '').lower()})
-    else: u = get_user_data_full(int(target))
-    if u:
-        msg = bot.send_message(message.from_user.id, f"💰 Amount for {u.get('name')}:")
-        bot.register_next_step_handler(msg, ad_gift_finish, u['user_id'])
-    else: bot.send_message(message.chat.id, "❌ Not found.")
-
-def ad_gift_finish(message, tid):
-    try:
-        val = float(message.text)
-        db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
-        bot.send_message(message.from_user.id, "✅ Done.")
-    except: bot.send_message(message.from_user.id, "❌ Error.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
-def admin_shop_settings(call):
-    bot.answer_callback_query(call.id)
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("💳 Binance Pay ID", callback_data="set_v_wallet"))
-    markup.add(InlineKeyboardButton("🟢 USDT (TRC20)", callback_data="set_v_usdt"),
-               InlineKeyboardButton("🟡 USDT (BEP20)", callback_data="set_v_usdt_bep20"))
-    markup.add(InlineKeyboardButton("💎 TON Address", callback_data="set_v_ton"),
-               InlineKeyboardButton("🔵 LTC Address", callback_data="set_v_ltc"))
-    markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
-    try: bot.edit_message_text("⚙️ <b>Settings:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("set_v_"))
-def admin_set_inputs(call):
-    bot.answer_callback_query(call.id)
-    mode = call.data
-    msg = bot.send_message(call.from_user.id, "Send new value:")
-    bot.register_next_step_handler(msg, admin_save_setting, mode)
-
-def admin_save_setting(message, mode):
-    val = message.text.strip()
-    keys = {
-        "set_v_log": "log_channel", 
-        "set_v_usdt": "usdt_address", 
-        "set_v_ltc": "ltc_address", 
-        "set_v_wallet": "wallet_address",
-        "set_v_usdt_bep20": "usdt_bep20_address",
-        "set_v_ton": "ton_address"
-    }
-    db.settings.update_one({'key': keys[mode]}, {'$set': {'value': val}}, upsert=True)
-    bot.send_message(message.chat.id, "✅ Updated.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "toggle_language")
-def toggle_lang(call):
-    bot.answer_callback_query(call.id)
-    uid = call.from_user.id
-    if is_user_banned(uid): return
-    u = get_user_data_full(uid)
-    new_l = 'en' if u.get('lang', 'ar') == 'ar' else 'ar'
-    db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l}})
-    try: bot.delete_message(call.message.chat.id, call.message.message_id)
-    except: pass
-    start_handler(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
-def refresh_main(call):
-    bot.answer_callback_query(call.id)
-    try: bot.delete_message(call.message.chat.id, call.message.message_id)
-    except: pass
-    start_handler(call)
-
 # ============================================================
-# 🚀 14. تشغيل البوت
+# 🚀 15. التشغيل
 # ============================================================
 def run_bot():
     try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
