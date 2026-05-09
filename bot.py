@@ -41,8 +41,10 @@ logger = logging.getLogger(__name__)
 # 🔑 1. الإعدادات الأساسية
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
-try: OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
-except ValueError: OWNER_ID = 0
+try:
+    OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
+except ValueError:
+    OWNER_ID = 0
 OWNER_USER = os.getenv('OWNER_USER', '').strip()
 
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
@@ -54,8 +56,10 @@ MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
-try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
-except ValueError: STARS_RATE = 120
+try:
+    STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
+except ValueError:
+    STARS_RATE = 120
 
 # ============================================================
 # 🎨 2. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
@@ -68,8 +72,10 @@ class CustomInlineButton(InlineKeyboardButton):
 
     def to_dict(self):
         d = super().to_dict()
-        if self.style: d['style'] = self.style
-        if self.icon_custom_emoji_id: d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
+        if self.style:
+            d['style'] = self.style
+        if self.icon_custom_emoji_id:
+            d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
 
 # ============================================================
@@ -105,6 +111,7 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
+
 PROCESSING_TXS = set()
 tx_lock = threading.Lock()
 
@@ -216,6 +223,7 @@ def start_gemini_session(uid, price):
     global ACTIVE_GEMINI_SESSION
     provider_bot = get_setting("provider_bot", "").replace("@", "")
     ACTIVE_GEMINI_SESSION = {'uid': uid, 'price': price, 'ready': False, 'msg_map': {}}
+    
     bot.send_message(uid, "⏳ <b>جاري تحضير طلبك والاتصال بالنظام...</b>\nيرجى الانتظار قليلاً...", parse_mode="HTML")
     
     async def _init_chat():
@@ -261,31 +269,61 @@ def add_to_gemini_queue(uid, price):
         start_gemini_session(uid, price)
     else:
         GEMINI_QUEUE.append({'uid': uid, 'price': price})
-        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
+        bot.send_message(uid, f"⏳ <b>تم وضعك في ط طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
 
 # ============================================================
 # 🌍 5. القواميس الأساسية والنصوص الافتراضية
 # ============================================================
 DEFAULT_BUTTONS = {
     'ar': {
-        'btn_products': '🛒 المنتجات', 'btn_deposit': '💳 شحن الرصيد', 'btn_profile': '👤 الملف الشخصي',
-        'btn_invite': '👥 الإحالات', 'btn_support': '👨‍💻 الدعم الفني', 'btn_lang': '🌐 English',
-        'btn_admin': '👑 لوحة الإدارة', 'btn_stars': '⭐️ نجوم تيليجرام', 'btn_binance': '🟡 Binance Pay',
-        'btn_usdt_trc20': '🟢 USDT (TRC-20)', 'btn_usdt_bep20': '🟡 USDT (BEP-20)', 'btn_ton': '💎 Toncoin (TON)',
-        'btn_ltc': '🔵 Litecoin (LTC)', 'btn_buy_hist': '🛍 المشتريات', 'btn_dep_hist': '💳 الإيداعات',
-        'btn_dl_buy': '📄 تحميل المشتريات', 'btn_gh': '🎓 تفعيل GitHub', 'btn_gemini': '✨ تفعيل Gemini',
-        'btn_refresh': '🔄 تحديث', 'btn_main_menu': '🏠 القائمة الرئيسية', 'btn_back': '🔙 رجوع',
-        'btn_buy_now': '✅ شراء الآن', 'btn_check_sub': '🔄 تحقق من الاشتراك'
+        'btn_products': 'المنتجات',
+        'btn_deposit': '💳 شحن الرصيد',
+        'btn_profile': '👤 الملف الشخصي',
+        'btn_invite': '👥 الإحالات',
+        'btn_support': '👨‍💻 الدعم الفني',
+        'btn_lang': '🌐 English',
+        'btn_admin': '👑 لوحة الإدارة',
+        'btn_stars': '⭐️ نجوم تيليجرام',
+        'btn_binance': '🟡 Binance Pay',
+        'btn_usdt_trc20': '🟢 USDT (TRC-20)',
+        'btn_usdt_bep20': '🟡 USDT (BEP-20)',
+        'btn_ton': '💎 Toncoin (TON)',
+        'btn_ltc': '🔵 Litecoin (LTC)',
+        'btn_buy_hist': '🛍 المشتريات',
+        'btn_dep_hist': '💳 الإيداعات',
+        'btn_dl_buy': '📄 تحميل المشتريات',
+        'btn_gh': '🎓 تفعيل GitHub',
+        'btn_gemini': '✨ تفعيل Gemini',
+        'btn_refresh': '🔄 تحديث',
+        'btn_main_menu': '🏠 القائمة الرئيسية',
+        'btn_back': '🔙 رجوع',
+        'btn_buy_now': '✅ شراء الآن',
+        'btn_check_sub': '🔄 تحقق من الاشتراك'
     },
     'en': {
-        'btn_products': '🛒 Products', 'btn_deposit': '💳 Deposit', 'btn_profile': '👤 Profile',
-        'btn_invite': '👥 Referrals', 'btn_support': '👨‍💻 Support', 'btn_lang': '🌐 العربية',
-        'btn_admin': '👑 Admin Panel', 'btn_stars': '⭐️ Telegram Stars', 'btn_binance': '🟡 Binance Pay',
-        'btn_usdt_trc20': '🟢 USDT (TRC-20)', 'btn_usdt_bep20': '🟡 USDT (BEP-20)', 'btn_ton': '💎 Toncoin (TON)',
-        'btn_ltc': '🔵 Litecoin (LTC)', 'btn_buy_hist': '🛍 Purchases', 'btn_dep_hist': '💳 Deposits',
-        'btn_dl_buy': '📄 Download Purchases', 'btn_gh': '🎓 GitHub Pack', 'btn_gemini': '✨ Gemini Advanced',
-        'btn_refresh': '🔄 Refresh', 'btn_main_menu': '🏠 Main Menu', 'btn_back': '🔙 Back',
-        'btn_buy_now': '✅ Buy Now', 'btn_check_sub': '🔄 Verify Sub'
+        'btn_products': 'Products',
+        'btn_deposit': '💳 Deposit',
+        'btn_profile': '👤 Profile',
+        'btn_invite': '👥 Referrals',
+        'btn_support': '👨‍💻 Support',
+        'btn_lang': '🌐 العربية',
+        'btn_admin': '👑 Admin Panel',
+        'btn_stars': '⭐️ Telegram Stars',
+        'btn_binance': '🟡 Binance Pay',
+        'btn_usdt_trc20': '🟢 USDT (TRC-20)',
+        'btn_usdt_bep20': '🟡 USDT (BEP-20)',
+        'btn_ton': '💎 Toncoin (TON)',
+        'btn_ltc': '🔵 Litecoin (LTC)',
+        'btn_buy_hist': '🛍 Purchases',
+        'btn_dep_hist': '💳 Deposits',
+        'btn_dl_buy': '📄 Download Purchases',
+        'btn_gh': '🎓 GitHub Pack',
+        'btn_gemini': '✨ Gemini Advanced',
+        'btn_refresh': '🔄 Refresh',
+        'btn_main_menu': '🏠 Main Menu',
+        'btn_back': '🔙 Back',
+        'btn_buy_now': '✅ Buy Now',
+        'btn_check_sub': '🔄 Verify Sub'
     }
 }
 
@@ -377,22 +415,25 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
+# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة، وجلب النصوص)
 # ============================================================
 
 def clean_old_emojis(text):
     """دالة تقوم بمسح الرموز القديمة العادية لتجنب التكرار عند وضع رمز Premium جديد"""
-    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
+    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
     for emj in old_emojis:
         text = text.replace(emj, '')
     return text.strip()
 
 def safe_translate_for_cms(text, target_lang='en'):
     """
-    ترجمة آمنة 100% تحمي:
+    🔧 [مُصلح] ترجمة آمنة 100% تحمي:
     - رموز Premium Emoji (<tg-emoji>...</tg-emoji>)
     - المتغيرات ({0}, {1}, {name}, ...)
     - وسوم HTML (<b>, <code>, <i>, <strike>, ...)
+    
+    تستخدم placeholder قوي بصيغة XZQXZQ_N_QZXQZX يصعب تكسيره
+    وتنظف الأرقام العربية قبل الاستبدال (لأن Google يحوّل الأرقام بالعربية أحياناً)
     """
     if not text or not text.strip():
         return text
@@ -403,10 +444,14 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
+        # استخراج Premium Emojis أولاً (أهم شيء)
         temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
+        # ثم المتغيرات بصيغة {var}
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
+        # ثم باقي وسوم HTML
         temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
+        # إذا لم يتبقَ شيء للترجمة (كل النص رموز/وسوم) أرجع الأصل
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         if not clean_check:
             return text
@@ -416,6 +461,8 @@ def safe_translate_for_cms(text, target_lang='en'):
         if not translated:
             return text
         
+        # 🔑 خطوة حاسمة: تنظيف الأرقام العربية داخل placeholders
+        # Google Translate أحياناً يحوّل XZQXZQ0001QZXQZX إلى XZQXZQ٠٠٠١QZXQZX
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def clean_arabic_digits(match):
             return match.group(0).translate(arabic_to_eng)
@@ -426,6 +473,7 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
+        # ⚠️ الاستبدال من الأكبر للأصغر (تجنب i=1 يتطابق مع i=11)
         for i in range(len(placeholders) - 1, -1, -1):
             ph = placeholders[i]
             pattern = re.compile(
@@ -434,29 +482,34 @@ def safe_translate_for_cms(text, target_lang='en'):
             )
             translated = pattern.sub(ph, translated)
         
+        # تنظيف نهائي: إذا بقي placeholder لم يُستبدل، أرجع النص الأصلي (سلامة)
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
-            logger.warning(f"Translation placeholder leak detected, returning original text")
+            logger.warning(f"Translation placeholder leak detected, returning original Arabic text")
             return text
             
         return translated.strip()
     except Exception as e:
         logger.error(f"Safe translation error: {e}")
-        return text 
+        return text  # في حالة أي خطأ، أرجع النص العربي الأصلي بدلاً من فقدانه
 
 def extract_custom_emojis_to_html(message):
-    if not message.text or not message.entities:
-        return message.text or ""
+    """تحويل الرموز التعبيرية التي أدخلتها في النصوص إلى كود HTML"""
+    if not message.text: return ""
+    if not message.entities: return message.text
+        
+    encoded_text = message.text.encode('utf-16-le')
+    custom_emojis = [e for e in message.entities if e.type == 'custom_emoji']
     
-    text = message.text
-    entities = sorted([e for e in message.entities if e.type == 'custom_emoji'], key=lambda x: x.offset, reverse=True)
+    if not custom_emojis: return message.text
+        
+    custom_emojis.sort(key=lambda x: x.offset, reverse=True)
     
-    encoded_text = text.encode('utf-16-le')
-    for ent in entities:
-        start = ent.offset * 2
-        end = start + (ent.length * 2)
+    for entity in custom_emojis:
+        start = entity.offset * 2
+        end = (entity.offset + entity.length) * 2
         emoji_char = encoded_text[start:end].decode('utf-16-le')
-        html_emoji = f'<tg-emoji emoji-id="{ent.custom_emoji_id}">{emoji_char}</tg-emoji>'
-        encoded_text = encoded_text[:start] + html_emoji.encode('utf-16-le') + encoded_text[end:]
+        replacement = f'<tg-emoji emoji-id="{entity.custom_emoji_id}">{emoji_char}</tg-emoji>'
+        encoded_text = encoded_text[:start] + replacement.encode('utf-16-le') + encoded_text[end:]
         
     return encoded_text.decode('utf-16-le')
 
@@ -479,11 +532,12 @@ def parse_button_input(message):
 
 def get_text(uid, key, *args):
     """
-    استدعاء النص بناءً على لغة المستخدم.
+    🔧 [مُصلح] استدعاء النص بناءً على لغة المستخدم.
     حماية مزدوجة: إذا النص المخصص مفقود أو معطوب، استخدم الافتراضي.
     """
     l = get_lang(uid)
-    if l not in ['ar', 'en']: l = 'ar'
+    if l not in ['ar', 'en']:
+        l = 'ar'
     
     base_text = ""
     try:
@@ -497,26 +551,32 @@ def get_text(uid, key, *args):
         base_text = LANG.get(l, LANG['ar']).get(key, "")
     
     if not base_text:
+        # محاولة أخيرة: استخدم اللغة الأخرى لو الحالية فارغة
         base_text = LANG.get('ar', {}).get(key, "") or LANG.get('en', {}).get(key, "")
     
     if args:
-        try: return base_text.format(*args)
-        except Exception as e: return base_text
+        try:
+            return base_text.format(*args)
+        except Exception as e:
+            logger.error(f"Error formatting string for key {key}: {e}")
+            return base_text
     return base_text
 
 def get_btn_data(uid, key):
     """
-    إرجاع نص الزر ورمز Premium ID بأمان.
+    🔧 [مُصلح] إرجاع نص الزر ورمز Premium ID بأمان.
     إذا النص المخصص فاضي/معطوب، يرجع للافتراضي تلقائياً.
     """
     l = get_lang(uid)
-    if l not in ['ar', 'en']: l = 'ar'
+    if l not in ['ar', 'en']:
+        l = 'ar'
     
     try:
         custom = db.custom_buttons.find_one({'lang': l, 'key': key})
         if custom:
-            text = custom.get('text', '').strip()
+            text = (custom.get('text') or '').strip()
             emoji_id = custom.get('emoji_id', None)
+            # إذا النص فاضي فعلياً (بسبب تخزين قديم)، ارجع الافتراضي
             if not text:
                 default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
                 return default_text, emoji_id
@@ -528,6 +588,7 @@ def get_btn_data(uid, key):
     return default_text, None
 
 def create_btn(uid, key, callback_data=None, url=None, style=None):
+    """توليد الأزرار بأمان لضمان عمل القائمة والرجوع دون توقف"""
     text, emj_id = get_btn_data(uid, key)
     kwargs = {'text': text}
     if callback_data: kwargs['callback_data'] = callback_data
@@ -673,7 +734,7 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
     markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
     
-    # 🔵 إضافة زر المنتجات (أزرق) بأمان
+    # إضافة زر المنتجات (أزرق 🔵) بأمان تام
     markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
     markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"),
@@ -689,12 +750,22 @@ def start_handler(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("init_lang_"))
 def init_lang_selection(call):
+    """🔧 [مُصلح] استخدام replace بدل split لضمان الأمان"""
     bot.answer_callback_query(call.id)
     new_lang = call.data.replace("init_lang_", "").strip()
-    if new_lang not in ['ar', 'en']: new_lang = 'ar' 
-    db.users.update_one({'user_id': call.from_user.id}, {'$set': {'lang': new_lang, 'lang_chosen': True}})
-    try: bot.delete_message(call.message.chat.id, call.message.message_id)
-    except: pass
+    if new_lang not in ['ar', 'en']:
+        new_lang = 'ar'  # fallback آمن
+    
+    db.users.update_one(
+        {'user_id': call.from_user.id},
+        {'$set': {'lang': new_lang, 'lang_chosen': True}}
+    )
+    
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
+    
     call.message.from_user = call.from_user
     start_handler(call.message)
 
@@ -1724,7 +1795,7 @@ def ad_cms_btns_cats_ui(call):
     markup.add(InlineKeyboardButton("🏠 أزرار القائمة الرئيسية", callback_data="ad_cms_b_start"))
     markup.add(InlineKeyboardButton("💳 أزرار الشحن والدفع", callback_data="ad_cms_b_dep"))
     markup.add(InlineKeyboardButton("👤 أزرار الملف والمشتريات", callback_data="ad_cms_b_prof"))
-    markup.add(InlineKeyboardButton("🛒 أزرار المتجر والتنقل", callback_data="ad_cms_b_shop"))
+    markup.add(InlineKeyboardButton("🛒 أزرار المتجر", callback_data="ad_cms_b_shop"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("🎛 <b>تخصيص أزرار البوت:</b>\nاختر القسم:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -1757,24 +1828,63 @@ def ad_edit_txt_prompt(call):
     current_val = db.custom_texts.find_one({'lang': 'ar', 'key': key})
     current_text = current_val['value'] if current_val else LANG['ar'].get(key, "")
 
-    msg_text = f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>\n\n👇 <b>انسخ النص، عدل عليه، وأرسله لي الآن. سيتم ترجمته للإنجليزي تلقائياً مع حماية الرموز!</b>\n(لإلغاء العملية أرسل: الغاء)"
+    msg_text = f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>\n\n👇 <b>انسخ النص، عدل عليه، وأرسله لي الآن (تتم الترجمة مرة واحدة فقط عند الحفظ):</b>\n(لإلغاء العملية أرسل: الغاء)"
     msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
 def ad_save_custom_text(message, key):
+    """🔧 [مُصلح] حماية ضد الترجمة الفاشلة + معاينة للأدمن"""
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
-        
+    
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ يجب إرسال نص.")
+        return
+    
     bot.send_message(message.chat.id, "⏳ جاري حفظ النص وترجمته بشكل آمن إلى الإنجليزية...")
     
+    # استخراج النص العربي مع الحفاظ على Premium Emojis كـ HTML
     final_text_ar = extract_custom_emojis_to_html(message)
+    
+    # ترجمة محمية من Google Translator
     final_text_en = safe_translate_for_cms(final_text_ar, 'en')
     
-    db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
-    db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
+    # تأمين إضافي: إذا الترجمة فشلت ورجعت نفس العربي، استخدم النص الأصلي بدون ترجمة
+    if final_text_en == final_text_ar:
+        try:
+            # محاولة ترجمة بدون أي حماية كملاذ أخير
+            simple_translation = GoogleTranslator(source='ar', target='en').translate(
+                re.sub(r'<[^>]+>', '', final_text_ar)
+            )
+            if simple_translation:
+                final_text_en = simple_translation
+        except:
+            pass
     
-    bot.send_message(message.chat.id, f"✅ <b>تم حفظ النص الجديد بنجاح وترجمته!</b>\n\n🇺🇸 النسخة الإنجليزية التي تم حفظها:\n<code>{html.escape(final_text_en)}</code>", parse_mode="HTML")
+    # حفظ النسختين
+    db.custom_texts.update_one(
+        {'lang': 'ar', 'key': key},
+        {'$set': {'value': final_text_ar}},
+        upsert=True
+    )
+    db.custom_texts.update_one(
+        {'lang': 'en', 'key': key},
+        {'$set': {'value': final_text_en}},
+        upsert=True
+    )
+    
+    # إظهار معاينة للأدمن للتحقق
+    preview_ar = final_text_ar[:200] + ("..." if len(final_text_ar) > 200 else "")
+    preview_en = final_text_en[:200] + ("..." if len(final_text_en) > 200 else "")
+    
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>تم الحفظ بنجاح!</b>\n\n"
+        f"🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n"
+        f"🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>",
+        parse_mode="HTML"
+    )
 
 # ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
@@ -1789,27 +1899,59 @@ def ad_edit_btn_prompt(call):
     bot.register_next_step_handler(msg, ad_save_custom_btn, key)
 
 def ad_save_custom_btn(message, key):
+    """🔧 [مُصلح] حماية الرموز Premium في الأزرار + ضمان عدم فقدان النص"""
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
-        
+    
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ يجب إرسال نص للزر.")
+        return
+    
     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة التلقائية للزر...")
     
     text_ar, emoji_id = parse_button_input(message)
     
-    current_text, current_emoji = get_btn_data(message.from_user.id, key)
-    if not text_ar:
-         text_ar = clean_old_emojis(current_text)
-         if not text_ar: 
-             text_ar = clean_old_emojis(DEFAULT_BUTTONS['ar'].get(key, key))
+    # إذا النص العربي فارغ بعد التنظيف، استخدم النص الافتراضي
+    if not text_ar or not text_ar.strip():
+        current_text, _ = get_btn_data(message.from_user.id, key)
+        text_ar = clean_old_emojis(current_text)
+        if not text_ar or not text_ar.strip():
+            text_ar = clean_old_emojis(DEFAULT_BUTTONS['ar'].get(key, key))
     
+    # ترجمة آمنة
     text_en = safe_translate_for_cms(text_ar, 'en')
     
-    db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
-    db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
+    # ضمان عدم فقدان النص: إذا الترجمة رجّعت نفس العربي، حاول ترجمة بسيطة
+    if text_en == text_ar and text_ar.strip():
+        try:
+            simple = GoogleTranslator(source='ar', target='en').translate(text_ar)
+            if simple and simple != text_ar:
+                text_en = simple
+        except:
+            text_en = text_ar  # fallback
+    
+    # حفظ كلتا اللغتين مع نفس الـ emoji_id (لأن Premium Emoji عالمي)
+    db.custom_buttons.update_one(
+        {'lang': 'ar', 'key': key},
+        {'$set': {'text': text_ar, 'emoji_id': emoji_id}},
+        upsert=True
+    )
+    db.custom_buttons.update_one(
+        {'lang': 'en', 'key': key},
+        {'$set': {'text': text_en, 'emoji_id': emoji_id}},
+        upsert=True
+    )
     
     emoji_status = f"<code>{emoji_id}</code>" if emoji_id else "لا يوجد"
-    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ! وتم حذف الرموز القديمة.</b>\n\n🇸🇦 العربية: {text_ar}\n🇺🇸 الإنجليزية: {text_en}\n🌟 الأيدي للرمز: {emoji_status}", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>تم الحفظ! وتم تنظيف الرموز القديمة.</b>\n\n"
+        f"🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n"
+        f"🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n"
+        f"🌟 الأيدي للرمز: {emoji_status}",
+        parse_mode="HTML"
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
 def admin_api_main(call):
