@@ -41,10 +41,8 @@ logger = logging.getLogger(__name__)
 # 🔑 1. الإعدادات الأساسية
 # ============================================================
 TOKEN = os.getenv('TOKEN', '').strip()
-try:
-    OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
-except ValueError:
-    OWNER_ID = 0
+try: OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
+except ValueError: OWNER_ID = 0
 OWNER_USER = os.getenv('OWNER_USER', '').strip()
 
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
@@ -56,10 +54,8 @@ MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
-try:
-    STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
-except ValueError:
-    STARS_RATE = 120
+try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
+except ValueError: STARS_RATE = 120
 
 # ============================================================
 # 🎨 2. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
@@ -72,10 +68,8 @@ class CustomInlineButton(InlineKeyboardButton):
 
     def to_dict(self):
         d = super().to_dict()
-        if self.style:
-            d['style'] = self.style
-        if self.icon_custom_emoji_id:
-            d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
+        if self.style: d['style'] = self.style
+        if self.icon_custom_emoji_id: d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
 
 # ============================================================
@@ -111,7 +105,6 @@ REFERRAL_REWARD = 0.10
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
-
 PROCESSING_TXS = set()
 tx_lock = threading.Lock()
 
@@ -202,7 +195,7 @@ def start_dynamic_userbot():
             
         elif "❌ Status: FAILED" in text or "❌ Error" in text:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من تفعيل (التحقق بخطوتين) والبيانات الصحيحة.", parse_mode="HTML")
+            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من البيانات.", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
 
@@ -223,7 +216,6 @@ def start_gemini_session(uid, price):
     global ACTIVE_GEMINI_SESSION
     provider_bot = get_setting("provider_bot", "").replace("@", "")
     ACTIVE_GEMINI_SESSION = {'uid': uid, 'price': price, 'ready': False, 'msg_map': {}}
-    
     bot.send_message(uid, "⏳ <b>جاري تحضير طلبك والاتصال بالنظام...</b>\nيرجى الانتظار قليلاً...", parse_mode="HTML")
     
     async def _init_chat():
@@ -247,14 +239,14 @@ def start_gemini_session(uid, price):
             if not clicked: await client.send_message(provider_bot, "✨ Create verify")
         except Exception as e:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>\nالخطأ البرمجي: <code>{e}</code>", parse_mode="HTML")
+            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
             
     if client and USERBOT_LOOP: asyncio.run_coroutine_threadsafe(_init_chat(), USERBOT_LOOP)
     else:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-        bot.send_message(uid, "❌ <b>النظام غير متصل (اليوزربوت معطل).</b> تم إرجاع رصيدك.", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>النظام غير متصل.</b> تم إرجاع رصيدك.", parse_mode="HTML")
         ACTIVE_GEMINI_SESSION = None
         process_next_gemini()
 
@@ -269,14 +261,14 @@ def add_to_gemini_queue(uid, price):
         start_gemini_session(uid, price)
     else:
         GEMINI_QUEUE.append({'uid': uid, 'price': price})
-        bot.send_message(uid, f"⏳ <b>تم وضعك في ط طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
+        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}", parse_mode="HTML")
 
 # ============================================================
 # 🌍 5. القواميس الأساسية والنصوص الافتراضية
 # ============================================================
 DEFAULT_BUTTONS = {
     'ar': {
-        'btn_products': 'المنتجات',
+        'btn_products': '🔵 المنتجات',
         'btn_deposit': '💳 شحن الرصيد',
         'btn_profile': '👤 الملف الشخصي',
         'btn_invite': '👥 الإحالات',
@@ -301,7 +293,7 @@ DEFAULT_BUTTONS = {
         'btn_check_sub': '🔄 تحقق من الاشتراك'
     },
     'en': {
-        'btn_products': 'Products',
+        'btn_products': '🔵 Products',
         'btn_deposit': '💳 Deposit',
         'btn_profile': '👤 Profile',
         'btn_invite': '👥 Referrals',
@@ -331,109 +323,96 @@ LANG = {
     'ar': {
         'welcome': "👋 <b>أهلاً بك في المتجر الاحترافي!</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n👥 المستخدمين: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>",
         'store_title': "🛒 <b>المنتجات المتوفرة:</b>",
-        'new_stock': "🔔 <b>توفر ستوك جديد!</b>\n\n🛍 <b>المنتج:</b> {}\n📦 <b>المتوفر الآن:</b> {}\n\n<i>سارع بالشراء الآن من المتجر! 🛒</i>",
-        'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر! 🛒",
+        'new_stock': "🔔 <b>توفر ستوك جديد!</b>\n\n🛍 <b>المنتج:</b> {}\n📦 <b>المتوفر الآن:</b> {}\n\n<i>سارع بالشراء الآن من المتجر!</i>",
+        'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>نظام الإحالات الذكي</b>\n\n🔗 <b>رابط الدعوة الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك:</b>\n👥 عدد المدعوين: <b>{}</b>\n💰 إجمالي أرباحك: <b>${:.2f}</b>\n\n🎁 <b>القوانين:</b> ستحصل على <b>$0.10</b> رصيد مجاني فور قيام صديقك بأول عملية شراء.",
-        'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>\n<i>جميع بواباتنا آمنة وتتم معالجتها تلقائياً ⚡️</i>",
-        'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ بعد التحويل، <b>أرسل رقم العملية (Order ID) كنص هنا.</b>",
-        'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ <b>الشبكة المقبولة: TRC-20 فقط.</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
-        'dep_ltc': "🔵 <b>شحن عبر Litecoin (LTC)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{}</code>\n\n⚠️ <b>تأكد من الإرسال عبر شبكة اللايتكوين الأساسية (Litecoin Network).</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>",
+        'invite_txt': "👥 <b>نظام الإحالات الذكي</b>\n\n🔗 <b>رابط الدعوة الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك:</b>\n👥 عدد المدعوين: <b>{}</b>\n💰 إجمالي أرباحك: <b>${:.2f}</b>",
+        'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
+        'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
+        'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
+        'dep_ltc': "🔵 <b>شحن عبر Litecoin (LTC)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
         'tx_used': "⚠️ <b>عذراً، هذا الرقم مستخدم مسبقاً!</b>",
-        'crypto_checking': "⏳ <b>جاري فحص العملية بأمان... الرجاء الانتظار.</b>",
-        'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك. نشكر ثقتك بنا.",
-        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه تم إرساله كنص (وليس صورة).",
-        'dep_pending': "⏳ <b>قيد المعالجة!</b> لم يتم تأكيد الحوالة في البلوكتشين بعد، يرجى المحاولة بعد قليل.",
+        'crypto_checking': "⏳ <b>جاري الفحص بأمان...</b>",
+        'dep_success': "✅ <b>اكتمل الإيداع بنجاح!</b>\nتم إضافة <b>${:.2f}</b> إلى رصيدك.",
+        'dep_fail': "❌ <b>لم نجد العملية!</b> تأكد من صحة الرقم وأنه نص.",
+        'dep_pending': "⏳ <b>قيد المعالجة!</b> لم يتم التأكيد في البلوكتشين بعد.",
         'history_title': "📜 <b>سجلاتك المالية (أحدث 5 عمليات):</b>",
         'no_hist': "📭 لا توجد سجلات حتى الآن.",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
-        'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى شحن حسابك أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b> يرجى الانتظار لحين التوفر.",
-        'must_join': "🔒 <b>عذراً، يجب عليك الاشتراك في قنواتنا أولاً لتتمكن من استخدام البوت:</b>",
-        'qty_prompt': "🔢 <b>أرسل الكمية التي تريد شراءها (أرقام فقط):</b>",
-        'qty_invalid': "❌ <b>يرجى إرسال أرقام صحيحة أكبر من صفر!</b>",
-        'qty_not_enough': "❌ <b>عذراً، المتوفر فقط {} قطعة!</b>",
-        'banned': "❌ <b>عذراً، تم حظرك من استخدام هذا البوت نهائياً.</b>",
+        'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى الشحن أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b>",
+        'must_join': "🔒 <b>يجب عليك الاشتراك في قنواتنا أولاً:</b>",
+        'qty_prompt': "🔢 <b>أرسل الكمية (أرقام فقط):</b>",
+        'qty_invalid': "❌ <b>رقم غير صحيح!</b>",
+        'qty_not_enough': "❌ <b>المتوفر فقط {} قطعة!</b>",
+        'banned': "❌ <b>تم حظرك من البوت.</b>",
         
-        # 🎓 GitHub & Gemini Texts
-        'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student Developer Pack</b> 🚀\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ اشتراك رسمي وقانوني 100% لمدة سنتين كاملة.\n✅ وصول كامل لأدوات المطورين.\n\n🚚 <b>نوع التسليم:</b> تلقائي عبر الـ API ⚡\n💰 <b>السعر:</b> <b>${:.2f}</b>",
-        'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n\n⚠️ <b>شرط أساسي:</b> يجب أن يكون حسابك محمياً بـ <b>التحقق بخطوتين (2FA)</b> عبر تطبيق مثل Google Authenticator لتتم العملية بنجاح.\n\n👇 الرجاء إرسال <b>اليوزر نيم (Username)</b> أو الإيميل الخاص بحسابك:",
-        'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n\n👇 الرجاء إرسال <b>الباسوورد (Password)</b> الخاص بالحساب بدقة:",
-        'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n\n📱 الرجاء فتح تطبيق المصادقة الخاص بك، وإرسال <b>كود التحقق (الـ 6 أرقام)</b> الجديد الآن لنسجل الدخول فوراً.\n\n<i>⏳ يرجى إرسال الكود بسرعة قبل أن تنتهي صلاحيته!</i>",
-        'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق والاتصال بالسيرفر، يرجى الانتظار...",
-        'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن في الخلفية.",
-        'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم الطلب: <code>{}</code>)</b>\n⏳ <i>جاري معالجة الحساب...</i>",
-        'gh_success': "🎉 <b>اكتمل التفعيل بنجاح!</b> 🎓\n✅ تم تفعيل اشتراك <b>GitHub Student</b> للحساب: <code>{}</code>\n\n<i>شكراً لثقتك بمتجرنا 🛡️ يمكنك رؤية تفاصيل الطلب في قسم 'المشتريات'.</i>",
-        'gh_fail': "❌ <b>فشل التفعيل!</b>\nالسبب: <b>{}</b>\n\nتم إرجاع <b>${:.2f}</b> إلى رصيدك. تأكد من صحة بياناتك أو حاول لاحقاً.",
-        'gh_processing': "🔄 <b>الطلب قيد التنفيذ (رقم: <code>{}</code>)</b>\n⏳ <i>الخطوة الحالية: <b>{}</b> {} (فحص {}/35)</i>",
-        'gh_timeout': "⚠️ <b>انتهى وقت الانتظار!</b> الطلب استغرق وقتاً طويلاً ومستمر في الخلفية. راجع الإدارة إذا لم يتفعل الحساب.",
-        'gh_api_err': "❌ <b>عذراً، سيرفر التفعيل لا يستجيب.</b> (الخطأ: <code>{}</code>)\nتم إرجاع الرصيد لحسابك.",
-        'gh_conn_err': "❌ <b>حدث خطأ في الاتصال بالسيرفر:</b>\n<code>{}</code>\nتم إرجاع الرصيد.",
-        'gemini_desc': "🤖 <b>تفعيل اشتراك Gemini Advanced</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>المميزات:</b>\n✅ تفعيل رسمي عبر عرض (Google Pixel).\n✅ مساحة تخزين سحابية <b>5 تيرابايت (5TB)</b>.\n✅ اشتراك طويل ومضمون لمدة <b>سنة كاملة</b>.\n✅ وصول كامل لذكاء <b>Gemini Pro</b> المتقدم.\n\n⚠️ <b>شرط أساسي:</b> يجب تفعيل (التحقق بخطوتين 2FA) في حساب جوجل قبل الطلب.\n\n💰 <b>السعر:</b> <b>${:.2f}</b>"
+        # GitHub & Gemini
+        'gh_desc': "🎓 <b>تفعيل اشتراك GitHub Student</b> 🚀\n\n💰 <b>السعر:</b> <b>${:.2f}</b>",
+        'gh_prompt_user': "🎓 <b>الخطوة 1 من 3: (اسم المستخدم)</b>\n👇 الرجاء إرسال <b>اليوزر نيم</b> أو الإيميل:",
+        'gh_prompt_pass': "🔑 <b>الخطوة 2 من 3: (كلمة المرور)</b>\n👇 الرجاء إرسال <b>الباسوورد</b>:",
+        'gh_prompt_2fa': "🛡️ <b>الخطوة 3 من 3: (كود التحقق)</b>\n📱 أرسل <b>كود التحقق (الـ 6 أرقام)</b>:",
+        'gh_deducted': "⏳ <b>تم استلام البيانات!</b> جاري التحقق...",
+        'gh_submitted': "✅ <b>تم تقديم الطلب بنجاح!</b> التفعيل يتم الآن.",
+        'gh_received': "🔄 <b>بدأت عملية التفعيل! (رقم: <code>{}</code>)</b>",
+        'gh_success': "🎉 <b>اكتمل التفعيل بنجاح!</b> 🎓\n✅ تم تفعيل الحساب: <code>{}</code>",
+        'gh_fail': "❌ <b>فشل التفعيل!</b>\nالسبب: <b>{}</b>\nتم إرجاع <b>${:.2f}</b> إلى رصيدك.",
+        'gh_processing': "🔄 <b>الطلب قيد التنفيذ (رقم: <code>{}</code>)</b>\n⏳ <i>الخطوة: <b>{}</b> {} (فحص {}/35)</i>",
+        'gh_timeout': "⚠️ <b>انتهى وقت الانتظار!</b> الطلب مستمر في الخلفية.",
+        'gh_conn_err': "❌ <b>حدث خطأ في الاتصال:</b>\n<code>{}</code>\nتم إرجاع الرصيد.",
+        'gemini_desc': "🤖 <b>تفعيل اشتراك Gemini Advanced</b>\n\n💰 <b>السعر:</b> <b>${:.2f}</b>"
     },
     'en': {
         'welcome': "👋 <b>Welcome to the Pro Shop!</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n👥 Users: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>",
         'store_title': "🛒 <b>Available Products:</b>",
-        'new_stock': "🔔 <b>New Stock Available!</b>\n\n🛍 <b>Product:</b> {}\n📦 <b>Available Now:</b> {}\n\n<i>Hurry up and buy now! 🛒</i>",
-        'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: Only <b>${}</b>!\n\nHurry up and buy now! 🛒",
+        'new_stock': "🔔 <b>New Stock Available!</b>\n\n🛍 <b>Product:</b> {}\n📦 <b>Available Now:</b> {}\n\n<i>Buy now!</i>",
+        'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>Smart Referrals</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Stats:</b>\n👥 Invited: <b>{}</b>\n💰 Earned: <b>${:.2f}</b>\n\n🎁 <b>Rule:</b> Earn <b>$0.10</b> free balance after your friend's first purchase.",
-        'dep_choose': "💳 <b>Choose payment method:</b>\n<i>All gateways are 100% secure and automated ⚡️</i>",
+        'invite_txt': "👥 <b>Smart Referrals</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Stats:</b>\n👥 Invited: <b>{}</b>\n💰 Earned: <b>${:.2f}</b>",
+        'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
-        'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ <b>Network: TRC-20 ONLY.</b>\n⚠️ Send <b>TxID (Hash)</b> here as text.",
-        'dep_ltc': "🔵 <b>Litecoin (LTC) Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ <b>Network: Litecoin Native.</b>\n⚠️ Send <b>TxID (Hash)</b> here as text.",
+        'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
+        'dep_ltc': "🔵 <b>Litecoin (LTC) Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
         'tx_used': "⚠️ <b>ID already used!</b>",
-        'crypto_checking': "⏳ <b>Verifying securely... Please wait.</b>",
-        'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance. Thank you!",
+        'crypto_checking': "⏳ <b>Verifying securely...</b>",
+        'dep_success': "✅ <b>Deposit Successful!</b>\n<b>${:.2f}</b> added to your balance.",
         'dep_fail': "❌ <b>Not found!</b> Check ID and send text, not an image.",
-        'dep_pending': "⏳ <b>Pending!</b> Not confirmed on blockchain yet. Try again shortly.",
+        'dep_pending': "⏳ <b>Pending!</b> Not confirmed on blockchain yet.",
         'history_title': "📜 <b>Your Financial Records:</b>",
         'no_hist': "📭 No records yet.",
-        'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}\n\n<i>Thank you for choosing us 🛡️</i>",
+        'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}\n",
         'no_balance': "❌ <b>Low balance!</b> Please deposit.", 'out_stock': "❌ <b>Out of stock!</b>",
-        'must_join': "🔒 <b>You must join our channels first to use the bot:</b>",
-        'qty_prompt': "🔢 <b>Enter the quantity you want to buy (numbers only):</b>",
-        'qty_invalid': "❌ <b>Please send valid numbers > 0!</b>",
+        'must_join': "🔒 <b>You must join our channels first:</b>",
+        'qty_prompt': "🔢 <b>Enter quantity:</b>",
+        'qty_invalid': "❌ <b>Invalid number!</b>",
         'qty_not_enough': "❌ <b>Only {} pieces available!</b>",
-        'banned': "❌ <b>Sorry, you have been permanently banned from using this bot.</b>",
+        'banned': "❌ <b>You are banned.</b>",
         
-        # 🎓 GitHub & Gemini Texts
-        'gh_desc': "🎓 <b>GitHub Student Developer Pack Activation</b> 🚀\n\n🚚 <b>Delivery:</b> Auto via API ⚡\n💰 <b>Price:</b> <b>${:.2f}</b>",
-        'gh_prompt_user': "🎓 <b>Step 1 of 3: (Username)</b>\n\n⚠️ <b>Prerequisite:</b> Your account MUST have <b>Two-Factor Authentication (2FA)</b> enabled via an authenticator app to proceed.\n\n👇 Please send your GitHub <b>Username or Email</b>:",
-        'gh_prompt_pass': "🔑 <b>Step 2 of 3: (Password)</b>\n\n👇 Please send your GitHub <b>Password</b>:",
-        'gh_prompt_2fa': "🛡️ <b>Step 3 of 3: (2FA Code)</b>\n\n📱 Please open your authenticator app and send a fresh <b>6-digit code</b> now so we can log in immediately.\n\n<i>⏳ Please send it quickly before it expires!</i>",
-        'gh_deducted': "⏳ <b>Data received!</b> Verifying and connecting to the server, please wait...",
-        'gh_submitted': "✅ <b>Request submitted successfully!</b> Activation is processing.",
-        'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>\n⏳ <i>Processing account...</i>",
-        'gh_success': "🎉 <b>Activation Completed!</b> 🎓\n✅ <b>GitHub Student</b> activated for: <code>{}</code>\n\n<i>Thank you for choosing us 🛡️ You can view the receipt in 'Purchases'.</i>",
-        'gh_fail': "❌ <b>Activation Failed!</b>\nReason: <b>{}</b>\n\n<b>${:.2f}</b> has been refunded. Check your details or try again later.",
-        'gh_processing': "🔄 <b>Processing request (ID: <code>{}</code>)</b>\n⏳ <i>Current Step: <b>{}</b> {} (Check {}/35)</i>",
-        'gh_timeout': "⚠️ <b>Timeout!</b> The request is taking too long but running in the background. Contact support if not activated.",
-        'gh_api_err': "❌ <b>Server is not responding.</b> (Error: <code>{}</code>)\nBalance refunded.",
-        'gh_conn_err': "❌ <b>Connection error:</b>\n<code>{}</code>\nBalance refunded.",
-        'gemini_desc': "🤖 <b>Gemini Advanced Activation</b>\n━━━━━━━━━━━━━━━━━━\n🔹 <b>Features:</b>\n✅ Official activation via (Google Pixel) promo.\n✅ Huge <b>5 Terabytes (5TB)</b> cloud storage.\n✅ Full <b>1-Year</b> subscription.\n✅ Full access to advanced <b>Gemini Pro</b> AI.\n\n⚠️ <b>Important:</b> Enable 2FA on your Google account before ordering.\n\n💰 <b>Price:</b> <b>${:.2f}</b>"
+        'gh_desc': "🎓 <b>GitHub Student Pack Activation</b>\n\n💰 <b>Price:</b> <b>${:.2f}</b>",
+        'gh_prompt_user': "🎓 <b>Step 1 of 3:</b>\n👇 Send your GitHub <b>Username or Email</b>:",
+        'gh_prompt_pass': "🔑 <b>Step 2 of 3:</b>\n👇 Send your GitHub <b>Password</b>:",
+        'gh_prompt_2fa': "🛡️ <b>Step 3 of 3:</b>\n📱 Send <b>2FA Code</b>:",
+        'gh_deducted': "⏳ <b>Data received!</b> Verifying...",
+        'gh_submitted': "✅ <b>Request submitted!</b> Activation is processing.",
+        'gh_received': "🔄 <b>Activation started! (ID: <code>{}</code>)</b>",
+        'gh_success': "🎉 <b>Activation Completed!</b> 🎓\n✅ Account: <code>{}</code>",
+        'gh_fail': "❌ <b>Failed!</b>\nReason: <b>{}</b>\nRefunded <b>${:.2f}</b>.",
+        'gh_processing': "🔄 <b>Processing (ID: <code>{}</code>)</b>\n⏳ <i>Step: <b>{}</b> {} ({}/35)</i>",
+        'gh_timeout': "⚠️ <b>Timeout!</b> Processing in background.",
+        'gh_conn_err': "❌ <b>Connection error:</b>\n<code>{}</code>\nRefunded.",
+        'gemini_desc': "🤖 <b>Gemini Advanced Activation</b>\n\n💰 <b>Price:</b> <b>${:.2f}</b>"
     }
 }
 
 # ============================================================
-# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة، وجلب النصوص)
+# 🛠️ 6. محرك الـ CMS (بدون ترجمة تلقائية للأزرار لحماية الرموز)
 # ============================================================
-
-def clean_old_emojis(text):
-    """دالة تقوم بمسح الرموز القديمة العادية لتجنب التكرار عند وضع رمز Premium جديد"""
-    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
-    for emj in old_emojis:
-        text = text.replace(emj, '')
-    return text.strip()
 
 def safe_translate_for_cms(text, target_lang='en'):
     """
-    🔧 [مُصلح] ترجمة آمنة 100% تحمي:
+    ترجمة آمنة 100% تحمي:
     - رموز Premium Emoji (<tg-emoji>...</tg-emoji>)
     - المتغيرات ({0}, {1}, {name}, ...)
     - وسوم HTML (<b>, <code>, <i>, <strike>, ...)
-    
-    تستخدم placeholder قوي بصيغة XZQXZQ_N_QZXQZX يصعب تكسيره
-    وتنظف الأرقام العربية قبل الاستبدال (لأن Google يحوّل الأرقام بالعربية أحياناً)
     """
     if not text or not text.strip():
         return text
@@ -444,14 +423,10 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
-        # استخراج Premium Emojis أولاً (أهم شيء)
         temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
-        # ثم المتغيرات بصيغة {var}
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
-        # ثم باقي وسوم HTML
         temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
-        # إذا لم يتبقَ شيء للترجمة (كل النص رموز/وسوم) أرجع الأصل
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         if not clean_check:
             return text
@@ -461,8 +436,6 @@ def safe_translate_for_cms(text, target_lang='en'):
         if not translated:
             return text
         
-        # 🔑 خطوة حاسمة: تنظيف الأرقام العربية داخل placeholders
-        # Google Translate أحياناً يحوّل XZQXZQ0001QZXQZX إلى XZQXZQ٠٠٠١QZXQZX
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def clean_arabic_digits(match):
             return match.group(0).translate(arabic_to_eng)
@@ -473,7 +446,6 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
-        # ⚠️ الاستبدال من الأكبر للأصغر (تجنب i=1 يتطابق مع i=11)
         for i in range(len(placeholders) - 1, -1, -1):
             ph = placeholders[i]
             pattern = re.compile(
@@ -482,41 +454,34 @@ def safe_translate_for_cms(text, target_lang='en'):
             )
             translated = pattern.sub(ph, translated)
         
-        # تنظيف نهائي: إذا بقي placeholder لم يُستبدل، أرجع النص الأصلي (سلامة)
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
-            logger.warning(f"Translation placeholder leak detected, returning original Arabic text")
             return text
             
         return translated.strip()
     except Exception as e:
-        logger.error(f"Safe translation error: {e}")
-        return text  # في حالة أي خطأ، أرجع النص العربي الأصلي بدلاً من فقدانه
+        return text 
 
 def extract_custom_emojis_to_html(message):
-    """تحويل الرموز التعبيرية التي أدخلتها في النصوص إلى كود HTML"""
-    if not message.text: return ""
-    if not message.entities: return message.text
-        
-    encoded_text = message.text.encode('utf-16-le')
-    custom_emojis = [e for e in message.entities if e.type == 'custom_emoji']
+    if not message.text or not message.entities:
+        return message.text or ""
     
-    if not custom_emojis: return message.text
-        
-    custom_emojis.sort(key=lambda x: x.offset, reverse=True)
+    text = message.text
+    entities = sorted([e for e in message.entities if e.type == 'custom_emoji'], key=lambda x: x.offset, reverse=True)
     
-    for entity in custom_emojis:
-        start = entity.offset * 2
-        end = (entity.offset + entity.length) * 2
+    encoded_text = text.encode('utf-16-le')
+    for ent in entities:
+        start = ent.offset * 2
+        end = start + (ent.length * 2)
         emoji_char = encoded_text[start:end].decode('utf-16-le')
-        replacement = f'<tg-emoji emoji-id="{entity.custom_emoji_id}">{emoji_char}</tg-emoji>'
-        encoded_text = encoded_text[:start] + replacement.encode('utf-16-le') + encoded_text[end:]
+        html_emoji = f'<tg-emoji emoji-id="{ent.custom_emoji_id}">{emoji_char}</tg-emoji>'
+        encoded_text = encoded_text[:start] + html_emoji.encode('utf-16-le') + encoded_text[end:]
         
     return encoded_text.decode('utf-16-le')
 
 def parse_button_input(message):
     """
-    تحليل رسالة الإدارة لاستخراج اسم الزر الجديد والتقاط ID الإيموجي المميز،
-    ثم تنظيف النص من الرموز العادية القديمة لمنع التكرار.
+    التقاط الرمز المميز الجديد للأزرار. 
+    ملاحظة هامة: تم إيقاف تنظيف ومسح الرموز العادية هنا لكي تظل أزرارك كما أدخلتها بالضبط.
     """
     text = message.text
     emoji_id = None
@@ -525,16 +490,12 @@ def parse_button_input(message):
             if ent.type == 'custom_emoji':
                 emoji_id = ent.custom_emoji_id
                 emoji_char = message.text[ent.offset:ent.offset+ent.length]
-                text = text.replace(emoji_char, '')
+                text = text.replace(emoji_char, '', 1) # يحذف الرمز المميز فقط ليضعه كأيقونة
                 break
-    text = clean_old_emojis(text)
-    return text, emoji_id
+    return text.strip(), emoji_id
 
 def get_text(uid, key, *args):
-    """
-    🔧 [مُصلح] استدعاء النص بناءً على لغة المستخدم.
-    حماية مزدوجة: إذا النص المخصص مفقود أو معطوب، استخدم الافتراضي.
-    """
+    """استدعاء النص بناءً على لغة المستخدم."""
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
@@ -547,26 +508,20 @@ def get_text(uid, key, *args):
         else:
             base_text = LANG.get(l, LANG['ar']).get(key, "")
     except Exception as e:
-        logger.error(f"get_text DB error: {e}")
         base_text = LANG.get(l, LANG['ar']).get(key, "")
     
     if not base_text:
-        # محاولة أخيرة: استخدم اللغة الأخرى لو الحالية فارغة
         base_text = LANG.get('ar', {}).get(key, "") or LANG.get('en', {}).get(key, "")
     
     if args:
         try:
             return base_text.format(*args)
         except Exception as e:
-            logger.error(f"Error formatting string for key {key}: {e}")
             return base_text
     return base_text
 
 def get_btn_data(uid, key):
-    """
-    🔧 [مُصلح] إرجاع نص الزر ورمز Premium ID بأمان.
-    إذا النص المخصص فاضي/معطوب، يرجع للافتراضي تلقائياً.
-    """
+    """إرجاع نص الزر ورمز Premium ID بأمان."""
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
@@ -574,27 +529,26 @@ def get_btn_data(uid, key):
     try:
         custom = db.custom_buttons.find_one({'lang': l, 'key': key})
         if custom:
-            text = (custom.get('text') or '').strip()
+            text = custom.get('text', '').strip()
             emoji_id = custom.get('emoji_id', None)
-            # إذا النص فاضي فعلياً (بسبب تخزين قديم)، ارجع الافتراضي
             if not text:
                 default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
                 return default_text, emoji_id
             return text, emoji_id
     except Exception as e:
-        logger.error(f"get_btn_data DB error: {e}")
+        pass
     
     default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
     return default_text, None
 
 def create_btn(uid, key, callback_data=None, url=None, style=None):
-    """توليد الأزرار بأمان لضمان عمل القائمة والرجوع دون توقف"""
+    """بناء الأزرار القياسية المستقرة لتجنب مشاكل Telegram API"""
     text, emj_id = get_btn_data(uid, key)
     kwargs = {'text': text}
     if callback_data: kwargs['callback_data'] = callback_data
     if url: kwargs['url'] = url
-    if style: kwargs['style'] = style
     if emj_id: kwargs['icon_custom_emoji_id'] = emj_id
+    # ملاحظة: تم إلغاء خاصية style لأنها تكسر الأزرار الشفافة
     return CustomInlineButton(**kwargs)
 
 def clean_name(text):
@@ -631,7 +585,7 @@ def find_product(pid):
                 if p: return p
             except: pass
     except Exception as e:
-        logger.error(f"Error in find_product function: {e}")
+        pass
     return None
 
 def get_product_stock_count(pid):
@@ -734,8 +688,7 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
     markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
     
-    # إضافة زر المنتجات (أزرق 🔵) بأمان تام
-    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
+    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
     markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"),
                create_btn(uid, 'btn_invite', callback_data="open_invite"))
@@ -750,22 +703,16 @@ def start_handler(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("init_lang_"))
 def init_lang_selection(call):
-    """🔧 [مُصلح] استخدام replace بدل split لضمان الأمان"""
     bot.answer_callback_query(call.id)
     new_lang = call.data.replace("init_lang_", "").strip()
     if new_lang not in ['ar', 'en']:
-        new_lang = 'ar'  # fallback آمن
-    
+        new_lang = 'ar'
     db.users.update_one(
         {'user_id': call.from_user.id},
         {'$set': {'lang': new_lang, 'lang_chosen': True}}
     )
-    
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except:
-        pass
-    
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except: pass
     call.message.from_user = call.from_user
     start_handler(call.message)
 
@@ -1187,21 +1134,21 @@ def shop_list_ui(call):
         st = get_product_stock_count(pid)
         
         # 🟢 خضراء للمتوفر ، 🔴 حمراء للمنتهي
-        btn_style = "success" if (is_manual or st > 0) else "danger"
-        custom_emoji_id = p.get('custom_emoji_id')
+        status_emoji = "🟢" if (is_manual or st > 0) else "🔴"
         
         hidden_icon = " 👻(مخفي)" if is_hidden else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n 
         
         st_text = "FW" if is_manual else str(st)
-        btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+        btn_text = f"{status_emoji} {short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
         
         btn_kwargs = {
             'text': btn_text,
-            'callback_data': f"vi_p_{pid}",
-            'style': btn_style
+            'callback_data': f"vi_p_{pid}"
         }
+        
+        custom_emoji_id = p.get('custom_emoji_id')
         if custom_emoji_id:
             btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             
@@ -1795,7 +1742,7 @@ def ad_cms_btns_cats_ui(call):
     markup.add(InlineKeyboardButton("🏠 أزرار القائمة الرئيسية", callback_data="ad_cms_b_start"))
     markup.add(InlineKeyboardButton("💳 أزرار الشحن والدفع", callback_data="ad_cms_b_dep"))
     markup.add(InlineKeyboardButton("👤 أزرار الملف والمشتريات", callback_data="ad_cms_b_prof"))
-    markup.add(InlineKeyboardButton("🛒 أزرار المتجر", callback_data="ad_cms_b_shop"))
+    markup.add(InlineKeyboardButton("🛒 أزرار المتجر والتنقل", callback_data="ad_cms_b_shop"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("🎛 <b>تخصيص أزرار البوت:</b>\nاختر القسم:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -1828,32 +1775,26 @@ def ad_edit_txt_prompt(call):
     current_val = db.custom_texts.find_one({'lang': 'ar', 'key': key})
     current_text = current_val['value'] if current_val else LANG['ar'].get(key, "")
 
-    msg_text = f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>\n\n👇 <b>انسخ النص، عدل عليه، وأرسله لي الآن (تتم الترجمة مرة واحدة فقط عند الحفظ):</b>\n(لإلغاء العملية أرسل: الغاء)"
+    msg_text = f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>\n\n👇 <b>انسخ النص، عدل عليه، وأرسله لي الآن. سيتم ترجمته للإنجليزي تلقائياً مع حماية الرموز!</b>\n(لإلغاء العملية أرسل: الغاء)"
     msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
 def ad_save_custom_text(message, key):
-    """🔧 [مُصلح] حماية ضد الترجمة الفاشلة + معاينة للأدمن"""
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
-    
+        
     if not message.text:
         bot.send_message(message.chat.id, "❌ يجب إرسال نص.")
         return
-    
+        
     bot.send_message(message.chat.id, "⏳ جاري حفظ النص وترجمته بشكل آمن إلى الإنجليزية...")
     
-    # استخراج النص العربي مع الحفاظ على Premium Emojis كـ HTML
     final_text_ar = extract_custom_emojis_to_html(message)
-    
-    # ترجمة محمية من Google Translator
     final_text_en = safe_translate_for_cms(final_text_ar, 'en')
     
-    # تأمين إضافي: إذا الترجمة فشلت ورجعت نفس العربي، استخدم النص الأصلي بدون ترجمة
     if final_text_en == final_text_ar:
         try:
-            # محاولة ترجمة بدون أي حماية كملاذ أخير
             simple_translation = GoogleTranslator(source='ar', target='en').translate(
                 re.sub(r'<[^>]+>', '', final_text_ar)
             )
@@ -1861,30 +1802,14 @@ def ad_save_custom_text(message, key):
                 final_text_en = simple_translation
         except:
             pass
+            
+    db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
+    db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
     
-    # حفظ النسختين
-    db.custom_texts.update_one(
-        {'lang': 'ar', 'key': key},
-        {'$set': {'value': final_text_ar}},
-        upsert=True
-    )
-    db.custom_texts.update_one(
-        {'lang': 'en', 'key': key},
-        {'$set': {'value': final_text_en}},
-        upsert=True
-    )
-    
-    # إظهار معاينة للأدمن للتحقق
     preview_ar = final_text_ar[:200] + ("..." if len(final_text_ar) > 200 else "")
     preview_en = final_text_en[:200] + ("..." if len(final_text_en) > 200 else "")
     
-    bot.send_message(
-        message.chat.id,
-        f"✅ <b>تم الحفظ بنجاح!</b>\n\n"
-        f"🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n"
-        f"🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>",
-        parse_mode="HTML"
-    )
+    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ بنجاح!</b>\n\n🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>", parse_mode="HTML")
 
 # ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
@@ -1899,59 +1824,39 @@ def ad_edit_btn_prompt(call):
     bot.register_next_step_handler(msg, ad_save_custom_btn, key)
 
 def ad_save_custom_btn(message, key):
-    """🔧 [مُصلح] حماية الرموز Premium في الأزرار + ضمان عدم فقدان النص"""
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
-    
+        
     if not message.text:
         bot.send_message(message.chat.id, "❌ يجب إرسال نص للزر.")
         return
-    
+        
     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة التلقائية للزر...")
     
     text_ar, emoji_id = parse_button_input(message)
     
-    # إذا النص العربي فارغ بعد التنظيف، استخدم النص الافتراضي
     if not text_ar or not text_ar.strip():
         current_text, _ = get_btn_data(message.from_user.id, key)
         text_ar = clean_old_emojis(current_text)
         if not text_ar or not text_ar.strip():
             text_ar = clean_old_emojis(DEFAULT_BUTTONS['ar'].get(key, key))
-    
-    # ترجمة آمنة
+            
     text_en = safe_translate_for_cms(text_ar, 'en')
     
-    # ضمان عدم فقدان النص: إذا الترجمة رجّعت نفس العربي، حاول ترجمة بسيطة
     if text_en == text_ar and text_ar.strip():
         try:
             simple = GoogleTranslator(source='ar', target='en').translate(text_ar)
             if simple and simple != text_ar:
                 text_en = simple
         except:
-            text_en = text_ar  # fallback
-    
-    # حفظ كلتا اللغتين مع نفس الـ emoji_id (لأن Premium Emoji عالمي)
-    db.custom_buttons.update_one(
-        {'lang': 'ar', 'key': key},
-        {'$set': {'text': text_ar, 'emoji_id': emoji_id}},
-        upsert=True
-    )
-    db.custom_buttons.update_one(
-        {'lang': 'en', 'key': key},
-        {'$set': {'text': text_en, 'emoji_id': emoji_id}},
-        upsert=True
-    )
+            text_en = text_ar 
+            
+    db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
+    db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
     
     emoji_status = f"<code>{emoji_id}</code>" if emoji_id else "لا يوجد"
-    bot.send_message(
-        message.chat.id,
-        f"✅ <b>تم الحفظ! وتم تنظيف الرموز القديمة.</b>\n\n"
-        f"🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n"
-        f"🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n"
-        f"🌟 الأيدي للرمز: {emoji_status}",
-        parse_mode="HTML"
-    )
+    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ! وتم تنظيف الرموز القديمة.</b>\n\n🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n🌟 الأيدي للرمز: {emoji_status}", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
 def admin_api_main(call):
