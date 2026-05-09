@@ -195,7 +195,7 @@ def start_dynamic_userbot():
             
         elif "❌ Status: FAILED" in text or "❌ Error" in text:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من البيانات.", parse_mode="HTML")
+            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من تفعيل (التحقق بخطوتين) والبيانات الصحيحة.", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
 
@@ -239,14 +239,14 @@ def start_gemini_session(uid, price):
             if not clicked: await client.send_message(provider_bot, "✨ Create verify")
         except Exception as e:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>", parse_mode="HTML")
+            bot.send_message(uid, f"❌ <b>فشل الاتصال بمزود الخدمة. تم إرجاع رصيدك.</b>\nالخطأ البرمجي: <code>{e}</code>", parse_mode="HTML")
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
             
     if client and USERBOT_LOOP: asyncio.run_coroutine_threadsafe(_init_chat(), USERBOT_LOOP)
     else:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-        bot.send_message(uid, "❌ <b>النظام غير متصل.</b> تم إرجاع رصيدك.", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>النظام غير متصل (اليوزربوت معطل).</b> تم إرجاع رصيدك.", parse_mode="HTML")
         ACTIVE_GEMINI_SESSION = None
         process_next_gemini()
 
@@ -261,7 +261,7 @@ def add_to_gemini_queue(uid, price):
         start_gemini_session(uid, price)
     else:
         GEMINI_QUEUE.append({'uid': uid, 'price': price})
-        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}", parse_mode="HTML")
+        bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
 
 # ============================================================
 # 🌍 5. القواميس الأساسية والنصوص الافتراضية
@@ -404,16 +404,16 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 6. محرك الـ CMS (بدون ترجمة تلقائية للأزرار لحماية الرموز)
+# 🛠️ 6. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
 # ============================================================
 
+def clean_old_emojis(text):
+    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
+    for emj in old_emojis:
+        text = text.replace(emj, '')
+    return text.strip()
+
 def safe_translate_for_cms(text, target_lang='en'):
-    """
-    ترجمة آمنة 100% تحمي:
-    - رموز Premium Emoji (<tg-emoji>...</tg-emoji>)
-    - المتغيرات ({0}, {1}, {name}, ...)
-    - وسوم HTML (<b>, <code>, <i>, <strike>, ...)
-    """
     if not text or not text.strip():
         return text
     try:
@@ -455,10 +455,12 @@ def safe_translate_for_cms(text, target_lang='en'):
             translated = pattern.sub(ph, translated)
         
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
+            logger.warning(f"Translation placeholder leak detected")
             return text
             
         return translated.strip()
     except Exception as e:
+        logger.error(f"Safe translation error: {e}")
         return text 
 
 def extract_custom_emojis_to_html(message):
@@ -479,10 +481,6 @@ def extract_custom_emojis_to_html(message):
     return encoded_text.decode('utf-16-le')
 
 def parse_button_input(message):
-    """
-    التقاط الرمز المميز الجديد للأزرار. 
-    ملاحظة هامة: تم إيقاف تنظيف ومسح الرموز العادية هنا لكي تظل أزرارك كما أدخلتها بالضبط.
-    """
     text = message.text
     emoji_id = None
     if message.entities:
@@ -490,12 +488,11 @@ def parse_button_input(message):
             if ent.type == 'custom_emoji':
                 emoji_id = ent.custom_emoji_id
                 emoji_char = message.text[ent.offset:ent.offset+ent.length]
-                text = text.replace(emoji_char, '', 1) # يحذف الرمز المميز فقط ليضعه كأيقونة
+                text = text.replace(emoji_char, '', 1) 
                 break
     return text.strip(), emoji_id
 
 def get_text(uid, key, *args):
-    """استدعاء النص بناءً على لغة المستخدم."""
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
@@ -508,6 +505,7 @@ def get_text(uid, key, *args):
         else:
             base_text = LANG.get(l, LANG['ar']).get(key, "")
     except Exception as e:
+        logger.error(f"get_text DB error: {e}")
         base_text = LANG.get(l, LANG['ar']).get(key, "")
     
     if not base_text:
@@ -521,7 +519,6 @@ def get_text(uid, key, *args):
     return base_text
 
 def get_btn_data(uid, key):
-    """إرجاع نص الزر ورمز Premium ID بأمان."""
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
@@ -542,13 +539,11 @@ def get_btn_data(uid, key):
     return default_text, None
 
 def create_btn(uid, key, callback_data=None, url=None, style=None):
-    """بناء الأزرار القياسية المستقرة لتجنب مشاكل Telegram API"""
     text, emj_id = get_btn_data(uid, key)
     kwargs = {'text': text}
     if callback_data: kwargs['callback_data'] = callback_data
     if url: kwargs['url'] = url
     if emj_id: kwargs['icon_custom_emoji_id'] = emj_id
-    # ملاحظة: تم إلغاء خاصية style لأنها تكسر الأزرار الشفافة
     return CustomInlineButton(**kwargs)
 
 def clean_name(text):
@@ -1460,8 +1455,9 @@ def verify_binance_pay(message, lang):
 
     tx_id = message.text.strip()
     
-    if len(tx_id) < 15:
-        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
+    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
+    if len(tx_id) < 5:
+        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1506,8 +1502,9 @@ def verify_crypto_tx(message, lang, coin):
 
     tx_id = message.text.strip().lower()
     
-    if len(tx_id) < 20:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
+    if len(tx_id) < 5:
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1556,8 +1553,9 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         
     tx_id = message.text.strip().lower()
     
-    if len(tx_id) < 20:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+    # قللنا التحقق إلى 5 أحرف فقط لتقبل الهاشات القصيرة
+    if len(tx_id) < 5:
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
         
     if wallet_address == "Not Set" or len(wallet_address) < 10:
@@ -2051,6 +2049,7 @@ def admin_edit_opts(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_hide_"))
 def admin_toggle_hide(call):
+    bot.answer_callback_query(call.id)
     pid = call.data.replace("toggle_hide_", "")
     p = find_product(pid)
     if p:
