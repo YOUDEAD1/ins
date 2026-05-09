@@ -9,6 +9,7 @@ import threading
 import asyncio
 import html
 import io
+import random
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -58,7 +59,53 @@ try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError: STARS_RATE = 120
 
 # ============================================================
-# 🎨 2. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
+# 🛡️ 2. نظام جلب البروكسيات المجانية التلقائي (Auto-Proxy)
+# ============================================================
+CACHED_PROXIES = []
+LAST_PROXY_FETCH = 0
+
+def get_free_proxies():
+    """هذه الدالة تجلب بروكسيات مجانية من الإنترنت وتحدثها كل ساعة"""
+    global CACHED_PROXIES, LAST_PROXY_FETCH
+    current_time = time.time()
+    
+    # إذا كانت القائمة فارغة أو مر عليها أكثر من ساعة (3600 ثانية)، قم بتحديثها
+    if not CACHED_PROXIES or (current_time - LAST_PROXY_FETCH > 3600):
+        try:
+            logger.info("🔄 جاري البحث عن بروكسيات مجانية جديدة من الإنترنت...")
+            # سحب قائمة بروكسيات HTTP مجانية من مستودع موثوق
+            res = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", timeout=10)
+            if res.status_code == 200:
+                proxies = res.text.strip().split('\n')
+                # نختار 50 بروكسي عشوائي من القائمة لتجربتها
+                selected = random.sample(proxies, min(50, len(proxies)))
+                CACHED_PROXIES = [f"http://{p.strip()}" for p in selected]
+                LAST_PROXY_FETCH = current_time
+                logger.info(f"✅ تم جلب {len(CACHED_PROXIES)} بروكسي مجاني بنجاح.")
+        except Exception as e:
+            logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
+            CACHED_PROXIES = []
+            
+    return CACHED_PROXIES
+
+def get_binance_client():
+    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي مجاني عشوائي لتفادي الحظر"""
+    proxies_list = get_free_proxies()
+    
+    if proxies_list:
+        proxy = random.choice(proxies_list)
+        proxies_dict = {'http': proxy, 'https': proxy}
+        try:
+            # نمرر البروكسي لمكتبة بينانس مع تحديد وقت أقصى (Timeout) حتى لا يعلق الكود
+            return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'proxies': proxies_dict, 'timeout': 10})
+        except:
+            pass # إذا فشل الاتصال بالبروكسي، سيتجاوزه ويتصل مباشرة
+            
+    # الاتصال الافتراضي بدون بروكسي كخطة بديلة
+    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+
+# ============================================================
+# 🎨 3. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
 # ============================================================
 class CustomInlineButton(InlineKeyboardButton):
     def __init__(self, text, style=None, icon_custom_emoji_id=None, **kwargs):
@@ -73,7 +120,7 @@ class CustomInlineButton(InlineKeyboardButton):
         return d
 
 # ============================================================
-# 🌐 3. السيرفر الوهمي وقاعدة البيانات
+# 🌐 4. السيرفر الوهمي وقاعدة البيانات
 # ============================================================
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -113,7 +160,7 @@ def get_setting(key, default="Not Set"):
     return res['value'] if res else default
 
 # ============================================================
-# 🤖 4. تهيئة اليوزربوت (Telethon) - للتفعيلات التلقائية
+# 🤖 5. تهيئة اليوزربوت (Telethon) - للتفعيلات التلقائية
 # ============================================================
 client = None
 USERBOT_LOOP = None
@@ -264,11 +311,11 @@ def add_to_gemini_queue(uid, price):
         bot.send_message(uid, f"⏳ <b>تم وضعك في طابور الانتظار!</b>\nدورك رقم: {len(GEMINI_QUEUE)}\nسيتم بدء التفعيل تلقائياً عند وصول دورك.", parse_mode="HTML")
 
 # ============================================================
-# 🌍 5. القواميس الأساسية والنصوص الافتراضية
+# 🌍 6. القواميس الأساسية والنصوص الافتراضية
 # ============================================================
 DEFAULT_BUTTONS = {
     'ar': {
-        'btn_products': 'المنتجات',
+        'btn_products': '🔵 المنتجات',
         'btn_deposit': '💳 شحن الرصيد',
         'btn_profile': '👤 الملف الشخصي',
         'btn_invite': '👥 الإحالات',
@@ -293,7 +340,7 @@ DEFAULT_BUTTONS = {
         'btn_check_sub': '🔄 تحقق من الاشتراك'
     },
     'en': {
-        'btn_products': 'Products',
+        'btn_products': '🔵 Products',
         'btn_deposit': '💳 Deposit',
         'btn_profile': '👤 Profile',
         'btn_invite': '👥 Referrals',
@@ -404,8 +451,14 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 6. محرك الـ CMS 
+# 🛠️ 7. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
 # ============================================================
+
+def clean_old_emojis(text):
+    old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
+    for emj in old_emojis:
+        text = text.replace(emj, '')
+    return text.strip()
 
 def safe_translate_for_cms(text, target_lang='en'):
     """
@@ -440,7 +493,7 @@ def safe_translate_for_cms(text, target_lang='en'):
         if not translated:
             return text
         
-        # تنظيف الأرقام العربية
+        # 🔑 خطوة حاسمة: تنظيف الأرقام العربية داخل placeholders
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def clean_arabic_digits(match):
             return match.group(0).translate(arabic_to_eng)
@@ -451,7 +504,7 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
-        # الاستبدال العكسي
+        # ⚠️ الاستبدال من الأكبر للأصغر (تجنب التداخل)
         for i in range(len(placeholders) - 1, -1, -1):
             ph = placeholders[i]
             pattern = re.compile(
@@ -461,13 +514,13 @@ def safe_translate_for_cms(text, target_lang='en'):
             translated = pattern.sub(ph, translated)
         
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
-            logger.warning(f"Translation placeholder leak detected")
+            logger.warning(f"Translation placeholder leak detected for key, returning original Arabic text")
             return text
             
         return translated.strip()
     except Exception as e:
         logger.error(f"Safe translation error: {e}")
-        return text
+        return text 
 
 def extract_custom_emojis_to_html(message):
     if not message.text or not message.entities:
@@ -496,6 +549,7 @@ def parse_button_input(message):
                 emoji_char = message.text[ent.offset:ent.offset+ent.length]
                 text = text.replace(emoji_char, '', 1) 
                 break
+    text = clean_old_emojis(text)
     return text.strip(), emoji_id
 
 def get_text(uid, key, *args):
@@ -550,6 +604,7 @@ def create_btn(uid, key, callback_data=None, url=None, style=None):
     kwargs = {'text': text}
     if callback_data: kwargs['callback_data'] = callback_data
     if url: kwargs['url'] = url
+    if style: kwargs['style'] = style
     if emj_id: kwargs['icon_custom_emoji_id'] = emj_id
     return CustomInlineButton(**kwargs)
 
@@ -634,7 +689,7 @@ def notify_admins(message_text):
             except: pass
 
 # ============================================================
-# 🏠 7. معالج البداية 
+# 🏠 8. معالج البداية 
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -689,7 +744,7 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
     markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
     
-    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop"),
+    markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
     markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"),
                create_btn(uid, 'btn_invite', callback_data="open_invite"))
@@ -739,7 +794,7 @@ def refresh_main(call):
     start_handler(call.message)
 
 # ============================================================
-# ✨ 8. وحدة تفعيل Gemini 
+# ✨ 9. وحدة تفعيل Gemini 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "gemini_pack_info")
 def gemini_info_ui(call):
@@ -789,7 +844,7 @@ def relay_to_provider(message):
         asyncio.run_coroutine_threadsafe(_send(), USERBOT_LOOP)
 
 # ============================================================
-# 🎓 9. وحدة تفعيل GitHub 
+# 🎓 10. وحدة تفعيل GitHub 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "github_pack_info")
 def github_info_ui(call):
@@ -973,7 +1028,7 @@ def process_gh_step_2fa(message):
     threading.Thread(target=api_worker, daemon=True).start()
 
 # ============================================================
-# 👤 10. الملف الشخصي وتاريخ العمليات 
+# 👤 11. الملف الشخصي وتاريخ العمليات 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_profile")
 def profile_ui(call):
@@ -1104,7 +1159,7 @@ def invite_ui(call):
     except: pass
 
 # ============================================================
-# 🛒 11. المتجر والشراء والترتيب الأبجدي للمنتجات 
+# 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
@@ -1134,19 +1189,18 @@ def shop_list_ui(call):
         pid = p.get('id', str(p.get('_id', '')))
         st = get_product_stock_count(pid)
         
-        btn_style = "success" if (is_manual or st > 0) else "danger"
+        status_emoji = "🟢" if (is_manual or st > 0) else "🔴"
         
         hidden_icon = " 👻(مخفي)" if is_hidden else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n 
         
         st_text = "FW" if is_manual else str(st)
-        btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+        btn_text = f"{status_emoji} {short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
         
         btn_kwargs = {
             'text': btn_text,
-            'callback_data': f"vi_p_{pid}",
-            'style': btn_style
+            'callback_data': f"vi_p_{pid}"
         }
         
         custom_emoji_id = p.get('custom_emoji_id')
@@ -1331,7 +1385,7 @@ def execute_bulk_buy(message, pid, lang):
             notify_admins(f"🔐 <b>إشعار إدارة (إحالة)</b>\n\nصاحب الدعوة: {ref_m_admin}\nالعميل الجديد: {buyer_m}\nالمكافأة الممنوحة: ${REFERRAL_REWARD:.2f}")
 
 # ============================================================
-# 🏦 12. بوابات الدفع
+# 🏦 13. بوابات الدفع (تحديث لقبول الهاش القصير)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -1461,8 +1515,9 @@ def verify_binance_pay(message, lang):
 
     tx_id = message.text.strip()
     
+    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح أو قصير جداً! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1475,7 +1530,7 @@ def verify_binance_pay(message, lang):
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
-        client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+        client = get_binance_client()
         pay_h = client.get_pay_trade_history().get('data', [])
 
         found = False; amt = 0.0
@@ -1495,7 +1550,7 @@ def verify_binance_pay(message, lang):
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
+        bot.send_message(uid, f"❌ حدث خطأ في الاتصال بالسيرفر. يرجى المحاولة بعد قليل.", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -1507,8 +1562,9 @@ def verify_crypto_tx(message, lang, coin):
 
     tx_id = message.text.strip().lower()
     
+    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
         
     with tx_lock:
@@ -1521,7 +1577,7 @@ def verify_crypto_tx(message, lang, coin):
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
-        client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+        client = get_binance_client()
         res = client.get_deposit_history(coin=coin)
 
         found = False; status = -1; amt = 0.0
@@ -1545,7 +1601,7 @@ def verify_crypto_tx(message, lang, coin):
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ حدث خطأ. يرجى مراجعة الإدارة.", parse_mode="HTML")
+        bot.send_message(uid, f"❌ حدث خطأ في الاتصال بالسيرفر. يرجى المحاولة بعد قليل.", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -1557,8 +1613,9 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         
     tx_id = message.text.strip().lower()
     
+    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
         
     if wallet_address == "Not Set" or len(wallet_address) < 10:
@@ -1630,7 +1687,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         if received_ltc > 0:
             if confirmations >= 1:
                 try:
-                    client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+                    client = get_binance_client()
                     ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
                 except:
                     ltc_price = 80.0
@@ -1664,7 +1721,7 @@ def credit_user(uid, amt, tx_id, lang, method):
         except: pass
 
 # ============================================================
-# 👑 13. لوحة الإدارة ونظام التقارير 
+# 👑 14. لوحة الإدارة ونظام التقارير 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
@@ -1767,7 +1824,7 @@ def ad_cms_btns_list(call):
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cms_btns_cats"))
     bot.edit_message_text("👇 <b>اختر الزر الذي تريد تغيير اسمه أو الإيموجي الخاص به:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
-# ----------- دوال تعديل النصوص والأزرار -----------
+# ----------- دوال تعديل النصوص (الرسائل) -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_txt_"))
 def ad_edit_txt_prompt(call):
     bot.answer_callback_query(call.id)
@@ -1801,7 +1858,8 @@ def ad_save_custom_text(message, key):
             )
             if simple_translation:
                 final_text_en = simple_translation
-        except: pass
+        except:
+            pass
             
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
@@ -1811,6 +1869,7 @@ def ad_save_custom_text(message, key):
     
     bot.send_message(message.chat.id, f"✅ <b>تم الحفظ بنجاح!</b>\n\n🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>", parse_mode="HTML")
 
+# ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
 def ad_edit_btn_prompt(call):
     bot.answer_callback_query(call.id)
@@ -1848,7 +1907,8 @@ def ad_save_custom_btn(message, key):
             simple = GoogleTranslator(source='ar', target='en').translate(text_ar)
             if simple and simple != text_ar:
                 text_en = simple
-        except: text_en = text_ar 
+        except:
+            text_en = text_ar 
             
     db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
     db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
@@ -2083,6 +2143,8 @@ def admin_edit_opts(call):
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"))
     
+    markup.add(InlineKeyboardButton("🌟 أيقونة المنتج", callback_data=f"ep_icon_{pid}"))
+    
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}"))
     
@@ -2109,6 +2171,11 @@ def admin_edit_prompt(call):
     parts = call.data.split('_', 2)
     field = parts[1]; pid = parts[2]
     
+    if field == "icon":
+        msg = bot.send_message(call.message.chat.id, "🌟 <b>أرسل الرمز التعبيري المميز (Premium Emoji) كرسالة ليتم وضعه كأيقونة للمنتج:</b>", parse_mode="HTML")
+        bot.register_next_step_handler(msg, admin_save_prod_icon, pid)
+        return
+        
     msg = bot.send_message(call.message.chat.id, "Send new value:")
     bot.register_next_step_handler(msg, admin_save_edit, field, pid)
 
@@ -2656,7 +2723,7 @@ def admin_save_setting(message, mode):
     bot.send_message(message.chat.id, "✅ Updated.")
 
 # ============================================================
-# 🚀 14. تشغيل البوت
+# 🚀 15. التشغيل
 # ============================================================
 def run_bot():
     try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
