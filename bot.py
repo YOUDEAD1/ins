@@ -49,13 +49,13 @@ BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
-MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
 
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
-try: STARS_RATE = int(os.getenv('STARS_RATE', '100').strip())
-except ValueError: STARS_RATE = 100
+try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
+except ValueError: STARS_RATE = 120
 
 # ============================================================
 # 🎨 2. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
