@@ -451,7 +451,7 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 7. محرك الـ CMS (تنظيف الرموز، الترجمة الآمنة المتقدمة، وجلب النصوص)
+# 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
 # ============================================================
 
 def clean_old_emojis(text):
@@ -461,12 +461,6 @@ def clean_old_emojis(text):
     return text.strip()
 
 def safe_translate_for_cms(text, target_lang='en'):
-    """
-    ترجمة آمنة 100% تحمي:
-    - رموز Premium Emoji (<tg-emoji>...</tg-emoji>)
-    - المتغيرات ({0}, {1}, {name}, ...)
-    - وسوم HTML (<b>, <code>, <i>, <strike>, ...)
-    """
     if not text or not text.strip():
         return text
     try:
@@ -476,14 +470,10 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
-        # استخراج Premium Emojis أولاً (أهم شيء)
         temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
-        # ثم المتغيرات بصيغة {var}
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
-        # ثم باقي وسوم HTML
         temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
-        # إذا لم يتبقَ شيء للترجمة (كل النص رموز/وسوم) أرجع الأصل
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         if not clean_check:
             return text
@@ -493,7 +483,6 @@ def safe_translate_for_cms(text, target_lang='en'):
         if not translated:
             return text
         
-        # 🔑 خطوة حاسمة: تنظيف الأرقام العربية داخل placeholders
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def clean_arabic_digits(match):
             return match.group(0).translate(arabic_to_eng)
@@ -504,7 +493,6 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
-        # ⚠️ الاستبدال من الأكبر للأصغر (تجنب التداخل)
         for i in range(len(placeholders) - 1, -1, -1):
             ph = placeholders[i]
             pattern = re.compile(
@@ -514,7 +502,7 @@ def safe_translate_for_cms(text, target_lang='en'):
             translated = pattern.sub(ph, translated)
         
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
-            logger.warning(f"Translation placeholder leak detected for key, returning original Arabic text")
+            logger.warning(f"Translation placeholder leak detected")
             return text
             
         return translated.strip()
@@ -1189,18 +1177,19 @@ def shop_list_ui(call):
         pid = p.get('id', str(p.get('_id', '')))
         st = get_product_stock_count(pid)
         
-        status_emoji = "🟢" if (is_manual or st > 0) else "🔴"
+        btn_style = "success" if (is_manual or st > 0) else "danger"
         
         hidden_icon = " 👻(مخفي)" if is_hidden else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n 
         
         st_text = "FW" if is_manual else str(st)
-        btn_text = f"{status_emoji} {short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+        btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
         
         btn_kwargs = {
             'text': btn_text,
-            'callback_data': f"vi_p_{pid}"
+            'callback_data': f"vi_p_{pid}",
+            'style': btn_style
         }
         
         custom_emoji_id = p.get('custom_emoji_id')
@@ -1347,7 +1336,7 @@ def execute_bulk_buy(message, pid, lang):
             f.name = f"Your_Codes_{pid}.txt"
             
             if lang == 'ar':
-                success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+                success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيار متجرنا 🛡️</i>"
             else:
                 success_msg = f"✅ <b>Purchase Successful!</b>\n\nSince you bought {qty} codes, they are attached in this file for easy copying 📄\n\n<i>Thank you for choosing us 🛡️</i>"
                 
@@ -1515,7 +1504,6 @@ def verify_binance_pay(message, lang):
 
     tx_id = message.text.strip()
     
-    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
         return
@@ -1562,7 +1550,6 @@ def verify_crypto_tx(message, lang, coin):
 
     tx_id = message.text.strip().lower()
     
-    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
@@ -1613,9 +1600,8 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         
     tx_id = message.text.strip().lower()
     
-    # 👈 تم تقليل التحقق ليقبل 5 أحرف أو أكثر
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
         return
         
     if wallet_address == "Not Set" or len(wallet_address) < 10:
@@ -1895,11 +1881,11 @@ def ad_save_custom_btn(message, key):
     text_ar, emoji_id = parse_button_input(message)
     
     if not text_ar or not text_ar.strip():
-        current_text, _ = get_btn_data(message.from_user.id, key)
-        text_ar = clean_old_emojis(current_text)
-        if not text_ar or not text_ar.strip():
-            text_ar = clean_old_emojis(DEFAULT_BUTTONS['ar'].get(key, key))
-            
+         current_text, _ = get_btn_data(message.from_user.id, key)
+         text_ar = clean_old_emojis(current_text)
+         if not text_ar or not text_ar.strip(): 
+             text_ar = clean_old_emojis(DEFAULT_BUTTONS['ar'].get(key, key))
+    
     text_en = safe_translate_for_cms(text_ar, 'en')
     
     if text_en == text_ar and text_ar.strip():
@@ -2143,8 +2129,6 @@ def admin_edit_opts(call):
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"))
     
-    markup.add(InlineKeyboardButton("🌟 أيقونة المنتج", callback_data=f"ep_icon_{pid}"))
-    
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}"))
     
@@ -2171,11 +2155,6 @@ def admin_edit_prompt(call):
     parts = call.data.split('_', 2)
     field = parts[1]; pid = parts[2]
     
-    if field == "icon":
-        msg = bot.send_message(call.message.chat.id, "🌟 <b>أرسل الرمز التعبيري المميز (Premium Emoji) كرسالة ليتم وضعه كأيقونة للمنتج:</b>", parse_mode="HTML")
-        bot.register_next_step_handler(msg, admin_save_prod_icon, pid)
-        return
-        
     msg = bot.send_message(call.message.chat.id, "Send new value:")
     bot.register_next_step_handler(msg, admin_save_edit, field, pid)
 
