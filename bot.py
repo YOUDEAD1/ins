@@ -10,7 +10,6 @@ import asyncio
 import html
 import io
 import random
-import concurrent.futures
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -55,12 +54,10 @@ BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()
 
 MONGO_URI = os.getenv('MONGO_URI', '').strip()
-MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_test_db').strip()
 
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
-
-PREMIUM_PROXIES_ENV = os.getenv('PREMIUM_PROXIES', '').strip() # أضف بروكسيات مدفوعة هنا مفصولة بفاصلة
 
 try: 
     STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
@@ -68,76 +65,62 @@ except ValueError:
     STARS_RATE = 120
 
 # ============================================================
-# 🛡️ 2. نظام جلب وفحص البروكسيات الذكي (Smart Auto-Proxy)
+# 🛡️ 2. نظام جلب البروكسيات الذكي والمفحوص (Auto-Proxy)
 # ============================================================
 CACHED_PROXIES = []
 LAST_PROXY_FETCH = 0
 
-def test_binance_proxy(proxy_url):
-    """دالة لاختبار البروكسي والتأكد من قدرته على الاتصال ببينانس بسرعة"""
+def test_proxy(proxy_url):
+    """دالة لاختبار البروكسي قبل استخدامه لتجنب الحظر"""
     try:
         proxies_dict = {'http': proxy_url, 'https': proxy_url}
-        # نستخدم مهلة قصيرة 3 ثواني حتى لا يتجمد البوت
-        res = requests.get("https://api.binance.com/api/v3/ping", proxies=proxies_dict, timeout=3)
-        if res.status_code == 200:
-            return proxy_url
-    except Exception:
-        pass
-    return None
+        res = requests.get("https://api.binance.com/api/v3/ping", proxies=proxies_dict, timeout=4)
+        return res.status_code == 200
+    except:
+        return False
 
-def get_working_proxies():
-    """هذه الدالة تجلب وتفحص البروكسيات قبل استخدامها"""
+def get_free_proxies():
+    """هذه الدالة تجلب بروكسيات مجانية من الإنترنت وتفحصها قبل الاستخدام"""
     global CACHED_PROXIES, LAST_PROXY_FETCH
     current_time = time.time()
     
-    # تحديث كل 30 دقيقة
-    if CACHED_PROXIES and (current_time - LAST_PROXY_FETCH < 1800):
-        return CACHED_PROXIES
-        
-    logger.info("🔄 جاري فحص وتحديث قائمة البروكسيات...")
-    working_proxies = []
-    
-    # 1. فحص البروكسيات المدفوعة أولاً (إن وجدت في ملف .env)
-    if PREMIUM_PROXIES_ENV:
-        p_list = [p.strip() for p in PREMIUM_PROXIES_ENV.split(',') if p.strip()]
-        for p in p_list:
-            if not p.startswith("http"):
-                p = f"http://{p}"
-            if test_binance_proxy(p):
-                working_proxies.append(p)
-                
-        if working_proxies:
-            CACHED_PROXIES = working_proxies
-            LAST_PROXY_FETCH = current_time
-            logger.info(f"✅ تم تفعيل {len(working_proxies)} بروكسي مدفوع بنجاح!")
-            return CACHED_PROXIES
-
-    # 2. في حال عدم وجود مدفوع، نجلب بروكسيات مجانية ونفحصها بسرعة
-    try:
-        res = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", timeout=10)
-        if res.status_code == 200:
-            proxies = [f"http://{p.strip()}" for p in res.text.strip().split('\n') if p.strip()]
-            selected = random.sample(proxies, min(100, len(proxies))) # اختيار 100 عشوائية للفحص
+    if not CACHED_PROXIES or (current_time - LAST_PROXY_FETCH > 3600):
+        try:
+            logger.info("🔄 جاري البحث عن بروكسيات جديدة وفحصها لتجنب حظر بينانس...")
             
-            # فحص متزامن وسريع
-            with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-                results = executor.map(test_binance_proxy, selected)
-                for r in results:
-                    if r:
-                        working_proxies.append(r)
-                        if len(working_proxies) >= 5: # نكتفي بـ 5 بروكسيات تعمل لتسريع العملية
-                            break
-    except Exception as e:
-        logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
-        
-    CACHED_PROXIES = working_proxies
-    LAST_PROXY_FETCH = current_time
-    logger.info(f"✅ تم اعتماد {len(CACHED_PROXIES)} بروكسي يعمل بنجاح للاتصال ببينانس.")
+            res = requests.get(
+                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", 
+                timeout=10
+            )
+            
+            if res.status_code == 200:
+                proxies = res.text.strip().split('\n')
+                random.shuffle(proxies)
+                
+                working_proxies = []
+                for p in proxies[:60]: # تجربة مجموعة عشوائية
+                    proxy_url = f"http://{p.strip()}"
+                    if test_proxy(proxy_url):
+                        working_proxies.append(proxy_url)
+                    if len(working_proxies) >= 5: # نحتفظ بأفضل 5 بروكسيات شغالة
+                        break
+                        
+                if working_proxies:
+                    CACHED_PROXIES = working_proxies
+                    LAST_PROXY_FETCH = current_time
+                    logger.info(f"✅ تم العثور على {len(CACHED_PROXIES)} بروكسيات نشطة وقوية.")
+                else:
+                    logger.warning("⚠️ لم يتم العثور على بروكسي نشط، سيتم المحاولة لاحقاً.")
+                 
+        except Exception as e:
+            logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
+            CACHED_PROXIES = []
+            
     return CACHED_PROXIES
 
 def get_binance_client():
-    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي صالح تم فحصه مسبقاً"""
-    proxies_list = get_working_proxies()
+    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي عشوائي مفحوص لتفادي الحظر"""
+    proxies_list = get_free_proxies()
     
     if proxies_list:
         proxy = random.choice(proxies_list)
@@ -146,16 +129,16 @@ def get_binance_client():
             return BinanceClient(
                 BINANCE_API_KEY, 
                 BINANCE_API_SECRET, 
-                requests_params={'proxies': proxies_dict, 'timeout': 5} # تقليل المهلة لعدم تجميد البوت
+                requests_params={'proxies': proxies_dict, 'timeout': 10}
             )
         except Exception:
             pass 
             
-    # الاتصال الافتراضي
-    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 5})
+    # الاتصال الافتراضي بدون بروكسي إذا لم تتوفر بروكسيات
+    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 # ============================================================
-# 🎨 3. فئة الأزرار المخصصة و دوال التقاط التنسيق
+# 🎨 3. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
 # ============================================================
 class CustomInlineButton(InlineKeyboardButton):
     def __init__(self, text, style=None, icon_custom_emoji_id=None, **kwargs):
@@ -170,12 +153,6 @@ class CustomInlineButton(InlineKeyboardButton):
         if self.icon_custom_emoji_id: 
             d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
-
-def get_html_text(message):
-    """التقاط النص مع تنسيقاته الأصلية (عريض، مائل، إلخ)"""
-    if hasattr(message, 'html_text') and message.html_text:
-        return message.html_text
-    return message.text or ""
 
 # ============================================================
 # 🌐 4. السيرفر الوهمي وقاعدة البيانات
@@ -357,7 +334,7 @@ def start_gemini_session(uid, price):
     global ACTIVE_GEMINI_SESSION
     
     provider_bot = get_setting("provider_bot", "").replace("@", "")
-    
+ 
     ACTIVE_GEMINI_SESSION = {
         'uid': uid, 
         'price': price, 
@@ -370,7 +347,7 @@ def start_gemini_session(uid, price):
         "⏳ <b>جاري تحضير طلبك والاتصال بالنظام...</b>\nيرجى الانتظار قليلاً...", 
         parse_mode="HTML"
     )
-    
+  
     async def _init_chat():
         global ACTIVE_GEMINI_SESSION
         try:
@@ -391,12 +368,12 @@ def start_gemini_session(uid, price):
                                 break
                         if clicked:
                             break
-                if clicked:
-                    break
+            if clicked:
+                break
                     
             if not clicked:
                 await client.send_message(provider_bot, "✨ Create verify")
-                
+              
         except Exception as e:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
             bot.send_message(
@@ -499,7 +476,7 @@ LANG = {
         'new_stock': "🔔 <b>توفر ستوك جديد!</b>\n\n🛍 <b>المنتج:</b> {}\n📦 <b>المتوفر الآن:</b> {}\n\n<i>سارع بالشراء الآن من المتجر!</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>نظام الإحالات الذكي</b>\n\n🔗 <b>الرابط الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك:</b>\n- نقرات الرابط: <b>{}</b>\n- معلق (لم يشترك): <b>{}</b>\n- نشط (مشترك): <b>{}</b>\n- غادر القناة: <b>{}</b>\n\n💰 أرباحك الحالية: <b>${:.2f}</b>\n\n🎁 <b>القوانين:</b> كل 10 أشخاص يكملون الاشتراك الإجباري = 0.10$. إذا غادروا، يتم خصم الرصيد.",
+        'invite_txt': "👥 <b>نظام الإحالات الذكي</b>\n\n🔗 <b>الرابط الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك الفورية:</b>\n- 👥 إجمالي الزيارات: <b>{}</b>\n- ⏳ معلق (لم يشترك): <b>{}</b>\n- ✅ نشط (مشترك): <b>{}</b>\n- ❌ غادر القناة: <b>{}</b>\n\n💰 أرباحك الحالية: <b>${:.2f}</b>\n\n🎁 <b>قوانين النظام الجديد:</b>\nتحصل على <b>0.10$</b> مقابل كل <b>10 أشخاص</b> يكملون الاشتراك الإجباري بنجاح. وفي حال غادر أحدهم القناة سينقص العدد، وإذا قلّ عن مضاعفات العشرة سيتم خصم الرصيد.",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -543,7 +520,7 @@ LANG = {
         'new_stock': "🔔 <b>New Stock Available!</b>\n\n🛍 <b>Product:</b> {}\n📦 <b>Available Now:</b> {}\n\n<i>Buy now!</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>Smart Referrals</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Stats:</b>\n- Clicks: <b>{}</b>\n- Pending (No Sub): <b>{}</b>\n- Active (Joined): <b>{}</b>\n- Left Channel: <b>{}</b>\n\n💰 Current Earnings: <b>${:.2f}</b>\n\n🎁 <b>Rule:</b> Every 10 active subs = $0.10. Leaving causes deductions.",
+        'invite_txt': "👥 <b>Smart Referrals</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Real-time Stats:</b>\n- 👥 Total Clicks: <b>{}</b>\n- ⏳ Pending (No Sub): <b>{}</b>\n- ✅ Active (Joined): <b>{}</b>\n- ❌ Left Channel: <b>{}</b>\n\n💰 Current Earnings: <b>${:.2f}</b>\n\n🎁 <b>Rule:</b> Get $0.10 for every 10 active subs. If anyone leaves, the counter drops and balance may be deducted automatically.",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -583,14 +560,14 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية والتنسيقات)
+# 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
 # ============================================================
 
 def clean_html(text):
+    """دالة مطورة تدعم التنسيقات (مثل المائل والغامق) في وصف المنتجات"""
     if not text: 
         return "بدون اسم"
-    # مسح الـ HTML للعناوين فقط وليس للوصف للحفاظ على التنسيقات
-    return re.sub(r'<[^>]+>', '', str(text)).strip()
+    return str(text).strip()
 
 def clean_old_emojis(text):
     old_emojis = [
@@ -613,9 +590,9 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
-        # حماية جميع تنسيقات HTML (مثل <b> و <i> وغيرها) أثناء الترجمة
-        temp_text = re.sub(r'<[^>]+>', replacer, text)
+        temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
+        temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         
@@ -648,6 +625,28 @@ def safe_translate_for_cms(text, target_lang='en'):
         return translated.strip()
     except Exception as e:
         return text 
+
+def extract_custom_emojis_to_html(message):
+    if not message.text or not message.entities: 
+        return message.text or ""
+        
+    text = message.text
+    entities = sorted(
+        [e for e in message.entities if e.type == 'custom_emoji'], 
+        key=lambda x: x.offset, 
+        reverse=True
+    )
+    
+    encoded_text = text.encode('utf-16-le')
+    
+    for ent in entities:
+        start = ent.offset * 2
+        end = start + (ent.length * 2)
+        emoji_char = encoded_text[start:end].decode('utf-16-le')
+        html_emoji = f'<tg-emoji emoji-id="{ent.custom_emoji_id}">{emoji_char}</tg-emoji>'
+        encoded_text = encoded_text[:start] + html_emoji.encode('utf-16-le') + encoded_text[end:]
+        
+    return encoded_text.decode('utf-16-le')
 
 def parse_button_input(message):
     text = message.text
@@ -851,7 +850,66 @@ def notify_admins(message_text):
                 pass
 
 # ============================================================
-# 🏠 8. معالج البداية
+# 👥 8. نظام تحديث الإحالات الديناميكي السريع (في الخلفية)
+# ============================================================
+def update_referrer_balance(referrer_id):
+    """دالة تقوم بحساب أرباح الشخص المحيل وتحديث رصيده بناءً على عدد الإحالات النشطة فقط"""
+    try:
+        active_count = db.users.count_documents({'referred_by': str(referrer_id), 'ref_status': 'active'})
+        expected_earnings = (active_count // 10) * 0.10 # 0.10$ لكل 10 أشخاص
+
+        referrer = db.users.find_one({'user_id': int(referrer_id)})
+        if not referrer: return
+
+        current_ref_earned = float(referrer.get('ref_earned', 0.0))
+
+        if expected_earnings != current_ref_earned:
+            diff = expected_earnings - current_ref_earned
+            db.users.update_one(
+                {'user_id': int(referrer_id)},
+                {
+                    '$inc': {'balance': diff},
+                    '$set': {'ref_earned': expected_earnings}
+                }
+            )
+    except Exception as e:
+        logger.error(f"Error updating referrer balance: {e}")
+
+def background_referral_checker():
+    """هذا المحرك يعمل في الخلفية بصمت لفحص المشتركين وخصم الرصيد إذا غادروا لضمان سرعة فائقة للمستخدمين"""
+    while True:
+        try:
+            referred_users = list(db.users.find({'referred_by': {'$ne': None}}))
+            for ru in referred_users:
+                inv_uid = ru['user_id']
+                referrer_id = int(ru['referred_by'])
+                current_status = ru.get('ref_status', 'pending')
+
+                is_subbed = check_forced_sub(inv_uid)
+                new_status = current_status
+
+                if is_subbed:
+                    if current_status != 'active':
+                        new_status = 'active'
+                else:
+                    if current_status == 'active':
+                        new_status = 'left'
+                    elif current_status == 'pending':
+                        new_status = 'pending'
+
+                if new_status != current_status:
+                    db.users.update_one({'user_id': inv_uid}, {'$set': {'ref_status': new_status}})
+                    update_referrer_balance(referrer_id)
+
+                time.sleep(0.1)
+        except Exception as e:
+            pass
+        time.sleep(300)
+
+threading.Thread(target=background_referral_checker, daemon=True).start()
+
+# ============================================================
+# 🏠 9. معالج البداية وتحديث الإحالة
 # ============================================================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -924,9 +982,11 @@ def start_handler(message):
     if lang not in ['ar', 'en']: 
         lang = 'ar'
     
+    # تحديث وتأكيد حالة الاشتراك الفورية للإحالات
     if not check_forced_sub(uid):
         if user.get('ref_status') == 'active':
             db.users.update_one({'user_id': uid}, {'$set': {'ref_status': 'left'}})
+            if user.get('referred_by'): update_referrer_balance(int(user['referred_by']))
             
         chans = list(db.required_channels.find())
         markup = InlineKeyboardMarkup(row_width=1)
@@ -935,7 +995,7 @@ def start_handler(message):
                 btn_txt = "📢 Channel"
             else:
                 btn_txt = "📢 القناة"
-                
+            
             markup.add(InlineKeyboardButton(btn_txt, url=f"https://t.me/{c['channel_id'].replace('@','') }"))
             
         markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
@@ -944,6 +1004,7 @@ def start_handler(message):
     else:
         if user.get('ref_status') in ['pending', 'left']:
             db.users.update_one({'user_id': uid}, {'$set': {'ref_status': 'active'}})
+            if user.get('referred_by'): update_referrer_balance(int(user['referred_by']))
 
     users_total = db.users.count_documents({})
     markup = InlineKeyboardMarkup(row_width=2)
@@ -979,7 +1040,7 @@ def start_handler(message):
         uid, 
         'welcome', 
         uid, 
-        clean_html(from_user.first_name), 
+        clean_name(from_user.first_name), 
         users_total, 
         user.get('balance', 0.0)
     )
@@ -993,7 +1054,8 @@ def start_handler(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("init_lang_"))
 def init_lang_selection(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     new_lang = call.data.replace("init_lang_", "").strip()
     
     if new_lang not in ['ar', 'en']:
@@ -1014,7 +1076,8 @@ def init_lang_selection(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "toggle_language")
 def toggle_lang(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1038,7 +1101,8 @@ def toggle_lang(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
 def refresh_main(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     
     try: 
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -1049,11 +1113,12 @@ def refresh_main(call):
     start_handler(call.message)
 
 # ============================================================
-# 👤 9. نظام الإحالات المتقدم
+# 👤 10. نظام الإحالات الصاروخي (بدون لود)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1071,53 +1136,21 @@ def invite_ui(call):
         
     b_n = bot.get_me().username
     
-    invites = list(db.users.find({'referred_by': str(uid)}))
-    total_clicks = len(invites)
+    # تحديث سريع للأرباح قبل العرض
+    update_referrer_balance(uid)
+    u = get_user_data_full(uid) 
     
-    pending_count = 0
-    active_count = 0
-    left_count = 0
+    # جلب الإحصائيات الفورية من قاعدة البيانات فقط (سريع جداً)
+    pending_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'pending'})
+    active_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'active'})
+    left_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'left'})
+    total_clicks = pending_count + active_count + left_count
     
-    for inv in invites:
-        inv_uid = inv['user_id']
-        current_status = inv.get('ref_status', 'pending')
-        
-        if check_forced_sub(inv_uid):
-            active_count += 1
-            if current_status != 'active':
-                db.users.update_one({'user_id': inv_uid}, {'$set': {'ref_status': 'active'}})
-        else:
-            if current_status == 'active':
-                left_count += 1
-                db.users.update_one({'user_id': inv_uid}, {'$set': {'ref_status': 'left'}})
-            elif current_status == 'left':
-                left_count += 1
-            else:
-                pending_count += 1
-
-    expected_earnings = (active_count // 10) * 0.10
-    
-    try:
-        current_ref_earned = float(u.get('ref_earned', 0.0))
-    except Exception:
-        current_ref_earned = 0.0
-    
-    if expected_earnings != current_ref_earned:
-        diff = expected_earnings - current_ref_earned
-        db.users.update_one(
-            {'user_id': uid}, 
-            {
-                '$inc': {'balance': diff}, 
-                '$set': {'ref_earned': expected_earnings}
-            }
-        )
-        actual_earned = expected_earnings
-    else:
-        actual_earned = current_ref_earned
+    actual_earned = float(u.get('ref_earned', 0.0))
 
     markup = InlineKeyboardMarkup()
     markup.add(
-        create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh")
+         create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh")
     )
     
     try: 
@@ -1142,11 +1175,12 @@ def invite_ui(call):
         pass
 
 # ============================================================
-# 🛒 10. المتجر والشراء والترتيب الأبجدي للمنتجات 
+# 🛒 11. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1161,21 +1195,21 @@ def shop_list_ui(call):
         is_admin = True
     else:
         is_admin = False
-        
+     
     l = get_lang(uid)
     
     prods = list(db.products.find())
     
     def sort_key(x):
         if l == 'en':
-            return clean_html(x.get('name_en')).lower()
+            return str(x.get('name_en')).lower()
         else:
-            return clean_html(x.get('name_ar')).lower()
+            return str(x.get('name_ar')).lower()
             
     prods.sort(key=sort_key)
     
     markup = InlineKeyboardMarkup(row_width=1)
-    
+ 
     markup.add(
         create_btn(uid, 'btn_gh', callback_data="github_pack_info")
     )
@@ -1196,7 +1230,7 @@ def shop_list_ui(call):
             btn_style = "success"
         else:
             btn_style = "danger"
-            
+        
         if is_hidden:
             hidden_icon = " 👻(مخفي)"
         else:
@@ -1257,7 +1291,8 @@ def shop_list_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vi_p_"))
 def shop_detail_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1300,7 +1335,6 @@ def shop_detail_ui(call):
             delivery_type = "Auto ⚡"
             st_text = f"{st} pcs"
         
-    # نعرض الوصف مع التنسيقات مباشرة
     if l == 'en':
         n = str(p.get('name_en'))
         d = str(p.get('desc_en'))
@@ -1342,7 +1376,8 @@ def shop_detail_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_qty_"))
 def prompt_quantity(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1356,7 +1391,7 @@ def prompt_quantity(call):
         return
     
     is_manual = p.get('is_manual', False)
-    
+   
     if not is_manual and get_product_stock_count(pid) == 0:
         bot.send_message(uid, get_text(uid, 'out_stock'), parse_mode="HTML")
         return
@@ -1492,17 +1527,18 @@ def execute_bulk_buy(message, pid, lang):
                 pub_msg = custom_log['value'].replace('{user}', obs_user).replace('{product}', f"{icon_html} {p_name_html}").replace('{qty}', str(qty))
             else:
                 pub_msg = f"🛒 <b>New Purchase!</b> 🛍\n\n👤 User: <b>{obs_user}</b>\n{icon_html} Product: <b>{p_name_html}</b>\n🔢 QTY: <b>{qty}</b>\n\n<i>Thank you for choosing us 🛡️</i>"
-                
+        
             bot.send_message(log_ch, pub_msg, parse_mode="HTML")
         except Exception: 
             pass
 
 # ============================================================
-# 🏦 11. بوابات الدفع (استخدام بروكسيات ذكية ومُحسنة)
+# 🏦 12. بوابات الدفع 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1548,7 +1584,8 @@ def dep_init_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_stars")
 def dep_stars_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     l = get_lang(uid)
     
@@ -1622,7 +1659,8 @@ def got_payment(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1637,7 +1675,8 @@ def dep_binance_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
 def dep_crypto_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     
     if is_user_banned(uid): 
@@ -1717,8 +1756,7 @@ def verify_binance_pay(message, lang):
         found = False
         amt = 0.0
         
-        # الاتصال السريع بفضل الفاحص المسبق للبروكسيات
-        for attempt in range(2): # قللنا المحاولات لأن البروكسي مفحوص
+        for attempt in range(4): 
             try:
                 client = get_binance_client()
                 pay_h = client.get_pay_trade_history().get('data', [])
@@ -1738,10 +1776,10 @@ def verify_binance_pay(message, lang):
                 break 
             except Exception as e:
                 logger.error(f"Binance Pay Proxy Attempt {attempt+1} Failed: {e}")
-                time.sleep(1) # راحة بسيطة فقط
+                time.sleep(1.5)
                 
         if not success:
-            bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً. يرجى إعادة إرسال الرقم بعد دقيقة.", parse_mode="HTML")
+            bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً (تم تبديل البروكسي عدة مرات). يرجى إعادة إرسال الرقم بعد دقيقة.", parse_mode="HTML")
             return
             
         if found: 
@@ -1785,7 +1823,7 @@ def verify_crypto_tx(message, lang, coin):
         status = -1
         amt = 0.0
         
-        for attempt in range(2): 
+        for attempt in range(4): 
             try:
                 client = get_binance_client()
                 res = client.get_deposit_history(coin=coin)
@@ -1806,7 +1844,7 @@ def verify_crypto_tx(message, lang, coin):
                 break
             except Exception as e:
                 logger.error(f"Crypto Proxy Attempt {attempt+1} Failed: {e}")
-                time.sleep(1)
+                time.sleep(1.5)
                 
         if not success:
             bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً. يرجى إعادة إرسال الهاش بعد دقيقة.", parse_mode="HTML")
@@ -1927,7 +1965,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         if received_ltc > 0:
             if confirmations >= 1:
                 ltc_price = 80.0
-                for attempt in range(2): 
+                for attempt in range(4): 
                     try:
                         client = get_binance_client()
                         ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
@@ -1977,11 +2015,12 @@ def credit_user(uid, amt, tx_id, lang, method):
             pass
 
 # ============================================================
-# 👑 12. لوحة الإدارة 
+# 👑 13. لوحة الإدارة 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 def admin_main_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     l = get_lang(call.from_user.id)
     markup = InlineKeyboardMarkup(row_width=2)
     
@@ -2075,7 +2114,8 @@ def admin_main_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_texts_main")
 def ad_texts_main_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"), 
@@ -2094,7 +2134,8 @@ def ad_texts_main_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_msgs")
 def ad_cms_msgs_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("رسالة الترحيب (Start)", callback_data="edit_txt_welcome"), 
@@ -2125,7 +2166,8 @@ def ad_cms_msgs_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_btns_cats")
 def ad_cms_btns_cats_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("🏠 أزرار القائمة الرئيسية", callback_data="ad_cms_b_start")
@@ -2152,7 +2194,8 @@ def ad_cms_btns_cats_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cms_b_"))
 def ad_cms_btns_list(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     cat = call.data.replace("ad_cms_b_", "")
     
     btn_categories = {
@@ -2183,7 +2226,8 @@ def ad_cms_btns_list(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_txt_"))
 def ad_edit_txt_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     key = call.data.replace("edit_txt_", "")
     current_val = db.custom_texts.find_one({'lang': 'ar', 'key': key})
     
@@ -2200,7 +2244,7 @@ def ad_edit_txt_prompt(call):
         
     msg = bot.send_message(
         call.message.chat.id, 
-        f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>{hint}\n\n👇 <b>أرسل التعديل الآن (يمكنك استخدام التنسيقات مثل <b>عريض</b> وغيرها وسيتم حفظها وترجمتها):</b>", 
+        f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>{hint}\n\n👇 <b>أرسل التعديل الآن بالرموز (سيتم ترجمته تلقائياً):</b>", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
@@ -2212,8 +2256,7 @@ def ad_save_custom_text(message, key):
         
     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة...")
     
-    # التقاط النص مع الحفاظ على التنسيقات والـ HTML المكتوب
-    final_ar = get_html_text(message) 
+    final_ar = extract_custom_emojis_to_html(message)
     final_en = safe_translate_for_cms(final_ar, 'en')
     
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_ar}}, upsert=True)
@@ -2232,7 +2275,8 @@ def ad_save_custom_text(message, key):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
 def ad_edit_btn_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     key = call.data.replace("edit_btn_", "")
     current_text, _ = get_btn_data(call.from_user.id, key)
     
@@ -2268,7 +2312,8 @@ def ad_save_custom_btn(message, key):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
 def ad_prod_emoji_start(call):
-    bot.answer_callback_query(call.id) 
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     prods = list(db.products.find())
     markup = InlineKeyboardMarkup(row_width=1)
     
@@ -2299,7 +2344,8 @@ def ad_prod_emoji_start(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_pemj_"))
 def ad_prod_emoji_ask(call):
-    bot.answer_callback_query(call.id) 
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("set_pemj_", "")
     
     msg = bot.send_message(
@@ -2340,7 +2386,8 @@ def ad_prod_emoji_save(message, pid):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
 def admin_api_main(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     
     gh_price = float(get_setting("github_price", 15.0))
     gem_price = float(get_setting("gemini_price", 5.0))
@@ -2376,7 +2423,8 @@ def admin_api_main(call):
 
 @bot.callback_query_handler(func=lambda call: call.data in ["ad_set_session", "ad_set_provider"])
 def admin_set_userbot_vars(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     
     if call.data == "ad_set_session":
         key = 'userbot_session'
@@ -2397,7 +2445,8 @@ def admin_set_userbot_vars(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_gh_credits")
 def admin_github_credits(call):
-    bot.answer_callback_query(call.id, "⏳ جاري الاتصال...")
+    try: bot.answer_callback_query(call.id, "⏳ جاري الاتصال...")
+    except Exception: pass
     try:
         if not GITHUB_API_KEY:
             bot.send_message(call.message.chat.id, "❌ لم يتم العثور على GITHUB_API_KEY في ملف .env")
@@ -2424,7 +2473,8 @@ def admin_github_credits(call):
 
 @bot.callback_query_handler(func=lambda call: call.data in ["ad_gh_price", "ad_gem_price"])
 def admin_set_price(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     
     if call.data == "ad_gh_price":
         key = 'github_price'
@@ -2445,30 +2495,31 @@ def admin_set_price(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 def ad_p_step1(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(
         call.from_user.id, 
-        "📦 أرسل اسم المنتج (يمكنك استخذام التنسيقات مثل <b>عريض</b>):", 
+        "📦 أرسل اسم المنتج (يمكنك وضع Premium Emoji):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_p_step2)
 
 def ad_p_step2(message):
     uid = message.from_user.id
-    n_ar = get_html_text(message) # التقاط التنسيق
+    n_ar = extract_custom_emojis_to_html(message)
     n_en = safe_translate_for_cms(n_ar, 'en')
     temp_product[uid] = {'n_ar': n_ar, 'n_en': n_en}
     
     msg = bot.send_message(
         uid, 
-        f"📝 أرسل وصف المنتج (يمكنك استخدام تنسيقات تيليجرام):", 
+        f"📝 أرسل وصف المنتج (يمكنك وضع Premium Emoji):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_p_step3)
 
 def ad_p_step3(message):
     uid = message.from_user.id
-    d_ar = get_html_text(message) # التقاط التنسيق
+    d_ar = extract_custom_emojis_to_html(message)
     d_en = safe_translate_for_cms(d_ar, 'en')
     temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
     
@@ -2495,7 +2546,8 @@ def ad_p_price(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_ptype_"))
 def ad_p_final(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     uid = call.from_user.id
     p = temp_product.get(uid)
     if not p: 
@@ -2526,7 +2578,8 @@ def ad_p_final(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
 def admin_edit_list(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     
     for p in list(db.products.find()): 
@@ -2549,7 +2602,8 @@ def admin_edit_list(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_p_"))
 def admin_edit_opts(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("edit_p_", "")
     p = find_product(pid)
     
@@ -2578,7 +2632,7 @@ def admin_edit_opts(call):
         InlineKeyboardButton(hide_text, callback_data=f"toggle_hide_{pid}"), 
         InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit")
     )
-              
+                  
     try: 
         bot.edit_message_text(
             "⚙️ Options:", 
@@ -2591,7 +2645,8 @@ def admin_edit_opts(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_hide_"))
 def admin_toggle_hide(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("toggle_hide_", "")
     p = find_product(pid)
     if p:
@@ -2601,12 +2656,13 @@ def admin_toggle_hide(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ep_"))
 def admin_edit_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     parts = call.data.split('_', 2)
     
     msg = bot.send_message(
         call.message.chat.id, 
-        "✏️ أرسل القيمة الجديدة (يمكنك استخدام تنسيقات تيليجرام كالعريض والمائل):", 
+        "✏️ أرسل القيمة الجديدة (يمكنك استخدام Premium Emojis):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, admin_save_edit, parts[1], parts[2])
@@ -2624,7 +2680,7 @@ def admin_save_edit(message, field, pid):
         except Exception: 
             bot.send_message(message.chat.id, "❌ خطأ في السعر.", parse_mode="HTML")
     else:
-        val_ar = get_html_text(message) # التقاط التنسيق
+        val_ar = extract_custom_emojis_to_html(message)
         
         if field in ['dar', 'nar']:
             val_en = safe_translate_for_cms(val_ar, 'en')
@@ -2642,7 +2698,8 @@ def admin_save_edit(message, field, pid):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
 def admin_del_list(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     
     for p in list(db.products.find()): 
@@ -2665,7 +2722,8 @@ def admin_del_list(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_"))
 def admin_del_exec(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("del_p_", "")
     p = find_product(pid)
     
@@ -2674,12 +2732,14 @@ def admin_del_exec(call):
         db.orders.delete_many({'product_id': str(pid)})
         db.products.delete_one({'_id': p['_id']})
         
-        bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
+        try: bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
+        except Exception: pass
         admin_main_ui(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_s_list")
 def admin_stock_list_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     
     for p in list(db.products.find({'is_manual': {'$ne': True}})): 
@@ -2705,7 +2765,8 @@ def admin_stock_list_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_s_opts_"))
 def admin_stock_opts_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("ad_s_opts_", "")
     p = find_product(pid)
     if not p: return
@@ -2738,7 +2799,8 @@ def admin_stock_opts_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_add_"))
 def admin_stock_input(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("stk_add_", "")
     
     msg = bot.send_message(
@@ -2773,7 +2835,8 @@ def admin_stock_save(message, pid):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_view_"))
 def admin_stock_view(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("stk_view_", "")
     
     queries = [{'product_id': str(pid)}]
@@ -2796,7 +2859,8 @@ def admin_stock_view(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_delcode_"))
 def admin_stock_delcode_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("stk_delcode_", "")
     
     msg = bot.send_message(
@@ -2821,7 +2885,8 @@ def admin_stock_delcode_prompt(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_clear_"))
 def admin_stock_clear_exec(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("stk_clear_", "")
     
     queries = [{'product_id': str(pid)}]
@@ -2836,7 +2901,8 @@ def admin_stock_clear_exec(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stk_edit_"))
 def admin_stock_edit_step1(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     pid = call.data.replace("stk_edit_", "")
     
     msg = bot.send_message(call.message.chat.id, "✏️ <b>أرسل الكود القديم:</b>", parse_mode="HTML")
@@ -2859,14 +2925,15 @@ def admin_stock_edit_step1(call):
                 bot.send_message(m.chat.id, "✅ <b>تم التعديل!</b>", parse_mode="HTML")
             else:
                 bot.send_message(m.chat.id, "❌ خطأ", parse_mode="HTML")
-                
+                 
         bot.register_next_step_handler(msg2, save_new)
         
     bot.register_next_step_handler(msg, step2, pid)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ban_user")
 def ad_ban_start(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(
         call.message.chat.id, 
         "🚫 <b>أرسل ID أو معرف المستخدم للحظر/فك الحظر:</b>", 
@@ -2899,7 +2966,8 @@ def ad_ban_start(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_users_main")
 def ad_users_main_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="ad_u_search"), 
@@ -2922,7 +2990,8 @@ def ad_users_main_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_u_top")
 def ad_u_top_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     
     for tu in list(db.users.find().sort('balance', -1).limit(10)): 
@@ -2953,7 +3022,8 @@ def ad_u_top_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_u_search")
 def ad_u_search_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.message.chat.id, "🔍 <b>أرسل الأيدي أو المعرف:</b>", parse_mode="HTML")
     
     def handle_search(m):
@@ -2973,7 +3043,8 @@ def ad_u_search_prompt(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_u_det_"))
 def ad_u_det_router(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     target_uid = int(call.data.replace("ad_u_det_", ""))
     show_user_admin_profile(call.message.chat.id, target_uid, call.message.message_id)
 
@@ -3016,7 +3087,8 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
 def admin_download_buy_hist(call):
-    bot.answer_callback_query(call.id, "⏳ جاري التجهيز...")
+    try: bot.answer_callback_query(call.id, "⏳ جاري التجهيز...")
+    except Exception: pass
     target_uid = int(call.data.replace("ad_dlbuy_", ""))
     recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
     
@@ -3045,7 +3117,8 @@ def admin_download_buy_hist(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_"))
 def show_admin_hist_detail(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     parts = call.data.split('_', 3)
     mode = parts[2]
     target_uid = int(parts[3])
@@ -3069,8 +3142,8 @@ def show_admin_hist_detail(call):
             if not recs: 
                 out += "📭 لا يوجد إيداعات."
             for r in recs: 
-                d = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
-                out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 📅 <code>{d}</code>\n🆔 <code>{r.get('transaction_id', '')}</code>\n"
+                 d = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+                 out += f"💰 <b>${r.get('amount', 0):.2f}</b> | 📅 <code>{d}</code>\n🆔 <code>{r.get('transaction_id', '')}</code>\n"
     except Exception: 
         out = f"❌ Error"
         
@@ -3090,7 +3163,8 @@ def show_admin_hist_detail(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_ugift_"))
 def ad_ugift_prompt(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     target_uid = call.data.replace("ad_ugift_", "")
     
     msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل المبلغ:</b>", parse_mode="HTML")
@@ -3104,12 +3178,13 @@ def ad_ugift_prompt(call):
                 bot.send_message(m.chat.id, "❌ خطأ")
         except Exception:
             bot.send_message(m.chat.id, "❌ خطأ")
-            
+             
     bot.register_next_step_handler(msg, apply_gift)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_gift")
 def ad_gift_start(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.from_user.id, "👤 <b>أرسل الأيدي أو المعرف:</b>", parse_mode="HTML")
     
     def step1(m):
@@ -3137,21 +3212,22 @@ def ad_gift_start(call):
                     bot.send_message(m2.chat.id, "❌ Error")
             except Exception:
                 bot.send_message(m2.chat.id, "❌ Error")
-                
+                 
         bot.register_next_step_handler(msg2, step2)
         
     bot.register_next_step_handler(msg, step1)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
 def admin_fsub_list(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=1)
     
     for c in list(db.required_channels.find()): 
         markup.add(
             InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}")
         )
-        
+         
     markup.add(
         InlineKeyboardButton("➕ إضافة قناة", callback_data="ad_fsub_add"), 
         InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main")
@@ -3164,7 +3240,8 @@ def admin_fsub_list(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
 def admin_fsub_add(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة:", parse_mode="HTML")
     
     def save_f(m):
@@ -3180,14 +3257,17 @@ def admin_fsub_add(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
 def del_fsub_btn(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     db.required_channels.delete_one({'channel_id': call.data.replace("del_fsub_", "")})
-    bot.answer_callback_query(call.id, "✅ تم الحذف", show_alert=True)
+    try: bot.answer_callback_query(call.id, "✅ تم الحذف", show_alert=True)
+    except Exception: pass
     admin_fsub_list(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_new_admin")
 def admin_add_admin_start(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.from_user.id, "👑 <b>أرسل الأيدي للترقية:</b>", parse_mode="HTML")
     
     def exec_promote(m):
@@ -3213,7 +3293,8 @@ def admin_add_admin_start(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
 def admin_all_logs(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     recs = list(db.used_transactions.find().sort('_id', -1).limit(10))
     txt = "📜 <b>آخر 10 إيداعات:</b>\n\n"
     
@@ -3230,7 +3311,8 @@ def admin_all_logs(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_bc")
 def admin_bc_init(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.from_user.id, "📢 أرسل رسالة البرودكاست (بكل الرموز):", parse_mode="HTML")
     
     def ex(m):
@@ -3246,7 +3328,8 @@ def admin_bc_init(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
 def admin_shop_settings(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     markup = InlineKeyboardMarkup(row_width=2)
     
     markup.add(
@@ -3280,7 +3363,8 @@ def admin_shop_settings(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_v_"))
 def admin_set_inputs(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     msg = bot.send_message(call.from_user.id, "أرسل القيمة الجديدة:")
     
     def save_setting_value(m):
