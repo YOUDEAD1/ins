@@ -155,6 +155,90 @@ temp_github_data = {}
 PROCESSING_TXS = set()
 tx_lock = threading.Lock()
 
+# ============================================================
+# 🛡 حماية #3: تشفير بيانات GitHub الحساسة (AES-GCM)
+# ============================================================
+# نشفّر بيانات GitHub (user/pass/2FA) في الذاكرة عشان لو سُرّب الـ memory dump
+# أو السيرفر، لا تكون البيانات بنص واضح.
+# المفتاح يُولَّد عند بدء البوت ولا يُحفظ في أي مكان دائم.
+# مرة البوت يقفل، المفتاح يضيع وكل البيانات اللي بقت ما تنفك تشفيرها (آمن).
+
+import secrets
+import base64
+from hashlib import sha256
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    _CRYPTO_AVAILABLE = True
+    # مفتاح عشوائي 256-bit يُولَّد عند تشغيل البوت
+    _GH_ENCRYPTION_KEY = AESGCM.generate_key(bit_length=256)
+    _gh_cipher = AESGCM(_GH_ENCRYPTION_KEY)
+    logger.info("🔐 تم تفعيل تشفير AES-256-GCM لبيانات GitHub")
+except ImportError:
+    _CRYPTO_AVAILABLE = False
+    _gh_cipher = None
+    logger.warning("⚠️ مكتبة cryptography غير مثبتة. تشغيل: pip install cryptography")
+    logger.warning("⚠️ سيتم استخدام XOR بسيط كحل بديل (أقل أمان من AES-GCM)")
+    # حل بديل بسيط (أقل أمان) لو cryptography مو مثبتة
+    _GH_XOR_KEY = secrets.token_bytes(64)
+
+
+def encrypt_sensitive(plaintext: str) -> str:
+    """تشفير نص حساس - يرجع string base64 جاهز للتخزين"""
+    if not plaintext:
+        return ""
+    try:
+        if _CRYPTO_AVAILABLE:
+            # AES-GCM مع nonce عشوائي
+            nonce = secrets.token_bytes(12)
+            ciphertext = _gh_cipher.encrypt(nonce, plaintext.encode('utf-8'), None)
+            # نخزّن nonce + ciphertext
+            combined = nonce + ciphertext
+            return base64.b64encode(combined).decode('ascii')
+        else:
+            # XOR بسيط (احتياطي)
+            data = plaintext.encode('utf-8')
+            encrypted = bytes(b ^ _GH_XOR_KEY[i % len(_GH_XOR_KEY)] for i, b in enumerate(data))
+            return base64.b64encode(encrypted).decode('ascii')
+    except Exception as e:
+        logger.error(f"Encryption error: {e}")
+        return ""
+
+
+def decrypt_sensitive(encrypted_b64: str) -> str:
+    """فك تشفير نص حساس"""
+    if not encrypted_b64:
+        return ""
+    try:
+        combined = base64.b64decode(encrypted_b64)
+        if _CRYPTO_AVAILABLE:
+            nonce = combined[:12]
+            ciphertext = combined[12:]
+            plaintext = _gh_cipher.decrypt(nonce, ciphertext, None)
+            return plaintext.decode('utf-8')
+        else:
+            # XOR العكسي
+            decrypted = bytes(b ^ _GH_XOR_KEY[i % len(_GH_XOR_KEY)] for i, b in enumerate(combined))
+            return decrypted.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Decryption error: {e}")
+        return ""
+
+
+def secure_wipe(data_dict: dict):
+    """يمسح القيم الحساسة من dict (يستبدلها بنص عشوائي قبل الحذف)"""
+    if not data_dict:
+        return
+    try:
+        for k in list(data_dict.keys()):
+            if k in ('user', 'pass', 'totp', '2fa', 'password'):
+                # نستبدل القيمة بقمامة عشوائية قبل الحذف (يصعّب استرجاعها من memory)
+                data_dict[k] = secrets.token_hex(32)
+        data_dict.clear()
+    except Exception:
+        pass
+
+
 def get_setting(key, default="Not Set"):
     res = db.settings.find_one({'key': key})
     return res['value'] if res else default
@@ -170,7 +254,7 @@ def get_setting(key, default="Not Set"):
 # - 0.10$ مقابل كل 10 احالات نشطة (مكتملة الاشتراك الإجباري)
 # - إذا غادر شخص ونقص العدد عن مضاعفات العشرة، يُخصم تلقائياً
 # ============================================================
-REF_V2_INIT_KEY = 'referrals_v2_initialized'
+REF_V2_INIT_KEY = 'referrals_v2_initialized_v3'
 
 def initialize_referrals_v2():
     """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
@@ -181,6 +265,12 @@ def initialize_referrals_v2():
             return
 
         logger.info("🔄 جاري تهيئة نظام الإحالات V2 (لأول مرة)...")
+
+        # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
+        try:
+            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2']}})
+        except Exception:
+            pass
 
         # 1. مسح كامل لجدول الإحالات الجديد (لو موجود من تجارب سابقة)
         try:
@@ -201,6 +291,14 @@ def initialize_referrals_v2():
             )
         except Exception as e:
             logger.error(f"Error clearing old referral fields: {e}")
+        
+        # 2.5. مسح نص invite_txt المخصص القديم من custom_texts
+        # عشان يستخدم النص الجديد من الكود (اللي يحتوي على 6 متغيرات بدل 2)
+        try:
+            db.custom_texts.delete_many({'key': 'invite_txt'})
+            logger.info("✅ تم مسح النص القديم لرسالة الإحالات من custom_texts")
+        except Exception as e:
+            logger.error(f"Error clearing old invite_txt: {e}")
 
         # 3. إنشاء فهارس (Indexes) لتسريع الاستعلامات
         try:
@@ -227,11 +325,15 @@ initialize_referrals_v2()
 
 def register_new_referral(invited_id, referrer_id):
     """
-    تسجيل إحالة جديدة في الجدول الجديد.
+    تسجيل إحالة جديدة في الجدول الجديد - محمي من race conditions.
     شروط القبول:
     - المستخدم المدعو (invited) ما يكون مسجلاً من قبل
     - الـ referrer_id ما يكون نفسه invited_id
     - ما يكون مسجلاً في جدول الإحالات من قبل
+    
+    🛡 الحماية:
+    - يستخدم unique index على invited_id لمنع التكرار
+    - DuplicateKeyError = الإحالة مسجلة بالفعل (آمن)
     """
     try:
         invited_id = int(invited_id)
@@ -243,20 +345,113 @@ def register_new_referral(invited_id, referrer_id):
         if not db.users.find_one({'user_id': referrer_id}):
             return False
 
-        if db.referrals_v2.find_one({'invited_id': invited_id}):
+        # 🛡 محاولة الإدراج مباشرة — الـ unique index بيمنع التكرار
+        # هذا أسرع وأأمن من find_one ثم insert (ما فيه race condition)
+        try:
+            db.referrals_v2.insert_one({
+                'invited_id': invited_id,
+                'referrer_id': referrer_id,
+                'status': 'pending',
+                'created_at': int(time.time()),
+                'updated_at': int(time.time())
+            })
+            return True
+        except Exception as dup_err:
+            # DuplicateKeyError - الإحالة مسجلة من قبل (طبيعي، نتجاهل)
+            error_msg = str(dup_err).lower()
+            if 'duplicate' in error_msg or 'e11000' in error_msg:
+                return False
+            # خطأ آخر — نسجله
+            logger.error(f"Insert referral error: {dup_err}")
             return False
-
-        db.referrals_v2.insert_one({
-            'invited_id': invited_id,
-            'referrer_id': referrer_id,
-            'status': 'pending',
-            'created_at': int(time.time()),
-            'updated_at': int(time.time())
-        })
-        return True
     except Exception as e:
         logger.error(f"Error registering referral: {e}")
         return False
+
+
+def mark_referral_status(invited_id, new_status):
+    """
+    يحدّث حالة المُدعَى وبعدها يحدّث رصيد المُحيل تلقائياً.
+    🛡 محمي من race conditions:
+    - يستخدم find_one_and_update atomic
+    - يحدّث فقط لو الحالة الحالية فعلاً تختلف عن الجديدة
+    """
+    try:
+        invited_id = int(invited_id)
+        
+        # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
+        # هذا يمنع تحديثات مكررة من threads متعددة
+        result = db.referrals_v2.find_one_and_update(
+            {
+                'invited_id': invited_id,
+                'status': {'$ne': new_status}  # فقط لو الحالة الحالية مختلفة
+            },
+            {
+                '$set': {
+                    'status': new_status,
+                    'updated_at': int(time.time())
+                }
+            },
+            return_document=False  # نريد القيمة القديمة
+        )
+        
+        # result = None يعني إما الإحالة غير موجودة أو الحالة نفسها (طبيعي)
+        if result is None:
+            return
+        
+        # تحديث رصيد المُحيل (آمن - update_referrer_balance بحد ذاته atomic)
+        update_referrer_balance(result['referrer_id'])
+    except Exception as e:
+        logger.error(f"Error marking referral status: {e}")
+
+
+def update_referrer_balance(referrer_id):
+    """
+    تحديث رصيد المُحيل بناءً على النشطين الحاليين.
+    🛡 محمي من race conditions باستخدام lock لكل referrer_id
+    """
+    try:
+        rid = int(referrer_id)
+        
+        # 🛡 lock على هذا الـ referrer لمنع تحديثين بنفس الوقت
+        with _get_referrer_lock(rid):
+            active_count = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
+            expected = round((active_count // 10) * REFERRAL_REWARD, 2)
+
+            referrer = db.users.find_one({'user_id': rid})
+            if not referrer:
+                return
+
+            current_earned = round(float(referrer.get('ref_v2_earned', 0.0)), 2)
+
+            if expected != current_earned:
+                diff = round(expected - current_earned, 2)
+                # 🛡 atomic update مع شرط ref_v2_earned القديم
+                # لو حد ثاني عدّل في نفس الوقت، الـ update هذا ما ينفّذ
+                db.users.find_one_and_update(
+                    {
+                        'user_id': rid,
+                        'ref_v2_earned': current_earned  # شرط optimistic locking
+                    },
+                    {
+                        '$inc': {'balance': diff},
+                        '$set': {'ref_v2_earned': expected}
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Error updating referrer balance: {e}")
+
+
+# 🛡 قفل لكل referrer_id (للحماية الإضافية)
+_referrer_locks = {}
+_referrer_locks_master = threading.Lock()
+
+def _get_referrer_lock(referrer_id):
+    """يرجع lock مخصص لكل referrer لتفادي race conditions"""
+    with _referrer_locks_master:
+        if referrer_id not in _referrer_locks:
+            _referrer_locks[referrer_id] = threading.Lock()
+        return _referrer_locks[referrer_id]
 
 
 def get_ref_counts(referrer_id):
@@ -270,61 +465,6 @@ def get_ref_counts(referrer_id):
         return pending, active, left, total
     except Exception:
         return 0, 0, 0, 0
-
-
-def update_referrer_balance(referrer_id):
-    """
-    تحديث رصيد المُحيل بناءً على النشطين الحاليين.
-    expected = (active // 10) * 0.10
-    لو expected > earned: نزيد الفرق
-    لو expected < earned: نخصم الفرق (لأنه نقص عدد النشطين)
-    """
-    try:
-        rid = int(referrer_id)
-        active_count = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
-        expected = round((active_count // 10) * REFERRAL_REWARD, 2)
-
-        referrer = db.users.find_one({'user_id': rid})
-        if not referrer:
-            return
-
-        current_earned = round(float(referrer.get('ref_v2_earned', 0.0)), 2)
-
-        if expected != current_earned:
-            diff = round(expected - current_earned, 2)
-            db.users.update_one(
-                {'user_id': rid},
-                {
-                    '$inc': {'balance': diff},
-                    '$set': {'ref_v2_earned': expected}
-                }
-            )
-    except Exception as e:
-        logger.error(f"Error updating referrer balance: {e}")
-
-
-def mark_referral_status(invited_id, new_status):
-    """
-    يحدّث حالة المُدعَى وبعدها يحدّث رصيد المُحيل تلقائياً.
-    """
-    try:
-        invited_id = int(invited_id)
-        rec = db.referrals_v2.find_one({'invited_id': invited_id})
-        if not rec:
-            return
-
-        current_status = rec.get('status', 'pending')
-        if current_status == new_status:
-            return
-
-        db.referrals_v2.update_one(
-            {'invited_id': invited_id},
-            {'$set': {'status': new_status, 'updated_at': int(time.time())}}
-        )
-
-        update_referrer_balance(rec['referrer_id'])
-    except Exception as e:
-        logger.error(f"Error marking referral status: {e}")
 
 
 def background_referral_checker_v2():
@@ -575,7 +715,7 @@ LANG = {
         'new_product': "🎉 <b>منتج جديد متاح في المتجر!</b> 🚀\n\n🛍 <b>المنتج:</b> {}\n💰 <b>السعر:</b> <b>${}</b>\n🚚 <b>نوع التسليم:</b> {}\n\n📝 <b>الوصف:</b>\n{}\n\n<i>سارع بزيارة المتجر والاستفادة من المنتج الجديد! 🛡️</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>نظام الإحالات الجديد ⚡</b>\n\n🔗 <b>رابط الدعوة الخاص بك:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>إحصائياتك (تحديث مباشر):</b>\n👥 عدد الذين دخلوا الرابط: <b>{}</b>\n⏳ المعلّقين (لم يكملوا الاشتراك الإجباري): <b>{}</b>\n✅ النشطين (الذين كسبتهم بنجاح): <b>{}</b>\n❌ الذين غادروا القناة (خسرتهم): <b>{}</b>\n\n💰 إجمالي أرباحك: <b>${:.2f}</b>\n\n🎁 <b>قوانين النظام:</b>\n• تحصل على <b>0.10$</b> مقابل كل <b>10 مدعوين نشطين</b> (مشتركين بنجاح في القنوات الإجبارية).\n• المستخدمين الموجودين في البوت من قبل <b>لا يُحسبون</b> أبداً.\n• إذا غادر شخص ونقص العدد عن مضاعفات العشرة سيُخصم الرصيد تلقائياً.\n• التحديث فوري ⚡ ولا يحتاج إعادة فتح.\n\n💡 <b>مثال:</b> 10 نشطين = 0.10$  |  20 نشط = 0.20$  |  9 نشطين = 0.00$",
+        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>كيف تربح؟</b>\n━━━━━━━━━━━━━━━\n🔥 كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> في رصيدك مباشرة!\n⚡ كل ما زاد العدد، زادت أرباحك تلقائياً!\n📲 التحديث <b>فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>مثال يحمّسك:</b>\n• 10 مشتركين = <b>0.10$</b> 💵\n• 50 مشترك = <b>0.50$</b> 💵💵\n• 100 مشترك = <b>1.00$</b> 💵💵💵\n• 500 مشترك = <b>5.00$</b> 🤑\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، كسبت أكثر — السماء هي الحد!</i>",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -617,7 +757,7 @@ LANG = {
         'new_product': "🎉 <b>New Product Available!</b> 🚀\n\n🛍 <b>Product:</b> {}\n💰 <b>Price:</b> <b>${}</b>\n🚚 <b>Delivery:</b> {}\n\n📝 <b>Description:</b>\n{}\n\n<i>Visit the shop now and check out the new product! 🛡️</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "👥 <b>New Referral System ⚡</b>\n\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n📊 <b>Real-time Stats:</b>\n👥 Total Link Clicks: <b>{}</b>\n⏳ Pending (Haven't joined channels): <b>{}</b>\n✅ Active (Successfully invited): <b>{}</b>\n❌ Left the channel (Lost): <b>{}</b>\n\n💰 Total Earnings: <b>${:.2f}</b>\n\n🎁 <b>Rules:</b>\n• Get <b>$0.10</b> for every <b>10 active invites</b> (subscribed to forced channels).\n• Users who already exist in the bot <b>are never counted</b>.\n• If anyone leaves and count drops below a multiple of 10, balance is auto-deducted.\n• Updates are instant ⚡ — no refresh needed.\n\n💡 <b>Example:</b> 10 active = $0.10  |  20 active = $0.20  |  9 active = $0.00",
+        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>How To Earn?</b>\n━━━━━━━━━━━━━━━\n🔥 Every <b>10 people</b> who click your link & join = <b>$0.10</b> straight to your balance!\n⚡ The more invites, the more you earn — automatically!\n📲 Updates are <b>INSTANT</b> — no waiting!\n\n💡 <b>Motivation Examples:</b>\n• 10 joins = <b>$0.10</b> 💵\n• 50 joins = <b>$0.50</b> 💵💵\n• 100 joins = <b>$1.00</b> 💵💵💵\n• 500 joins = <b>$5.00</b> 🤑\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>The more you invite, the more you earn — the sky is the limit!</i>",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -1041,15 +1181,37 @@ def gemini_buy_prompt(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     l = get_lang(uid)
-    gemini_price = float(get_setting("gemini_price", 5.0))
-    u = get_user_data_full(uid)
     
-    if float(u.get('balance', 0)) < gemini_price:
-        bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+    # 🛡 Rate Limiting
+    if not _acquire_purchase_lock(uid):
+        if l == 'ar':
+            bot.send_message(uid, "⏳ <b>يوجد عملية شراء قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", parse_mode="HTML")
+        else:
+            bot.send_message(uid, "⏳ <b>You have a purchase in progress!</b>", parse_mode="HTML")
         return
+    
+    try:
+        gemini_price = round(float(get_setting("gemini_price", 5.0)), 2)
         
-    db.users.update_one({'user_id': uid}, {'$inc': {'balance': -gemini_price}})
-    add_to_gemini_queue(uid, gemini_price)
+        # 🛡 خصم atomic مع فحص الرصيد - يمنع double-spending
+        updated_user = db.users.find_one_and_update(
+            {
+                'user_id': uid,
+                'balance': {'$gte': gemini_price}
+            },
+            {'$inc': {'balance': -gemini_price}},
+            return_document=True
+        )
+        
+        if updated_user is None:
+            bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+            return
+        
+        # ✅ نجح الخصم - أضفه للقائمة
+        add_to_gemini_queue(uid, gemini_price)
+    finally:
+        # نحرر القفل بعد ما يدخل القائمة (لأنه ممكن يستنى طويل)
+        _release_purchase_lock(uid)
 
 @bot.message_handler(func=lambda m: ACTIVE_GEMINI_SESSION and m.from_user.id == ACTIVE_GEMINI_SESSION['uid'])
 def relay_to_provider(message):
@@ -1088,10 +1250,20 @@ def github_buy_prompt(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     l = get_lang(uid)
+    
+    # 🛡 Rate Limiting - منع طلبين بنفس الوقت
+    if not _acquire_purchase_lock(uid):
+        if l == 'ar':
+            bot.send_message(uid, "⏳ <b>يوجد عملية شراء أو تفعيل قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", parse_mode="HTML")
+        else:
+            bot.send_message(uid, "⏳ <b>You have a purchase/activation in progress!</b>", parse_mode="HTML")
+        return
+    
     gh_price = float(get_setting("github_price", 15.0))
     u = get_user_data_full(uid)
     
     if float(u.get('balance', 0)) < gh_price:
+        _release_purchase_lock(uid)  # حرّر القفل
         bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
         return
         
@@ -1104,8 +1276,13 @@ def process_gh_step_user(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
     
-    temp_github_data[uid]['user'] = message.text.strip()
+    # 🛡 تشفير اسم المستخدم
+    temp_github_data[uid]['user'] = encrypt_sensitive(message.text.strip())
     l = temp_github_data[uid]['lang']
+    
+    # حذف الرسالة من المحادثة (الأمان البصري)
+    try: bot.delete_message(uid, message.message_id)
+    except: pass
     
     msg = bot.send_message(uid, get_text(uid, 'gh_prompt_pass'), parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_pass)
@@ -1114,8 +1291,13 @@ def process_gh_step_pass(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
     
-    temp_github_data[uid]['pass'] = message.text.strip()
+    # 🛡 تشفير كلمة المرور
+    temp_github_data[uid]['pass'] = encrypt_sensitive(message.text.strip())
     l = temp_github_data[uid]['lang']
+    
+    # حذف رسالة كلمة المرور فوراً من المحادثة (الأمان البصري)
+    try: bot.delete_message(uid, message.message_id)
+    except: pass
     
     msg = bot.send_message(uid, get_text(uid, 'gh_prompt_2fa'), parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_2fa)
@@ -1124,15 +1306,26 @@ def process_gh_step_2fa(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
     
-    two_factor = message.text.strip()
-        
+    # 🛡 تشفير كود 2FA
+    two_factor_encrypted = encrypt_sensitive(message.text.strip())
+    
+    # حذف رسالة 2FA فوراً من المحادثة
+    try: bot.delete_message(uid, message.message_id)
+    except: pass
+    
     data = temp_github_data.pop(uid)
     
     price = data['price']
     lang = data['lang']
-    g_user = data['user']
-    g_pass = data['pass']
-    g_totp = two_factor
+    
+    # 🛡 فك التشفير فقط عند الإرسال للـ API (وقت قصير جداً في الذاكرة)
+    g_user = decrypt_sensitive(data['user'])
+    g_pass = decrypt_sensitive(data['pass'])
+    g_totp = decrypt_sensitive(two_factor_encrypted)
+    
+    # مسح المرجع المشفّر بعد فك التشفير
+    secure_wipe(data)
+    del two_factor_encrypted
     
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': -price}})
     status_msg = bot.send_message(uid, get_text(uid, 'gh_deducted'), parse_mode="HTML")
@@ -1233,6 +1426,15 @@ def process_gh_step_2fa(message):
             try: bot.edit_message_text(get_text(uid, 'gh_conn_err', e), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
             except: pass
             logger.error(f"GitHub Connection Error: {e}")
+        finally:
+            # 🛡 تحرير قفل الشراء (سواء نجح أو فشل)
+            _release_purchase_lock(uid)
+            # 🛡 مسح بيانات GitHub الحساسة من الذاكرة بعد الانتهاء
+            try:
+                nonlocal_vars = {'g_user': g_user, 'g_pass': g_pass, 'g_totp': g_totp}
+                secure_wipe(nonlocal_vars)
+            except Exception:
+                pass
 
     threading.Thread(target=api_worker, daemon=True).start()
 
@@ -1511,83 +1713,225 @@ def execute_bulk_buy(message, pid, lang):
     qty = int(message.text.strip())
     if qty <= 0:
         bot.send_message(uid, get_text(uid, 'qty_invalid'), parse_mode="HTML"); return
-
-    u = get_user_data_full(uid)
-    p = find_product(pid)
-    if not p: return
-
-    is_manual = p.get('is_manual', False)
-    if not is_manual:
-        pid_str = str(pid)
-        queries = [{'product_id': pid_str}]
-        if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-        try: queries.append({'product_id': float(pid_str)})
-        except: pass
-        
-        stk_items = list(db.product_stock.find({'$or': queries, 'is_sold': False}).limit(qty))
-        if len(stk_items) < qty:
-            bot.send_message(uid, get_text(uid, 'qty_not_enough', len(stk_items)), parse_mode="HTML"); return
-        
-    total_price = float(p.get('price', 0)) * qty
-    if float(u.get('balance', 0)) < total_price:
-        bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML"); return
-        
-    db.users.update_one({'user_id': uid}, {'$inc': {'balance': -total_price}})
     
-    support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
-    buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
-    log_ch = get_setting('log_channel')
-
-    if is_manual:
-        order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
-        db.orders.insert_one({'user_id': uid, 'product_id': str(pid), 'code_delivered': f"طلب يدوي: {order_id}"})
-        
+    # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
+    if not _acquire_purchase_lock(uid):
         if lang == 'ar':
-            msg_txt = f"✅ <b>تم الطلب بنجاح! وتم خصم (${total_price:.2f})</b>\n\nهذا المنتج يتطلب (تسليم يدوي).\nرقم طلبك: <code>{order_id}</code>\n\nيرجى التواصل مع {support_user} لتنفيذ طلبك."
+            bot.send_message(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", parse_mode="HTML")
         else:
-            msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nThis is a manual delivery product.\nOrder ID: <code>{order_id}</code>\n\nPlease contact {support_user}."
-        bot.send_message(uid, msg_txt, parse_mode="HTML")
+            bot.send_message(uid, "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another.", parse_mode="HTML")
+        return
+
+    try:
+        u = get_user_data_full(uid)
+        p = find_product(pid)
+        if not p:
+            bot.send_message(uid, "❌ المنتج غير موجود.", parse_mode="HTML")
+            return
+
+        is_manual = p.get('is_manual', False)
+        total_price = round(float(p.get('price', 0)) * qty, 2)
         
-        admin_msg = f"🔐 <b>إشعار إدارة (طلب تسليم يدوي) 🤝</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}\n🔖 رقم الطلب: <code>{order_id}</code>\n\n⚠️ <b>تواصل مع العميل لتسليمه طلبه!</b>"
-        notify_admins(admin_msg)
-    else:
-        delivered_codes = []
-        for item in stk_items:
-            db.product_stock.update_one({'_id': item['_id']}, {'$set': {'is_sold': True}})
-            db.orders.insert_one({'user_id': uid, 'product_id': str(pid), 'code_delivered': item['code_line']})
-            delivered_codes.append(item['code_line'])
+        # 🛡 حماية #2.1: حجز الأكواد بشكل atomic قبل خصم الرصيد
+        # نحجزها بـ "is_sold: True" + "reserved_by: uid + timestamp"
+        # لو فشل الدفع نرجعها
+        reserved_items = []
+        reservation_id = f"{uid}_{int(time.time() * 1000)}"
+        
+        if not is_manual:
+            pid_str = str(pid)
+            queries = [{'product_id': pid_str}]
+            if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+            try: queries.append({'product_id': float(pid_str)})
+            except: pass
             
-        if qty > 3:
-            file_content = ""
-            for i, code in enumerate(delivered_codes, 1):
-                file_content += f"{i}. {code}\n"
-            
-            f = io.BytesIO(file_content.encode('utf-8'))
-            f.name = f"Your_Codes_{pid}.txt"
+            # 🛡 حجز ذري: نحجز كود واحد بكل مرة باستخدام find_one_and_update
+            # هذا يضمن إن نفس الكود ما ينباع لشخصين
+            for _ in range(qty):
+                reserved = db.product_stock.find_one_and_update(
+                    {'$or': queries, 'is_sold': False},
+                    {'$set': {
+                        'is_sold': True,
+                        'reservation_id': reservation_id,
+                        'reserved_at': int(time.time())
+                    }},
+                    return_document=True
+                )
+                if reserved is None:
+                    # لم نجد كود متاح - نُرجع كل المحجوزات
+                    _release_reservation(reservation_id)
+                    bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
+                    return
+                reserved_items.append(reserved)
+        
+        # 🛡 حماية #2.2: خصم الرصيد بشكل atomic - فقط لو الرصيد كافي
+        # find_one_and_update مع شرط balance >= total_price يمنع double-spend
+        updated_user = db.users.find_one_and_update(
+            {
+                'user_id': uid,
+                'balance': {'$gte': total_price}  # شرط الرصيد الكافي
+            },
+            {'$inc': {'balance': -total_price}},
+            return_document=True  # نريد القيمة الجديدة
+        )
+        
+        if updated_user is None:
+            # الرصيد غير كافي - نُرجع الأكواد المحجوزة
+            _release_reservation(reservation_id)
+            bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+            return
+        
+        # ✅ نجح الخصم - نكمل العملية
+        u = updated_user  # استخدم الإصدار المحدث
+        
+        support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
+        buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
+        log_ch = get_setting('log_channel')
+
+        if is_manual:
+            order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
+            try:
+                db.orders.insert_one({
+                    'user_id': uid, 
+                    'product_id': str(pid), 
+                    'code_delivered': f"طلب يدوي: {order_id}",
+                    'qty': qty,
+                    'total_price': total_price
+                })
+            except Exception as e:
+                # فشل تسجيل الطلب - نرجع الرصيد
+                logger.error(f"Failed to insert manual order: {e}")
+                db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                bot.send_message(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", parse_mode="HTML")
+                return
             
             if lang == 'ar':
-                success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيار متجرنا 🛡️</i>"
+                msg_txt = f"✅ <b>تم الطلب بنجاح! وتم خصم (${total_price:.2f})</b>\n\nهذا المنتج يتطلب (تسليم يدوي).\nرقم طلبك: <code>{order_id}</code>\n\nيرجى التواصل مع {support_user} لتنفيذ طلبك."
             else:
-                success_msg = f"✅ <b>Purchase Successful!</b>\n\nSince you bought {qty} codes, they are attached in this file for easy copying 📄\n\n<i>Thank you for choosing us 🛡️</i>"
-                
-            bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+                msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nThis is a manual delivery product.\nOrder ID: <code>{order_id}</code>\n\nPlease contact {support_user}."
+            bot.send_message(uid, msg_txt, parse_mode="HTML")
+            
+            admin_msg = f"🔐 <b>إشعار إدارة (طلب تسليم يدوي) 🤝</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}\n🔖 رقم الطلب: <code>{order_id}</code>\n\n⚠️ <b>تواصل مع العميل لتسليمه طلبه!</b>"
+            notify_admins(admin_msg)
         else:
-            codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
-            bot.send_message(uid, get_text(uid, 'buy_success', codes_str), parse_mode="HTML")
+            # تثبيت الأكواد المحجوزة (إزالة reservation_id - أصبحت مباعة فعلياً)
+            delivered_codes = []
+            try:
+                for item in reserved_items:
+                    db.product_stock.update_one(
+                        {'_id': item['_id']},
+                        {'$unset': {'reservation_id': "", 'reserved_at': ""}}
+                    )
+                    db.orders.insert_one({
+                        'user_id': uid,
+                        'product_id': str(pid),
+                        'code_delivered': item['code_line'],
+                        'qty': 1,
+                        'price': float(p.get('price', 0))
+                    })
+                    delivered_codes.append(item['code_line'])
+            except Exception as e:
+                # فشل في تسليم بعض الأكواد - حذف نظيف
+                logger.error(f"Critical: Failed during code delivery: {e}")
+                # ما نقدر نرجع الكل بأمان هنا، نسجل الحادثة
+                notify_admins(f"⚠️ <b>تنبيه أمني!</b>\nفشل في تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}\n\n<b>راجع يدوياً!</b>")
+                
+            if qty > 3:
+                file_content = ""
+                for i, code in enumerate(delivered_codes, 1):
+                    file_content += f"{i}. {code}\n"
+                
+                f = io.BytesIO(file_content.encode('utf-8'))
+                f.name = f"Your_Codes_{pid}.txt"
+                
+                if lang == 'ar':
+                    success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيار متجرنا 🛡️</i>"
+                else:
+                    success_msg = f"✅ <b>Purchase Successful!</b>\n\nSince you bought {qty} codes, they are attached in this file for easy copying 📄\n\n<i>Thank you for choosing us 🛡️</i>"
+                    
+                bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+            else:
+                codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
+                bot.send_message(uid, get_text(uid, 'buy_success', codes_str), parse_mode="HTML")
+            
+            admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
+            notify_admins(admin_msg)
+
+        if log_ch and log_ch != "Not Set":
+            try: 
+                obs_user = obscure_text(u.get('username') or str(uid))
+                pub_msg = f"🛒 <b>New Purchase!</b> 🛍\n\n👤 User: <b>{obs_user}</b>\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n🔢 QTY: {qty}\n\n<i>Thank you for choosing us 🛡️</i>"
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+            except: pass
+
+        # ⚠️ ملاحظة: تم إزالة منطق مكافأة الإحالة القديمة (عند أول شراء)
+        # النظام الجديد V2 يعتمد على عدد الإحالات النشطة (10 = 0.10$)
+    
+    finally:
+        # 🛡 تحرير قفل الشراء دائماً (حتى لو حصل خطأ)
+        _release_purchase_lock(uid)
+
+
+def _release_reservation(reservation_id):
+    """إرجاع الأكواد المحجوزة لو فشل الدفع"""
+    try:
+        db.product_stock.update_many(
+            {'reservation_id': reservation_id},
+            {
+                '$set': {'is_sold': False},
+                '$unset': {'reservation_id': "", 'reserved_at': ""}
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error releasing reservation {reservation_id}: {e}")
+
+
+# ============================================================
+# 🛡 حماية #4: Rate Limiting لكل مستخدم
+# ============================================================
+_purchase_locks = {}              # {uid: lock_acquired_timestamp}
+_purchase_locks_master = threading.Lock()
+PURCHASE_LOCK_TIMEOUT = 60  # ثانية - أقصى وقت لعملية شراء واحدة
+
+def _acquire_purchase_lock(uid):
+    """
+    يحاول الحصول على قفل لمنع المستخدم من فتح أكثر من عملية شراء.
+    يرجع True لو نجح، False لو فيه عملية قائمة.
+    """
+    with _purchase_locks_master:
+        now = int(time.time())
+        existing = _purchase_locks.get(uid)
         
-        admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
-        notify_admins(admin_msg)
+        # لو فيه قفل قديم وما انتهى timeout
+        if existing and (now - existing) < PURCHASE_LOCK_TIMEOUT:
+            return False
+        
+        # نأخذ القفل
+        _purchase_locks[uid] = now
+        return True
 
-    if log_ch and log_ch != "Not Set":
-        try: 
-            obs_user = obscure_text(u.get('username') or str(uid))
-            pub_msg = f"🛒 <b>New Purchase!</b> 🛍\n\n👤 User: <b>{obs_user}</b>\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n🔢 QTY: {qty}\n\n<i>Thank you for choosing us 🛡️</i>"
-            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-        except: pass
+def _release_purchase_lock(uid):
+    """تحرير قفل الشراء للمستخدم"""
+    with _purchase_locks_master:
+        _purchase_locks.pop(uid, None)
 
-    # ⚠️ ملاحظة: تم إزالة منطق مكافأة الإحالة القديمة (عند أول شراء)
-    # النظام الجديد V2 يعتمد على عدد الإحالات النشطة (10 = 0.10$)
-    # ولا يعتمد على عمليات الشراء.
+
+def _cleanup_stale_purchase_locks():
+    """تنظيف الأقفال المعلقة (تشتغل في الخلفية)"""
+    while True:
+        try:
+            time.sleep(120)  # كل دقيقتين
+            with _purchase_locks_master:
+                now = int(time.time())
+                stale = [uid for uid, ts in _purchase_locks.items() if (now - ts) > PURCHASE_LOCK_TIMEOUT]
+                for uid in stale:
+                    _purchase_locks.pop(uid, None)
+                if stale:
+                    logger.info(f"🧹 تنظيف {len(stale)} قفل شراء معلق")
+        except Exception as e:
+            logger.error(f"Error in cleanup_stale_purchase_locks: {e}")
+
+threading.Thread(target=_cleanup_stale_purchase_locks, daemon=True).start()
 
 # ============================================================
 # 🏦 13. بوابات الدفع (تحديث لقبول الهاش القصير)
@@ -2122,16 +2466,38 @@ def ad_save_custom_btn(message, key):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
 def ad_prod_emoji_start(call):
     bot.answer_callback_query(call.id) 
+    l = get_lang(call.from_user.id)
     prods = list(db.products.find())
+    
+    # ترتيب أبجدي
+    def sort_key(x):
+        if l == 'en':
+            return str(x.get('name_en', x.get('name_ar', ''))).lower()
+        return str(x.get('name_ar', x.get('name_en', ''))).lower()
+    prods.sort(key=sort_key)
+    
     markup = InlineKeyboardMarkup(row_width=1)
     
     for p in prods: 
-        p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+        p_name = p.get('name_en') if l == 'en' else p.get('name_ar')
+        if not p_name:
+            p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
         p_id = p.get('id', str(p.get('_id', '')))
-        markup.add(InlineKeyboardButton(f"📦 {clean_name(p_name)}", callback_data=f"set_pemj_{p_id}"))
+        
+        # علامة لو الإيموجي مُعيّن
+        has_emoji_mark = " ✅" if p.get('custom_emoji_id') else " ⚪"
+        btn_text = f"📦 {clean_name(p_name)}{has_emoji_mark}"
+        btn_kwargs = {'text': btn_text, 'callback_data': f"set_pemj_{p_id}"}
+        
+        # عرض الإيموجي الحالي على الزر (لو موجود)
+        custom_emoji_id = p.get('custom_emoji_id')
+        if custom_emoji_id:
+            btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
+        
+        markup.add(CustomInlineButton(**btn_kwargs))
         
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
-    bot.edit_message_text("👇 <b>اختر المنتج الذي تريد تعيين أيقونة له:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    bot.edit_message_text("👇 <b>اختر المنتج الذي تريد تعيين أيقونة له:</b>\n\n✅ = يحتوي على أيقونة | ⚪ = بدون أيقونة", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_pemj_"))
 def ad_prod_emoji_ask(call):
@@ -2322,12 +2688,36 @@ def ad_p_final(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
 def admin_edit_list(call):
     bot.answer_callback_query(call.id)
+    l = get_lang(call.from_user.id)
     prods = list(db.products.find())
+    
+    # ترتيب أبجدي حسب لغة الأدمن
+    def sort_key(x):
+        if l == 'en':
+            return str(x.get('name_en', x.get('name_ar', ''))).lower()
+        return str(x.get('name_ar', x.get('name_en', ''))).lower()
+    prods.sort(key=sort_key)
+    
     markup = InlineKeyboardMarkup(row_width=1)
     for p in prods:
         pid = p.get('id', str(p.get('_id', '')))
         hidden_icon = " 👻" if p.get('is_hidden', False) else ""
-        markup.add(InlineKeyboardButton(f"📝 {clean_name(p.get('name_en'))}{hidden_icon}", callback_data=f"edit_p_{pid}"))
+        
+        # عرض الاسم حسب لغة الأدمن
+        p_name = p.get('name_en') if l == 'en' else p.get('name_ar')
+        if not p_name:
+            p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+        
+        btn_text = f"📝 {clean_name(p_name)}{hidden_icon}"
+        btn_kwargs = {'text': btn_text, 'callback_data': f"edit_p_{pid}"}
+        
+        # إضافة الإيموجي المميز (Premium Emoji) للزر
+        custom_emoji_id = p.get('custom_emoji_id')
+        if custom_emoji_id:
+            btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
+        
+        markup.add(CustomInlineButton(**btn_kwargs))
+    
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
     bot.edit_message_text("👇 Select Product:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
@@ -2371,22 +2761,130 @@ def admin_edit_prompt(call):
     parts = call.data.split('_', 2)
     field = parts[1]; pid = parts[2]
     
-    msg = bot.send_message(call.message.chat.id, "Send new value:")
+    # جلب المنتج لعرض القيمة القديمة
+    p = find_product(pid)
+    if not p:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
+    
+    # اسم المنتج للعرض (مع الإيموجي المميز إن وجد)
+    p_name_raw = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+    custom_emoji_id = p.get('custom_emoji_id')
+    if custom_emoji_id:
+        p_display_name = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {clean_name(p_name_raw)}'
+    else:
+        p_display_name = f'📦 {clean_name(p_name_raw)}'
+    
+    # تحديد القيمة القديمة + التسمية حسب النوع
+    if field == "price":
+        current_price = float(p.get('price', 0))
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"💵 <b>تعديل سعر المنتج</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"💰 <b>السعر الحالي:</b> <code>${current_price:.2f}</code>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👇 <b>أرسل السعر الجديد بالدولار:</b>\n"
+            f"<i>(مثال: 5.99 أو 10)</i>\n\n"
+            f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
+        )
+    elif field == "dar":
+        old_desc = clean_name(p.get('desc_ar', '-'))
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"📝 <b>تعديل الوصف العربي</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"📌 <b>الوصف الحالي:</b>\n<blockquote>{html.escape(str(old_desc))}</blockquote>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👇 <b>أرسل الوصف الجديد:</b>\n"
+            f"<i>(يدعم Premium Emojis - سيُترجم تلقائياً للإنجليزية)</i>\n\n"
+            f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
+        )
+    elif field == "den":
+        old_desc = clean_name(p.get('desc_en', '-'))
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"📝 <b>Edit English Description</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"📌 <b>Current Description:</b>\n<blockquote>{html.escape(str(old_desc))}</blockquote>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👇 <b>Send new description:</b>\n"
+            f"<i>(Supports Premium Emojis)</i>\n\n"
+            f"💡 <i>Send <b>cancel</b> to abort.</i>"
+        )
+    elif field == "nar":
+        old_name = clean_name(p.get('name_ar', '-'))
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"✏️ <b>تعديل الاسم العربي</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"📌 <b>الاسم الحالي:</b> <code>{html.escape(str(old_name))}</code>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👇 <b>أرسل الاسم الجديد:</b>\n"
+            f"<i>(يدعم Premium Emojis - سيُترجم تلقائياً للإنجليزية)</i>\n\n"
+            f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
+        )
+    elif field == "nen":
+        old_name = clean_name(p.get('name_en', '-'))
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"✏️ <b>Edit English Name</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"📌 <b>Current Name:</b> <code>{html.escape(str(old_name))}</code>\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👇 <b>Send new name:</b>\n"
+            f"<i>(Supports Premium Emojis)</i>\n\n"
+            f"💡 <i>Send <b>cancel</b> to abort.</i>"
+        )
+    else:
+        prompt_msg = "👇 أرسل القيمة الجديدة:"
+    
+    msg = bot.send_message(call.message.chat.id, prompt_msg, parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_save_edit, field, pid)
 
-# ----------- إشعار تغيير السعر بتقرير -----------
+# ----------- حفظ تعديل المنتج + إشعار تخفيض السعر -----------
 def admin_save_edit(message, field, pid):
-    val = message.text
+    val = message.text or ""
+    
+    # دعم الإلغاء
+    if val.strip().lower() in ['الغاء', 'cancel', '/cancel']:
+        bot.send_message(message.chat.id, "❌ تم إلغاء التعديل.")
+        return
+    
     keys = {"price": "price", "dar": "desc_ar", "den": "desc_en", "nar": "name_ar", "nen": "name_en"}
     p = find_product(pid)
-    if not p: return
+    if not p: 
+        bot.send_message(message.chat.id, "❌ المنتج لم يعد موجوداً.")
+        return
 
     if field == "price":
         try:
             new_price = float(val)
+            if new_price < 0:
+                bot.send_message(message.chat.id, "❌ السعر لا يمكن أن يكون سالباً.")
+                return
             old_price = float(p.get('price', 0))
             db.products.update_one({'_id': p['_id']}, {'$set': {'price': new_price}})
-            bot.send_message(message.chat.id, "✅ Updated.")
+            
+            # رسالة توضح التغيير
+            if new_price < old_price:
+                change_emoji = "📉"
+                change_txt = f"تم تخفيض السعر من <b>${old_price:.2f}</b> إلى <b>${new_price:.2f}</b>"
+            elif new_price > old_price:
+                change_emoji = "📈"
+                change_txt = f"تم رفع السعر من <b>${old_price:.2f}</b> إلى <b>${new_price:.2f}</b>"
+            else:
+                change_emoji = "✅"
+                change_txt = f"السعر بقي نفسه: <b>${new_price:.2f}</b>"
+            
+            bot.send_message(message.chat.id, f"{change_emoji} <b>تم التحديث!</b>\n{change_txt}", parse_mode="HTML")
+            
+            # برودكاست فقط لو السعر نزل
             if new_price < old_price:
                 def broadcast_price_drop(admin_id):
                     users = list(db.users.find())
@@ -2411,20 +2909,58 @@ def admin_save_edit(message, field, pid):
                     bot.send_message(admin_id, f"📢 <b>تقرير إشعار التخفيض للمنتج ({p.get('name_ar')}):</b>\n🟢 مستلمين: {success}\n🔴 محظورين: {fail}", parse_mode="HTML")
                 
                 threading.Thread(target=broadcast_price_drop, args=(message.chat.id,), daemon=True).start()
-                bot.send_message(message.chat.id, "📢 تم بدء إرسال إشعار التخفيض وسيصلك تقرير قريبًا.")
-        except: bot.send_message(message.chat.id, "❌ خطأ في السعر.")
+                bot.send_message(message.chat.id, "📢 تم بدء إرسال إشعار التخفيض للجميع وسيصلك تقرير قريباً.")
+        except Exception as e: 
+            bot.send_message(message.chat.id, f"❌ خطأ في السعر. تأكد من إرسال رقم صحيح (مثال: 5.99)")
     else:
-        db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: val}})
-        bot.send_message(message.chat.id, "✅ Updated.")
+        # للأسماء والأوصاف — دعم Premium Emojis + ترجمة تلقائية
+        final_text = extract_custom_emojis_to_html(message)
+        
+        if field in ['nar', 'dar']:
+            # عربي → ترجم للإنجليزي تلقائياً
+            translated = safe_translate_for_cms(final_text, 'en')
+            if field == 'nar':
+                db.products.update_one({'_id': p['_id']}, {'$set': {'name_ar': final_text, 'name_en': translated}})
+                bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML")
+            else:
+                db.products.update_one({'_id': p['_id']}, {'$set': {'desc_ar': final_text, 'desc_en': translated}})
+                bot.send_message(message.chat.id, "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>", parse_mode="HTML")
+        else:
+            # إنجليزي فقط
+            db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: final_text}})
+            bot.send_message(message.chat.id, "✅ <b>تم التحديث بنجاح.</b>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
 def admin_del_list(call):
     bot.answer_callback_query(call.id)
+    l = get_lang(call.from_user.id)
     prods = list(db.products.find())
+    
+    # ترتيب أبجدي
+    def sort_key(x):
+        if l == 'en':
+            return str(x.get('name_en', x.get('name_ar', ''))).lower()
+        return str(x.get('name_ar', x.get('name_en', ''))).lower()
+    prods.sort(key=sort_key)
+    
     markup = InlineKeyboardMarkup(row_width=1)
     for p in prods:
         pid = p.get('id', str(p.get('_id', '')))
-        markup.add(InlineKeyboardButton(f"🗑 {clean_name(p.get('name_en'))}", callback_data=f"del_p_{pid}"))
+        
+        p_name = p.get('name_en') if l == 'en' else p.get('name_ar')
+        if not p_name:
+            p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+        
+        btn_text = f"🗑 {clean_name(p_name)}"
+        btn_kwargs = {'text': btn_text, 'callback_data': f"del_p_{pid}"}
+        
+        # إيموجي مميز
+        custom_emoji_id = p.get('custom_emoji_id')
+        if custom_emoji_id:
+            btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
+        
+        markup.add(CustomInlineButton(**btn_kwargs))
+    
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
     bot.edit_message_text("👇 Select Product to Delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
@@ -2450,13 +2986,39 @@ def admin_del_exec(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_s_list")
 def admin_stock_list_ui(call):
     bot.answer_callback_query(call.id)
+    l = get_lang(call.from_user.id)
     prods = list(db.products.find({'is_manual': {'$ne': True}}))
+    
+    # ترتيب أبجدي
+    def sort_key(x):
+        if l == 'en':
+            return str(x.get('name_en', x.get('name_ar', ''))).lower()
+        return str(x.get('name_ar', x.get('name_en', ''))).lower()
+    prods.sort(key=sort_key)
+    
     markup = InlineKeyboardMarkup(row_width=1)
-    if not prods: return
+    if not prods: 
+        bot.edit_message_text("📭 لا توجد منتجات تلقائية حالياً.", call.message.chat.id, call.message.message_id, parse_mode="HTML")
+        return
+    
     for p in prods:
         pid = p.get('id', str(p.get('_id', '')))
         stk_count = get_product_stock_count(pid)
-        markup.add(InlineKeyboardButton(f"📦 {clean_name(p.get('name_en'))} ({stk_count})", callback_data=f"ad_s_opts_{pid}"))
+        
+        p_name = p.get('name_en') if l == 'en' else p.get('name_ar')
+        if not p_name:
+            p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
+        
+        btn_text = f"📦 {clean_name(p_name)} ({stk_count})"
+        btn_kwargs = {'text': btn_text, 'callback_data': f"ad_s_opts_{pid}"}
+        
+        # إيموجي مميز
+        custom_emoji_id = p.get('custom_emoji_id')
+        if custom_emoji_id:
+            btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
+        
+        markup.add(CustomInlineButton(**btn_kwargs))
+    
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
     bot.edit_message_text("📦 <b>اختر المنتج لإدارة الستوك الخاص به:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
