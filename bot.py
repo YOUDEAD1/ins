@@ -71,7 +71,6 @@ CACHED_PROXIES = []
 LAST_PROXY_FETCH = 0
 
 def test_proxy(proxy_url):
-    """دالة لاختبار البروكسي قبل استخدامه لتجنب الحظر"""
     try:
         proxies_dict = {'http': proxy_url, 'https': proxy_url}
         res = requests.get("https://api.binance.com/api/v3/ping", proxies=proxies_dict, timeout=4)
@@ -80,7 +79,6 @@ def test_proxy(proxy_url):
         return False
 
 def get_free_proxies():
-    """هذه الدالة تجلب بروكسيات مجانية من الإنترنت وتفحصها قبل الاستخدام"""
     global CACHED_PROXIES, LAST_PROXY_FETCH
     current_time = time.time()
     
@@ -98,11 +96,11 @@ def get_free_proxies():
                 random.shuffle(proxies)
                 
                 working_proxies = []
-                for p in proxies[:60]: # تجربة مجموعة عشوائية
+                for p in proxies[:60]:
                     proxy_url = f"http://{p.strip()}"
                     if test_proxy(proxy_url):
                         working_proxies.append(proxy_url)
-                    if len(working_proxies) >= 5: # نحتفظ بأفضل 5 بروكسيات شغالة
+                    if len(working_proxies) >= 5:
                         break
                         
                 if working_proxies:
@@ -119,7 +117,6 @@ def get_free_proxies():
     return CACHED_PROXIES
 
 def get_binance_client():
-    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي عشوائي مفحوص لتفادي الحظر"""
     proxies_list = get_free_proxies()
     
     if proxies_list:
@@ -134,7 +131,6 @@ def get_binance_client():
         except Exception:
             pass 
             
-    # الاتصال الافتراضي بدون بروكسي إذا لم تتوفر بروكسيات
     return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 # ============================================================
@@ -368,8 +364,8 @@ def start_gemini_session(uid, price):
                                 break
                         if clicked:
                             break
-            if clicked:
-                break
+                if clicked: # <--- تم إصلاح مسافة الـ break هنا 
+                    break
                     
             if not clicked:
                 await client.send_message(provider_bot, "✨ Create verify")
@@ -564,7 +560,6 @@ LANG = {
 # ============================================================
 
 def clean_html(text):
-    """دالة مطورة تدعم التنسيقات (مثل المائل والغامق) في وصف المنتجات"""
     if not text: 
         return "بدون اسم"
     return str(text).strip()
@@ -853,10 +848,9 @@ def notify_admins(message_text):
 # 👥 8. نظام تحديث الإحالات الديناميكي السريع (في الخلفية)
 # ============================================================
 def update_referrer_balance(referrer_id):
-    """دالة تقوم بحساب أرباح الشخص المحيل وتحديث رصيده بناءً على عدد الإحالات النشطة فقط"""
     try:
         active_count = db.users.count_documents({'referred_by': str(referrer_id), 'ref_status': 'active'})
-        expected_earnings = (active_count // 10) * 0.10 # 0.10$ لكل 10 أشخاص
+        expected_earnings = (active_count // 10) * 0.10
 
         referrer = db.users.find_one({'user_id': int(referrer_id)})
         if not referrer: return
@@ -876,7 +870,6 @@ def update_referrer_balance(referrer_id):
         logger.error(f"Error updating referrer balance: {e}")
 
 def background_referral_checker():
-    """هذا المحرك يعمل في الخلفية بصمت لفحص المشتركين وخصم الرصيد إذا غادروا لضمان سرعة فائقة للمستخدمين"""
     while True:
         try:
             referred_users = list(db.users.find({'referred_by': {'$ne': None}}))
@@ -982,7 +975,6 @@ def start_handler(message):
     if lang not in ['ar', 'en']: 
         lang = 'ar'
     
-    # تحديث وتأكيد حالة الاشتراك الفورية للإحالات
     if not check_forced_sub(uid):
         if user.get('ref_status') == 'active':
             db.users.update_one({'user_id': uid}, {'$set': {'ref_status': 'left'}})
@@ -1136,11 +1128,9 @@ def invite_ui(call):
         
     b_n = bot.get_me().username
     
-    # تحديث سريع للأرباح قبل العرض
     update_referrer_balance(uid)
     u = get_user_data_full(uid) 
     
-    # جلب الإحصائيات الفورية من قاعدة البيانات فقط (سريع جداً)
     pending_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'pending'})
     active_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'active'})
     left_count = db.users.count_documents({'referred_by': str(uid), 'ref_status': 'left'})
@@ -2756,7 +2746,7 @@ def admin_stock_list_ui(call):
     )
     
     bot.edit_message_text(
-        "📦 <b>اختر المنتج لإدارة الستوك الخاص به:</b>", 
+        "📦 <b>اختر المنتج لإدارة الستوك الخاص الخاص به:</b>", 
         call.message.chat.id, 
         call.message.message_id, 
         reply_markup=markup, 
