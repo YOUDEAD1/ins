@@ -254,7 +254,7 @@ def get_setting(key, default="Not Set"):
 # - 0.10$ مقابل كل 10 احالات نشطة (مكتملة الاشتراك الإجباري)
 # - إذا غادر شخص ونقص العدد عن مضاعفات العشرة، يُخصم تلقائياً
 # ============================================================
-REF_V2_INIT_KEY = 'referrals_v2_initialized_v3'
+REF_V2_INIT_KEY = 'referrals_v2_initialized_v4'
 
 def initialize_referrals_v2():
     """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
@@ -268,7 +268,7 @@ def initialize_referrals_v2():
 
         # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
         try:
-            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2']}})
+            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3']}})
         except Exception:
             pass
 
@@ -442,6 +442,105 @@ def update_referrer_balance(referrer_id):
         logger.error(f"Error updating referrer balance: {e}")
 
 
+def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0):
+    """
+    🎁 مكافأة إحالة عند الشراء:
+    لو هذا المستخدم (buyer_uid) جاي من إحالة شخص، نعطي ذاك الشخص 0.10$
+    تشتغل في كل عملية شراء (متراكمة).
+    
+    🛡 محمي من race conditions بـ:
+    - find_one_and_update atomic للرصيد
+    - تسجيل المكافأة في جدول purchase_rewards لتتبعها (وكدليل)
+    """
+    try:
+        buyer_uid = int(buyer_uid)
+        
+        # نشوف هل المشتري عنده مُحيل في النظام الجديد
+        ref_record = db.referrals_v2.find_one({'invited_id': buyer_uid})
+        if not ref_record:
+            return False  # المشتري ما له مُحيل
+        
+        referrer_id = int(ref_record.get('referrer_id', 0))
+        if referrer_id <= 0:
+            return False
+        
+        # تأكد إن المُحيل لازال موجود وما هو محظور
+        referrer = db.users.find_one({'user_id': referrer_id})
+        if not referrer or referrer.get('is_banned') == 1:
+            return False
+        
+        # 🛡 منح المكافأة atomic
+        result = db.users.find_one_and_update(
+            {'user_id': referrer_id},
+            {
+                '$inc': {
+                    'balance': REFERRAL_REWARD,
+                    'ref_v2_purchase_earned': REFERRAL_REWARD  # مجموع أرباح المشتريات
+                }
+            },
+            return_document=True
+        )
+        
+        if result is None:
+            return False
+        
+        # تسجيل المكافأة كسجل دائم (للأرشيف والتتبع)
+        try:
+            db.purchase_rewards.insert_one({
+                'referrer_id': referrer_id,
+                'buyer_id': buyer_uid,
+                'amount': REFERRAL_REWARD,
+                'product': product_name,
+                'purchase_amount': purchase_amount,
+                'timestamp': int(time.time())
+            })
+        except Exception:
+            pass
+        
+        # 🎉 إشعار حماسي للمُحيل
+        try:
+            new_balance = float(result.get('balance', 0))
+            buyer_data = db.users.find_one({'user_id': buyer_uid})
+            buyer_display = obscure_text(buyer_data.get('username') or str(buyer_uid)) if buyer_data else "***"
+            
+            ref_lang = referrer.get('lang', 'ar')
+            
+            if ref_lang == 'ar':
+                celebration = (
+                    f"🎉🎊 <b>مبروك! ربحت من إحالاتك!</b> 💰\n\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"💸 <b>وصلك:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
+                    f"🛍 <b>السبب:</b> أحد إحالاتك (<b>{buyer_display}</b>) اشترى منتج!\n"
+                    f"💼 <b>رصيدك الحالي:</b> <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━━\n\n"
+                    f"🔥 <b>استمر! كل ما اشتروا أصدقاؤك، كل ما زادت أرباحك!</b>\n"
+                    f"🚀 <b>شارك رابطك أكثر = اكسب أكثر!</b>\n\n"
+                    f"💪 <i>الفرصة مفتوحة بلا حدود — اكسب وأنت نايم!</i> 😎"
+                )
+            else:
+                celebration = (
+                    f"🎉🎊 <b>Congrats! You Earned From Referrals!</b> 💰\n\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"💸 <b>You got:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
+                    f"🛍 <b>Reason:</b> One of your referrals (<b>{buyer_display}</b>) made a purchase!\n"
+                    f"💼 <b>Your Balance:</b> <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━━\n\n"
+                    f"🔥 <b>Keep going! Every purchase = more profit!</b>\n"
+                    f"🚀 <b>Share your link more = Earn more!</b>\n\n"
+                    f"💪 <i>Unlimited opportunity — earn while you sleep!</i> 😎"
+                )
+            
+            bot.send_message(referrer_id, celebration, parse_mode="HTML")
+        except Exception as notify_err:
+            logger.debug(f"Couldn't notify referrer {referrer_id}: {notify_err}")
+        
+        logger.info(f"🎁 مكافأة شراء: {referrer_id} ربح ${REFERRAL_REWARD} من شراء {buyer_uid}")
+        return True
+    except Exception as e:
+        logger.error(f"Error in award_purchase_referral_reward: {e}")
+        return False
+
+
 # 🛡 قفل لكل referrer_id (للحماية الإضافية)
 _referrer_locks = {}
 _referrer_locks_master = threading.Lock()
@@ -574,9 +673,11 @@ def start_dynamic_userbot():
                 try: bot.send_message(log_ch, f"✨ <b>New Gemini Advanced Activation!</b> 🚀\n\n👤 Account: <b>{obs_user}</b>\n✅ Status: <b>Successfully Activated</b>\n\n<i>Activated automatically via Bot ⚡</i>", parse_mode="HTML")
                 except: pass
             
-            # ⚠️ ملاحظة: تم إزالة منطق مكافأة الإحالة القديمة هنا
-            # النظام الجديد V2 يعتمد على عدد الإحالات النشطة (10 = 0.10$)
-            # ولا يعتمد على أول عملية شراء كما كان النظام القديم.
+            # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
+            try:
+                award_purchase_referral_reward(uid, "Gemini Advanced", price)
+            except Exception as ref_err:
+                logger.error(f"Error awarding referral on Gemini purchase: {ref_err}")
 
             ACTIVE_GEMINI_SESSION = None
             process_next_gemini()
@@ -715,7 +816,7 @@ LANG = {
         'new_product': "🎉 <b>منتج جديد متاح في المتجر!</b> 🚀\n\n🛍 <b>المنتج:</b> {}\n💰 <b>السعر:</b> <b>${}</b>\n🚚 <b>نوع التسليم:</b> {}\n\n📝 <b>الوصف:</b>\n{}\n\n<i>سارع بزيارة المتجر والاستفادة من المنتج الجديد! 🛡️</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>كيف تربح؟</b>\n━━━━━━━━━━━━━━━\n🔥 كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> في رصيدك مباشرة!\n⚡ كل ما زاد العدد، زادت أرباحك تلقائياً!\n📲 التحديث <b>فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>مثال يحمّسك:</b>\n• 10 مشتركين = <b>0.10$</b> 💵\n• 50 مشترك = <b>0.50$</b> 💵💵\n• 100 مشترك = <b>1.00$</b> 💵💵💵\n• 500 مشترك = <b>5.00$</b> 🤑\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، كسبت أكثر — السماء هي الحد!</i>",
+        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح بدون حد!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>الطريقة 1: ربح من الاشتراكات</b>\n• كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> فوراً!\n\n💸 <b>الطريقة 2: ربح من المشتريات (الجديدة!)</b> ⭐\n• كل ما اشترى أي شخص من إحالاتك أي منتج = <b>0.10$</b> مباشرة في رصيدك!\n• ما له حد! كل عملية شراء = مكافأة جديدة! 💰💰💰\n\n⚡ <b>التحديث فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>تخيّل كم تكسب:</b>\n• دعوت 100 شخص واشتركوا = <b>$1.00</b>\n• 50 منهم اشتروا منتج واحد = <b>+$5.00</b>\n• الإجمالي: <b>$6.00</b> 🤑\n• ولو كل واحد منهم اشترى 3 مرات = <b>$16.00</b>! 💎\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، وكل ما اشتروا أكثر = كسبت أكثر!</i>\n😴 <i>اكسب وأنت نايم — هذي هي الفرصة الذهبية!</i> 💰",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -757,7 +858,7 @@ LANG = {
         'new_product': "🎉 <b>New Product Available!</b> 🚀\n\n🛍 <b>Product:</b> {}\n💰 <b>Price:</b> <b>${}</b>\n🚚 <b>Delivery:</b> {}\n\n📝 <b>Description:</b>\n{}\n\n<i>Visit the shop now and check out the new product! 🛡️</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>How To Earn?</b>\n━━━━━━━━━━━━━━━\n🔥 Every <b>10 people</b> who click your link & join = <b>$0.10</b> straight to your balance!\n⚡ The more invites, the more you earn — automatically!\n📲 Updates are <b>INSTANT</b> — no waiting!\n\n💡 <b>Motivation Examples:</b>\n• 10 joins = <b>$0.10</b> 💵\n• 50 joins = <b>$0.50</b> 💵💵\n• 100 joins = <b>$1.00</b> 💵💵💵\n• 500 joins = <b>$5.00</b> 🤑\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>The more you invite, the more you earn — the sky is the limit!</i>",
+        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>Two Ways To Earn — No Limits!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>Method 1: Earn From Joins</b>\n• Every <b>10 people</b> who click & join = <b>$0.10</b> instantly!\n\n💸 <b>Method 2: Earn From Purchases (NEW!)</b> ⭐\n• Every time a referral buys ANY product = <b>$0.10</b> straight to your balance!\n• No limits! Every purchase = New reward! 💰💰💰\n\n⚡ <b>Instant updates</b> — no waiting!\n\n💡 <b>Imagine The Earnings:</b>\n• Invited 100 people who joined = <b>$1.00</b>\n• 50 of them bought one product = <b>+$5.00</b>\n• Total: <b>$6.00</b> 🤑\n• If each bought 3 times = <b>$16.00</b>! 💎\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>More invites + more purchases = MORE PROFIT!</i>\n😴 <i>Earn while you sleep — this is YOUR golden opportunity!</i> 💰",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -1389,8 +1490,11 @@ def process_gh_step_2fa(message):
                                         bot.send_message(log_ch, pub_msg, parse_mode="HTML")
                                     except: pass
                                 
-                                # ⚠️ ملاحظة: تم إزالة منطق مكافأة الإحالة القديمة هنا
-                                # النظام الجديد V2 يعتمد على عدد الإحالات النشطة (10 = 0.10$)
+                                # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
+                                try:
+                                    award_purchase_referral_reward(uid, "GitHub Student Pack", price)
+                                except Exception as ref_err:
+                                    logger.error(f"Error awarding referral on GitHub: {ref_err}")
 
                                 return 
                                 
@@ -1864,8 +1968,13 @@ def execute_bulk_buy(message, pid, lang):
                 bot.send_message(log_ch, pub_msg, parse_mode="HTML")
             except: pass
 
-        # ⚠️ ملاحظة: تم إزالة منطق مكافأة الإحالة القديمة (عند أول شراء)
-        # النظام الجديد V2 يعتمد على عدد الإحالات النشطة (10 = 0.10$)
+        # 🎁 منح مكافأة الإحالة للشخص اللي دعا هذا المشتري (لو موجود)
+        # تشتغل في كل عملية شراء (ليست مرة واحدة)
+        try:
+            product_display = clean_name(p.get('name_ar') or p.get('name_en') or 'منتج')
+            award_purchase_referral_reward(uid, product_display, total_price)
+        except Exception as ref_err:
+            logger.error(f"Error awarding referral on purchase: {ref_err}")
     
     finally:
         # 🛡 تحرير قفل الشراء دائماً (حتى لو حصل خطأ)
