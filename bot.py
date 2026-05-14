@@ -10,6 +10,7 @@ import asyncio
 import html
 import io
 import random
+import concurrent.futures
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -59,49 +60,84 @@ MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'shop_db').strip()
 GITHUB_API_KEY = os.getenv('GITHUB_API_KEY', '').strip()
 GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').strip().rstrip('/')
 
+PREMIUM_PROXIES_ENV = os.getenv('PREMIUM_PROXIES', '').strip() # أضف بروكسيات مدفوعة هنا مفصولة بفاصلة
+
 try: 
     STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError: 
     STARS_RATE = 120
 
 # ============================================================
-# 🛡️ 2. نظام جلب البروكسيات المجانية التلقائي (Auto-Proxy)
+# 🛡️ 2. نظام جلب وفحص البروكسيات الذكي (Smart Auto-Proxy)
 # ============================================================
 CACHED_PROXIES = []
 LAST_PROXY_FETCH = 0
 
-def get_free_proxies():
-    """هذه الدالة تجلب بروكسيات مجانية من الإنترنت وتحدثها كل ساعة"""
+def test_binance_proxy(proxy_url):
+    """دالة لاختبار البروكسي والتأكد من قدرته على الاتصال ببينانس بسرعة"""
+    try:
+        proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        # نستخدم مهلة قصيرة 3 ثواني حتى لا يتجمد البوت
+        res = requests.get("https://api.binance.com/api/v3/ping", proxies=proxies_dict, timeout=3)
+        if res.status_code == 200:
+            return proxy_url
+    except Exception:
+        pass
+    return None
+
+def get_working_proxies():
+    """هذه الدالة تجلب وتفحص البروكسيات قبل استخدامها"""
     global CACHED_PROXIES, LAST_PROXY_FETCH
     current_time = time.time()
     
-    # إذا كانت القائمة فارغة أو مر عليها أكثر من ساعة (3600 ثانية)، قم بتحديثها
-    if not CACHED_PROXIES or (current_time - LAST_PROXY_FETCH > 3600):
-        try:
-            logger.info("🔄 جاري البحث عن بروكسيات مجانية جديدة من الإنترنت...")
-            
-            res = requests.get(
-                "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", 
-                timeout=10
-            )
-            
-            if res.status_code == 200:
-                proxies = res.text.strip().split('\n')
-                # نختار 50 بروكسي عشوائي من القائمة لتجربتها
-                selected = random.sample(proxies, min(50, len(proxies)))
-                CACHED_PROXIES = [f"http://{p.strip()}" for p in selected]
-                LAST_PROXY_FETCH = current_time
-                logger.info(f"✅ تم جلب {len(CACHED_PROXIES)} بروكسي مجاني بنجاح.")
+    # تحديث كل 30 دقيقة
+    if CACHED_PROXIES and (current_time - LAST_PROXY_FETCH < 1800):
+        return CACHED_PROXIES
+        
+    logger.info("🔄 جاري فحص وتحديث قائمة البروكسيات...")
+    working_proxies = []
+    
+    # 1. فحص البروكسيات المدفوعة أولاً (إن وجدت في ملف .env)
+    if PREMIUM_PROXIES_ENV:
+        p_list = [p.strip() for p in PREMIUM_PROXIES_ENV.split(',') if p.strip()]
+        for p in p_list:
+            if not p.startswith("http"):
+                p = f"http://{p}"
+            if test_binance_proxy(p):
+                working_proxies.append(p)
                 
-        except Exception as e:
-            logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
-            CACHED_PROXIES = []
+        if working_proxies:
+            CACHED_PROXIES = working_proxies
+            LAST_PROXY_FETCH = current_time
+            logger.info(f"✅ تم تفعيل {len(working_proxies)} بروكسي مدفوع بنجاح!")
+            return CACHED_PROXIES
+
+    # 2. في حال عدم وجود مدفوع، نجلب بروكسيات مجانية ونفحصها بسرعة
+    try:
+        res = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", timeout=10)
+        if res.status_code == 200:
+            proxies = [f"http://{p.strip()}" for p in res.text.strip().split('\n') if p.strip()]
+            selected = random.sample(proxies, min(100, len(proxies))) # اختيار 100 عشوائية للفحص
             
+            # فحص متزامن وسريع
+            with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+                results = executor.map(test_binance_proxy, selected)
+                for r in results:
+                    if r:
+                        working_proxies.append(r)
+                        if len(working_proxies) >= 5: # نكتفي بـ 5 بروكسيات تعمل لتسريع العملية
+                            break
+    except Exception as e:
+        logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
+        
+    CACHED_PROXIES = working_proxies
+    LAST_PROXY_FETCH = current_time
+    logger.info(f"✅ تم اعتماد {len(CACHED_PROXIES)} بروكسي يعمل بنجاح للاتصال ببينانس.")
     return CACHED_PROXIES
 
 def get_binance_client():
-    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي مجاني عشوائي لتفادي الحظر"""
-    proxies_list = get_free_proxies()
+    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي صالح تم فحصه مسبقاً"""
+    proxies_list = get_working_proxies()
     
     if proxies_list:
         proxy = random.choice(proxies_list)
@@ -110,16 +146,16 @@ def get_binance_client():
             return BinanceClient(
                 BINANCE_API_KEY, 
                 BINANCE_API_SECRET, 
-                requests_params={'proxies': proxies_dict, 'timeout': 10}
+                requests_params={'proxies': proxies_dict, 'timeout': 5} # تقليل المهلة لعدم تجميد البوت
             )
         except Exception:
             pass 
             
-    # الاتصال الافتراضي بدون بروكسي
-    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+    # الاتصال الافتراضي
+    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 5})
 
 # ============================================================
-# 🎨 3. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
+# 🎨 3. فئة الأزرار المخصصة و دوال التقاط التنسيق
 # ============================================================
 class CustomInlineButton(InlineKeyboardButton):
     def __init__(self, text, style=None, icon_custom_emoji_id=None, **kwargs):
@@ -134,6 +170,12 @@ class CustomInlineButton(InlineKeyboardButton):
         if self.icon_custom_emoji_id: 
             d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
+
+def get_html_text(message):
+    """التقاط النص مع تنسيقاته الأصلية (عريض، مائل، إلخ)"""
+    if hasattr(message, 'html_text') and message.html_text:
+        return message.html_text
+    return message.text or ""
 
 # ============================================================
 # 🌐 4. السيرفر الوهمي وقاعدة البيانات
@@ -207,6 +249,7 @@ def start_dynamic_userbot():
 
     USERBOT_LOOP = asyncio.new_event_loop()
     asyncio.set_event_loop(USERBOT_LOOP)
+  
     client = TelegramClient(StringSession(session_string), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
 
     @client.on(events.NewMessage(chats=provider_bot))
@@ -219,7 +262,7 @@ def start_dynamic_userbot():
             
         if not ACTIVE_GEMINI_SESSION.get('ready'):
             return
-        
+       
         text = event.raw_text or ""
         uid = ACTIVE_GEMINI_SESSION['uid']
         price = ACTIVE_GEMINI_SESSION['price']
@@ -273,7 +316,7 @@ def start_dynamic_userbot():
             log_ch = get_setting('log_channel')
             u_data = db.users.find_one({'user_id': uid})
             obs_user = obscure_text(u_data.get('username') or str(uid))
-            
+          
             if log_ch and log_ch != "Not Set":
                 try:
                     bot.send_message(
@@ -540,13 +583,13 @@ LANG = {
 }
 
 # ============================================================
-# 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
+# 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية والتنسيقات)
 # ============================================================
 
 def clean_html(text):
     if not text: 
         return "بدون اسم"
-        
+    # مسح الـ HTML للعناوين فقط وليس للوصف للحفاظ على التنسيقات
     return re.sub(r'<[^>]+>', '', str(text)).strip()
 
 def clean_old_emojis(text):
@@ -570,9 +613,9 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
-        temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
+        # حماية جميع تنسيقات HTML (مثل <b> و <i> وغيرها) أثناء الترجمة
+        temp_text = re.sub(r'<[^>]+>', replacer, text)
         temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
-        temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
         
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         
@@ -605,28 +648,6 @@ def safe_translate_for_cms(text, target_lang='en'):
         return translated.strip()
     except Exception as e:
         return text 
-
-def extract_custom_emojis_to_html(message):
-    if not message.text or not message.entities: 
-        return message.text or ""
-        
-    text = message.text
-    entities = sorted(
-        [e for e in message.entities if e.type == 'custom_emoji'], 
-        key=lambda x: x.offset, 
-        reverse=True
-    )
-    
-    encoded_text = text.encode('utf-16-le')
-    
-    for ent in entities:
-        start = ent.offset * 2
-        end = start + (ent.length * 2)
-        emoji_char = encoded_text[start:end].decode('utf-16-le')
-        html_emoji = f'<tg-emoji emoji-id="{ent.custom_emoji_id}">{emoji_char}</tg-emoji>'
-        encoded_text = encoded_text[:start] + html_emoji.encode('utf-16-le') + encoded_text[end:]
-        
-    return encoded_text.decode('utf-16-le')
 
 def parse_button_input(message):
     text = message.text
@@ -1028,7 +1049,7 @@ def refresh_main(call):
     start_handler(call.message)
 
 # ============================================================
-# 👤 9. نظام الإحالات المتقدم (10 أشخاص)
+# 👤 9. نظام الإحالات المتقدم
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
@@ -1175,7 +1196,7 @@ def shop_list_ui(call):
             btn_style = "success"
         else:
             btn_style = "danger"
-        
+            
         if is_hidden:
             hidden_icon = " 👻(مخفي)"
         else:
@@ -1279,6 +1300,7 @@ def shop_detail_ui(call):
             delivery_type = "Auto ⚡"
             st_text = f"{st} pcs"
         
+    # نعرض الوصف مع التنسيقات مباشرة
     if l == 'en':
         n = str(p.get('name_en'))
         d = str(p.get('desc_en'))
@@ -1476,7 +1498,7 @@ def execute_bulk_buy(message, pid, lang):
             pass
 
 # ============================================================
-# 🏦 11. بوابات الدفع (تحديث لقبول الهاش القصير والتناوب الذكي للبروكسي)
+# 🏦 11. بوابات الدفع (استخدام بروكسيات ذكية ومُحسنة)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
@@ -1579,7 +1601,6 @@ def process_stars_amount(message, lang):
             err = "❌ الرجاء إرسال أرقام فقط."
         else:
             err = "❌ Please send numbers only."
-            
         bot.send_message(uid, err, parse_mode="HTML")
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
@@ -1696,7 +1717,8 @@ def verify_binance_pay(message, lang):
         found = False
         amt = 0.0
         
-        for attempt in range(4): 
+        # الاتصال السريع بفضل الفاحص المسبق للبروكسيات
+        for attempt in range(2): # قللنا المحاولات لأن البروكسي مفحوص
             try:
                 client = get_binance_client()
                 pay_h = client.get_pay_trade_history().get('data', [])
@@ -1716,10 +1738,10 @@ def verify_binance_pay(message, lang):
                 break 
             except Exception as e:
                 logger.error(f"Binance Pay Proxy Attempt {attempt+1} Failed: {e}")
-                time.sleep(1.5)
+                time.sleep(1) # راحة بسيطة فقط
                 
         if not success:
-            bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً (تم تبديل البروكسي عدة مرات). يرجى إعادة إرسال الرقم بعد دقيقة.", parse_mode="HTML")
+            bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً. يرجى إعادة إرسال الرقم بعد دقيقة.", parse_mode="HTML")
             return
             
         if found: 
@@ -1763,7 +1785,7 @@ def verify_crypto_tx(message, lang, coin):
         status = -1
         amt = 0.0
         
-        for attempt in range(4): 
+        for attempt in range(2): 
             try:
                 client = get_binance_client()
                 res = client.get_deposit_history(coin=coin)
@@ -1784,7 +1806,7 @@ def verify_crypto_tx(message, lang, coin):
                 break
             except Exception as e:
                 logger.error(f"Crypto Proxy Attempt {attempt+1} Failed: {e}")
-                time.sleep(1.5)
+                time.sleep(1)
                 
         if not success:
             bot.send_message(uid, "❌ السيرفر يواجه ضغطاً حالياً. يرجى إعادة إرسال الهاش بعد دقيقة.", parse_mode="HTML")
@@ -1905,7 +1927,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         if received_ltc > 0:
             if confirmations >= 1:
                 ltc_price = 80.0
-                for attempt in range(4): 
+                for attempt in range(2): 
                     try:
                         client = get_binance_client()
                         ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
@@ -1949,7 +1971,7 @@ def credit_user(uid, amt, tx_id, lang, method):
                 pub_msg = custom_log['value'].replace('{user}', obs_user).replace('{amount}', f"${amt:.2f}").replace('{method}', method)
             else:
                 pub_msg = f"💳 <b>New Deposit!</b> 💵\n\n👤 User: <b>{obs_user}</b>\n💰 Amount: <b>${amt:.2f}</b>\n🟢 Method: <b>{method}</b>\n\n<i>Processed automatically ⚡</i>"
-                
+            
             bot.send_message(log_ch, pub_msg, parse_mode="HTML")
         except Exception: 
             pass
@@ -2178,7 +2200,7 @@ def ad_edit_txt_prompt(call):
         
     msg = bot.send_message(
         call.message.chat.id, 
-        f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>{hint}\n\n👇 <b>أرسل التعديل الآن بالرموز (سيتم ترجمته تلقائياً):</b>", 
+        f"النص الحالي:\n\n<code>{html.escape(current_text)}</code>{hint}\n\n👇 <b>أرسل التعديل الآن (يمكنك استخدام التنسيقات مثل <b>عريض</b> وغيرها وسيتم حفظها وترجمتها):</b>", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
@@ -2190,7 +2212,8 @@ def ad_save_custom_text(message, key):
         
     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة...")
     
-    final_ar = extract_custom_emojis_to_html(message)
+    # التقاط النص مع الحفاظ على التنسيقات والـ HTML المكتوب
+    final_ar = get_html_text(message) 
     final_en = safe_translate_for_cms(final_ar, 'en')
     
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_ar}}, upsert=True)
@@ -2425,27 +2448,27 @@ def ad_p_step1(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(
         call.from_user.id, 
-        "📦 أرسل اسم المنتج (يمكنك وضع Premium Emoji):", 
+        "📦 أرسل اسم المنتج (يمكنك استخذام التنسيقات مثل <b>عريض</b>):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_p_step2)
 
 def ad_p_step2(message):
     uid = message.from_user.id
-    n_ar = extract_custom_emojis_to_html(message)
+    n_ar = get_html_text(message) # التقاط التنسيق
     n_en = safe_translate_for_cms(n_ar, 'en')
     temp_product[uid] = {'n_ar': n_ar, 'n_en': n_en}
     
     msg = bot.send_message(
         uid, 
-        f"📝 أرسل وصف المنتج (يمكنك وضع Premium Emoji):", 
+        f"📝 أرسل وصف المنتج (يمكنك استخدام تنسيقات تيليجرام):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_p_step3)
 
 def ad_p_step3(message):
     uid = message.from_user.id
-    d_ar = extract_custom_emojis_to_html(message)
+    d_ar = get_html_text(message) # التقاط التنسيق
     d_en = safe_translate_for_cms(d_ar, 'en')
     temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
     
@@ -2555,7 +2578,7 @@ def admin_edit_opts(call):
         InlineKeyboardButton(hide_text, callback_data=f"toggle_hide_{pid}"), 
         InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit")
     )
-               
+              
     try: 
         bot.edit_message_text(
             "⚙️ Options:", 
@@ -2583,7 +2606,7 @@ def admin_edit_prompt(call):
     
     msg = bot.send_message(
         call.message.chat.id, 
-        "✏️ أرسل القيمة الجديدة (يمكنك استخدام Premium Emojis):", 
+        "✏️ أرسل القيمة الجديدة (يمكنك استخدام تنسيقات تيليجرام كالعريض والمائل):", 
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, admin_save_edit, parts[1], parts[2])
@@ -2601,7 +2624,7 @@ def admin_save_edit(message, field, pid):
         except Exception: 
             bot.send_message(message.chat.id, "❌ خطأ في السعر.", parse_mode="HTML")
     else:
-        val_ar = extract_custom_emojis_to_html(message)
+        val_ar = get_html_text(message) # التقاط التنسيق
         
         if field in ['dar', 'nar']:
             val_en = safe_translate_for_cms(val_ar, 'en')
