@@ -1306,52 +1306,119 @@ def safe_translate_for_cms(text, target_lang='en'):
     - Placeholders {} و {name}
     - URLs
     - الإيموجيات العادية
+    - 🆕 الأسطر الجديدة والمسافات الفارغة (التنسيق البصري)
     """
     if not text or not text.strip():
         return text
     
     try:
-        # نخزن كل الأشياء الحساسة في قائمة
+        # 🆕 الاستراتيجية الجديدة: نترجم سطر بسطر
+        # هذا يحافظ على كل الفواصل والأسطر الفارغة بالضبط
+        lines = text.split('\n')
+        translated_lines = []
+        
+        for line in lines:
+            # 🛡 الأسطر الفارغة نتركها كما هي
+            if not line.strip():
+                translated_lines.append(line)  # سطر فارغ يبقى فارغ
+                continue
+            
+            # 🛡 الأسطر اللي فيها بس فواصل بصرية (━━━ أو ─── أو ═══) نتركها
+            if re.match(r'^[━─═\s]+$', line):
+                translated_lines.append(line)
+                continue
+            
+            # 🛡 لو السطر بدون أي نص قابل للترجمة (بس HTML tags + رموز)
+            # نتحقق إن فيه أي حرف عربي أو إنجليزي حقيقي
+            text_only = re.sub(r'<[^>]+>', '', line)  # احذف HTML
+            text_only = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text_only, flags=re.DOTALL)
+            text_only = re.sub(r'\{[^}]*\}', '', text_only)  # احذف placeholders
+            text_only = re.sub(r'https?://\S+', '', text_only)  # احذف URLs
+            text_only = re.sub(r'[━─═]+', '', text_only)  # احذف فواصل
+            
+            # لو ما بقي حروف أو أرقام عربية/إنجليزية، نتركها كما هي
+            if not re.search(r'[a-zA-Z\u0600-\u06FF\u0750-\u077F]', text_only):
+                translated_lines.append(line)
+                continue
+            
+            # 🌐 نترجم السطر مع حماية كل العناصر الحساسة
+            translated_line = _translate_single_line(line, target_lang)
+            translated_lines.append(translated_line)
+        
+        # 🛡 نجمع الأسطر كما كانت بالضبط (مع كل الـ \n)
+        result = '\n'.join(translated_lines)
+        
+        # 🛡 فحص نهائي للسلامة
+        # 1. عدد {} placeholders
+        original_placeholders = len(re.findall(r'\{[^}]*\}', text))
+        translated_placeholders = len(re.findall(r'\{[^}]*\}', result))
+        if original_placeholders != translated_placeholders:
+            logger.warning(
+                f"⚠️ Translation lost placeholders! "
+                f"Original: {original_placeholders}, Translated: {translated_placeholders}. "
+                f"Returning original text."
+            )
+            return text
+        
+        # 2. عدد <tg-emoji>
+        original_emojis = len(re.findall(r'<tg-emoji', text))
+        translated_emojis = len(re.findall(r'<tg-emoji', result))
+        if original_emojis != translated_emojis:
+            logger.warning(
+                f"⚠️ Translation lost premium emojis! "
+                f"Original: {original_emojis}, Translated: {translated_emojis}. "
+                f"Returning original text."
+            )
+            return text
+        
+        # 3. HTML tags متوازنة
+        for tag in ['b', 'i', 'u', 's', 'code', 'blockquote', 'pre']:
+            open_count = len(re.findall(rf'<{tag}[^>]*>', result, re.IGNORECASE))
+            close_count = len(re.findall(rf'</{tag}>', result, re.IGNORECASE))
+            if open_count != close_count:
+                logger.warning(
+                    f"⚠️ Translation broke <{tag}> balance! "
+                    f"Open: {open_count}, Close: {close_count}. "
+                    f"Returning original text."
+                )
+                return text
+        
+        return result
+    except Exception as e:
+        logger.error(f"Safe translation error: {e}")
+        return text
+
+
+def _translate_single_line(line, target_lang='en'):
+    """يترجم سطر واحد مع حماية HTML والـ Premium Emojis والـ Placeholders"""
+    try:
         protected_items = []
         
         def protect(match):
-            """يخزن العنصر الحساس ويستبدله بمعرّف مميز جداً"""
             protected_items.append(match.group(0))
-            # نستخدم marker بسيط جداً: PROTECT أرقام PROTECT
-            # الأرقام بالحروف الإنجليزية واضحة، PROTECT كلمة لا تترجم
             idx = len(protected_items) - 1
             return f" PROTECT{idx:04d}PROTECT "
         
-        temp_text = text
+        temp_line = line
         
-        # 🛡 ترتيب الحماية مهم (الأخص أولاً):
-        # 1. Premium Emojis (HTML معقد)
-        temp_text = re.sub(r'<tg-emoji\s+emoji-id="[^"]*">.*?</tg-emoji>', protect, temp_text)
-        # 2. Blockquotes (يحتوي على نص داخله ما نبي يترجم بمعزل)
-        temp_text = re.sub(r'<blockquote>.*?</blockquote>', protect, temp_text, flags=re.DOTALL)
-        # 3. Code blocks (يحتوي على روابط وأكواد)
-        temp_text = re.sub(r'<code>.*?</code>', protect, temp_text, flags=re.DOTALL)
-        # 4. Pre blocks
-        temp_text = re.sub(r'<pre>.*?</pre>', protect, temp_text, flags=re.DOTALL)
-        # 5. كل HTML tags الباقية (b, i, u, s, a, etc.)
-        temp_text = re.sub(r'<[^>]+>', protect, temp_text)
-        # 6. URLs (في حال كانت خارج tags)
-        temp_text = re.sub(r'https?://[^\s<>]+', protect, temp_text)
-        # 7. Placeholders {} و {name}
-        temp_text = re.sub(r'\{[^}]*\}', protect, temp_text)
-        # 8. الفواصل البصرية ━━━━ (الترجمة أحياناً تحذفها)
-        temp_text = re.sub(r'[━─═]{2,}', protect, temp_text)
+        # 🛡 نفس ترتيب الحماية:
+        temp_line = re.sub(r'<tg-emoji\s+emoji-id="[^"]*">.*?</tg-emoji>', protect, temp_line)
+        temp_line = re.sub(r'<blockquote>.*?</blockquote>', protect, temp_line, flags=re.DOTALL)
+        temp_line = re.sub(r'<code>.*?</code>', protect, temp_line, flags=re.DOTALL)
+        temp_line = re.sub(r'<pre>.*?</pre>', protect, temp_line, flags=re.DOTALL)
+        temp_line = re.sub(r'<[^>]+>', protect, temp_line)
+        temp_line = re.sub(r'https?://[^\s<>]+', protect, temp_line)
+        temp_line = re.sub(r'\{[^}]*\}', protect, temp_line)
+        temp_line = re.sub(r'[━─═]{2,}', protect, temp_line)
         
-        # 9. ⭐ حماية الإيموجيات العادية (هذا اللي كان مفقود!)
-        # الإيموجيات أحياناً تتدمج مع نصوص أو تختفي بعد الترجمة
+        # حماية الإيموجي
         emoji_pattern = re.compile(
             "["
-            "\U0001F600-\U0001F64F"  # وجوه
-            "\U0001F300-\U0001F5FF"  # رموز
-            "\U0001F680-\U0001F6FF"  # نقل
-            "\U0001F1E0-\U0001F1FF"  # أعلام
-            "\U00002500-\U00002BEF"  # أشكال
-            "\U00002702-\U000027B0"  
+            "\U0001F600-\U0001F64F"
+            "\U0001F300-\U0001F5FF"
+            "\U0001F680-\U0001F6FF"
+            "\U0001F1E0-\U0001F1FF"
+            "\U00002500-\U00002BEF"
             "\U00002702-\U000027B0"
             "\U000024C2-\U0001F251"
             "\U0001f926-\U0001f937"
@@ -1367,32 +1434,20 @@ def safe_translate_for_cms(text, target_lang='en'):
             "]+",
             flags=re.UNICODE
         )
-        temp_text = emoji_pattern.sub(protect, temp_text)
+        temp_line = emoji_pattern.sub(protect, temp_line)
         
-        # تحقق: لو ما بقي نص حقيقي للترجمة، نرجع الأصل
-        clean_check = re.sub(r'\s*PROTECT\d+PROTECT\s*', ' ', temp_text).strip()
+        # تحقق: لو ما بقي نص حقيقي للترجمة، نرجع السطر كما هو
+        clean_check = re.sub(r'\s*PROTECT\d+PROTECT\s*', ' ', temp_line).strip()
         if not clean_check or len(clean_check) < 2:
-            return text
+            return line
         
         # 🌐 الترجمة
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_text)
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_line)
         
         if not translated:
-            return text
+            return line
         
-        # 🔄 ترميم الأرقام العربية لإنجليزية (في حال الترجمة عربتها)
-        arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
-        def fix_marker_digits(match):
-            return match.group(0).translate(arabic_to_eng)
-        # نصلح markers اللي صارت أرقامها عربية
-        translated = re.sub(
-            r'PROTECT[\d٠-٩\s]+PROTECT',
-            fix_marker_digits,
-            translated,
-            flags=re.IGNORECASE
-        )
-        
-        # 🔄 ترميم المسافات (الترجمة أحياناً تكسر الـ markers بإضافة مسافات)
+        # ترميم المسافات في الـ markers
         translated = re.sub(
             r'P\s*R\s*O\s*T\s*E\s*C\s*T',
             'PROTECT',
@@ -1400,60 +1455,35 @@ def safe_translate_for_cms(text, target_lang='en'):
             flags=re.IGNORECASE
         )
         
-        # 🔁 استرجاع العناصر المحمية (من الآخر للأول لتجنب تداخل المعرّفات)
+        # ترميم الأرقام العربية في الـ markers
+        arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+        def fix_marker_digits(match):
+            return match.group(0).translate(arabic_to_eng)
+        translated = re.sub(
+            r'PROTECT[\d٠-٩\s]+PROTECT',
+            fix_marker_digits,
+            translated,
+            flags=re.IGNORECASE
+        )
+        
+        # 🔁 استرجاع العناصر المحمية
         for i in range(len(protected_items) - 1, -1, -1):
             original = protected_items[i]
-            # نمط يلتقط الـ marker بمرونة
             pattern = re.compile(
                 r'\s*PROTECT\s*0*' + str(i) + r'\s*PROTECT\s*',
                 re.IGNORECASE
             )
             translated = pattern.sub(original, translated)
         
-        # 🛡 فحص نهائي: هل بقي markers ما اتفك تشفيرها؟
+        # لو بقي markers ما اتفك تشفيرها، نرجع السطر الأصلي
         if re.search(r'PROTECT\d*PROTECT', translated, re.IGNORECASE):
-            logger.warning(f"⚠️ Translation marker leak detected - returning original")
-            return text
+            return line
         
-        # 🛡 فحص: عدد الـ {} نفسه قبل وبعد
-        original_placeholders = len(re.findall(r'\{[^}]*\}', text))
-        translated_placeholders = len(re.findall(r'\{[^}]*\}', translated))
-        if original_placeholders != translated_placeholders:
-            logger.warning(
-                f"⚠️ Translation lost placeholders! "
-                f"Original: {original_placeholders}, Translated: {translated_placeholders}. "
-                f"Returning original text."
-            )
-            return text
-        
-        # 🛡 فحص: عدد الـ <tg-emoji> نفسه قبل وبعد
-        original_emojis = len(re.findall(r'<tg-emoji', text))
-        translated_emojis = len(re.findall(r'<tg-emoji', translated))
-        if original_emojis != translated_emojis:
-            logger.warning(
-                f"⚠️ Translation lost premium emojis! "
-                f"Original: {original_emojis}, Translated: {translated_emojis}. "
-                f"Returning original text."
-            )
-            return text
-        
-        # 🛡 فحص: HTML tags لازم تكون متوازنة
-        # نعد كل tag مفتوح ومغلق
-        for tag in ['b', 'i', 'u', 's', 'code', 'blockquote', 'pre']:
-            open_count = len(re.findall(rf'<{tag}[^>]*>', translated, re.IGNORECASE))
-            close_count = len(re.findall(rf'</{tag}>', translated, re.IGNORECASE))
-            if open_count != close_count:
-                logger.warning(
-                    f"⚠️ Translation broke <{tag}> balance! "
-                    f"Open: {open_count}, Close: {close_count}. "
-                    f"Returning original text."
-                )
-                return text
-            
         return translated.strip()
     except Exception as e:
-        logger.error(f"Safe translation error: {e}")
-        return text 
+        logger.debug(f"Single line translation error: {e}")
+        return line
+
 
 def extract_custom_emojis_to_html(message):
     if not message.text or not message.entities:
