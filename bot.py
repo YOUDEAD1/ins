@@ -935,43 +935,70 @@ def get_ref_counts(referrer_id):
 
 def background_referral_checker_v2():
     """
-    فاحص خلفي سريع — يدور كل ثانية على كل الإحالات
-    ويحدّث حالتهم بناءً على اشتراكهم في القنوات الإجبارية.
+    فاحص خلفي ذكي - يتجنب Telegram Rate Limit
+    
+    🛡 الاستراتيجية الجديدة:
+    - يفحص الإحالات على دفعات صغيرة (10 إحالات كل دورة)
+    - فاصل 100ms بين كل فحص (آمن من Rate Limit)
+    - دورة كاملة كل ~30 ثانية بدلاً من ثانية واحدة
+    - يفحص بالأولوية: pending أولاً، ثم active (للتحقق من المغادرة)
+    - يتجاهل left (محسوم - ما يرجعون)
     """
+    BATCH_SIZE = 10          # عدد الإحالات في كل دفعة
+    DELAY_BETWEEN_CHECKS = 0.1   # 100ms بين كل فحص (آمن جداً)
+    DELAY_BETWEEN_CYCLES = 30    # 30 ثانية بين الدورات الكاملة
+    
     while True:
         try:
-            referrals = list(db.referrals_v2.find({}))
-
-            for r in referrals:
+            # 🛡 نفحص فقط pending و active (نتجاهل left - حسموا)
+            # pending: نريد ترقيتهم لـ active لو اشتركوا
+            # active: نريد تنزيلهم لـ left لو غادروا
+            cursor = db.referrals_v2.find({
+                'status': {'$in': ['pending', 'active']}
+            })
+            
+            batch_count = 0
+            for r in cursor:
                 inv_uid = r.get('invited_id')
                 if not inv_uid:
                     continue
-
+                
                 current_status = r.get('status', 'pending')
+                
                 try:
                     is_subbed = check_forced_sub(int(inv_uid))
                 except Exception:
+                    # خطأ في الفحص - نتركه للدورة التالية
+                    time.sleep(DELAY_BETWEEN_CHECKS)
                     continue
-
+                
+                # تحديد الحالة الجديدة
                 if is_subbed:
                     new_status = 'active'
                 else:
-                    if current_status == 'active':
-                        new_status = 'left'
-                    elif current_status == 'left':
-                        new_status = 'left'
-                    else:
-                        new_status = 'pending'
-
+                    new_status = 'left' if current_status == 'active' else 'pending'
+                
+                # تحديث فقط لو تغيرت الحالة
                 if new_status != current_status:
                     mark_referral_status(inv_uid, new_status)
+                
+                # فاصل صغير بين الفحوصات (يحمي من Rate Limit)
+                time.sleep(DELAY_BETWEEN_CHECKS)
+                
+                batch_count += 1
+                # كل 10 إحالات، نعمل وقفة أطول
+                if batch_count >= BATCH_SIZE:
+                    batch_count = 0
+                    time.sleep(1)  # ثانية وقفة بعد كل 10
         except Exception as e:
             logger.error(f"Background ref checker error: {e}")
+        
+        # دورة كاملة كل 30 ثانية (آمن وكافي)
+        time.sleep(DELAY_BETWEEN_CYCLES)
 
-        # تحديث فوري كل ثانية
-        time.sleep(1)
 
-
+# 🆕 فاحص فوري للإحالات الجديدة عند الـ /start
+# هذا الـ thread الرئيسي يدور بهدوء، والتحديث الفوري يحصل في start_handler
 threading.Thread(target=background_referral_checker_v2, daemon=True).start()
 
 # ============================================================
@@ -2231,7 +2258,22 @@ def invite_ui(call):
         )
         sent_successfully = True
     except Exception as e:
-        logger.error(f"Failed to send invite message with HTML: {e}")
+        error_str = str(e).lower()
+        # 🛡 "message is not modified" مو خطأ - الرسالة نفسها زي ما هي (المستخدم ضغط تحديث ولا فيه تغيير)
+        if 'message is not modified' in error_str or 'not modified' in error_str:
+            sent_successfully = True
+            # نظهر للمستخدم تأكيد إن البيانات محدثة
+            try:
+                # نسوي callback answer بدل ما نزعجه بإشعار
+                bot.answer_callback_query(
+                    call.id, 
+                    "✅ البيانات محدّثة بالفعل" if l == 'ar' else "✅ Already up to date",
+                    show_alert=False
+                )
+            except: pass
+        else:
+            # خطأ حقيقي - نسجله ونحاول fallback
+            logger.error(f"Failed to send invite message with HTML: {e}")
     
     # المحاولة 2: بدون parse_mode (نص عادي)
     if not sent_successfully:
@@ -2246,7 +2288,11 @@ def invite_ui(call):
             sent_successfully = True
             logger.warning(f"Sent invite as plain text (HTML failed) for user {uid}")
         except Exception as e:
-            logger.error(f"Failed to send invite as plain text: {e}")
+            error_str = str(e).lower()
+            if 'message is not modified' in error_str or 'not modified' in error_str:
+                sent_successfully = True
+            else:
+                logger.error(f"Failed to send invite as plain text: {e}")
     
     # المحاولة 3: إرسال رسالة جديدة بدلاً من edit
     if not sent_successfully:
