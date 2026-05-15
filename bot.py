@@ -1119,7 +1119,15 @@ def start_dynamic_userbot():
             u_data = db.users.find_one({'user_id': uid})
             obs_user = obscure_text(u_data.get('username') or str(uid))
             if log_ch and log_ch != "Not Set":
-                try: bot.send_message(log_ch, f"✨ <b>New Gemini Advanced Activation!</b> 🚀\n\n👤 Account: <b>{obs_user}</b>\n✅ Status: <b>Successfully Activated</b>\n\n<i>Activated automatically via Bot ⚡</i>", parse_mode="HTML")
+                try: 
+                    # 🆕 النص من CMS (قابل للتعديل)
+                    gemini_msg = LANG['en']['log_gemini'].format(obs_user)
+                    custom_g = db.custom_texts.find_one({'lang': 'en', 'key': 'log_gemini'})
+                    if custom_g and custom_g.get('value'):
+                        try:
+                            gemini_msg = custom_g['value'].format(obs_user)
+                        except: pass
+                    bot.send_message(log_ch, gemini_msg, parse_mode="HTML")
                 except: pass
             
             # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
@@ -1271,6 +1279,16 @@ LANG = {
         
         # 🆕 إشعار خاص للمُحيل لما يشتري شخص من دعواته (في خاص البوت)
         'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
+        
+        # 🆕 إشعارات قناة اللوق العامة (قابلة للتعديل من CMS)
+        'log_purchase': "🛒 <b>New Purchase!</b> 🛍\n\n👤 <b>User:</b> {}\n📦 <b>Product:</b> {}\n🔢 <b>QTY:</b> {}\n\n<i>Thank you for choosing us 🛡️</i>",
+        
+        'log_deposit': "💳 <b>New Deposit!</b> 💵\n\n👤 <b>User:</b> {}\n💰 <b>Amount:</b> <b>${}</b>\n🟢 <b>Method:</b> {}\n\n<i>Processed automatically ⚡</i>",
+        
+        # 🆕 إشعارات تفعيل المنتجات الخاصة
+        'log_gemini': "✨ <b>New Gemini Advanced Activation!</b> 🚀\n\n👤 <b>Account:</b> {}\n✅ <b>Status:</b> Successfully Activated\n\n<i>Activated automatically via Bot ⚡</i>",
+        
+        'log_github': "🎓 <b>New GitHub Student Activation!</b> 🚀\n\n👤 <b>Account:</b> {}\n✅ <b>Status:</b> Successfully Activated\n\n<i>Activated automatically via Bot ⚡</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
         'invite_txt': "💎 <b>نظام الإحالات</b>\n\n━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة</b>\n━━━━━━━━━━━━━━\n\n👥 <b>الزيارات:</b>  <b>{}</b>\n⏳ <b>المعلق:</b>  <b>{}</b>\n✅ <b>النشط:</b>  <b>{}</b>\n❌ <b>غادر:</b>  <b>{}</b>\n\n💰 <b>أرباحك:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>رابطك:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح:</b>\n\n🔥 كل <b>10</b> اشتراكات نشطة = <b>$0.10</b>\n💸 شراء صديقك > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>التحديث فوري</i>",
@@ -1321,6 +1339,16 @@ LANG = {
         
         # 🆕 Private DM to inviter when their invitee makes a purchase
         'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
+        
+        # 🆕 General log channel notifications (editable via CMS)
+        'log_purchase': "🛒 <b>New Purchase!</b> 🛍\n\n👤 <b>User:</b> {}\n📦 <b>Product:</b> {}\n🔢 <b>QTY:</b> {}\n\n<i>Thank you for choosing us 🛡️</i>",
+        
+        'log_deposit': "💳 <b>New Deposit!</b> 💵\n\n👤 <b>User:</b> {}\n💰 <b>Amount:</b> <b>${}</b>\n🟢 <b>Method:</b> {}\n\n<i>Processed automatically ⚡</i>",
+        
+        # 🆕 Special product activation logs
+        'log_gemini': "✨ <b>New Gemini Advanced Activation!</b> 🚀\n\n👤 <b>Account:</b> {}\n✅ <b>Status:</b> Successfully Activated\n\n<i>Activated automatically via Bot ⚡</i>",
+        
+        'log_github': "🎓 <b>New GitHub Student Activation!</b> 🚀\n\n👤 <b>Account:</b> {}\n✅ <b>Status:</b> Successfully Activated\n\n<i>Activated automatically via Bot ⚡</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
         'invite_txt': "💎 <b>Referral System</b>\n\n━━━━━━━━━━━━━━\n📊 <b>Your Live Stats</b>\n━━━━━━━━━━━━━━\n\n👥 <b>Clicks:</b>  <b>{}</b>\n⏳ <b>Pending:</b>  <b>{}</b>\n✅ <b>Active:</b>  <b>{}</b>\n❌ <b>Left:</b>  <b>{}</b>\n\n💰 <b>Earnings:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>Two Ways to Earn:</b>\n\n🔥 Every <b>10</b> active joins = <b>$0.10</b>\n💸 Friend buys > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>Real-time updates</i>",
@@ -2118,8 +2146,14 @@ def process_gh_step_2fa(message):
                                 
                                 if log_ch and log_ch != "Not Set":
                                     try: 
-                                        pub_msg = f"🎓 <b>New GitHub Student Activation!</b> 🚀\n\n👤 Account: <b>{obs_user}</b>\n✅ Status: <b>Successfully Activated</b>\n\n<i>Activated automatically via Bot ⚡</i>"
-                                        bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+                                        # 🆕 النص من CMS (قابل للتعديل)
+                                        github_msg = LANG['en']['log_github'].format(obs_user)
+                                        custom_gh = db.custom_texts.find_one({'lang': 'en', 'key': 'log_github'})
+                                        if custom_gh and custom_gh.get('value'):
+                                            try:
+                                                github_msg = custom_gh['value'].format(obs_user)
+                                            except: pass
+                                        bot.send_message(log_ch, github_msg, parse_mode="HTML")
                                     except: pass
                                 
                                 # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
@@ -2259,31 +2293,169 @@ def show_hist_detail(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); mode = call.data.replace("h_view_", "")
-    out = ""
+    l = get_lang(uid)
+    mode = call.data.replace("h_view_", "")
+    
     try:
         if mode == "buy":
-            recs = list(db.orders.find({'user_id': uid}).sort('_id', -1).limit(5))
-            if not recs: out = get_text(uid, 'no_hist')
-            for r in recs:
-                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
-                if r.get('product_id') in ['GitHub_Student', 'Gemini_Activation']:
-                    out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n📦 المنتج: <b>{r.get('product_id').replace('_', ' ')}</b>\n🔑 التفاصيل:\n<code>{r.get('code_delivered', '')}</code>\n────────────\n"
-                    continue
-                p = find_product(r['product_id'])
-                n = clean_name(p['name_en'] if l == 'en' else p['name_ar']) if p else "Product"
-                out += f"🧾 <b>فاتورة شراء | Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n📦 المنتج: <b>{n}</b>\n🔑 الكود: <code>{r.get('code_delivered', '')}</code>\n────────────\n"
-        else:
-            recs = list(db.used_transactions.find({'user_id': uid}).sort('_id', -1).limit(5))
-            if not recs: out = get_text(uid, 'no_hist')
-            for r in recs: 
-                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
-                out += f"💳 <b>إيصال إيداع | Deposit Receipt</b>\n📅 التاريخ: <code>{date_str}</code>\n💰 المبلغ: <b>${r.get('amount', 0):.2f}</b>\n🆔 العملية: <code>{r.get('transaction_id', '')}</code>\n────────────\n"
-    except Exception as e: out = f"❌ Error"
+            # 🆕 نجمع المشتريات حسب المنتج
+            all_orders = list(db.orders.find({'user_id': uid}).sort('_id', -1))
+            
+            if not all_orders:
+                out = get_text(uid, 'no_hist')
+                markup = InlineKeyboardMarkup()
+                markup.add(create_btn(uid, 'btn_back', callback_data="history_menu_callback"))
+                try: bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+                except: pass
+                return
+            
+            # تجميع حسب product_id
+            grouped = {}
+            for r in all_orders:
+                pid = str(r.get('product_id', ''))
+                if pid not in grouped:
+                    grouped[pid] = []
+                grouped[pid].append(r)
+            
+            # نبني الرسالة + الأزرار
+            if l == 'en':
+                out = f"🛍 <b>Your Purchases</b>\n\n"
+                out += f"📦 You have purchased <b>{len(grouped)}</b> different product(s).\n"
+                out += f"💼 Total orders: <b>{len(all_orders)}</b>\n\n"
+                out += "👇 <b>Click any product below to download its codes:</b>\n"
+            else:
+                out = f"🛍 <b>مشترياتك</b>\n\n"
+                out += f"📦 لقد اشتريت <b>{len(grouped)}</b> منتج مختلف.\n"
+                out += f"💼 إجمالي الطلبات: <b>{len(all_orders)}</b>\n\n"
+                out += "👇 <b>اضغط على أي منتج لتحميل أكواده:</b>\n"
+            
+            markup = InlineKeyboardMarkup(row_width=1)
+            
+            for pid, orders in grouped.items():
+                # نجيب اسم المنتج
+                if pid in ['GitHub_Student', 'Gemini_Activation']:
+                    p_name = pid.replace('_', ' ')
+                    custom_emoji_id = None
+                else:
+                    p = find_product(pid)
+                    if p:
+                        p_name = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar', p.get('name_en', 'Product')))
+                        custom_emoji_id = p.get('custom_emoji_id')
+                    else:
+                        p_name = "منتج محذوف" if l == 'ar' else "Deleted Product"
+                        custom_emoji_id = None
+                
+                count = len(orders)
+                btn_text = f"📦 {p_name} ({count})"
+                
+                btn_kwargs = {
+                    'text': btn_text,
+                    'callback_data': f"dlhist_{pid}"
+                }
+                if custom_emoji_id:
+                    btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
+                
+                markup.add(CustomInlineButton(**btn_kwargs))
+            
+            # زر تحميل كل المشتريات
+            if l == 'en':
+                markup.add(InlineKeyboardButton("📥 Download All Purchases", callback_data="h_dl_buy"))
+            else:
+                markup.add(InlineKeyboardButton("📥 تحميل كل المشتريات", callback_data="h_dl_buy"))
+            
+            markup.add(create_btn(uid, 'btn_back', callback_data="history_menu_callback"))
+            
+        else:  # mode == "dep" - الإيداعات
+            recs = list(db.used_transactions.find({'user_id': uid}).sort('_id', -1).limit(10))
+            out = ""
+            if not recs: 
+                out = get_text(uid, 'no_hist')
+            else:
+                if l == 'en':
+                    out = "💳 <b>Your Last 10 Deposits</b>\n\n"
+                else:
+                    out = "💳 <b>آخر 10 إيداعات لك</b>\n\n"
+                for r in recs: 
+                    date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+                    out += f"💳 <b>{'Deposit' if l=='en' else 'إيداع'}</b>\n📅 <code>{date_str}</code>\n💰 <b>${r.get('amount', 0):.2f}</b>\n🆔 <code>{r.get('transaction_id', '')[:30]}...</code>\n────────────\n"
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(create_btn(uid, 'btn_back', callback_data="history_menu_callback"))
+        
+        try: bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+    except Exception as e:
+        logger.error(f"Error in show_hist_detail: {e}")
+        try: bot.send_message(uid, "❌ حدث خطأ، حاول مرة ثانية.", parse_mode="HTML")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dlhist_"))
+def download_product_history(call):
+    """🆕 تحميل أكواد منتج معين من سجل المشتريات"""
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    uid = call.from_user.id
+    if is_user_banned(uid): return
     
-    markup = InlineKeyboardMarkup(); markup.add(create_btn(uid, 'btn_back', callback_data="history_menu_callback"))
-    try: bot.edit_message_text(out, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    pid = call.data.replace("dlhist_", "")
+    l = get_lang(uid)
+    
+    # نجيب كل الطلبات لهذا المنتج
+    orders = list(db.orders.find({'user_id': uid, 'product_id': pid}).sort('_id', -1))
+    if not orders:
+        # ممكن pid يكون رقم أو string، نجرب الأنواع
+        try:
+            orders = list(db.orders.find({'user_id': uid, 'product_id': int(pid)}).sort('_id', -1))
+        except: pass
+    
+    if not orders:
+        msg = "❌ No purchases found for this product." if l == 'en' else "❌ لا توجد مشتريات لهذا المنتج."
+        bot.send_message(uid, msg)
+        return
+    
+    # نجيب اسم المنتج
+    if pid in ['GitHub_Student', 'Gemini_Activation']:
+        p_name = pid.replace('_', ' ')
+    else:
+        p = find_product(pid)
+        if p:
+            p_name = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar', p.get('name_en', 'Product')))
+        else:
+            p_name = "Product"
+    
+    # نبني الملف
+    if l == 'en':
+        content = f"=== Your Purchases: {p_name} ===\n"
+    else:
+        content = f"=== مشترياتك: {p_name} ===\n"
+    
+    content += f"Total: {len(orders)} order(s)\n"
+    content += f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "=" * 50 + "\n\n"
+    
+    for i, r in enumerate(orders, 1):
+        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+        code = r.get('code_delivered', '')
+        if l == 'en':
+            content += f"#{i} | Date: {date_str}\nCode: {code}\n{'-'*50}\n"
+        else:
+            content += f"#{i} | التاريخ: {date_str}\nالكود: {code}\n{'-'*50}\n"
+    
+    # إرسال الملف
+    f = io.BytesIO(content.encode('utf-8'))
+    safe_name = re.sub(r'[^\w\-]', '_', p_name)[:30]
+    f.name = f"My_{safe_name}_Codes.txt"
+    
+    if l == 'en':
+        caption = f"📄 <b>{p_name}</b>\n\nAll your codes for this product ({len(orders)} total).\n\n<i>Keep this file safe!</i>"
+    else:
+        caption = f"📄 <b>{p_name}</b>\n\nكل أكوادك لهذا المنتج ({len(orders)} كود).\n\n<i>احتفظ بالملف بأمان!</i>"
+    
+    try:
+        bot.send_document(uid, f, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to send product history file: {e}")
+        bot.send_message(uid, "❌ فشل إرسال الملف، حاول مرة ثانية.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
@@ -2681,33 +2853,86 @@ def execute_bulk_buy(message, pid, lang):
                 # ما نقدر نرجع الكل بأمان هنا، نسجل الحادثة
                 notify_admins(f"⚠️ <b>تنبيه أمني!</b>\nفشل في تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}\n\n<b>راجع يدوياً!</b>")
                 
-            if qty > 3:
+            # 📦 منطق إرسال موحّد:
+            # دائماً نرسل ملف (حتى لو كود واحد) - حسب طلب المستخدم
+            # - أوضح للعميل (الكود في ملف منظم)
+            # - ما يصير في مشاكل HTML أو طول رسالة
+            
+            sent_successfully = False
+            
+            # إرسال ملف لكل عملية شراء (الطريقة الموحدة)
+            try:
                 file_content = ""
+                p_name_for_file = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
+                file_content += f"=== {p_name_for_file} ===\n"
+                file_content += f"Quantity: {qty}\n"
+                file_content += f"Total Paid: ${total_price:.2f}\n"
+                file_content += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                file_content += "=" * 40 + "\n\n"
+                
                 for i, code in enumerate(delivered_codes, 1):
                     file_content += f"{i}. {code}\n"
                 
                 f = io.BytesIO(file_content.encode('utf-8'))
-                f.name = f"Your_Codes_{pid}.txt"
+                safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
+                f.name = f"Your_Codes_{safe_name}.txt"
                 
                 if lang == 'ar':
-                    success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\nبما أنك اشتريت {qty} أكواد، تم إرفاقها لك في هذا الملف لسهولة النسخ 📄\n\n<i>شكراً لاختيار متجرنا 🛡️</i>"
+                    if qty == 1:
+                        success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الكود مرفق في الملف.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+                    else:
+                        success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 الكمية: <b>{qty}</b> كود\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الأكواد مرفقة في الملف لسهولة النسخ.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
                 else:
-                    success_msg = f"✅ <b>Purchase Successful!</b>\n\nSince you bought {qty} codes, they are attached in this file for easy copying 📄\n\n<i>Thank you for choosing us 🛡️</i>"
+                    if qty == 1:
+                        success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Code attached as file.\n\n<i>Thank you for choosing us 🛡️</i>"
+                    else:
+                        success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Quantity: <b>{qty}</b> codes\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Codes attached as file for easy copying.\n\n<i>Thank you for choosing us 🛡️</i>"
                     
                 bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
-            else:
-                codes_str = "\n".join([f"<code>{c}</code>" for c in delivered_codes])
-                bot.send_message(uid, get_text(uid, 'buy_success', codes_str), parse_mode="HTML")
+                sent_successfully = True
+            except Exception as file_err:
+                logger.error(f"Failed to send file for user {uid}: {file_err}")
+                # Fallback 1: رسالة شات بسيطة بدون HTML
+                try:
+                    simple_msg = f"✅ تم الشراء!\n\nالأكواد:\n\n" + "\n".join(delivered_codes)
+                    bot.send_message(uid, simple_msg[:4000])
+                    sent_successfully = True
+                except Exception as e2:
+                    logger.error(f"Critical failure delivering codes: {e2}")
+                    notify_admins(f"🚨 <b>عاجل!</b>\nفشل تسليم {qty} كود للمستخدم <code>{uid}</code>!\nالأكواد محجوزة وتم خصم ${total_price:.2f}.\n<b>راجع وسلّمها يدوياً!</b>")
             
             admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
             notify_admins(admin_msg)
 
+        # 🔔 إشعار قناة اللوق (قابل للتعديل من CMS)
         if log_ch and log_ch != "Not Set":
             try: 
                 obs_user = obscure_text(u.get('username') or str(uid))
-                pub_msg = f"🛒 <b>New Purchase!</b> 🛍\n\n👤 User: <b>{obs_user}</b>\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n🔢 QTY: {qty}\n\n<i>Thank you for choosing us 🛡️</i>"
+                
+                # 🆕 إضافة Premium Emoji للمنتج (لو موجود)
+                product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
+                custom_emoji_id = p.get('custom_emoji_id')
+                
+                if custom_emoji_id:
+                    # نستخدم Premium Emoji بدل 📦 العادي
+                    product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>'
+                else:
+                    product_name_log = f'📦 <b>{product_name_clean}</b>'
+                
+                # النص الافتراضي
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+                
+                # شيك على النص المخصص من CMS
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try:
+                        pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                    except:
+                        pass
+                
                 bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-            except: pass
+            except Exception as log_err: 
+                logger.debug(f"Log channel error: {log_err}")
 
         # 🎁 منح مكافأة الإحالة للشخص اللي دعا هذا المشتري (لو موجود)
         # تشتغل في كل عملية شراء (ليست مرة واحدة)
@@ -3603,9 +3828,20 @@ def credit_user(uid, amt, tx_id, lang, method):
     if log_ch and log_ch != "Not Set":
         obs_user = obscure_text(u.get('username') or str(uid))
         try: 
-            pub_msg = f"💳 <b>New Deposit!</b> 💵\n\n👤 User: <b>{obs_user}</b>\n💰 Amount: <b>${amt:.2f}</b>\n🟢 Method: <b>{method}</b>\n\n<i>Processed automatically ⚡</i>"
+            # 🔔 النص الافتراضي للإيداع
+            pub_msg = LANG['en']['log_deposit'].format(obs_user, f"{amt:.2f}", method)
+            
+            # شيك على النص المخصص من CMS
+            custom_dep = db.custom_texts.find_one({'lang': 'en', 'key': 'log_deposit'})
+            if custom_dep and custom_dep.get('value'):
+                try:
+                    pub_msg = custom_dep['value'].format(obs_user, f"{amt:.2f}", method)
+                except:
+                    pass
+            
             bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-        except: pass
+        except Exception as log_err: 
+            logger.debug(f"Log channel deposit error: {log_err}")
 
 # ============================================================
 # 👑 14. لوحة الإدارة ونظام التقارير 
@@ -3681,6 +3917,11 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
     markup.add(InlineKeyboardButton("🏆 لوق: إنجاز 10 إحالات", callback_data="edit_txt_log_ref_milestone"))
     markup.add(InlineKeyboardButton("💌 رسالة المُحيل (شراء صديقه)", callback_data="edit_txt_ref_purchase_dm"))
+    # 🆕 إشعارات اللوق العامة
+    markup.add(InlineKeyboardButton("🛒 لوق: شراء بنجاح", callback_data="edit_txt_log_purchase"))
+    markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
+    markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
+    markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -3755,6 +3996,28 @@ def ad_edit_txt_prompt(call):
             "<code>{}</code> 2 = قيمة المكافأة الجديدة (مثل 0.10)\n"
             "<code>{}</code> 3 = الرصيد الجديد للمُحيل\n\n"
             "💡 <i>هذي رسالة خاصة تُرسل للمُحيل لما يشتري شخص من إحالاته</i>"
+        ),
+        'log_purchase': (
+            "💡 <b>المتغيرات (3 متغيرات):</b>\n"
+            "<code>{}</code> 1 = اسم المستخدم (مخفي)\n"
+            "<code>{}</code> 2 = اسم المنتج\n"
+            "<code>{}</code> 3 = الكمية المشتراة"
+        ),
+        'log_deposit': (
+            "💡 <b>المتغيرات (3 متغيرات):</b>\n"
+            "<code>{}</code> 1 = اسم المستخدم (مخفي)\n"
+            "<code>{}</code> 2 = المبلغ (مثل 5.00)\n"
+            "<code>{}</code> 3 = طريقة الدفع (Binance Pay / USDT / TON ...)"
+        ),
+        'log_gemini': (
+            "💡 <b>المتغيرات (1 متغير):</b>\n"
+            "<code>{}</code> 1 = اسم حساب Gemini (مخفي)\n\n"
+            "💡 <i>هذا الإشعار يُرسل في اللوق عند كل تفعيل Gemini Advanced ناجح</i>"
+        ),
+        'log_github': (
+            "💡 <b>المتغيرات (1 متغير):</b>\n"
+            "<code>{}</code> 1 = اسم حساب GitHub (مخفي)\n\n"
+            "💡 <i>هذا الإشعار يُرسل في اللوق عند كل تفعيل GitHub Student ناجح</i>"
         ),
         'new_stock': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
