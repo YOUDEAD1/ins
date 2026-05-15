@@ -614,7 +614,7 @@ def get_setting(key, default="Not Set"):
 # - 0.10$ مقابل كل 10 احالات نشطة (مكتملة الاشتراك الإجباري)
 # - إذا غادر شخص ونقص العدد عن مضاعفات العشرة، يُخصم تلقائياً
 # ============================================================
-REF_V2_INIT_KEY = 'referrals_v2_initialized_v5'
+REF_V2_INIT_KEY = 'referrals_v2_initialized_v6'
 
 def initialize_referrals_v2():
     """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
@@ -628,7 +628,7 @@ def initialize_referrals_v2():
 
         # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
         try:
-            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4']}})
+            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4', 'referrals_v2_initialized_v5']}})
         except Exception:
             pass
 
@@ -1461,28 +1461,44 @@ def safe_translate_for_cms(text, target_lang='en'):
 
 
 def _translate_single_line(line, target_lang='en'):
-    """يترجم سطر واحد مع حماية HTML والـ Premium Emojis والـ Placeholders"""
+    """
+    يترجم سطر واحد مع حماية HTML والـ Premium Emojis والـ Placeholders.
+    
+    🆕 الطريقة الذكية الجديدة:
+    - بدل ما نحمي <b> و </b> منفصلين (فيحط بينهم PROTECT يكسر الجملة)
+    - نحمي الـ HTML attributes فقط، ونخلي الكلمات داخلها تترجم
+    - مثلاً: <b>الزيارات</b> → <b>Clicks</b> (تترجم الكلمة وتبقي الـ tag)
+    """
     try:
         protected_items = []
         
         def protect(match):
             protected_items.append(match.group(0))
             idx = len(protected_items) - 1
-            return f" PROTECT{idx:04d}PROTECT "
+            # نستخدم marker قصير وبسيط ما يكسر السياق
+            return f"@@{idx}@@"
         
         temp_line = line
         
-        # 🛡 نفس ترتيب الحماية:
+        # 🛡 ترتيب الحماية (الأخص أولاً):
+        # 1. Premium Emojis (كتلة كاملة)
         temp_line = re.sub(r'<tg-emoji\s+emoji-id="[^"]*">.*?</tg-emoji>', protect, temp_line)
-        temp_line = re.sub(r'<blockquote>.*?</blockquote>', protect, temp_line, flags=re.DOTALL)
+        # 2. Code/Pre blocks (محتواها ما يترجم)
         temp_line = re.sub(r'<code>.*?</code>', protect, temp_line, flags=re.DOTALL)
         temp_line = re.sub(r'<pre>.*?</pre>', protect, temp_line, flags=re.DOTALL)
-        temp_line = re.sub(r'<[^>]+>', protect, temp_line)
+        # 3. URLs
         temp_line = re.sub(r'https?://[^\s<>]+', protect, temp_line)
+        # 4. Placeholders {} و {name} و {:.2f}
         temp_line = re.sub(r'\{[^}]*\}', protect, temp_line)
+        # 5. الفواصل البصرية
         temp_line = re.sub(r'[━─═]{2,}', protect, temp_line)
         
-        # حماية الإيموجي
+        # 6. ⭐ HTML tags بدون محتوى (نحميها كـ tokens ولكن نخلي محتواها قابل للترجمة)
+        # مثلاً: <b>الزيارات:</b> → @@5@@الزيارات:@@6@@
+        # هكذا الترجمة تشوف "الزيارات:" بشكل واضح وتترجمها لـ "Clicks:"
+        temp_line = re.sub(r'</?[a-zA-Z][^>]*>', protect, temp_line)
+        
+        # 7. حماية الإيموجي العادي
         emoji_pattern = re.compile(
             "["
             "\U0001F600-\U0001F64F"
@@ -1493,7 +1509,6 @@ def _translate_single_line(line, target_lang='en'):
             "\U00002702-\U000027B0"
             "\U000024C2-\U0001F251"
             "\U0001f926-\U0001f937"
-            "\U00010000-\U0010ffff"
             "\u2640-\u2642"
             "\u2600-\u2B55"
             "\u200d"
@@ -1508,46 +1523,38 @@ def _translate_single_line(line, target_lang='en'):
         temp_line = emoji_pattern.sub(protect, temp_line)
         
         # تحقق: لو ما بقي نص حقيقي للترجمة، نرجع السطر كما هو
-        clean_check = re.sub(r'\s*PROTECT\d+PROTECT\s*', ' ', temp_line).strip()
+        clean_check = re.sub(r'@@\d+@@', ' ', temp_line).strip()
         if not clean_check or len(clean_check) < 2:
             return line
         
-        # 🌐 الترجمة
+        # 🌐 الترجمة - بهذا الشكل، Google يشوف النص العربي واضح مع تكنات بسيطة
         translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_line)
         
         if not translated:
             return line
         
-        # ترميم المسافات في الـ markers
-        translated = re.sub(
-            r'P\s*R\s*O\s*T\s*E\s*C\s*T',
-            'PROTECT',
-            translated,
-            flags=re.IGNORECASE
-        )
-        
-        # ترميم الأرقام العربية في الـ markers
+        # ترميم markers اللي تغيرت في الترجمة
+        # 1. ترميم المسافات في الـ markers (مثل @@ 5 @@)
+        translated = re.sub(r'@\s*@\s*(\d+)\s*@\s*@', r'@@\1@@', translated)
+        # 2. ترميم الأرقام العربية (لو ترجمت الأرقام)
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
         def fix_marker_digits(match):
             return match.group(0).translate(arabic_to_eng)
-        translated = re.sub(
-            r'PROTECT[\d٠-٩\s]+PROTECT',
-            fix_marker_digits,
-            translated,
-            flags=re.IGNORECASE
-        )
+        translated = re.sub(r'@@[\d٠-٩]+@@', fix_marker_digits, translated)
         
-        # 🔁 استرجاع العناصر المحمية
+        # 🔁 استرجاع العناصر المحمية (من الآخر للأول لتجنب تداخل الأرقام)
         for i in range(len(protected_items) - 1, -1, -1):
             original = protected_items[i]
-            pattern = re.compile(
-                r'\s*PROTECT\s*0*' + str(i) + r'\s*PROTECT\s*',
-                re.IGNORECASE
+            # نسوي replace مرن: يقبل أي مسافات حول الأرقام
+            translated = re.sub(
+                r'@@\s*' + str(i) + r'\s*@@',
+                lambda m: original,
+                translated
             )
-            translated = pattern.sub(original, translated)
         
-        # لو بقي markers ما اتفك تشفيرها، نرجع السطر الأصلي
-        if re.search(r'PROTECT\d*PROTECT', translated, re.IGNORECASE):
+        # 🛡 لو بقي markers ما اتفك تشفيرها، نرجع السطر الأصلي
+        if re.search(r'@@\d*@@', translated):
+            logger.warning(f"Marker leak in translation - returning original line")
             return line
         
         return translated.strip()
