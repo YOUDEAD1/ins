@@ -66,33 +66,59 @@ except ValueError: STARS_RATE = 120
 # ============================================================
 
 PROXY_SOURCES = [
+    # مصادر HTTP/HTTPS
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
     "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
     "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
     "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
+    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
+    # مصدر يحدّث كثيراً
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=5000&country=all",
 ]
 
 VERIFIED_PROXIES = []           # البروكسيات اللي تأكدنا أنها شغالة
 PROXY_REFRESH_LOCK = threading.Lock()
 LAST_PROXY_REFRESH = 0
 PROXY_REFRESH_INTERVAL = 1800   # كل 30 دقيقة نعمل refresh
-MIN_WORKING_PROXIES = 5         # نحتاج على الأقل 5 بروكسي شغال
+MIN_WORKING_PROXIES = 10        # نحتاج على الأقل 10 بروكسي شغال (نظام متوازي)
+TARGET_PROXY_COUNT = 30         # نهدف لـ 30 بروكسي شغال في الـ pool
 
 
-def _test_proxy(proxy_url, timeout=5):
-    """يفحص هل البروكسي شغال أو لا. يرجع True لو شغال."""
-    try:
-        proxies = {'http': proxy_url, 'https': proxy_url}
-        # نختبره على endpoint سريع من Binance
-        resp = requests.get(
-            "https://api.binance.com/api/v3/ping",
-            proxies=proxies,
-            timeout=timeout
-        )
-        return resp.status_code == 200
-    except Exception:
-        return False
+def _test_proxy(proxy_url, timeout=8):
+    """
+    يفحص هل البروكسي شغال أو لا. يرجع True لو شغال.
+    نختبر على عدة endpoints لزيادة فرص النجاح.
+    """
+    # نجرب على عدة URLs (أبسطها أولاً)
+    test_urls = [
+        "http://httpbin.org/ip",  # HTTP بدل HTTPS - أسهل
+        "http://api.ipify.org",
+        "https://api.binance.com/api/v3/ping",  # هذا الهدف الأساسي
+    ]
+    
+    proxies = {'http': proxy_url, 'https': proxy_url}
+    
+    # نجرب أول URL، لو نجح كافي
+    for test_url in test_urls:
+        try:
+            resp = requests.get(
+                test_url,
+                proxies=proxies,
+                timeout=timeout,
+                allow_redirects=False
+            )
+            if resp.status_code in [200, 301, 302]:
+                return True
+        except Exception:
+            continue
+    
+    return False
 
 
 def _fetch_proxies_from_sources():
@@ -116,7 +142,7 @@ def _fetch_proxies_from_sources():
     return list(all_proxies)
 
 
-def _validate_proxies_parallel(proxies, max_workers=50, target_count=20):
+def _validate_proxies_parallel(proxies, max_workers=100, target_count=20):
     """
     يفحص البروكسيات بالتوازي ويرجع الشغّالة منها فقط.
     target_count = نتوقف بعد ما نلقى هذا العدد من الشغّالين (لتوفير الوقت).
@@ -128,8 +154,8 @@ def _validate_proxies_parallel(proxies, max_workers=50, target_count=20):
     # نخلط البروكسيات عشوائياً للتنوع
     random.shuffle(proxies)
     
-    # نأخذ أول 300 بروكسي للفحص (أكثر من هذا ياخذ وقت)
-    candidates = proxies[:300]
+    # نأخذ أول 800 بروكسي للفحص (زدنا العدد لأن أغلبها ميت)
+    candidates = proxies[:800]
     
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -137,13 +163,17 @@ def _validate_proxies_parallel(proxies, max_workers=50, target_count=20):
             
             for future in as_completed(future_to_proxy):
                 if len(working) >= target_count:
-                    # وصلنا للعدد المطلوب، نوقف
+                    # وصلنا للعدد المطلوب، نوقف الباقي
+                    for f in future_to_proxy:
+                        if not f.done():
+                            f.cancel()
                     break
                 
                 proxy = future_to_proxy[future]
                 try:
-                    if future.result():
+                    if future.result(timeout=15):
                         working.append(proxy)
+                        logger.info(f"✅ بروكسي شغّال ({len(working)}/{target_count}): {proxy[:50]}")
                 except Exception:
                     continue
     except Exception as e:
@@ -178,7 +208,7 @@ def refresh_proxies(force=False):
             logger.info(f"📥 تم جلب {len(raw_proxies)} بروكسي خام، جاري الفحص...")
             
             # 2. فحص بالتوازي وأخذ الشغّالين فقط
-            working = _validate_proxies_parallel(raw_proxies, target_count=20)
+            working = _validate_proxies_parallel(raw_proxies, target_count=TARGET_PROXY_COUNT)
             
             if working:
                 VERIFIED_PROXIES = working
@@ -249,23 +279,172 @@ def _proxy_refresh_thread():
             time.sleep(60)
 
 
+def _proxy_guard_thread():
+    """
+    Thread حراسة: يتأكد إن عندنا بروكسيات شغّالة دائماً.
+    لو نقص العدد عن MIN_WORKING_PROXIES، يجلب جدد فوراً.
+    """
+    while True:
+        try:
+            time.sleep(30)  # فحص كل 30 ثانية
+            if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
+                logger.info(f"🛡 عدد البروكسيات أقل من الحد الأدنى ({len(VERIFIED_PROXIES)}/{MIN_WORKING_PROXIES}) - جاري التحديث...")
+                refresh_proxies(force=True)
+        except Exception as e:
+            logger.error(f"Proxy guard thread error: {e}")
+            time.sleep(60)
+
+
+def _proxy_health_check_thread():
+    """
+    Thread فحص دوري: كل 5 دقائق يفحص البروكسيات الموجودة
+    ويحذف اللي مات منها (للمحافظة على pool نظيف).
+    """
+    while True:
+        try:
+            time.sleep(300)  # كل 5 دقائق
+            if not VERIFIED_PROXIES:
+                continue
+            
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            still_working = []
+            current_proxies = list(VERIFIED_PROXIES)
+            
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                future_to_proxy = {executor.submit(_test_proxy, p, 5): p for p in current_proxies}
+                
+                for future in as_completed(future_to_proxy):
+                    proxy = future_to_proxy[future]
+                    try:
+                        if future.result(timeout=8):
+                            still_working.append(proxy)
+                    except Exception:
+                        continue
+            
+            removed_count = len(current_proxies) - len(still_working)
+            if removed_count > 0:
+                # تحديث الـ pool بالـ working فقط
+                global VERIFIED_PROXIES
+                VERIFIED_PROXIES = still_working
+                logger.info(f"🧹 تم تنظيف {removed_count} بروكسي ميت. متبقي {len(still_working)} شغّال.")
+                
+                # لو نزل العدد، نحدث فوراً
+                if len(still_working) < MIN_WORKING_PROXIES:
+                    refresh_proxies(force=True)
+        except Exception as e:
+            logger.error(f"Proxy health check error: {e}")
+            time.sleep(60)
+
+
 # جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
 threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
 threading.Thread(target=_proxy_refresh_thread, daemon=True).start()
+threading.Thread(target=_proxy_guard_thread, daemon=True).start()
+threading.Thread(target=_proxy_health_check_thread, daemon=True).start()
 
 
-def execute_binance_call(call_fn, max_retries=5):
+def execute_binance_call(call_fn, max_retries=5, fast_mode=True, total_timeout=5):
     """
-    يحاول تنفيذ استدعاء Binance API مع تغيير البروكسي عند الفشل.
-    يكتم الأخطاء ويعيد المحاولة بصمت.
+    يحاول تنفيذ استدعاء Binance API بسرعة.
     
-    call_fn: دالة تأخذ client كـ parameter وترجع النتيجة.
-        مثال: lambda c: c.get_pay_trade_history()
+    fast_mode=True: يحاول 5 بروكسيات بالتوازي ويرجع أول رد ناجح
+                   (سرعة عالية - مناسب لفحص الإيداعات)
+    fast_mode=False: يحاول واحد تلو الآخر (موارد أقل لكن أبطأ)
+    
+    total_timeout: أقصى وقت بالثواني للعملية كلها
     
     يرجع: النتيجة لو نجح، None لو فشل بعد كل المحاولات.
     """
-    last_error = None
+    if fast_mode:
+        return _execute_binance_call_parallel(call_fn, max_workers=5, total_timeout=total_timeout)
+    else:
+        return _execute_binance_call_sequential(call_fn, max_retries)
+
+
+def _execute_binance_call_parallel(call_fn, max_workers=5, total_timeout=5):
+    """
+    يحاول عدة بروكسيات بالتوازي ويرجع أول رد ناجح.
+    سريع جداً (~2-3 ثواني) لأنه ما ينتظر بروكسي يفشل قبل ما يجرب الثاني.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED, wait
     
+    # نتأكد إن عندنا بروكسيات
+    if not VERIFIED_PROXIES:
+        # محاولة سريعة بدون بروكسي (لو السيرفر في منطقة مسموحة)
+        try:
+            client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': total_timeout})
+            return call_fn(client)
+        except Exception:
+            pass
+        
+        # نطلب refresh في الخلفية للمستقبل
+        threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+        return None
+    
+    # نأخذ عينة من الـ pool للمحاولة بالتوازي
+    proxies_to_try = random.sample(VERIFIED_PROXIES, min(max_workers, len(VERIFIED_PROXIES)))
+    
+    def try_with_proxy(proxy_url):
+        """يحاول العملية مع بروكسي معين"""
+        try:
+            client = BinanceClient(
+                BINANCE_API_KEY,
+                BINANCE_API_SECRET,
+                requests_params={
+                    'proxies': {'http': proxy_url, 'https': proxy_url},
+                    'timeout': total_timeout
+                }
+            )
+            result = call_fn(client)
+            return ('success', result, proxy_url)
+        except Exception as e:
+            return ('error', str(e), proxy_url)
+    
+    # نشغل المحاولات بالتوازي
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {executor.submit(try_with_proxy, p): p for p in proxies_to_try}
+        
+        # ننتظر أول واحد ينجح (أو ينتهي الـ timeout الكلي)
+        done, pending = wait(futures.keys(), timeout=total_timeout, return_when=FIRST_COMPLETED)
+        
+        # نشيك على الـ completed futures
+        for future in done:
+            try:
+                status, data, proxy = future.result(timeout=0.1)
+                if status == 'success':
+                    # ✅ نجح! نلغي الباقي ونرجع النتيجة
+                    for p in pending:
+                        p.cancel()
+                    return data
+                else:
+                    # فشل هذا البروكسي - نحذفه من الـ pool
+                    _remove_dead_proxy(proxy)
+            except Exception:
+                continue
+        
+        # ما نجح أي بروكسي في أول جولة - نحاول الباقي بسرعة
+        if pending:
+            done2, _ = wait(pending, timeout=max(0.5, total_timeout - 2), return_when=FIRST_COMPLETED)
+            for future in done2:
+                try:
+                    status, data, proxy = future.result(timeout=0.1)
+                    if status == 'success':
+                        return data
+                    else:
+                        _remove_dead_proxy(proxy)
+                except Exception:
+                    continue
+        
+        return None
+    finally:
+        # ننهي الـ executor بدون انتظار (الـ threads الباقية تكمل في الخلفية بدون مشاكل)
+        executor.shutdown(wait=False)
+
+
+def _execute_binance_call_sequential(call_fn, max_retries=5):
+    """النسخة القديمة - واحد بعد الثاني (احتياطي)"""
     for attempt in range(max_retries):
         client = None
         try:
@@ -273,28 +452,15 @@ def execute_binance_call(call_fn, max_retries=5):
             result = call_fn(client)
             return result
         except Exception as e:
-            last_error = e
             error_msg = str(e).lower()
-            
-            # لو الخطأ من البروكسي أو من الحظر الجغرافي، نجرب بروكسي ثاني
-            if any(keyword in error_msg for keyword in ['restricted', 'eligibility', 'service unavailable', 'timeout', 'connection', 'proxy', 'unreachable']):
-                # نحذف البروكسي الميت ونعيد المحاولة
+            if any(kw in error_msg for kw in ['restricted', 'eligibility', 'service unavailable', 'timeout', 'connection', 'proxy', 'unreachable']):
                 if client and hasattr(client, '_used_proxy'):
                     _remove_dead_proxy(client._used_proxy)
-                # لو ما بقي بروكسيات، نجلب جديد
                 if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
                     threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
-                time.sleep(0.5)  # نستنى شوي قبل المحاولة الجاية
                 continue
             else:
-                # خطأ مختلف (مثلاً API Key غلط) - ما نعيد
                 break
-    
-    # كل المحاولات فشلت
-    # نسجّل الخطأ كـ debug فقط (مو error) عشان ما يعبّي الـ logs
-    if last_error:
-        logger.debug(f"Binance call failed after {max_retries} retries: {last_error}")
-    
     return None
 
 # ============================================================
@@ -1106,61 +1272,125 @@ def clean_old_emojis(text):
     return text.strip()
 
 def safe_translate_for_cms(text, target_lang='en'):
+    """
+    ترجمة آمنة تحافظ على:
+    - Premium Emojis (<tg-emoji>)
+    - HTML tags (<b>, <i>, <code>, <blockquote>, etc.)
+    - Placeholders {} و {name}
+    - URLs
+    - الإيموجيات العادية
+    """
     if not text or not text.strip():
         return text
+    
     try:
-        placeholders = []
+        # نخزن كل الأشياء الحساسة في قائمة
+        protected_items = []
         
-        def replacer(match):
-            placeholders.append(match.group(0))
-            return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
+        def protect(match):
+            """يخزن العنصر الحساس ويستبدله بمعرّف مميز جداً"""
+            protected_items.append(match.group(0))
+            # نستخدم marker بسيط جداً: PROTECT أرقام PROTECT
+            # الأرقام بالحروف الإنجليزية واضحة، PROTECT كلمة لا تترجم
+            idx = len(protected_items) - 1
+            return f" PROTECT{idx:04d}PROTECT "
         
-        # 1. حماية Premium Emojis
-        temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
-        # 2. حماية placeholders الفارغة {} والمسماة {name}  ⭐ مهم جداً
-        temp_text = re.sub(r'\{[^}]*\}', replacer, temp_text)
-        # 3. حماية HTML tags
-        temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
-        # 4. حماية الأكواد بين <code>...</code> (تم تغطيتها فوق لكن للتأكيد)
-        # 5. حماية الـ URLs
-        temp_text = re.sub(r'https?://[^\s]+', replacer, temp_text)
+        temp_text = text
         
-        clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
-        if not clean_check:
+        # 🛡 ترتيب الحماية مهم (الأخص أولاً):
+        # 1. Premium Emojis (HTML معقد)
+        temp_text = re.sub(r'<tg-emoji\s+emoji-id="[^"]*">.*?</tg-emoji>', protect, temp_text)
+        # 2. Blockquotes (يحتوي على نص داخله ما نبي يترجم بمعزل)
+        temp_text = re.sub(r'<blockquote>.*?</blockquote>', protect, temp_text, flags=re.DOTALL)
+        # 3. Code blocks (يحتوي على روابط وأكواد)
+        temp_text = re.sub(r'<code>.*?</code>', protect, temp_text, flags=re.DOTALL)
+        # 4. Pre blocks
+        temp_text = re.sub(r'<pre>.*?</pre>', protect, temp_text, flags=re.DOTALL)
+        # 5. كل HTML tags الباقية (b, i, u, s, a, etc.)
+        temp_text = re.sub(r'<[^>]+>', protect, temp_text)
+        # 6. URLs (في حال كانت خارج tags)
+        temp_text = re.sub(r'https?://[^\s<>]+', protect, temp_text)
+        # 7. Placeholders {} و {name}
+        temp_text = re.sub(r'\{[^}]*\}', protect, temp_text)
+        # 8. الفواصل البصرية ━━━━ (الترجمة أحياناً تحذفها)
+        temp_text = re.sub(r'[━─═]{2,}', protect, temp_text)
+        
+        # 9. ⭐ حماية الإيموجيات العادية (هذا اللي كان مفقود!)
+        # الإيموجيات أحياناً تتدمج مع نصوص أو تختفي بعد الترجمة
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F600-\U0001F64F"  # وجوه
+            "\U0001F300-\U0001F5FF"  # رموز
+            "\U0001F680-\U0001F6FF"  # نقل
+            "\U0001F1E0-\U0001F1FF"  # أعلام
+            "\U00002500-\U00002BEF"  # أشكال
+            "\U00002702-\U000027B0"  
+            "\U00002702-\U000027B0"
+            "\U000024C2-\U0001F251"
+            "\U0001f926-\U0001f937"
+            "\U00010000-\U0010ffff"
+            "\u2640-\u2642"
+            "\u2600-\u2B55"
+            "\u200d"
+            "\u23cf"
+            "\u23e9"
+            "\u231a"
+            "\ufe0f"
+            "\u3030"
+            "]+",
+            flags=re.UNICODE
+        )
+        temp_text = emoji_pattern.sub(protect, temp_text)
+        
+        # تحقق: لو ما بقي نص حقيقي للترجمة، نرجع الأصل
+        clean_check = re.sub(r'\s*PROTECT\d+PROTECT\s*', ' ', temp_text).strip()
+        if not clean_check or len(clean_check) < 2:
             return text
         
+        # 🌐 الترجمة
         translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_text)
         
         if not translated:
             return text
         
+        # 🔄 ترميم الأرقام العربية لإنجليزية (في حال الترجمة عربتها)
         arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
-        def clean_arabic_digits(match):
+        def fix_marker_digits(match):
             return match.group(0).translate(arabic_to_eng)
+        # نصلح markers اللي صارت أرقامها عربية
         translated = re.sub(
-            r'XZQXZQ[^A-Za-z]*?QZXQZX',
-            clean_arabic_digits,
+            r'PROTECT[\d٠-٩\s]+PROTECT',
+            fix_marker_digits,
             translated,
             flags=re.IGNORECASE
         )
         
-        for i in range(len(placeholders) - 1, -1, -1):
-            ph = placeholders[i]
+        # 🔄 ترميم المسافات (الترجمة أحياناً تكسر الـ markers بإضافة مسافات)
+        translated = re.sub(
+            r'P\s*R\s*O\s*T\s*E\s*C\s*T',
+            'PROTECT',
+            translated,
+            flags=re.IGNORECASE
+        )
+        
+        # 🔁 استرجاع العناصر المحمية (من الآخر للأول لتجنب تداخل المعرّفات)
+        for i in range(len(protected_items) - 1, -1, -1):
+            original = protected_items[i]
+            # نمط يلتقط الـ marker بمرونة
             pattern = re.compile(
-                r'\s*XZQXZQ\s*0*' + str(i) + r'\s*QZXQZX\s*',
+                r'\s*PROTECT\s*0*' + str(i) + r'\s*PROTECT\s*',
                 re.IGNORECASE
             )
-            translated = pattern.sub(ph, translated)
+            translated = pattern.sub(original, translated)
         
-        if re.search(r'XZQXZQ', translated, re.IGNORECASE):
-            logger.warning(f"Translation placeholder leak detected")
+        # 🛡 فحص نهائي: هل بقي markers ما اتفك تشفيرها؟
+        if re.search(r'PROTECT\d*PROTECT', translated, re.IGNORECASE):
+            logger.warning(f"⚠️ Translation marker leak detected - returning original")
             return text
         
-        # 🛡 فحص نهائي: عد الـ placeholders في الأصل والمترجم
-        # لو الترجمة فقدت placeholders، نرفضها (للأمان)
+        # 🛡 فحص: عدد الـ {} نفسه قبل وبعد
         original_placeholders = len(re.findall(r'\{[^}]*\}', text))
         translated_placeholders = len(re.findall(r'\{[^}]*\}', translated))
-        
         if original_placeholders != translated_placeholders:
             logger.warning(
                 f"⚠️ Translation lost placeholders! "
@@ -1168,6 +1398,30 @@ def safe_translate_for_cms(text, target_lang='en'):
                 f"Returning original text."
             )
             return text
+        
+        # 🛡 فحص: عدد الـ <tg-emoji> نفسه قبل وبعد
+        original_emojis = len(re.findall(r'<tg-emoji', text))
+        translated_emojis = len(re.findall(r'<tg-emoji', translated))
+        if original_emojis != translated_emojis:
+            logger.warning(
+                f"⚠️ Translation lost premium emojis! "
+                f"Original: {original_emojis}, Translated: {translated_emojis}. "
+                f"Returning original text."
+            )
+            return text
+        
+        # 🛡 فحص: HTML tags لازم تكون متوازنة
+        # نعد كل tag مفتوح ومغلق
+        for tag in ['b', 'i', 'u', 's', 'code', 'blockquote', 'pre']:
+            open_count = len(re.findall(rf'<{tag}[^>]*>', translated, re.IGNORECASE))
+            close_count = len(re.findall(rf'</{tag}>', translated, re.IGNORECASE))
+            if open_count != close_count:
+                logger.warning(
+                    f"⚠️ Translation broke <{tag}> balance! "
+                    f"Open: {open_count}, Close: {close_count}. "
+                    f"Returning original text."
+                )
+                return text
             
         return translated.strip()
     except Exception as e:
@@ -2521,15 +2775,23 @@ def verify_binance_pay(message, lang):
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
-        # 🛡 استخدام wrapper ذكي: يجرب عدة بروكسيات تلقائياً ويكتم الأخطاء
+        # ⚡ Fast mode: يحاول 5 بروكسيات بالتوازي - أسرع طريقة (~3-5 ثواني)
         pay_response = execute_binance_call(
             lambda c: c.get_pay_trade_history(),
-            max_retries=8  # نحاول 8 مرات قبل ما نرفع راية الفشل
+            fast_mode=True,
+            total_timeout=5  # 5 ثواني max
         )
         
         if pay_response is None:
-            # كل المحاولات فشلت — رسالة لطيفة للمستخدم
-            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد دقيقة من فضلك. 🙏", parse_mode="HTML")
+            # محاولة ثانية لو فشل بسرعة (احتياطي)
+            pay_response = execute_binance_call(
+                lambda c: c.get_pay_trade_history(),
+                fast_mode=True,
+                total_timeout=5
+            )
+        
+        if pay_response is None:
+            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
             return
         
         pay_h = pay_response.get('data', [])
@@ -2557,6 +2819,16 @@ def verify_binance_pay(message, lang):
         PROCESSING_TXS.discard(tx_id)
 
 def verify_crypto_tx(message, lang, coin):
+    """
+    🛡 توجيه ذكي: TON يفحص من TONCenter (الـ blockchain العام)
+    باقي العملات تفحص من Binance
+    """
+    # 🛡 TON يفحص من شبكة TON مباشرة (لا يحتاج بروكسي ولا Binance)
+    if coin == "TON":
+        ton_wallet = get_setting("ton_address", "Not Set")
+        verify_ton_public_blockchain(message, lang, ton_wallet)
+        return
+    
     uid = message.from_user.id
     if is_user_banned(uid): return
     if not message.text:
@@ -2579,14 +2851,23 @@ def verify_crypto_tx(message, lang, coin):
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
-        # 🛡 استخدام wrapper ذكي
+        # ⚡ Fast mode: يحاول 5 بروكسيات بالتوازي
         res = execute_binance_call(
             lambda c: c.get_deposit_history(coin=coin),
-            max_retries=8
+            fast_mode=True,
+            total_timeout=5
         )
         
         if res is None:
-            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد دقيقة من فضلك. 🙏", parse_mode="HTML")
+            # محاولة ثانية احتياطية
+            res = execute_binance_call(
+                lambda c: c.get_deposit_history(coin=coin),
+                fast_mode=True,
+                total_timeout=5
+            )
+        
+        if res is None:
+            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
             return
 
         found = False; status = -1; amt = 0.0
@@ -2613,6 +2894,350 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, f"❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
+
+
+def get_ltc_price_usd():
+    """يجلب سعر LTC بالدولار من 3 مصادر مع تحقق منطقية (10$ - 1000$)"""
+    # المصدر 1: Binance (عبر بروكسي - الأسرع)
+    try:
+        ticker = execute_binance_call(
+            lambda c: c.get_symbol_ticker(symbol="LTCUSDT"),
+            fast_mode=True,
+            total_timeout=5
+        )
+        if ticker:
+            price = float(ticker.get('price', 0))
+            if 10 <= price <= 1000:
+                logger.info(f"💱 سعر LTC من Binance: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"Binance LTC price error: {e}")
+    
+    # المصدر 2: CoinGecko
+    try:
+        cg_res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd",
+            timeout=10
+        )
+        if cg_res.status_code == 200:
+            price = float(cg_res.json().get('litecoin', {}).get('usd', 0))
+            if 10 <= price <= 1000:
+                logger.info(f"💱 سعر LTC من CoinGecko: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"CoinGecko LTC price error: {e}")
+    
+    # المصدر 3: Coinbase
+    try:
+        cb_res = requests.get(
+            "https://api.coinbase.com/v2/prices/LTC-USD/spot",
+            timeout=10
+        )
+        if cb_res.status_code == 200:
+            price = float(cb_res.json().get('data', {}).get('amount', 0))
+            if 10 <= price <= 1000:
+                logger.info(f"💱 سعر LTC من Coinbase: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"Coinbase LTC price error: {e}")
+    
+    return None
+
+
+def get_ton_price_usd():
+    """يجلب سعر TON بالدولار من 3 مصادر مع تحقق منطقية"""
+    # المصدر 1: CoinGecko
+    try:
+        cg_res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=the-open-network&vs_currencies=usd",
+            timeout=10
+        )
+        if cg_res.status_code == 200:
+            price = float(cg_res.json().get('the-open-network', {}).get('usd', 0))
+            if 0.5 <= price <= 50:  # نطاق منطقي لـ TON
+                logger.info(f"💱 سعر TON من CoinGecko: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"CoinGecko TON price error: {e}")
+    
+    # المصدر 2: Coinbase
+    try:
+        cb_res = requests.get(
+            "https://api.coinbase.com/v2/prices/TON-USD/spot",
+            timeout=10
+        )
+        if cb_res.status_code == 200:
+            price = float(cb_res.json().get('data', {}).get('amount', 0))
+            if 0.5 <= price <= 50:
+                logger.info(f"💱 سعر TON من Coinbase: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"Coinbase TON price error: {e}")
+    
+    # المصدر 3: Binance (احتياطي بالبروكسي)
+    try:
+        ticker = execute_binance_call(
+            lambda c: c.get_symbol_ticker(symbol="TONUSDT"),
+            fast_mode=True,
+            total_timeout=5
+        )
+        if ticker:
+            price = float(ticker.get('price', 0))
+            if 0.5 <= price <= 50:
+                logger.info(f"💱 سعر TON من Binance: ${price:.4f}")
+                return price
+    except Exception as e:
+        logger.debug(f"Binance TON price error: {e}")
+    
+    return None
+
+
+def verify_ton_public_blockchain(message, lang, wallet_address):
+    """
+    🛡 يفحص حوالات TON مباشرة من TON blockchain (بدون Binance، بدون بروكسي)
+    يستخدم TONCenter API + TON Whales API + Tonviewer API
+    """
+    uid = message.from_user.id
+    if is_user_banned(uid): return
+    if not message.text:
+        bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML"); return
+    
+    tx_id = message.text.strip()
+    # 🛡 TON hashes case-sensitive - ما نسوي lower!
+    tx_id_clean = tx_id.replace(' ', '').replace('\n', '')
+    
+    if len(tx_id_clean) < 20:
+        bot.send_message(
+            uid,
+            "❌ <b>رقم الهاش (TxID) غير صحيح!</b>\n\n"
+            "💡 <i>هاش TON يكون على شكل: <code>abc123...XYZ=</code> أو base64</i>\n"
+            "تأكد من نسخه بالكامل من محفظتك.",
+            parse_mode="HTML"
+        )
+        return
+    
+    if wallet_address == "Not Set" or len(wallet_address) < 10:
+        bot.send_message(uid, "❌ <b>خطأ:</b> عنوان محفظة TON غير معين في البوت.", parse_mode="HTML")
+        return
+    
+    # نستخدم lowercase للـ tracking في PROCESSING_TXS فقط
+    tx_track_key = tx_id_clean.lower()
+    
+    with tx_lock:
+        if tx_track_key in PROCESSING_TXS:
+            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            return
+        if db.used_transactions.find_one({'transaction_id': tx_track_key}):
+            bot.reply_to(message, get_text(uid, 'tx_used')); return
+        PROCESSING_TXS.add(tx_track_key)
+    
+    try:
+        bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
+        
+        received_ton = 0.0
+        is_sender = False
+        is_old = False
+        is_confirmed = False
+        data_source = None
+        current_time = int(time.time())
+        
+        # 🛡 المصدر 1: TONCenter API (الأكثر موثوقية)
+        try:
+            # TONCenter يقبل hash بصيغ مختلفة
+            # نجرب نبحث في الـ transactions الخاصة بعنواننا
+            url = f"https://toncenter.com/api/v2/getTransactions"
+            params = {
+                "address": wallet_address,
+                "limit": 50,  # آخر 50 transaction
+                "archival": "true"
+            }
+            
+            res = requests.get(url, params=params, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("ok"):
+                    transactions = data.get("result", [])
+                    
+                    for tx in transactions:
+                        # هاش الـ tx
+                        tx_hash = tx.get("transaction_id", {}).get("hash", "")
+                        
+                        # نشيك على الـ hash بطرق مختلفة (TON يستخدم صيغ متعددة)
+                        if (tx_id_clean in tx_hash or 
+                            tx_hash in tx_id_clean or 
+                            tx_id_clean == tx_hash or
+                            tx_id_clean.lower() == tx_hash.lower()):
+                            
+                            # تحقق من الوقت
+                            tx_time = int(tx.get("utime", 0))
+                            if tx_time > 0 and (current_time - tx_time) > 24 * 60 * 60:
+                                is_old = True
+                                break
+                            
+                            # تحقق هل هي إيداع (in_msg موجود)
+                            in_msg = tx.get("in_msg", {})
+                            if in_msg:
+                                source_addr = in_msg.get("source", "")
+                                # لو المصدر هو عنواننا، فهي حوالة صادرة
+                                if source_addr == wallet_address:
+                                    is_sender = True
+                                    break
+                                
+                                # المبلغ بالـ nanoTON (1 TON = 1_000_000_000 nanoTON)
+                                value_nano = int(in_msg.get("value", 0))
+                                if value_nano > 0:
+                                    received_ton = value_nano / 1_000_000_000
+                                    is_confirmed = True
+                                    data_source = "toncenter"
+                                    logger.info(f"💎 TON من TONCenter: {received_ton:.6f} TON")
+                                    break
+        except Exception as e:
+            logger.error(f"TONCenter API error: {e}")
+        
+        # 🛡 المصدر 2: TonAPI (احتياطي)
+        if data_source is None and not is_sender and not is_old:
+            try:
+                # TonAPI v2
+                url2 = f"https://tonapi.io/v2/blockchain/accounts/{wallet_address}/transactions"
+                params2 = {"limit": 50}
+                
+                res2 = requests.get(url2, params=params2, timeout=15)
+                if res2.status_code == 200:
+                    data2 = res2.json()
+                    transactions2 = data2.get("transactions", [])
+                    
+                    for tx in transactions2:
+                        tx_hash = tx.get("hash", "")
+                        
+                        if (tx_id_clean in tx_hash or 
+                            tx_hash in tx_id_clean or 
+                            tx_id_clean.lower() == tx_hash.lower()):
+                            
+                            tx_time = int(tx.get("utime", 0))
+                            if tx_time > 0 and (current_time - tx_time) > 24 * 60 * 60:
+                                is_old = True
+                                break
+                            
+                            in_msg = tx.get("in_msg", {})
+                            if in_msg:
+                                source = in_msg.get("source", {})
+                                source_addr = source.get("address", "") if isinstance(source, dict) else str(source)
+                                
+                                if source_addr == wallet_address:
+                                    is_sender = True
+                                    break
+                                
+                                value_nano = int(in_msg.get("value", 0))
+                                if value_nano > 0:
+                                    received_ton = value_nano / 1_000_000_000
+                                    is_confirmed = True
+                                    data_source = "tonapi"
+                                    logger.info(f"💎 TON من TonAPI: {received_ton:.6f} TON")
+                                    break
+            except Exception as e:
+                logger.error(f"TonAPI error: {e}")
+        
+        # 🛡 المصدر 3: Tonviewer/Tonscan (احتياطي ثاني)
+        if data_source is None and not is_sender and not is_old:
+            try:
+                # ندوّر الـ tx بشكل عام (بدون عنوان محدد)
+                url3 = f"https://toncenter.com/api/v2/getTransactionByHash"
+                params3 = {"hash": tx_id_clean}
+                
+                res3 = requests.get(url3, params=params3, timeout=15)
+                if res3.status_code == 200:
+                    data3 = res3.json()
+                    if data3.get("ok"):
+                        tx = data3.get("result", {})
+                        tx_time = int(tx.get("utime", 0))
+                        if tx_time > 0 and (current_time - tx_time) > 24 * 60 * 60:
+                            is_old = True
+                        else:
+                            in_msg = tx.get("in_msg", {})
+                            destination = in_msg.get("destination", "")
+                            source_addr = in_msg.get("source", "")
+                            
+                            # تحقق إن الوجهة فعلاً عنواننا
+                            if destination == wallet_address:
+                                if source_addr == wallet_address:
+                                    is_sender = True
+                                else:
+                                    value_nano = int(in_msg.get("value", 0))
+                                    if value_nano > 0:
+                                        received_ton = value_nano / 1_000_000_000
+                                        is_confirmed = True
+                                        data_source = "toncenter_direct"
+                                        logger.info(f"💎 TON بحث مباشر: {received_ton:.6f} TON")
+            except Exception as e:
+                logger.error(f"TONCenter direct lookup error: {e}")
+        
+        # 🛡 الاستجابات
+        if is_old:
+            bot.send_message(
+                uid,
+                "❌ <b>مرفوض:</b> الحوالة قديمة جداً (أكثر من 24 ساعة).\n\n"
+                "💡 يرجى التواصل مع الإدارة للمساعدة.",
+                parse_mode="HTML"
+            )
+            return
+        
+        if is_sender:
+            bot.send_message(
+                uid,
+                "❌ <b>مرفوض:</b> هذه الحوالة صادرة من محفظتنا وليست إيداعاً.",
+                parse_mode="HTML"
+            )
+            return
+        
+        if received_ton == 0.0 or not is_confirmed:
+            bot.send_message(
+                uid,
+                "❌ <b>لم نتمكن من العثور على الحوالة!</b>\n\n"
+                "💡 <b>تأكد من:</b>\n"
+                "• نسخ الهاش (TxID) بشكل صحيح بدون مسافات\n"
+                "• أن الحوالة مكتملة على الشبكة (≥1 تأكيد)\n"
+                "• أنك أرسلت إلى المحفظة الصحيحة\n"
+                "• مرور دقيقة على الأقل بعد إرسال الحوالة\n\n"
+                "🔄 جرب مرة ثانية بعد دقيقة، أو تواصل مع الإدارة.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # 🛡 جلب سعر TON والتحقق من منطقيته
+        ton_price = get_ton_price_usd()
+        if ton_price is None:
+            bot.send_message(
+                uid,
+                "❌ <b>تعذر الحصول على سعر TON الحالي.</b>\n\n"
+                "يرجى المحاولة بعد دقائق قليلة. لن يُخصم منك شيء.",
+                parse_mode="HTML"
+            )
+            logger.error(f"⚠️ فشل جلب سعر TON للحوالة {tx_id_clean[:16]}")
+            return
+        
+        # حساب المبلغ بالدولار
+        usd_amount = round(received_ton * ton_price, 2)
+        
+        logger.info(
+            f"✅ حساب TON نهائي:\n"
+            f"   tx_id: {tx_id_clean[:30]}...\n"
+            f"   received_ton: {received_ton:.6f} TON\n"
+            f"   ton_price: ${ton_price:.4f}\n"
+            f"   usd_amount: ${usd_amount:.2f}\n"
+            f"   data_source: {data_source}"
+        )
+        
+        credit_user(uid, usd_amount, tx_track_key, lang, "Toncoin (TON)")
+    
+    except Exception as e:
+        logger.error(f"Unexpected error in verify_ton_public_blockchain: {e}")
+        bot.send_message(
+            uid,
+            "❌ <b>حدث خطأ أثناء فحص الشبكة.</b>\n\nيرجى المحاولة بعد قليل.",
+            parse_mode="HTML"
+        )
+    finally:
+        PROCESSING_TXS.discard(tx_track_key)
 
 def verify_ltc_public_blockchain(message, lang, wallet_address):
     uid = message.from_user.id
@@ -2645,7 +3270,9 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         is_sender = False
         is_old = False
         current_time = int(time.time())
+        data_source = None  # 🛡 لتتبع من أين جلبنا البيانات (يمنع الجمع المضاعف)
         
+        # 🛡 المصدر الأول: litecoinspace.org
         try:
             url = f"https://litecoinspace.org/api/tx/{tx_id}"
             res = requests.get(url, timeout=10)
@@ -2654,17 +3281,37 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                 block_time = data.get("status", {}).get("block_time", 0)
                 if block_time > 0 and (current_time - block_time) > 24 * 60 * 60:
                     is_old = True
+                
+                # فحص هل المرسل من محفظتنا (إيداع ضد سحب)
                 for vin in data.get("vin", []):
                     if vin.get("prevout", {}).get("scriptpubkey_address") == wallet_address:
                         is_sender = True
                         break
-                if data.get("status", {}).get("confirmed"): confirmations = 1
-                for vout in data.get("vout", []):
+                
+                if data.get("status", {}).get("confirmed"): 
+                    confirmations = 1
+                
+                # 🛡 حساب المبلغ المستلم في عنواننا فقط (بدون تكرار)
+                # نستخدم vout index كمفتاح فريد لتفادي outputs مكررة
+                seen_vouts = set()
+                temp_received = 0.0
+                for idx, vout in enumerate(data.get("vout", [])):
                     if vout.get("scriptpubkey_address") == wallet_address:
-                        received_ltc += float(vout.get("value", 0)) / 100000000.0
-        except: pass
+                        vout_key = f"litecoinspace_{idx}_{vout.get('value', 0)}"
+                        if vout_key not in seen_vouts:
+                            seen_vouts.add(vout_key)
+                            temp_received += float(vout.get("value", 0)) / 100000000.0
+                
+                if temp_received > 0:
+                    received_ltc = temp_received  # 🛡 = بدل +=
+                    data_source = "litecoinspace"
+                    logger.info(f"💰 LTC من litecoinspace: {received_ltc:.8f} LTC للحوالة {tx_id[:16]}")
+        except Exception as e:
+            logger.error(f"LTC API 1 error: {e}")
 
-        if received_ltc == 0.0 and not is_sender and not is_old:
+        # 🛡 المصدر الثاني (احتياطي): blockcypher.com
+        # فقط إذا لم نحصل على بيانات من المصدر الأول
+        if data_source is None and not is_sender and not is_old:
             try:
                 url2 = f"https://api.blockcypher.com/v1/ltc/main/txs/{tx_id}"
                 res2 = requests.get(url2, timeout=10)
@@ -2674,16 +3321,33 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                     if confirmed_str:
                         try:
                             tx_t = datetime.datetime.strptime(confirmed_str[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
-                            if (current_time - tx_t) > 24 * 60 * 60: is_old = True
+                            if (current_time - tx_t) > 24 * 60 * 60: 
+                                is_old = True
                         except: pass
+                    
                     for inp in data2.get("inputs", []):
                         if wallet_address in inp.get("addresses", []):
-                            is_sender = True; break
+                            is_sender = True
+                            break
+                    
                     confirmations = data2.get("confirmations", 0)
-                    for output in data2.get("outputs", []):
+                    
+                    # 🛡 حساب المبلغ بدون تكرار
+                    seen_outputs = set()
+                    temp_received2 = 0.0
+                    for idx, output in enumerate(data2.get("outputs", [])):
                         if wallet_address in output.get("addresses", []):
-                            received_ltc += float(output.get("value", 0)) / 100000000.0
-            except: pass
+                            output_key = f"blockcypher_{idx}_{output.get('value', 0)}"
+                            if output_key not in seen_outputs:
+                                seen_outputs.add(output_key)
+                                temp_received2 += float(output.get("value", 0)) / 100000000.0
+                    
+                    if temp_received2 > 0:
+                        received_ltc = temp_received2  # 🛡 = بدل +=
+                        data_source = "blockcypher"
+                        logger.info(f"💰 LTC من blockcypher: {received_ltc:.8f} LTC للحوالة {tx_id[:16]}")
+            except Exception as e:
+                logger.error(f"LTC API 2 error: {e}")
 
         if is_old:
             bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
@@ -2694,30 +3358,38 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
 
         if received_ltc > 0:
             if confirmations >= 1:
-                # 🛡 استخدام wrapper ذكي مع fallback
-                ticker = execute_binance_call(
-                    lambda c: c.get_symbol_ticker(symbol="LTCUSDT"),
-                    max_retries=5
+                # 🛡 جلب سعر LTC تلقائياً من 3 مصادر
+                ltc_price = get_ltc_price_usd()
+                
+                # 🛡 إذا فشلت كل المصادر، نرفض العملية بدل ما نحط سعر تخميني
+                if ltc_price is None:
+                    bot.send_message(
+                        uid, 
+                        "❌ <b>تعذر الحصول على سعر LTC الحالي.</b>\n\n"
+                        "يرجى المحاولة بعد دقائق قليلة. لن يُخصم منك شيء.", 
+                        parse_mode="HTML"
+                    )
+                    logger.error(f"⚠️ فشل جلب سعر LTC للحوالة {tx_id} - رُفضت لحماية المستخدم")
+                    return
+                
+                # 🛡 حساب نهائي مع تقريب آمن إلى منزلتين عشريتين
+                usd_amount = round(received_ltc * ltc_price, 2)
+                
+                # 🛡 تسجيل مفصل لكل عملية حساب (للمراجعة لو في مشكلة)
+                logger.info(
+                    f"✅ حساب LTC نهائي:\n"
+                    f"   tx_id: {tx_id[:16]}...\n"
+                    f"   received_ltc: {received_ltc:.8f}\n"
+                    f"   ltc_price: ${ltc_price:.4f}\n"
+                    f"   usd_amount: ${usd_amount:.2f}\n"
+                    f"   data_source: {data_source}"
                 )
-                if ticker:
-                    ltc_price = float(ticker.get('price', 80.0))
-                else:
-                    # fallback: نجرب من CoinGecko (مصدر بديل بدون بروكسي)
-                    try:
-                        cg_res = requests.get(
-                            "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd",
-                            timeout=10
-                        )
-                        if cg_res.status_code == 200:
-                            ltc_price = float(cg_res.json().get('litecoin', {}).get('usd', 80.0))
-                        else:
-                            ltc_price = 80.0
-                    except:
-                        ltc_price = 80.0
-                usd_amount = received_ltc * ltc_price
+                
                 credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
-            else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
-        else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
+            else: 
+                bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
+        else: 
+            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ أثناء فحص الشبكة.", parse_mode="HTML")
