@@ -59,50 +59,243 @@ try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError: STARS_RATE = 120
 
 # ============================================================
-# 🛡️ 2. نظام جلب البروكسيات المجانية التلقائي (Auto-Proxy)
+# 🛡️ 2. نظام البروكسي الذكي (Auto-Discovery + Validation)
 # ============================================================
-CACHED_PROXIES = []
-LAST_PROXY_FETCH = 0
+# هذا النظام يجلب بروكسيات من عدة مصادر، يفحصها بالتوازي،
+# ويحتفظ فقط بالشغالة منها. ولو فشل بروكسي، يجرب التالي تلقائياً.
+# ============================================================
 
-def get_free_proxies():
-    """هذه الدالة تجلب بروكسيات مجانية من الإنترنت وتحدثها كل ساعة"""
-    global CACHED_PROXIES, LAST_PROXY_FETCH
-    current_time = time.time()
-    
-    # إذا كانت القائمة فارغة أو مر عليها أكثر من ساعة (3600 ثانية)، قم بتحديثها
-    if not CACHED_PROXIES or (current_time - LAST_PROXY_FETCH > 3600):
+PROXY_SOURCES = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+]
+
+VERIFIED_PROXIES = []           # البروكسيات اللي تأكدنا أنها شغالة
+PROXY_REFRESH_LOCK = threading.Lock()
+LAST_PROXY_REFRESH = 0
+PROXY_REFRESH_INTERVAL = 1800   # كل 30 دقيقة نعمل refresh
+MIN_WORKING_PROXIES = 5         # نحتاج على الأقل 5 بروكسي شغال
+
+
+def _test_proxy(proxy_url, timeout=5):
+    """يفحص هل البروكسي شغال أو لا. يرجع True لو شغال."""
+    try:
+        proxies = {'http': proxy_url, 'https': proxy_url}
+        # نختبره على endpoint سريع من Binance
+        resp = requests.get(
+            "https://api.binance.com/api/v3/ping",
+            proxies=proxies,
+            timeout=timeout
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _fetch_proxies_from_sources():
+    """يجلب قائمة بروكسيات خام من كل المصادر"""
+    all_proxies = set()
+    for source in PROXY_SOURCES:
         try:
-            logger.info("🔄 جاري البحث عن بروكسيات مجانية جديدة من الإنترنت...")
-            # سحب قائمة بروكسيات HTTP مجانية من مستودع موثوق
-            res = requests.get("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", timeout=10)
+            res = requests.get(source, timeout=10)
             if res.status_code == 200:
-                proxies = res.text.strip().split('\n')
-                # نختار 50 بروكسي عشوائي من القائمة لتجربتها
-                selected = random.sample(proxies, min(50, len(proxies)))
-                CACHED_PROXIES = [f"http://{p.strip()}" for p in selected]
-                LAST_PROXY_FETCH = current_time
-                logger.info(f"✅ تم جلب {len(CACHED_PROXIES)} بروكسي مجاني بنجاح.")
-        except Exception as e:
-            logger.error(f"❌ فشل جلب البروكسيات المجانية: {e}")
-            CACHED_PROXIES = []
+                lines = res.text.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and ':' in line and not line.startswith('#'):
+                        # تنظيف السطر
+                        if line.startswith('http'):
+                            all_proxies.add(line)
+                        else:
+                            all_proxies.add(f"http://{line}")
+        except Exception:
+            continue
+    return list(all_proxies)
+
+
+def _validate_proxies_parallel(proxies, max_workers=50, target_count=20):
+    """
+    يفحص البروكسيات بالتوازي ويرجع الشغّالة منها فقط.
+    target_count = نتوقف بعد ما نلقى هذا العدد من الشغّالين (لتوفير الوقت).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    working = []
+    
+    # نخلط البروكسيات عشوائياً للتنوع
+    random.shuffle(proxies)
+    
+    # نأخذ أول 300 بروكسي للفحص (أكثر من هذا ياخذ وقت)
+    candidates = proxies[:300]
+    
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_proxy = {executor.submit(_test_proxy, p): p for p in candidates}
             
-    return CACHED_PROXIES
+            for future in as_completed(future_to_proxy):
+                if len(working) >= target_count:
+                    # وصلنا للعدد المطلوب، نوقف
+                    break
+                
+                proxy = future_to_proxy[future]
+                try:
+                    if future.result():
+                        working.append(proxy)
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.error(f"Error in parallel proxy validation: {e}")
+    
+    return working
+
+
+def refresh_proxies(force=False):
+    """
+    يحدث قائمة البروكسيات الشغّالة.
+    يشتغل في الخلفية ولا يوقف البوت.
+    """
+    global VERIFIED_PROXIES, LAST_PROXY_REFRESH
+    
+    with PROXY_REFRESH_LOCK:
+        current_time = time.time()
+        
+        # تحديث فقط لو لازم
+        if not force and VERIFIED_PROXIES and (current_time - LAST_PROXY_REFRESH < PROXY_REFRESH_INTERVAL):
+            return
+        
+        try:
+            logger.info("🔄 جاري تحديث قائمة البروكسيات...")
+            
+            # 1. جلب البروكسيات من المصادر
+            raw_proxies = _fetch_proxies_from_sources()
+            if not raw_proxies:
+                logger.warning("⚠️ لم يتم جلب أي بروكسي من المصادر.")
+                return
+            
+            logger.info(f"📥 تم جلب {len(raw_proxies)} بروكسي خام، جاري الفحص...")
+            
+            # 2. فحص بالتوازي وأخذ الشغّالين فقط
+            working = _validate_proxies_parallel(raw_proxies, target_count=20)
+            
+            if working:
+                VERIFIED_PROXIES = working
+                LAST_PROXY_REFRESH = current_time
+                logger.info(f"✅ تم التحقق من {len(working)} بروكسي شغّال.")
+            else:
+                logger.warning("⚠️ لم نجد أي بروكسي شغّال.")
+        except Exception as e:
+            logger.error(f"❌ خطأ في تحديث البروكسيات: {e}")
+
+
+def _remove_dead_proxy(proxy_url):
+    """يحذف بروكسي ميت من القائمة"""
+    global VERIFIED_PROXIES
+    try:
+        VERIFIED_PROXIES = [p for p in VERIFIED_PROXIES if p != proxy_url]
+        # لو خلصوا، نطلب refresh في الخلفية
+        if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
+            threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+    except Exception:
+        pass
+
 
 def get_binance_client():
-    """دالة لإنشاء اتصال مع بينانس باستخدام بروكسي مجاني عشوائي لتفادي الحظر"""
-    proxies_list = get_free_proxies()
+    """
+    دالة إنشاء BinanceClient ذكية:
+    - تستخدم بروكسي شغّال مُتحقّق منه
+    - تحاول تلقائياً مع عدة بروكسيات لو فشل واحد
+    - تعيد البحث عن بروكسيات جديدة لو خلصت الشغّالة
+    """
+    # لو ما عندنا بروكسيات شغّالة، نجلب الحين
+    if not VERIFIED_PROXIES:
+        refresh_proxies(force=True)
     
-    if proxies_list:
-        proxy = random.choice(proxies_list)
-        proxies_dict = {'http': proxy, 'https': proxy}
+    # نحاول مع 3 بروكسيات مختلفة
+    for _ in range(3):
+        if not VERIFIED_PROXIES:
+            break
+        
         try:
-            # نمرر البروكسي لمكتبة بينانس مع تحديد وقت أقصى (Timeout) حتى لا يعلق الكود
-            return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'proxies': proxies_dict, 'timeout': 10})
-        except:
-            pass # إذا فشل الاتصال بالبروكسي، سيتجاوزه ويتصل مباشرة
-            
-    # الاتصال الافتراضي بدون بروكسي كخطة بديلة
+            proxy = random.choice(VERIFIED_PROXIES)
+            proxies_dict = {'http': proxy, 'https': proxy}
+            client = BinanceClient(
+                BINANCE_API_KEY,
+                BINANCE_API_SECRET,
+                requests_params={'proxies': proxies_dict, 'timeout': 15}
+            )
+            # نخزّن البروكسي المستخدم في الـ client لو احتجنا نحذفه بعدين
+            client._used_proxy = proxy
+            return client
+        except Exception:
+            # نحذف البروكسي ونحاول التالي
+            _remove_dead_proxy(proxy)
+            continue
+    
+    # آخر محاولة بدون بروكسي
     return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+
+
+def _proxy_refresh_thread():
+    """Thread خلفي يحدّث البروكسيات دورياً"""
+    while True:
+        try:
+            time.sleep(PROXY_REFRESH_INTERVAL)
+            refresh_proxies(force=False)
+        except Exception as e:
+            logger.error(f"Proxy refresh thread error: {e}")
+            time.sleep(60)
+
+
+# جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
+threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+threading.Thread(target=_proxy_refresh_thread, daemon=True).start()
+
+
+def execute_binance_call(call_fn, max_retries=5):
+    """
+    يحاول تنفيذ استدعاء Binance API مع تغيير البروكسي عند الفشل.
+    يكتم الأخطاء ويعيد المحاولة بصمت.
+    
+    call_fn: دالة تأخذ client كـ parameter وترجع النتيجة.
+        مثال: lambda c: c.get_pay_trade_history()
+    
+    يرجع: النتيجة لو نجح، None لو فشل بعد كل المحاولات.
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        client = None
+        try:
+            client = get_binance_client()
+            result = call_fn(client)
+            return result
+        except Exception as e:
+            last_error = e
+            error_msg = str(e).lower()
+            
+            # لو الخطأ من البروكسي أو من الحظر الجغرافي، نجرب بروكسي ثاني
+            if any(keyword in error_msg for keyword in ['restricted', 'eligibility', 'service unavailable', 'timeout', 'connection', 'proxy', 'unreachable']):
+                # نحذف البروكسي الميت ونعيد المحاولة
+                if client and hasattr(client, '_used_proxy'):
+                    _remove_dead_proxy(client._used_proxy)
+                # لو ما بقي بروكسيات، نجلب جديد
+                if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
+                    threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+                time.sleep(0.5)  # نستنى شوي قبل المحاولة الجاية
+                continue
+            else:
+                # خطأ مختلف (مثلاً API Key غلط) - ما نعيد
+                break
+    
+    # كل المحاولات فشلت
+    # نسجّل الخطأ كـ debug فقط (مو error) عشان ما يعبّي الـ logs
+    if last_error:
+        logger.debug(f"Binance call failed after {max_retries} retries: {last_error}")
+    
+    return None
 
 # ============================================================
 # 🎨 3. فئة الأزرار المخصصة (لدعم الألوان و Premium Emojis)
@@ -149,6 +342,7 @@ except Exception as e:
     sys.exit(1)
 
 REFERRAL_REWARD = 0.10
+REFERRAL_MIN_PURCHASE = 2.0  # الحد الأدنى لقيمة الشراء عشان يربح المُحيل المكافأة
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
@@ -448,12 +642,19 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
     لو هذا المستخدم (buyer_uid) جاي من إحالة شخص، نعطي ذاك الشخص 0.10$
     تشتغل في كل عملية شراء (متراكمة).
     
+    ⚠️ الشرط: قيمة عملية الشراء لازم تكون > 2$ (REFERRAL_MIN_PURCHASE)
+    
     🛡 محمي من race conditions بـ:
     - find_one_and_update atomic للرصيد
     - تسجيل المكافأة في جدول purchase_rewards لتتبعها (وكدليل)
     """
     try:
         buyer_uid = int(buyer_uid)
+        purchase_amount = round(float(purchase_amount), 2)
+        
+        # ⚠️ شرط الحد الأدنى: قيمة الشراء لازم تكون أكثر من 2$
+        if purchase_amount <= REFERRAL_MIN_PURCHASE:
+            return False  # الشراء أقل من الحد الأدنى - لا مكافأة
         
         # نشوف هل المشتري عنده مُحيل في النظام الجديد
         ref_record = db.referrals_v2.find_one({'invited_id': buyer_uid})
@@ -510,7 +711,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                     f"🎉🎊 <b>مبروك! ربحت من إحالاتك!</b> 💰\n\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"💸 <b>وصلك:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
-                    f"🛍 <b>السبب:</b> أحد إحالاتك (<b>{buyer_display}</b>) اشترى منتج!\n"
+                    f"🛍 <b>السبب:</b> أحد إحالاتك (<b>{buyer_display}</b>) اشترى بقيمة <b>${purchase_amount:.2f}</b>!\n"
                     f"💼 <b>رصيدك الحالي:</b> <b>${new_balance:.2f}</b>\n"
                     f"━━━━━━━━━━━━━━━\n\n"
                     f"🔥 <b>استمر! كل ما اشتروا أصدقاؤك، كل ما زادت أرباحك!</b>\n"
@@ -522,7 +723,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                     f"🎉🎊 <b>Congrats! You Earned From Referrals!</b> 💰\n\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"💸 <b>You got:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
-                    f"🛍 <b>Reason:</b> One of your referrals (<b>{buyer_display}</b>) made a purchase!\n"
+                    f"🛍 <b>Reason:</b> One of your referrals (<b>{buyer_display}</b>) purchased for <b>${purchase_amount:.2f}</b>!\n"
                     f"💼 <b>Your Balance:</b> <b>${new_balance:.2f}</b>\n"
                     f"━━━━━━━━━━━━━━━\n\n"
                     f"🔥 <b>Keep going! Every purchase = more profit!</b>\n"
@@ -816,7 +1017,7 @@ LANG = {
         'new_product': "🎉 <b>منتج جديد متاح في المتجر!</b> 🚀\n\n🛍 <b>المنتج:</b> {}\n💰 <b>السعر:</b> <b>${}</b>\n🚚 <b>نوع التسليم:</b> {}\n\n📝 <b>الوصف:</b>\n{}\n\n<i>سارع بزيارة المتجر والاستفادة من المنتج الجديد! 🛡️</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح بدون حد!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>الطريقة 1: ربح من الاشتراكات</b>\n• كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> فوراً!\n\n💸 <b>الطريقة 2: ربح من المشتريات (الجديدة!)</b> ⭐\n• كل ما اشترى أي شخص من إحالاتك أي منتج = <b>0.10$</b> مباشرة في رصيدك!\n• ما له حد! كل عملية شراء = مكافأة جديدة! 💰💰💰\n\n⚡ <b>التحديث فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>تخيّل كم تكسب:</b>\n• دعوت 100 شخص واشتركوا = <b>$1.00</b>\n• 50 منهم اشتروا منتج واحد = <b>+$5.00</b>\n• الإجمالي: <b>$6.00</b> 🤑\n• ولو كل واحد منهم اشترى 3 مرات = <b>$16.00</b>! 💎\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، وكل ما اشتروا أكثر = كسبت أكثر!</i>\n😴 <i>اكسب وأنت نايم — هذي هي الفرصة الذهبية!</i> 💰",
+        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح بدون حد!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>الطريقة 1: ربح من الاشتراكات</b>\n• كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> فوراً!\n\n💸 <b>الطريقة 2: ربح من المشتريات (الجديدة!)</b> ⭐\n• كل ما اشترى أي شخص من إحالاتك منتج <b>أكثر من 2$</b> = <b>0.10$</b> مباشرة في رصيدك!\n• ما له حد! كل عملية شراء = مكافأة جديدة! 💰💰💰\n\n⚡ <b>التحديث فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>تخيّل كم تكسب:</b>\n• دعوت 100 شخص واشتركوا = <b>$1.00</b>\n• 50 منهم اشتروا منتج بـ 3$ = <b>+$5.00</b>\n• الإجمالي: <b>$6.00</b> 🤑\n• ولو كل واحد منهم اشترى 3 مرات = <b>$16.00</b>! 💎\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، وكل ما اشتروا أكثر = كسبت أكثر!</i>\n😴 <i>اكسب وأنت نايم — هذي هي الفرصة الذهبية!</i> 💰",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -858,7 +1059,7 @@ LANG = {
         'new_product': "🎉 <b>New Product Available!</b> 🚀\n\n🛍 <b>Product:</b> {}\n💰 <b>Price:</b> <b>${}</b>\n🚚 <b>Delivery:</b> {}\n\n📝 <b>Description:</b>\n{}\n\n<i>Visit the shop now and check out the new product! 🛡️</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>Two Ways To Earn — No Limits!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>Method 1: Earn From Joins</b>\n• Every <b>10 people</b> who click & join = <b>$0.10</b> instantly!\n\n💸 <b>Method 2: Earn From Purchases (NEW!)</b> ⭐\n• Every time a referral buys ANY product = <b>$0.10</b> straight to your balance!\n• No limits! Every purchase = New reward! 💰💰💰\n\n⚡ <b>Instant updates</b> — no waiting!\n\n💡 <b>Imagine The Earnings:</b>\n• Invited 100 people who joined = <b>$1.00</b>\n• 50 of them bought one product = <b>+$5.00</b>\n• Total: <b>$6.00</b> 🤑\n• If each bought 3 times = <b>$16.00</b>! 💎\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>More invites + more purchases = MORE PROFIT!</i>\n😴 <i>Earn while you sleep — this is YOUR golden opportunity!</i> 💰",
+        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>Two Ways To Earn — No Limits!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>Method 1: Earn From Joins</b>\n• Every <b>10 people</b> who click & join = <b>$0.10</b> instantly!\n\n💸 <b>Method 2: Earn From Purchases (NEW!)</b> ⭐\n• Every time a referral buys a product <b>over $2</b> = <b>$0.10</b> straight to your balance!\n• No limits! Every purchase = New reward! 💰💰💰\n\n⚡ <b>Instant updates</b> — no waiting!\n\n💡 <b>Imagine The Earnings:</b>\n• Invited 100 people who joined = <b>$1.00</b>\n• 50 of them bought a $3 product = <b>+$5.00</b>\n• Total: <b>$6.00</b> 🤑\n• If each bought 3 times = <b>$16.00</b>! 💎\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>More invites + more purchases = MORE PROFIT!</i>\n😴 <i>Earn while you sleep — this is YOUR golden opportunity!</i> 💰",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -914,9 +1115,15 @@ def safe_translate_for_cms(text, target_lang='en'):
             placeholders.append(match.group(0))
             return f" XZQXZQ{len(placeholders)-1:04d}QZXQZX "
         
+        # 1. حماية Premium Emojis
         temp_text = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', replacer, text)
-        temp_text = re.sub(r'\{[^}]+\}', replacer, temp_text)
+        # 2. حماية placeholders الفارغة {} والمسماة {name}  ⭐ مهم جداً
+        temp_text = re.sub(r'\{[^}]*\}', replacer, temp_text)
+        # 3. حماية HTML tags
         temp_text = re.sub(r'<[^>]+>', replacer, temp_text)
+        # 4. حماية الأكواد بين <code>...</code> (تم تغطيتها فوق لكن للتأكيد)
+        # 5. حماية الـ URLs
+        temp_text = re.sub(r'https?://[^\s]+', replacer, temp_text)
         
         clean_check = re.sub(r'\s*XZQXZQ\d+QZXQZX\s*', '', temp_text).strip()
         if not clean_check:
@@ -947,6 +1154,19 @@ def safe_translate_for_cms(text, target_lang='en'):
         
         if re.search(r'XZQXZQ', translated, re.IGNORECASE):
             logger.warning(f"Translation placeholder leak detected")
+            return text
+        
+        # 🛡 فحص نهائي: عد الـ placeholders في الأصل والمترجم
+        # لو الترجمة فقدت placeholders، نرفضها (للأمان)
+        original_placeholders = len(re.findall(r'\{[^}]*\}', text))
+        translated_placeholders = len(re.findall(r'\{[^}]*\}', translated))
+        
+        if original_placeholders != translated_placeholders:
+            logger.warning(
+                f"⚠️ Translation lost placeholders! "
+                f"Original: {original_placeholders}, Translated: {translated_placeholders}. "
+                f"Returning original text."
+            )
             return text
             
         return translated.strip()
@@ -989,26 +1209,49 @@ def get_text(uid, key, *args):
     if l not in ['ar', 'en']:
         l = 'ar'
     
+    # نحفظ النص الافتراضي من الكود كـ backup
+    default_text = LANG.get(l, LANG['ar']).get(key, "")
+    
     base_text = ""
+    custom_text_used = False
+    
     try:
         custom = db.custom_texts.find_one({'lang': l, 'key': key})
         if custom and custom.get('value') and custom['value'].strip():
             base_text = custom['value']
+            custom_text_used = True
         else:
-            base_text = LANG.get(l, LANG['ar']).get(key, "")
+            base_text = default_text
     except Exception as e:
         logger.error(f"get_text DB error: {e}")
-        base_text = LANG.get(l, LANG['ar']).get(key, "")
+        base_text = default_text
     
     if not base_text:
         base_text = LANG.get('ar', {}).get(key, "") or LANG.get('en', {}).get(key, "")
     
     if args:
+        # 🛡 محاولة الـ format على النص الحالي
         try:
             return base_text.format(*args)
         except Exception as e:
-            logger.error(f"Error formatting string for key {key}: {e}")
+            # ❌ الـ format فشلت — غالباً النص المخصص فقد بعض الـ {} placeholders
+            # 🔄 fallback: نستخدم النص الافتراضي من الكود
+            logger.warning(
+                f"⚠️ Custom text for key '{key}' (lang={l}) has broken placeholders. "
+                f"Falling back to default text. Error: {e}"
+            )
+            
+            if custom_text_used and default_text:
+                try:
+                    # 🛡 محاولة بالنص الافتراضي
+                    return default_text.format(*args)
+                except Exception as e2:
+                    logger.error(f"Even default text failed for key '{key}': {e2}")
+                    return default_text
+            
+            # آخر شي: نرجع النص بدون format (أحسن من رسالة فاضية)
             return base_text
+    
     return base_text
 
 def get_btn_data(uid, key):
@@ -2187,8 +2430,19 @@ def verify_binance_pay(message, lang):
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
-        client = get_binance_client()
-        pay_h = client.get_pay_trade_history().get('data', [])
+        
+        # 🛡 استخدام wrapper ذكي: يجرب عدة بروكسيات تلقائياً ويكتم الأخطاء
+        pay_response = execute_binance_call(
+            lambda c: c.get_pay_trade_history(),
+            max_retries=8  # نحاول 8 مرات قبل ما نرفع راية الفشل
+        )
+        
+        if pay_response is None:
+            # كل المحاولات فشلت — رسالة لطيفة للمستخدم
+            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد دقيقة من فضلك. 🙏", parse_mode="HTML")
+            return
+        
+        pay_h = pay_response.get('data', [])
 
         found = False; amt = 0.0
         current_time_ms = int(time.time() * 1000)
@@ -2206,8 +2460,9 @@ def verify_binance_pay(message, lang):
         if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ حدث خطأ في الاتصال بالسيرفر. يرجى المحاولة بعد قليل.", parse_mode="HTML")
+        # خطأ غير متوقع (مو من Binance) — نسجله
+        logger.debug(f"Unexpected error in verify_binance_tx: {e}")
+        bot.send_message(uid, f"❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -2233,8 +2488,16 @@ def verify_crypto_tx(message, lang, coin):
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
-        client = get_binance_client()
-        res = client.get_deposit_history(coin=coin)
+        
+        # 🛡 استخدام wrapper ذكي
+        res = execute_binance_call(
+            lambda c: c.get_deposit_history(coin=coin),
+            max_retries=8
+        )
+        
+        if res is None:
+            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد دقيقة من فضلك. 🙏", parse_mode="HTML")
+            return
 
         found = False; status = -1; amt = 0.0
         current_time_ms = int(time.time() * 1000)
@@ -2256,8 +2519,8 @@ def verify_crypto_tx(message, lang, coin):
             else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Binance API Error: {e}")
-        bot.send_message(uid, f"❌ حدث خطأ في الاتصال بالسيرفر. يرجى المحاولة بعد قليل.", parse_mode="HTML")
+        logger.debug(f"Unexpected error in verify_crypto_tx: {e}")
+        bot.send_message(uid, f"❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -2341,11 +2604,26 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
 
         if received_ltc > 0:
             if confirmations >= 1:
-                try:
-                    client = get_binance_client()
-                    ltc_price = float(client.get_symbol_ticker(symbol="LTCUSDT")['price'])
-                except:
-                    ltc_price = 80.0
+                # 🛡 استخدام wrapper ذكي مع fallback
+                ticker = execute_binance_call(
+                    lambda c: c.get_symbol_ticker(symbol="LTCUSDT"),
+                    max_retries=5
+                )
+                if ticker:
+                    ltc_price = float(ticker.get('price', 80.0))
+                else:
+                    # fallback: نجرب من CoinGecko (مصدر بديل بدون بروكسي)
+                    try:
+                        cg_res = requests.get(
+                            "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd",
+                            timeout=10
+                        )
+                        if cg_res.status_code == 200:
+                            ltc_price = float(cg_res.json().get('litecoin', {}).get('usd', 80.0))
+                        else:
+                            ltc_price = 80.0
+                    except:
+                        ltc_price = 80.0
                 usd_amount = received_ltc * ltc_price
                 credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
             else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
@@ -2504,6 +2782,32 @@ def ad_save_custom_text(message, key):
     bot.send_message(message.chat.id, "⏳ جاري حفظ النص وترجمته بشكل آمن إلى الإنجليزية...")
     
     final_text_ar = extract_custom_emojis_to_html(message)
+    
+    # 🛡 عدد الـ placeholders في النص الافتراضي من الكود (للمقارنة)
+    default_ar = LANG.get('ar', {}).get(key, "")
+    expected_placeholders = len(re.findall(r'\{[^}]*\}', default_ar)) if default_ar else 0
+    
+    # عدد الـ placeholders في النص الذي أرسله الأدمن
+    user_placeholders_count = len(re.findall(r'\{[^}]*\}', final_text_ar))
+    
+    # ⚠️ تحذير لو الأدمن نسي أو ضيّع placeholders
+    if expected_placeholders > 0 and user_placeholders_count < expected_placeholders:
+        warning_msg = (
+            f"⚠️ <b>تحذير!</b>\n\n"
+            f"النص الافتراضي يحتاج <b>{expected_placeholders}</b> متغير (مثل {{}}) "
+            f"لكن نصك يحتوي على <b>{user_placeholders_count}</b> فقط.\n\n"
+            f"💡 المتغيرات في رسالة الإحالات هي:\n"
+            f"<code>{{}}</code> = اسم البوت\n"
+            f"<code>{{}}</code> = معرف المستخدم\n"
+            f"<code>{{}}</code> = إجمالي الزيارات\n"
+            f"<code>{{}}</code> = المعلقين\n"
+            f"<code>{{}}</code> = النشطين\n"
+            f"<code>{{}}</code> = الذين غادروا\n"
+            f"<code>{{}}</code> = الرصيد\n\n"
+            f"❓ هل تريد المتابعة بأي حال؟ سيتم استخدام النص الافتراضي تلقائياً لو فقدت متغيرات."
+        )
+        bot.send_message(message.chat.id, warning_msg, parse_mode="HTML")
+    
     final_text_en = safe_translate_for_cms(final_text_ar, 'en')
     
     if final_text_en == final_text_ar:
@@ -2515,6 +2819,22 @@ def ad_save_custom_text(message, key):
                 final_text_en = simple_translation
         except:
             pass
+    
+    # 🛡 فحص نهائي: عدد placeholders في النسختين (عربي وإنجليزي) لازم يكون متطابق
+    ar_count = len(re.findall(r'\{[^}]*\}', final_text_ar))
+    en_count = len(re.findall(r'\{[^}]*\}', final_text_en))
+    
+    if ar_count != en_count:
+        # الترجمة ضيّعت placeholders — نستخدم نفس النص العربي للإنجليزي (آمن)
+        logger.warning(f"Translation lost placeholders for '{key}': ar={ar_count}, en={en_count}")
+        final_text_en = final_text_ar  # كحل آمن، نخلي الإنجليزي = العربي
+        bot.send_message(
+            message.chat.id,
+            "⚠️ <b>ملاحظة:</b> الترجمة التلقائية فقدت بعض المتغيرات. "
+            "تم حفظ النص العربي كنسخة احتياطية للإنجليزية. "
+            "لو تبي ترجمة دقيقة، عدّل النص الإنجليزي يدوياً.",
+            parse_mode="HTML"
+        )
             
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
