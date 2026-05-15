@@ -614,7 +614,7 @@ def get_setting(key, default="Not Set"):
 # - 0.10$ مقابل كل 10 احالات نشطة (مكتملة الاشتراك الإجباري)
 # - إذا غادر شخص ونقص العدد عن مضاعفات العشرة، يُخصم تلقائياً
 # ============================================================
-REF_V2_INIT_KEY = 'referrals_v2_initialized_v4'
+REF_V2_INIT_KEY = 'referrals_v2_initialized_v5'
 
 def initialize_referrals_v2():
     """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
@@ -628,7 +628,7 @@ def initialize_referrals_v2():
 
         # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
         try:
-            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3']}})
+            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4']}})
         except Exception:
             pass
 
@@ -808,16 +808,26 @@ def update_referrer_balance(referrer_id):
                         log_ch = get_setting('log_channel')
                         if log_ch and log_ch != "Not Set":
                             referrer_display = obscure_text(referrer.get('username') or str(rid))
-                            total_earned_str = f"{expected:.2f}"
-                            log_text = get_text(
-                                rid,
-                                'log_ref_milestone',
+                            
+                            # 🆕 النص الافتراضي (3 متغيرات فقط - بدون إجمالي الأرباح)
+                            log_text = LANG['en']['log_ref_milestone'].format(
                                 referrer_display,
                                 active_count,
-                                f"{diff:.2f}",
-                                total_earned_str,
-                                active_count
+                                f"{diff:.2f}"
                             )
+                            
+                            # نشيك على النص المخصص لو الأدمن عدّله من CMS
+                            custom_milestone = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_milestone'})
+                            if custom_milestone and custom_milestone.get('value'):
+                                try:
+                                    log_text = custom_milestone['value'].format(
+                                        referrer_display,
+                                        active_count,
+                                        f"{diff:.2f}"
+                                    )
+                                except:
+                                    pass  # لو في خطأ format، نستخدم الافتراضي
+                            
                             bot.send_message(log_ch, log_text, parse_mode="HTML")
                     except Exception as log_err:
                         logger.debug(f"Milestone log error: {log_err}")
@@ -887,38 +897,30 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         except Exception:
             pass
         
-        # 🎉 إشعار حماسي للمُحيل
+        # 🎉 إشعار خاص للمُحيل في الشات (بالإنجليزي + قابل للتعديل من CMS)
         try:
             new_balance = float(result.get('balance', 0))
             buyer_data = db.users.find_one({'user_id': buyer_uid})
             buyer_display = obscure_text(buyer_data.get('username') or str(buyer_uid)) if buyer_data else "***"
             
-            ref_lang = referrer.get('lang', 'ar')
+            # 🆕 نستخدم نص CMS قابل للتعديل (إنجليزي افتراضياً)
+            celebration = LANG['en']['ref_purchase_dm'].format(
+                buyer_display,
+                f"{REFERRAL_REWARD:.2f}",
+                f"{new_balance:.2f}"
+            )
             
-            if ref_lang == 'ar':
-                celebration = (
-                    f"🎉🎊 <b>مبروك! ربحت من إحالاتك!</b> 💰\n\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💸 <b>وصلك:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
-                    f"🛍 <b>السبب:</b> أحد إحالاتك (<b>{buyer_display}</b>) اشترى بقيمة <b>${purchase_amount:.2f}</b>!\n"
-                    f"💼 <b>رصيدك الحالي:</b> <b>${new_balance:.2f}</b>\n"
-                    f"━━━━━━━━━━━━━━━\n\n"
-                    f"🔥 <b>استمر! كل ما اشتروا أصدقاؤك، كل ما زادت أرباحك!</b>\n"
-                    f"🚀 <b>شارك رابطك أكثر = اكسب أكثر!</b>\n\n"
-                    f"💪 <i>الفرصة مفتوحة بلا حدود — اكسب وأنت نايم!</i> 😎"
-                )
-            else:
-                celebration = (
-                    f"🎉🎊 <b>Congrats! You Earned From Referrals!</b> 💰\n\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💸 <b>You got:</b> <code>+${REFERRAL_REWARD:.2f}</code> 🤩\n"
-                    f"🛍 <b>Reason:</b> One of your referrals (<b>{buyer_display}</b>) purchased for <b>${purchase_amount:.2f}</b>!\n"
-                    f"💼 <b>Your Balance:</b> <b>${new_balance:.2f}</b>\n"
-                    f"━━━━━━━━━━━━━━━\n\n"
-                    f"🔥 <b>Keep going! Every purchase = more profit!</b>\n"
-                    f"🚀 <b>Share your link more = Earn more!</b>\n\n"
-                    f"💪 <i>Unlimited opportunity — earn while you sleep!</i> 😎"
-                )
+            # نشيك على النص المخصص لو الأدمن عدّله من CMS
+            custom_dm = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_purchase_dm'})
+            if custom_dm and custom_dm.get('value'):
+                try:
+                    celebration = custom_dm['value'].format(
+                        buyer_display,
+                        f"{REFERRAL_REWARD:.2f}",
+                        f"{new_balance:.2f}"
+                    )
+                except:
+                    pass  # لو في خطأ format، نستخدم الافتراضي
             
             bot.send_message(referrer_id, celebration, parse_mode="HTML")
         except Exception as notify_err:
@@ -927,24 +929,30 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         logger.info(f"🎁 مكافأة شراء: {referrer_id} ربح ${REFERRAL_REWARD} من شراء {buyer_uid}")
         
         # 🔔 إشعار قناة اللوق (مع تخفي الأسماء بنجمات)
+        # 🔔 إشعار قناة اللوق (مختصر + بالإنجليزي)
         try:
             log_ch = get_setting('log_channel')
             if log_ch and log_ch != "Not Set":
-                # نخفي اليوزرات بنجمات
+                # نخفي يوزر المُحيل بنجمات
                 referrer_display = obscure_text(referrer.get('username') or str(referrer_id))
-                buyer_data_for_log = db.users.find_one({'user_id': buyer_uid})
-                buyer_display_log = obscure_text(buyer_data_for_log.get('username') or str(buyer_uid)) if buyer_data_for_log else "***"
                 
-                # نستخدم نص custom من LANG (يدعم تعديل CMS)
-                # نختار اللغة بناءً على إعدادات اللوق (افتراضي عربي)
-                log_text = get_text(
-                    referrer_id,  # نستخدم لغة المُحيل
-                    'log_ref_purchase',
+                # 🆕 نستخدم النص الإنجليزي المختصر (بدون ذكر السبب أو المُدعى)
+                log_text = LANG['en']['log_ref_purchase'].format(
                     referrer_display,
-                    buyer_display_log,
-                    f"{REFERRAL_REWARD:.2f}",
-                    f"{purchase_amount:.2f}"
+                    f"{REFERRAL_REWARD:.2f}"
                 )
+                
+                # نشيك على النص المخصص لو الأدمن عدّله من CMS
+                custom_log = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_purchase'})
+                if custom_log and custom_log.get('value'):
+                    try:
+                        log_text = custom_log['value'].format(
+                            referrer_display,
+                            f"{REFERRAL_REWARD:.2f}"
+                        )
+                    except:
+                        pass  # لو في خطأ format، نستخدم الافتراضي
+                
                 bot.send_message(log_ch, log_text, parse_mode="HTML")
         except Exception as log_err:
             logger.debug(f"Log channel notification error: {log_err}")
@@ -1256,13 +1264,16 @@ LANG = {
         'new_stock': "🔔 <b>توفر ستوك جديد!</b>\n\n🛍 <b>المنتج:</b> {}\n📦 <b>المتوفر الآن:</b> {}\n\n<i>سارع بالشراء الآن من المتجر!</i>",
         'new_product': "🎉 <b>منتج جديد متاح في المتجر!</b> 🚀\n\n🛍 <b>المنتج:</b> {}\n💰 <b>السعر:</b> <b>${}</b>\n🚚 <b>نوع التسليم:</b> {}\n\n📝 <b>الوصف:</b>\n{}\n\n<i>سارع بزيارة المتجر والاستفادة من المنتج الجديد! 🛡️</i>",
         
-        # 🆕 إشعارات قناة اللوق لنظام الإحالات
-        'log_ref_purchase': "🎁 <b>مكافأة إحالة جديدة!</b> 💰\n\n👤 <b>صاحب الدعوة:</b> {}\n🛍 <b>المُدعَى:</b> {}\n💵 <b>المكافأة:</b> <code>+${}</code>\n📦 <b>سبب المكافأة:</b> شراء بقيمة ${}\n\n<i>ادعُ المزيد واكسب المزيد! 🚀</i>",
+        # 🆕 إشعارات قناة اللوق لنظام الإحالات (دائماً بالإنجليزي - مختصرة - تشجيعية)
+        'log_ref_purchase': "💰 <b>Referral Bonus!</b> 🎉\n\n👤 <b>User:</b> {}\n💵 <b>Earned:</b> <code>+${}</code>\n\n<i>Keep inviting friends to earn more! 🚀</i>",
         
-        'log_ref_milestone': "🏆 <b>إنجاز إحالات جديد!</b> 🎉\n\n👤 <b>المُحيل:</b> {}\n👥 <b>عدد الإحالات النشطة:</b> <b>{}</b>\n💰 <b>المكافأة:</b> <code>+${}</code>\n💼 <b>إجمالي أرباحه من الإحالات:</b> <b>${}</b>\n\n<i>مبروك على وصولك لـ {} دعوات ناجحة! 🎊</i>",
+        'log_ref_milestone': "🏆 <b>Referral Achievement Unlocked!</b> 🎊\n\n👤 <b>User:</b> {}\n👥 <b>Active Invites:</b> <b>{}</b>\n💰 <b>Reward:</b> <code>+${}</code>\n\n<i>Invite your friends and earn rewards too! 🔥</i>",
+        
+        # 🆕 إشعار خاص للمُحيل لما يشتري شخص من دعواته (في خاص البوت)
+        'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
         'price_drop': "📉 <b>تخفيض مذهل!</b> 🔥\n\nالمنتج: <b>{}</b>\nالسعر القديم: <strike>${}</strike>\nالسعر الجديد: <b>${}</b> فقط!\n\nسارع بالشراء الآن من المتجر!",
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>اكسب فلوس مجاناً من الإحالات!</b> 🚀\n\n🔗 <b>رابطك الخاص للدعوة:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>انسخ الرابط وانشره في قروباتك وأصدقائك!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>دخلوا رابطك:</b> {}\n⏳ <b>بانتظار الاشتراك:</b> {}\n✅ <b>اكتمل اشتراكهم:</b> {}\n💸 <b>غادروا (لا تقلق، تقدر تعوّضهم!):</b> {}\n\n💰 <b>رصيدك من الإحالات:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح بدون حد!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>الطريقة 1: ربح من الاشتراكات</b>\n• كل <b>10 أشخاص</b> يدخلون رابطك ويشتركون = <b>0.10$</b> فوراً!\n\n💸 <b>الطريقة 2: ربح من المشتريات (الجديدة!)</b> ⭐\n• كل ما اشترى أي شخص من إحالاتك منتج <b>أكثر من 2$</b> = <b>0.10$</b> مباشرة في رصيدك!\n• ما له حد! كل عملية شراء = مكافأة جديدة! 💰💰💰\n\n⚡ <b>التحديث فوري</b> — ما يحتاج تنتظر!\n\n💡 <b>تخيّل كم تكسب:</b>\n• دعوت 100 شخص واشتركوا = <b>$1.00</b>\n• 50 منهم اشتروا منتج بـ 3$ = <b>+$5.00</b>\n• الإجمالي: <b>$6.00</b> 🤑\n• ولو كل واحد منهم اشترى 3 مرات = <b>$16.00</b>! 💎\n\n🚀 <b>ابدأ الحين!</b> شارك رابطك في:\n• قروبات الواتساب وتيليجرام\n• قصص سناب وانستقرام\n• تويتر / X\n• أصدقائك وأهلك\n\n💪 <i>كل ما دعوت أكثر، وكل ما اشتروا أكثر = كسبت أكثر!</i>\n😴 <i>اكسب وأنت نايم — هذي هي الفرصة الذهبية!</i> 💰",
+        'invite_txt': "💎 <b>نظام الإحالات</b>\n\n━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة</b>\n━━━━━━━━━━━━━━\n\n👥 <b>الزيارات:</b>  <b>{}</b>\n⏳ <b>المعلق:</b>  <b>{}</b>\n✅ <b>النشط:</b>  <b>{}</b>\n❌ <b>غادر:</b>  <b>{}</b>\n\n💰 <b>أرباحك:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>رابطك:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح:</b>\n\n🔥 كل <b>10</b> اشتراكات نشطة = <b>$0.10</b>\n💸 شراء صديقك > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>التحديث فوري</i>",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -1303,13 +1314,16 @@ LANG = {
         'new_stock': "🔔 <b>New Stock Available!</b>\n\n🛍 <b>Product:</b> {}\n📦 <b>Available Now:</b> {}\n\n<i>Buy now!</i>",
         'new_product': "🎉 <b>New Product Available!</b> 🚀\n\n🛍 <b>Product:</b> {}\n💰 <b>Price:</b> <b>${}</b>\n🚚 <b>Delivery:</b> {}\n\n📝 <b>Description:</b>\n{}\n\n<i>Visit the shop now and check out the new product! 🛡️</i>",
         
-        # 🆕 Log channel notifications for referral system
-        'log_ref_purchase': "🎁 <b>New Referral Reward!</b> 💰\n\n👤 <b>Inviter:</b> {}\n🛍 <b>Invitee:</b> {}\n💵 <b>Reward:</b> <code>+${}</code>\n📦 <b>Reason:</b> Purchase of ${}\n\n<i>Invite more and earn more! 🚀</i>",
+        # 🆕 Log channel notifications for referral system (always English, short, motivational)
+        'log_ref_purchase': "💰 <b>Referral Bonus!</b> 🎉\n\n👤 <b>User:</b> {}\n💵 <b>Earned:</b> <code>+${}</code>\n\n<i>Keep inviting friends to earn more! 🚀</i>",
         
-        'log_ref_milestone': "🏆 <b>New Referral Milestone!</b> 🎉\n\n👤 <b>Inviter:</b> {}\n👥 <b>Active Referrals:</b> <b>{}</b>\n💰 <b>Reward:</b> <code>+${}</code>\n💼 <b>Total Earnings:</b> <b>${}</b>\n\n<i>Congrats on reaching {} successful invites! 🎊</i>",
+        'log_ref_milestone': "🏆 <b>Referral Achievement Unlocked!</b> 🎊\n\n👤 <b>User:</b> {}\n👥 <b>Active Invites:</b> <b>{}</b>\n💰 <b>Reward:</b> <code>+${}</code>\n\n<i>Invite your friends and earn rewards too! 🔥</i>",
+        
+        # 🆕 Private DM to inviter when their invitee makes a purchase
+        'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
         'price_drop': "📉 <b>Massive Price Drop!</b> 🔥\n\nProduct: <b>{}</b>\nOld Price: <strike>${}</strike>\nNew Price: <b>${}</b>!\n\n<i>Buy now!</i>",
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
-        'invite_txt': "💎 <b>Earn FREE Money From Referrals!</b> 🚀\n\n🔗 <b>Your Personal Invite Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n👆 <i>Copy & share it everywhere!</i>\n\n━━━━━━━━━━━━━━━\n📊 <b>Your Live Stats ⚡</b>\n━━━━━━━━━━━━━━━\n👥 <b>Clicked Your Link:</b> {}\n⏳ <b>Waiting To Join:</b> {}\n✅ <b>Joined Successfully:</b> {}\n💸 <b>Left (Don't worry, replace them!):</b> {}\n\n💰 <b>Your Referral Balance:</b> <b>${:.2f}</b> 🎉\n\n━━━━━━━━━━━━━━━\n🎁 <b>Two Ways To Earn — No Limits!</b>\n━━━━━━━━━━━━━━━\n\n🔥 <b>Method 1: Earn From Joins</b>\n• Every <b>10 people</b> who click & join = <b>$0.10</b> instantly!\n\n💸 <b>Method 2: Earn From Purchases (NEW!)</b> ⭐\n• Every time a referral buys a product <b>over $2</b> = <b>$0.10</b> straight to your balance!\n• No limits! Every purchase = New reward! 💰💰💰\n\n⚡ <b>Instant updates</b> — no waiting!\n\n💡 <b>Imagine The Earnings:</b>\n• Invited 100 people who joined = <b>$1.00</b>\n• 50 of them bought a $3 product = <b>+$5.00</b>\n• Total: <b>$6.00</b> 🤑\n• If each bought 3 times = <b>$16.00</b>! 💎\n\n🚀 <b>Start NOW!</b> Share your link on:\n• WhatsApp & Telegram groups\n• Snapchat & Instagram stories\n• Twitter / X\n• Friends & family\n\n💪 <i>More invites + more purchases = MORE PROFIT!</i>\n😴 <i>Earn while you sleep — this is YOUR golden opportunity!</i> 💰",
+        'invite_txt': "💎 <b>Referral System</b>\n\n━━━━━━━━━━━━━━\n📊 <b>Your Live Stats</b>\n━━━━━━━━━━━━━━\n\n👥 <b>Clicks:</b>  <b>{}</b>\n⏳ <b>Pending:</b>  <b>{}</b>\n✅ <b>Active:</b>  <b>{}</b>\n❌ <b>Left:</b>  <b>{}</b>\n\n💰 <b>Earnings:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>Two Ways to Earn:</b>\n\n🔥 Every <b>10</b> active joins = <b>$0.10</b>\n💸 Friend buys > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>Real-time updates</i>",
         'dep_choose': "💳 <b>Choose payment method:</b>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -2297,7 +2311,7 @@ def invite_ui(call):
     
     # المستوى 1: محاولة النص المخصص + format
     try:
-        final_text = get_text(uid, 'invite_txt', b_n, uid, total_clicks, pending_count, active_count, left_count, actual_earned)
+        final_text = get_text(uid, 'invite_txt', total_clicks, pending_count, active_count, left_count, actual_earned, b_n, uid)
     except Exception as e:
         logger.error(f"Error getting invite_txt (level 1): {e}")
     
@@ -2305,7 +2319,7 @@ def invite_ui(call):
     if not final_text:
         try:
             default_text = LANG.get(l, LANG['ar']).get('invite_txt', '')
-            final_text = default_text.format(b_n, uid, total_clicks, pending_count, active_count, left_count, actual_earned)
+            final_text = default_text.format(total_clicks, pending_count, active_count, left_count, actual_earned, b_n, uid)
             logger.warning(f"⚠️ Fell back to default invite_txt for user {uid} (lang={l})")
         except Exception as e:
             logger.error(f"Error formatting default invite_txt (level 2): {e}")
@@ -2908,23 +2922,41 @@ def verify_binance_pay(message, lang):
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
-        # ⚡ Fast mode: يحاول 5 بروكسيات بالتوازي - أسرع طريقة (~3-5 ثواني)
-        pay_response = execute_binance_call(
-            lambda c: c.get_pay_trade_history(),
-            fast_mode=True,
-            total_timeout=5  # 5 ثواني max
-        )
-        
-        if pay_response is None:
-            # محاولة ثانية لو فشل بسرعة (احتياطي)
+        pay_response = None
+        # ⚡ نحاول 4 مرات (كل مرة 5 بروكسيات بالتوازي = 20 بروكسي مختلف)
+        for attempt in range(4):
             pay_response = execute_binance_call(
                 lambda c: c.get_pay_trade_history(),
                 fast_mode=True,
-                total_timeout=5
+                total_timeout=8  # 8 ثواني (بدل 5)
             )
+            if pay_response is not None:
+                break
+            # لو فشلت، نطلب refresh للبروكسيات في الخلفية
+            if attempt == 1:  # بعد المحاولة الثانية
+                threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+            time.sleep(0.5)
         
         if pay_response is None:
-            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
+            # 🆕 آخر محاولة: بدون بروكسي مباشرة (لو السيرفر في منطقة مسموحة)
+            try:
+                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
+                pay_response = direct_client.get_pay_trade_history()
+            except Exception:
+                pass
+        
+        if pay_response is None:
+            bot.send_message(
+                uid, 
+                "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
+                "💡 <b>الحلول:</b>\n"
+                "• انتظر دقيقة وحاول مرة ثانية\n"
+                "• تأكد من أنك أرسلت <b>Order ID</b> الصحيح (مو الـ TxID)\n"
+                "• تأكد من تنفيذ الحوالة فعلياً\n\n"
+                "🔄 المحاولة الجاية: <b>ابعت Order ID مرة ثانية</b>\n"
+                "💬 لو استمرت المشكلة، تواصل مع الإدارة.", 
+                parse_mode="HTML"
+            )
             return
         
         pay_h = pay_response.get('data', [])
@@ -2945,9 +2977,13 @@ def verify_binance_pay(message, lang):
         if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
-        # خطأ غير متوقع (مو من Binance) — نسجله
         logger.debug(f"Unexpected error in verify_binance_tx: {e}")
-        bot.send_message(uid, f"❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
+        bot.send_message(
+            uid, 
+            "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
+            "💡 انتظر دقيقة وحاول مرة ثانية، أو تواصل مع الإدارة.", 
+            parse_mode="HTML"
+        )
     finally:
         PROCESSING_TXS.discard(tx_id)
 
@@ -2984,23 +3020,39 @@ def verify_crypto_tx(message, lang, coin):
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
-        # ⚡ Fast mode: يحاول 5 بروكسيات بالتوازي
-        res = execute_binance_call(
-            lambda c: c.get_deposit_history(coin=coin),
-            fast_mode=True,
-            total_timeout=5
-        )
-        
-        if res is None:
-            # محاولة ثانية احتياطية
+        res = None
+        # ⚡ 4 محاولات (كل وحدة 5 بروكسيات بالتوازي)
+        for attempt in range(4):
             res = execute_binance_call(
                 lambda c: c.get_deposit_history(coin=coin),
                 fast_mode=True,
-                total_timeout=5
+                total_timeout=8
             )
+            if res is not None:
+                break
+            if attempt == 1:
+                threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+            time.sleep(0.5)
+        
+        # 🆕 آخر محاولة بدون بروكسي
+        if res is None:
+            try:
+                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
+                res = direct_client.get_deposit_history(coin=coin)
+            except Exception:
+                pass
         
         if res is None:
-            bot.send_message(uid, "❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
+            bot.send_message(
+                uid,
+                "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
+                "💡 <b>الحلول:</b>\n"
+                "• انتظر دقيقة وحاول مرة ثانية\n"
+                "• تأكد من أن الحوالة وصلت ومؤكدة على الشبكة\n"
+                "• تأكد من نسخ الهاش (TxID) الصحيح\n\n"
+                "🔄 المحاولة الجاية: <b>ابعت Hash مرة ثانية</b>",
+                parse_mode="HTML"
+            )
             return
 
         found = False; status = -1; amt = 0.0
@@ -3621,6 +3673,7 @@ def ad_cms_msgs_ui(call):
     # 🆕 إشعارات اللوق لنظام الإحالات
     markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
     markup.add(InlineKeyboardButton("🏆 لوق: إنجاز 10 إحالات", callback_data="edit_txt_log_ref_milestone"))
+    markup.add(InlineKeyboardButton("💌 رسالة المُحيل (شراء صديقه)", callback_data="edit_txt_ref_purchase_dm"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -3668,28 +3721,33 @@ def ad_edit_txt_prompt(call):
     placeholders_info = {
         'invite_txt': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
-            "<code>{}</code> 1 = اسم البوت\n"
-            "<code>{}</code> 2 = معرف المستخدم\n"
-            "<code>{}</code> 3 = إجمالي الزيارات\n"
-            "<code>{}</code> 4 = عدد المعلقين\n"
-            "<code>{}</code> 5 = عدد النشطين\n"
-            "<code>{}</code> 6 = عدد اللي غادروا\n"
-            "<code>{}</code> 7 = إجمالي الرصيد"
+            "<code>{}</code> 1 = إجمالي الزيارات\n"
+            "<code>{}</code> 2 = عدد المعلقين\n"
+            "<code>{}</code> 3 = عدد النشطين\n"
+            "<code>{}</code> 4 = عدد اللي غادروا\n"
+            "<code>{}</code> 5 = الأرباح (الرصيد)\n"
+            "<code>{}</code> 6 = اسم البوت\n"
+            "<code>{}</code> 7 = معرف المستخدم"
         ),
         'log_ref_purchase': (
-            "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
-            "<code>{}</code> 1 = اسم صاحب الدعوة (مخفي)\n"
-            "<code>{}</code> 2 = اسم المُدعَى (مخفي)\n"
-            "<code>{}</code> 3 = قيمة المكافأة (مثل 0.10)\n"
-            "<code>{}</code> 4 = قيمة عملية الشراء (مثل 5.00)"
+            "💡 <b>المتغيرات (2 فقط):</b>\n"
+            "<code>{}</code> 1 = اسم المُحيل (مخفي)\n"
+            "<code>{}</code> 2 = قيمة المكافأة (مثل 0.10)\n\n"
+            "⚠️ <i>تم إلغاء ذكر اسم المُدعَى وقيمة الشراء في اللوق - تشجيعي فقط</i>"
         ),
         'log_ref_milestone': (
-            "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
+            "💡 <b>المتغيرات (3 فقط):</b>\n"
             "<code>{}</code> 1 = اسم المُحيل (مخفي)\n"
             "<code>{}</code> 2 = عدد الإحالات النشطة\n"
-            "<code>{}</code> 3 = قيمة المكافأة الحالية\n"
-            "<code>{}</code> 4 = إجمالي أرباحه من الإحالات\n"
-            "<code>{}</code> 5 = عدد الإحالات (مكرر للتنسيق)"
+            "<code>{}</code> 3 = قيمة المكافأة (مثل 0.10)\n\n"
+            "⚠️ <i>تم إلغاء ذكر إجمالي الأرباح - تشجيعي فقط</i>"
+        ),
+        'ref_purchase_dm': (
+            "💡 <b>المتغيرات في رسالة المُحيل (3 متغيرات):</b>\n"
+            "<code>{}</code> 1 = اسم الصديق المُدعَى (مخفي)\n"
+            "<code>{}</code> 2 = قيمة المكافأة الجديدة (مثل 0.10)\n"
+            "<code>{}</code> 3 = الرصيد الجديد للمُحيل\n\n"
+            "💡 <i>هذي رسالة خاصة تُرسل للمُحيل لما يشتري شخص من إحالاته</i>"
         ),
         'new_stock': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
