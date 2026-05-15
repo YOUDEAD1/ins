@@ -300,6 +300,7 @@ def _proxy_health_check_thread():
     Thread فحص دوري: كل 5 دقائق يفحص البروكسيات الموجودة
     ويحذف اللي مات منها (للمحافظة على pool نظيف).
     """
+    global VERIFIED_PROXIES  # 🛡 لازم يكون في بداية الدالة
     while True:
         try:
             time.sleep(300)  # كل 5 دقائق
@@ -325,7 +326,6 @@ def _proxy_health_check_thread():
             removed_count = len(current_proxies) - len(still_working)
             if removed_count > 0:
                 # تحديث الـ pool بالـ working فقط
-                global VERIFIED_PROXIES
                 VERIFIED_PROXIES = still_working
                 logger.info(f"🧹 تم تنظيف {removed_count} بروكسي ميت. متبقي {len(still_working)} شغّال.")
                 
