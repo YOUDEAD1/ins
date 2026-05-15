@@ -1898,16 +1898,23 @@ def show_hist_detail(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    
     uid = call.from_user.id
     if is_user_banned(uid): return
     if not check_forced_sub(uid): start_handler(call.message); return
     
-    u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'; b_n = bot.get_me().username
+    u = get_user_data_full(uid)
+    l = u.get('lang', 'ar') if u else 'ar'
+    b_n = bot.get_me().username
     
     # تحديث فوري للرصيد قبل العرض
-    update_referrer_balance(uid)
-    u = get_user_data_full(uid)
+    try:
+        update_referrer_balance(uid)
+        u = get_user_data_full(uid)
+    except Exception as e:
+        logger.error(f"Error updating referrer balance in invite_ui: {e}")
     
     # جلب الإحصائيات من الجدول الجديد
     pending_count, active_count, left_count, total_clicks = get_ref_counts(uid)
@@ -1917,13 +1924,96 @@ def invite_ui(call):
     markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     
+    # 🛡 جلب النص بشكل آمن مع 3 مستويات من الـ fallback
+    final_text = None
+    
+    # المستوى 1: محاولة النص المخصص + format
+    try:
+        final_text = get_text(uid, 'invite_txt', b_n, uid, total_clicks, pending_count, active_count, left_count, actual_earned)
+    except Exception as e:
+        logger.error(f"Error getting invite_txt (level 1): {e}")
+    
+    # المستوى 2: لو فشل، نستخدم النص الافتراضي مباشرة من الكود
+    if not final_text:
+        try:
+            default_text = LANG.get(l, LANG['ar']).get('invite_txt', '')
+            final_text = default_text.format(b_n, uid, total_clicks, pending_count, active_count, left_count, actual_earned)
+            logger.warning(f"⚠️ Fell back to default invite_txt for user {uid} (lang={l})")
+        except Exception as e:
+            logger.error(f"Error formatting default invite_txt (level 2): {e}")
+    
+    # المستوى 3: لو حتى الافتراضي فشل، نسوي رسالة بسيطة
+    if not final_text:
+        if l == 'en':
+            final_text = (
+                f"👥 <b>Referrals</b>\n\n"
+                f"🔗 <code>https://t.me/{b_n}?start={uid}</code>\n\n"
+                f"👥 Clicks: <b>{total_clicks}</b>\n"
+                f"⏳ Pending: <b>{pending_count}</b>\n"
+                f"✅ Active: <b>{active_count}</b>\n"
+                f"❌ Left: <b>{left_count}</b>\n\n"
+                f"💰 Balance: <b>${actual_earned:.2f}</b>"
+            )
+        else:
+            final_text = (
+                f"👥 <b>الإحالات</b>\n\n"
+                f"🔗 <code>https://t.me/{b_n}?start={uid}</code>\n\n"
+                f"👥 الزيارات: <b>{total_clicks}</b>\n"
+                f"⏳ معلق: <b>{pending_count}</b>\n"
+                f"✅ نشط: <b>{active_count}</b>\n"
+                f"❌ غادر: <b>{left_count}</b>\n\n"
+                f"💰 الرصيد: <b>${actual_earned:.2f}</b>"
+            )
+    
+    # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
+    sent_successfully = False
+    
+    # المحاولة 1: HTML كامل
     try: 
         bot.edit_message_text(
-            get_text(uid, 'invite_txt', b_n, uid, total_clicks, pending_count, active_count, left_count, actual_earned), 
+            final_text, 
             call.message.chat.id, call.message.message_id, 
             reply_markup=markup, parse_mode="HTML"
         )
-    except: pass
+        sent_successfully = True
+    except Exception as e:
+        logger.error(f"Failed to send invite message with HTML: {e}")
+    
+    # المحاولة 2: بدون parse_mode (نص عادي)
+    if not sent_successfully:
+        try:
+            # تنظيف HTML tags وعرض النص العادي
+            clean_text = re.sub(r'<[^>]+>', '', final_text)
+            bot.edit_message_text(
+                clean_text,
+                call.message.chat.id, call.message.message_id,
+                reply_markup=markup
+            )
+            sent_successfully = True
+            logger.warning(f"Sent invite as plain text (HTML failed) for user {uid}")
+        except Exception as e:
+            logger.error(f"Failed to send invite as plain text: {e}")
+    
+    # المحاولة 3: إرسال رسالة جديدة بدلاً من edit
+    if not sent_successfully:
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                final_text,
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+            sent_successfully = True
+        except Exception as e:
+            logger.error(f"Failed to send new invite message: {e}")
+            # آخر شي - رسالة بسيطة جداً
+            try:
+                bot.send_message(
+                    call.message.chat.id,
+                    f"Your link: https://t.me/{b_n}?start={uid}\nBalance: ${actual_earned:.2f}",
+                    reply_markup=markup
+                )
+            except: pass
 
 # ============================================================
 # 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
