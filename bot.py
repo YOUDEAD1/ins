@@ -4063,70 +4063,99 @@ def ad_save_custom_text(message, key):
         bot.send_message(message.chat.id, "❌ يجب إرسال نص.")
         return
         
-    bot.send_message(message.chat.id, "⏳ جاري حفظ النص وترجمته بشكل آمن إلى الإنجليزية...")
+    bot.send_message(message.chat.id, "⏳ جاري حفظ النص...")
     
-    final_text_ar = extract_custom_emojis_to_html(message)
+    # 🆕 نستخرج النص مع الـ Premium Emojis
+    final_text = extract_custom_emojis_to_html(message)
     
-    # 🛡 عدد الـ placeholders في النص الافتراضي من الكود (للمقارنة)
-    default_ar = LANG.get('ar', {}).get(key, "")
-    expected_placeholders = len(re.findall(r'\{[^}]*\}', default_ar)) if default_ar else 0
+    # 🆕 اكتشاف اللغة: نشيك على النص بعد إزالة HTML والإيموجيات
+    text_only = re.sub(r'<[^>]+>', '', final_text)
+    text_only = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text_only, flags=re.DOTALL)
+    text_only = re.sub(r'\{[^}]*\}', '', text_only)
+    text_only = re.sub(r'[━─═]+', '', text_only)
+    # نشيل الإيموجي العادي
+    emoji_pattern = re.compile(
+        "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF\U00002500-\U00002BEF\U00002702-\U000027B0"
+        "\u2640-\u2642\u2600-\u2B55\u200d\u23cf\u23e9\u231a\ufe0f\u3030]+",
+        flags=re.UNICODE
+    )
+    text_only = emoji_pattern.sub('', text_only).strip()
     
-    # عدد الـ placeholders في النص الذي أرسله الأدمن
-    user_placeholders_count = len(re.findall(r'\{[^}]*\}', final_text_ar))
+    # نعد أحرف عربية vs إنجليزية
+    arabic_chars = len(re.findall(r'[\u0600-\u06FF]', text_only))
+    english_chars = len(re.findall(r'[a-zA-Z]', text_only))
     
-    # ⚠️ تحذير لو الأدمن نسي أو ضيّع placeholders
-    if expected_placeholders > 0 and user_placeholders_count < expected_placeholders:
-        warning_msg = (
-            f"⚠️ <b>تحذير!</b>\n\n"
-            f"النص الافتراضي يحتاج <b>{expected_placeholders}</b> متغير (مثل {{}}) "
-            f"لكن نصك يحتوي على <b>{user_placeholders_count}</b> فقط.\n\n"
-            f"💡 المتغيرات في رسالة الإحالات هي:\n"
-            f"<code>{{}}</code> = اسم البوت\n"
-            f"<code>{{}}</code> = معرف المستخدم\n"
-            f"<code>{{}}</code> = إجمالي الزيارات\n"
-            f"<code>{{}}</code> = المعلقين\n"
-            f"<code>{{}}</code> = النشطين\n"
-            f"<code>{{}}</code> = الذين غادروا\n"
-            f"<code>{{}}</code> = الرصيد\n\n"
-            f"❓ هل تريد المتابعة بأي حال؟ سيتم استخدام النص الافتراضي تلقائياً لو فقدت متغيرات."
-        )
-        bot.send_message(message.chat.id, warning_msg, parse_mode="HTML")
+    # نحدد لغة النص
+    if english_chars > arabic_chars * 1.5:
+        # 🆕 النص إنجليزي → نحفظه كما هو في النسختين (لا ترجمة)
+        source_lang = 'en'
+        final_text_en = final_text
+        # نترجمه للعربي
+        final_text_ar = safe_translate_for_cms(final_text, 'ar')
+    elif arabic_chars > english_chars * 1.5:
+        # النص عربي → نحفظه كما هو + نترجم للإنجليزي
+        source_lang = 'ar'
+        final_text_ar = final_text
+        final_text_en = safe_translate_for_cms(final_text, 'en')
+    else:
+        # نص مختلط أو غير واضح → نحفظ في النسختين بدون ترجمة
+        source_lang = 'mixed'
+        final_text_ar = final_text
+        final_text_en = final_text
     
-    final_text_en = safe_translate_for_cms(final_text_ar, 'en')
-    
-    if final_text_en == final_text_ar:
-        try:
-            simple_translation = GoogleTranslator(source='ar', target='en').translate(
-                re.sub(r'<[^>]+>', '', final_text_ar)
-            )
-            if simple_translation:
-                final_text_en = simple_translation
-        except:
-            pass
-    
-    # 🛡 فحص نهائي: عدد placeholders في النسختين (عربي وإنجليزي) لازم يكون متطابق
+    # 🛡 فحص: عدد placeholders في النسختين لازم يكون متطابق
     ar_count = len(re.findall(r'\{[^}]*\}', final_text_ar))
     en_count = len(re.findall(r'\{[^}]*\}', final_text_en))
     
     if ar_count != en_count:
-        # الترجمة ضيّعت placeholders — نستخدم نفس النص العربي للإنجليزي (آمن)
         logger.warning(f"Translation lost placeholders for '{key}': ar={ar_count}, en={en_count}")
-        final_text_en = final_text_ar  # كحل آمن، نخلي الإنجليزي = العربي
+        # نخلي النسختين متطابقتين
+        if source_lang == 'en':
+            final_text_ar = final_text_en
+        else:
+            final_text_en = final_text_ar
         bot.send_message(
             message.chat.id,
-            "⚠️ <b>ملاحظة:</b> الترجمة التلقائية فقدت بعض المتغيرات. "
-            "تم حفظ النص العربي كنسخة احتياطية للإنجليزية. "
-            "لو تبي ترجمة دقيقة، عدّل النص الإنجليزي يدوياً.",
+            "⚠️ <b>ملاحظة:</b> تم حفظ النص بدون ترجمة لحماية المتغيرات والتنسيقات.",
             parse_mode="HTML"
         )
+    
+    # 🛡 فحص: عدد Premium Emojis في النسختين
+    ar_emojis = len(re.findall(r'<tg-emoji', final_text_ar))
+    en_emojis = len(re.findall(r'<tg-emoji', final_text_en))
+    
+    if ar_emojis != en_emojis:
+        logger.warning(f"Translation lost premium emojis: ar={ar_emojis}, en={en_emojis}")
+        # نخلي النسختين متطابقتين
+        if source_lang == 'en':
+            final_text_ar = final_text_en
+        else:
+            final_text_en = final_text_ar
             
+    # حفظ النصين
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
     
-    preview_ar = final_text_ar[:200] + ("..." if len(final_text_ar) > 200 else "")
-    preview_en = final_text_en[:200] + ("..." if len(final_text_en) > 200 else "")
+    # رسالة تأكيد بسيطة (بدون كود escape عشان يبان شكل النص الحقيقي)
+    lang_label = "🇸🇦 عربي" if source_lang == 'ar' else ("🇺🇸 إنجليزي" if source_lang == 'en' else "🌐 مختلط")
     
-    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ بنجاح!</b>\n\n🇸🇦 <b>العربية:</b>\n<code>{html.escape(preview_ar)}</code>\n\n🇺🇸 <b>الإنجليزية:</b>\n<code>{html.escape(preview_en)}</code>", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id, 
+        f"✅ <b>تم الحفظ بنجاح!</b>\n\n"
+        f"📝 <b>لغة النص:</b> {lang_label}\n"
+        f"💾 <b>المحفوظ:</b> عربي + إنجليزي\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📌 <b>معاينة النص المحفوظ:</b>",
+        parse_mode="HTML"
+    )
+    
+    # نرسل النص نفسه كما هو (يبان الإيموجيات والتنسيقات)
+    try:
+        bot.send_message(message.chat.id, final_text_en, parse_mode="HTML")
+    except Exception as preview_err:
+        logger.debug(f"Preview error: {preview_err}")
+        bot.send_message(message.chat.id, "⚠️ المعاينة تعذرت لكن النص محفوظ.")
 
 # ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
