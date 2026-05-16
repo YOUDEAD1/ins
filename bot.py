@@ -59,392 +59,124 @@ try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError: STARS_RATE = 120
 
 # ============================================================
-# 🛡️ 2. نظام البروكسي الذكي (Auto-Discovery + Validation)
+# 🛡️ 2. نظام البروكسي البسيط والخفيف (يوفر RAM)
 # ============================================================
-# هذا النظام يجلب بروكسيات من عدة مصادر، يفحصها بالتوازي،
-# ويحتفظ فقط بالشغالة منها. ولو فشل بروكسي، يجرب التالي تلقائياً.
+# نظام بسيط: نجلب بروكسيات، نحط واحد ونجربه، لو فشل نجرب التالي.
+# لا threads خلفية ضخمة، لا فحص متوازي بـ 100 worker، لا قوائم كبيرة.
 # ============================================================
 
 PROXY_SOURCES = [
-    # مصادر HTTP/HTTPS
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
-    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
-    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
-    # مصدر يحدّث كثيراً
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all",
-    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=5000&country=all",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000",
 ]
 
-VERIFIED_PROXIES = []           # البروكسيات اللي تأكدنا أنها شغالة
+VERIFIED_PROXIES = []           # قائمة بسيطة من البروكسيات
 PROXY_REFRESH_LOCK = threading.Lock()
 LAST_PROXY_REFRESH = 0
-PROXY_REFRESH_INTERVAL = 1800   # كل 30 دقيقة نعمل refresh
-MIN_WORKING_PROXIES = 10        # نحتاج على الأقل 10 بروكسي شغال (نظام متوازي)
-TARGET_PROXY_COUNT = 30         # نهدف لـ 30 بروكسي شغال في الـ pool
+PROXY_REFRESH_INTERVAL = 3600   # ساعة كاملة بين كل refresh (توفير RAM)
+MAX_PROXIES_IN_POOL = 10        # نحتفظ بـ 10 فقط (بدل 30)
 
 
-def _test_proxy(proxy_url, timeout=8):
-    """
-    يفحص هل البروكسي شغال أو لا. يرجع True لو شغال.
-    نختبر على عدة endpoints لزيادة فرص النجاح.
-    """
-    # نجرب على عدة URLs (أبسطها أولاً)
-    test_urls = [
-        "http://httpbin.org/ip",  # HTTP بدل HTTPS - أسهل
-        "http://api.ipify.org",
-        "https://api.binance.com/api/v3/ping",  # هذا الهدف الأساسي
-    ]
-    
-    proxies = {'http': proxy_url, 'https': proxy_url}
-    
-    # نجرب أول URL، لو نجح كافي
-    for test_url in test_urls:
-        try:
-            resp = requests.get(
-                test_url,
-                proxies=proxies,
-                timeout=timeout,
-                allow_redirects=False
-            )
-            if resp.status_code in [200, 301, 302]:
-                return True
-        except Exception:
-            continue
-    
-    return False
-
-
-def _fetch_proxies_from_sources():
-    """يجلب قائمة بروكسيات خام من كل المصادر"""
-    all_proxies = set()
+def _fetch_proxies_simple():
+    """يجلب بروكسيات من المصدر الأول الذي يستجيب"""
     for source in PROXY_SOURCES:
         try:
-            res = requests.get(source, timeout=10)
+            res = requests.get(source, timeout=8)
             if res.status_code == 200:
                 lines = res.text.strip().split('\n')
-                for line in lines:
+                proxies = []
+                for line in lines[:200]:  # نأخذ 200 فقط لتوفير RAM
                     line = line.strip()
                     if line and ':' in line and not line.startswith('#'):
-                        # تنظيف السطر
-                        if line.startswith('http'):
-                            all_proxies.add(line)
-                        else:
-                            all_proxies.add(f"http://{line}")
+                        if not line.startswith('http'):
+                            line = f"http://{line}"
+                        proxies.append(line)
+                if proxies:
+                    random.shuffle(proxies)
+                    return proxies
         except Exception:
             continue
-    return list(all_proxies)
-
-
-def _validate_proxies_parallel(proxies, max_workers=100, target_count=20):
-    """
-    يفحص البروكسيات بالتوازي ويرجع الشغّالة منها فقط.
-    target_count = نتوقف بعد ما نلقى هذا العدد من الشغّالين (لتوفير الوقت).
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    
-    working = []
-    
-    # نخلط البروكسيات عشوائياً للتنوع
-    random.shuffle(proxies)
-    
-    # نأخذ أول 800 بروكسي للفحص (زدنا العدد لأن أغلبها ميت)
-    candidates = proxies[:800]
-    
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_proxy = {executor.submit(_test_proxy, p): p for p in candidates}
-            
-            for future in as_completed(future_to_proxy):
-                if len(working) >= target_count:
-                    # وصلنا للعدد المطلوب، نوقف الباقي
-                    for f in future_to_proxy:
-                        if not f.done():
-                            f.cancel()
-                    break
-                
-                proxy = future_to_proxy[future]
-                try:
-                    if future.result(timeout=15):
-                        working.append(proxy)
-                        logger.info(f"✅ بروكسي شغّال ({len(working)}/{target_count}): {proxy[:50]}")
-                except Exception:
-                    continue
-    except Exception as e:
-        logger.error(f"Error in parallel proxy validation: {e}")
-    
-    return working
+    return []
 
 
 def refresh_proxies(force=False):
-    """
-    يحدث قائمة البروكسيات الشغّالة.
-    يشتغل في الخلفية ولا يوقف البوت.
-    """
+    """يحدث قائمة البروكسيات بشكل بسيط (بدون فحص متوازي ضخم)"""
     global VERIFIED_PROXIES, LAST_PROXY_REFRESH
     
-    with PROXY_REFRESH_LOCK:
+    # ما نسوي refresh كثير
+    if not PROXY_REFRESH_LOCK.acquire(blocking=False):
+        return  # في refresh شغال بالفعل
+    
+    try:
         current_time = time.time()
-        
-        # تحديث فقط لو لازم
         if not force and VERIFIED_PROXIES and (current_time - LAST_PROXY_REFRESH < PROXY_REFRESH_INTERVAL):
             return
         
-        try:
-            logger.info("🔄 جاري تحديث قائمة البروكسيات...")
-            
-            # 1. جلب البروكسيات من المصادر
-            raw_proxies = _fetch_proxies_from_sources()
-            if not raw_proxies:
-                logger.warning("⚠️ لم يتم جلب أي بروكسي من المصادر.")
-                return
-            
-            logger.info(f"📥 تم جلب {len(raw_proxies)} بروكسي خام، جاري الفحص...")
-            
-            # 2. فحص بالتوازي وأخذ الشغّالين فقط
-            working = _validate_proxies_parallel(raw_proxies, target_count=TARGET_PROXY_COUNT)
-            
-            if working:
-                VERIFIED_PROXIES = working
-                LAST_PROXY_REFRESH = current_time
-                logger.info(f"✅ تم التحقق من {len(working)} بروكسي شغّال.")
-            else:
-                logger.warning("⚠️ لم نجد أي بروكسي شغّال.")
-        except Exception as e:
-            logger.error(f"❌ خطأ في تحديث البروكسيات: {e}")
+        logger.info("🔄 جاري جلب البروكسيات...")
+        new_proxies = _fetch_proxies_simple()
+        
+        if new_proxies:
+            # نحط كل البروكسيات في الـ pool (بدون فحص مسبق)
+            # سيتم اختبارها أثناء الاستخدام الفعلي
+            VERIFIED_PROXIES = new_proxies[:MAX_PROXIES_IN_POOL * 5]  # 50 بروكسي كاحتياطي
+            LAST_PROXY_REFRESH = current_time
+            logger.info(f"✅ جلب {len(VERIFIED_PROXIES)} بروكسي.")
+    except Exception as e:
+        logger.error(f"❌ خطأ في جلب البروكسيات: {e}")
+    finally:
+        PROXY_REFRESH_LOCK.release()
 
 
 def _remove_dead_proxy(proxy_url):
     """يحذف بروكسي ميت من القائمة"""
     global VERIFIED_PROXIES
     try:
-        VERIFIED_PROXIES = [p for p in VERIFIED_PROXIES if p != proxy_url]
-        # لو خلصوا، نطلب refresh في الخلفية
-        if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
+        if proxy_url in VERIFIED_PROXIES:
+            VERIFIED_PROXIES.remove(proxy_url)
+        # لو نزل العدد كثير، نطلب تحديث (بدون thread - يتم في الـ call التالي)
+        if len(VERIFIED_PROXIES) < 5:
             threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
     except Exception:
         pass
 
 
 def get_binance_client():
-    """
-    دالة إنشاء BinanceClient ذكية:
-    - تستخدم بروكسي شغّال مُتحقّق منه
-    - تحاول تلقائياً مع عدة بروكسيات لو فشل واحد
-    - تعيد البحث عن بروكسيات جديدة لو خلصت الشغّالة
-    """
-    # لو ما عندنا بروكسيات شغّالة، نجلب الحين
+    """ينشئ Binance client مع بروكسي عشوائي"""
     if not VERIFIED_PROXIES:
         refresh_proxies(force=True)
     
-    # نحاول مع 3 بروكسيات مختلفة
-    for _ in range(3):
-        if not VERIFIED_PROXIES:
-            break
-        
-        try:
-            proxy = random.choice(VERIFIED_PROXIES)
-            proxies_dict = {'http': proxy, 'https': proxy}
-            client = BinanceClient(
-                BINANCE_API_KEY,
-                BINANCE_API_SECRET,
-                requests_params={'proxies': proxies_dict, 'timeout': 15}
-            )
-            # نخزّن البروكسي المستخدم في الـ client لو احتجنا نحذفه بعدين
-            client._used_proxy = proxy
-            return client
-        except Exception:
-            # نحذف البروكسي ونحاول التالي
-            _remove_dead_proxy(proxy)
-            continue
-    
-    # آخر محاولة بدون بروكسي
-    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
-
-
-def _proxy_refresh_thread():
-    """Thread خلفي يحدّث البروكسيات دورياً"""
-    while True:
-        try:
-            time.sleep(PROXY_REFRESH_INTERVAL)
-            refresh_proxies(force=False)
-        except Exception as e:
-            logger.error(f"Proxy refresh thread error: {e}")
-            time.sleep(60)
-
-
-def _proxy_guard_thread():
-    """
-    Thread حراسة: يتأكد إن عندنا بروكسيات شغّالة دائماً.
-    لو نقص العدد عن MIN_WORKING_PROXIES، يجلب جدد فوراً.
-    """
-    while True:
-        try:
-            time.sleep(30)  # فحص كل 30 ثانية
-            if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
-                logger.info(f"🛡 عدد البروكسيات أقل من الحد الأدنى ({len(VERIFIED_PROXIES)}/{MIN_WORKING_PROXIES}) - جاري التحديث...")
-                refresh_proxies(force=True)
-        except Exception as e:
-            logger.error(f"Proxy guard thread error: {e}")
-            time.sleep(60)
-
-
-def _proxy_health_check_thread():
-    """
-    Thread فحص دوري: كل 5 دقائق يفحص البروكسيات الموجودة
-    ويحذف اللي مات منها (للمحافظة على pool نظيف).
-    """
-    global VERIFIED_PROXIES  # 🛡 لازم يكون في بداية الدالة
-    while True:
-        try:
-            time.sleep(300)  # كل 5 دقائق
-            if not VERIFIED_PROXIES:
-                continue
-            
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            
-            still_working = []
-            current_proxies = list(VERIFIED_PROXIES)
-            
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                future_to_proxy = {executor.submit(_test_proxy, p, 5): p for p in current_proxies}
-                
-                for future in as_completed(future_to_proxy):
-                    proxy = future_to_proxy[future]
-                    try:
-                        if future.result(timeout=8):
-                            still_working.append(proxy)
-                    except Exception:
-                        continue
-            
-            removed_count = len(current_proxies) - len(still_working)
-            if removed_count > 0:
-                # تحديث الـ pool بالـ working فقط
-                VERIFIED_PROXIES = still_working
-                logger.info(f"🧹 تم تنظيف {removed_count} بروكسي ميت. متبقي {len(still_working)} شغّال.")
-                
-                # لو نزل العدد، نحدث فوراً
-                if len(still_working) < MIN_WORKING_PROXIES:
-                    refresh_proxies(force=True)
-        except Exception as e:
-            logger.error(f"Proxy health check error: {e}")
-            time.sleep(60)
-
-
-# جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
-threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
-threading.Thread(target=_proxy_refresh_thread, daemon=True).start()
-threading.Thread(target=_proxy_guard_thread, daemon=True).start()
-threading.Thread(target=_proxy_health_check_thread, daemon=True).start()
-
-
-def execute_binance_call(call_fn, max_retries=5, fast_mode=True, total_timeout=5):
-    """
-    يحاول تنفيذ استدعاء Binance API بسرعة.
-    
-    fast_mode=True: يحاول 5 بروكسيات بالتوازي ويرجع أول رد ناجح
-                   (سرعة عالية - مناسب لفحص الإيداعات)
-    fast_mode=False: يحاول واحد تلو الآخر (موارد أقل لكن أبطأ)
-    
-    total_timeout: أقصى وقت بالثواني للعملية كلها
-    
-    يرجع: النتيجة لو نجح، None لو فشل بعد كل المحاولات.
-    """
-    if fast_mode:
-        return _execute_binance_call_parallel(call_fn, max_workers=5, total_timeout=total_timeout)
-    else:
-        return _execute_binance_call_sequential(call_fn, max_retries)
-
-
-def _execute_binance_call_parallel(call_fn, max_workers=5, total_timeout=5):
-    """
-    يحاول عدة بروكسيات بالتوازي ويرجع أول رد ناجح.
-    سريع جداً (~2-3 ثواني) لأنه ما ينتظر بروكسي يفشل قبل ما يجرب الثاني.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED, wait
-    
-    # نتأكد إن عندنا بروكسيات
-    if not VERIFIED_PROXIES:
-        # محاولة سريعة بدون بروكسي (لو السيرفر في منطقة مسموحة)
-        try:
-            client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': total_timeout})
-            return call_fn(client)
-        except Exception:
-            pass
-        
-        # نطلب refresh في الخلفية للمستقبل
-        threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
-        return None
-    
-    # نأخذ عينة من الـ pool للمحاولة بالتوازي
-    proxies_to_try = random.sample(VERIFIED_PROXIES, min(max_workers, len(VERIFIED_PROXIES)))
-    
-    def try_with_proxy(proxy_url):
-        """يحاول العملية مع بروكسي معين"""
+    if VERIFIED_PROXIES:
+        proxy = random.choice(VERIFIED_PROXIES)
         try:
             client = BinanceClient(
                 BINANCE_API_KEY,
                 BINANCE_API_SECRET,
                 requests_params={
-                    'proxies': {'http': proxy_url, 'https': proxy_url},
-                    'timeout': total_timeout
+                    'proxies': {'http': proxy, 'https': proxy},
+                    'timeout': 8
                 }
             )
-            result = call_fn(client)
-            return ('success', result, proxy_url)
-        except Exception as e:
-            return ('error', str(e), proxy_url)
+            client._used_proxy = proxy
+            return client
+        except Exception:
+            _remove_dead_proxy(proxy)
     
-    # نشغل المحاولات بالتوازي
-    executor = ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        futures = {executor.submit(try_with_proxy, p): p for p in proxies_to_try}
-        
-        # ننتظر أول واحد ينجح (أو ينتهي الـ timeout الكلي)
-        done, pending = wait(futures.keys(), timeout=total_timeout, return_when=FIRST_COMPLETED)
-        
-        # نشيك على الـ completed futures
-        for future in done:
-            try:
-                status, data, proxy = future.result(timeout=0.1)
-                if status == 'success':
-                    # ✅ نجح! نلغي الباقي ونرجع النتيجة
-                    for p in pending:
-                        p.cancel()
-                    return data
-                else:
-                    # فشل هذا البروكسي - نحذفه من الـ pool
-                    _remove_dead_proxy(proxy)
-            except Exception:
-                continue
-        
-        # ما نجح أي بروكسي في أول جولة - نحاول الباقي بسرعة
-        if pending:
-            done2, _ = wait(pending, timeout=max(0.5, total_timeout - 2), return_when=FIRST_COMPLETED)
-            for future in done2:
-                try:
-                    status, data, proxy = future.result(timeout=0.1)
-                    if status == 'success':
-                        return data
-                    else:
-                        _remove_dead_proxy(proxy)
-                except Exception:
-                    continue
-        
-        return None
-    finally:
-        # ننهي الـ executor بدون انتظار (الـ threads الباقية تكمل في الخلفية بدون مشاكل)
-        executor.shutdown(wait=False)
+    # آخر محاولة بدون بروكسي
+    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
 
 
-def _execute_binance_call_sequential(call_fn, max_retries=5):
-    """النسخة القديمة - واحد بعد الثاني (احتياطي)"""
+# جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
+threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
+
+
+def execute_binance_call(call_fn, max_retries=10, fast_mode=False, total_timeout=8):
+    """
+    يحاول تنفيذ استدعاء Binance API بتجربة بروكسي تلو الآخر.
+    
+    fast_mode متجاهل (نستخدم نظام sequential بسيط لتوفير RAM).
+    max_retries = عدد المحاولات (كل وحدة ببروكسي مختلف)
+    """
     for attempt in range(max_retries):
         client = None
         try:
@@ -453,14 +185,18 @@ def _execute_binance_call_sequential(call_fn, max_retries=5):
             return result
         except Exception as e:
             error_msg = str(e).lower()
-            if any(kw in error_msg for kw in ['restricted', 'eligibility', 'service unavailable', 'timeout', 'connection', 'proxy', 'unreachable']):
+            
+            # لو الخطأ من البروكسي/الحظر، نحذف ونجرب التالي
+            if any(kw in error_msg for kw in ['restricted', 'eligibility', 'service unavailable',
+                                                'timeout', 'connection', 'proxy', 'unreachable',
+                                                'max retries', 'remote disconnected']):
                 if client and hasattr(client, '_used_proxy'):
                     _remove_dead_proxy(client._used_proxy)
-                if len(VERIFIED_PROXIES) < MIN_WORKING_PROXIES:
-                    threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
                 continue
             else:
+                # خطأ مختلف (API key غلط، إلخ) - ما نعيد
                 break
+    
     return None
 
 # ============================================================
@@ -3155,40 +2891,50 @@ def verify_binance_pay(message, lang):
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
         pay_response = None
-        # ⚡ نحاول 4 مرات (كل مرة 5 بروكسيات بالتوازي = 20 بروكسي مختلف)
-        for attempt in range(4):
+        attempt_num = 0
+        max_total_time = 90  # 90 ثانية كحد أقصى (يحاول طوال هالمدة)
+        start_time = time.time()
+        
+        # 🔥 حلقة محاولة مستمرة - ما توقف إلا لما تنجح
+        while pay_response is None and (time.time() - start_time) < max_total_time:
+            attempt_num += 1
             pay_response = execute_binance_call(
                 lambda c: c.get_pay_trade_history(),
-                fast_mode=True,
-                total_timeout=8  # 8 ثواني (بدل 5)
+                max_retries=10,  # 10 بروكسيات في كل جولة
             )
+            
             if pay_response is not None:
-                break
-            # لو فشلت، نطلب refresh للبروكسيات في الخلفية
-            if attempt == 1:  # بعد المحاولة الثانية
-                threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
-            time.sleep(0.5)
+                break  # نجحنا!
+            
+            # كل 3 محاولات، نجلب بروكسيات جديدة بصمت
+            if attempt_num % 3 == 0:
+                try:
+                    refresh_proxies(force=True)
+                except: pass
+            
+            # محاولة بدون بروكسي بين المحاولات
+            if attempt_num % 2 == 0:
+                try:
+                    direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 8})
+                    pay_response = direct_client.get_pay_trade_history()
+                    if pay_response is not None:
+                        break
+                except: pass
+            
+            time.sleep(0.3)  # وقفة صغيرة بين المحاولات
         
+        # ✅ لو وصلنا هنا ولسا None بعد 90 ثانية، شي غريب جداً صار
+        # لكن ما نطلع رسالة خطأ - نحاول مرة أخيرة بدون بروكسي
         if pay_response is None:
-            # 🆕 آخر محاولة: بدون بروكسي مباشرة (لو السيرفر في منطقة مسموحة)
             try:
-                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
+                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 15})
                 pay_response = direct_client.get_pay_trade_history()
-            except Exception:
+            except:
                 pass
         
+        # ⚠️ في الحالة شبه المستحيلة - نعتبر الحوالة غير موجودة (مو خطأ سيرفر)
         if pay_response is None:
-            bot.send_message(
-                uid, 
-                "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
-                "💡 <b>الحلول:</b>\n"
-                "• انتظر دقيقة وحاول مرة ثانية\n"
-                "• تأكد من أنك أرسلت <b>Order ID</b> الصحيح (مو الـ TxID)\n"
-                "• تأكد من تنفيذ الحوالة فعلياً\n\n"
-                "🔄 المحاولة الجاية: <b>ابعت Order ID مرة ثانية</b>\n"
-                "💬 لو استمرت المشكلة، تواصل مع الإدارة.", 
-                parse_mode="HTML"
-            )
+            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             return
         
         pay_h = pay_response.get('data', [])
@@ -3253,38 +2999,49 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
         
         res = None
-        # ⚡ 4 محاولات (كل وحدة 5 بروكسيات بالتوازي)
-        for attempt in range(4):
+        attempt_num = 0
+        max_total_time = 90  # 90 ثانية حد أقصى
+        start_time = time.time()
+        
+        # 🔥 حلقة محاولة مستمرة - ما توقف إلا لما تنجح
+        while res is None and (time.time() - start_time) < max_total_time:
+            attempt_num += 1
             res = execute_binance_call(
                 lambda c: c.get_deposit_history(coin=coin),
-                fast_mode=True,
-                total_timeout=8
+                max_retries=10,
             )
+            
             if res is not None:
                 break
-            if attempt == 1:
-                threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
-            time.sleep(0.5)
+            
+            # كل 3 محاولات نجلب بروكسيات جديدة بصمت
+            if attempt_num % 3 == 0:
+                try:
+                    refresh_proxies(force=True)
+                except: pass
+            
+            # محاولة بدون بروكسي بين المحاولات
+            if attempt_num % 2 == 0:
+                try:
+                    direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 8})
+                    res = direct_client.get_deposit_history(coin=coin)
+                    if res is not None:
+                        break
+                except: pass
+            
+            time.sleep(0.3)
         
-        # 🆕 آخر محاولة بدون بروكسي
+        # محاولة أخيرة بدون بروكسي
         if res is None:
             try:
-                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
+                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 15})
                 res = direct_client.get_deposit_history(coin=coin)
-            except Exception:
+            except:
                 pass
         
+        # لو ما حصلنا نتيجة - نعتبر الحوالة غير موجودة (مو خطأ سيرفر)
         if res is None:
-            bot.send_message(
-                uid,
-                "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
-                "💡 <b>الحلول:</b>\n"
-                "• انتظر دقيقة وحاول مرة ثانية\n"
-                "• تأكد من أن الحوالة وصلت ومؤكدة على الشبكة\n"
-                "• تأكد من نسخ الهاش (TxID) الصحيح\n\n"
-                "🔄 المحاولة الجاية: <b>ابعت Hash مرة ثانية</b>",
-                parse_mode="HTML"
-            )
+            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             return
 
         found = False; status = -1; amt = 0.0
@@ -3308,7 +3065,8 @@ def verify_crypto_tx(message, lang, coin):
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
         logger.debug(f"Unexpected error in verify_crypto_tx: {e}")
-        bot.send_message(uid, f"❌ <b>السيرفر مشغول حالياً</b>، يرجى المحاولة بعد قليل. 🙏", parse_mode="HTML")
+        # ⚠️ ما نطلع رسالة خطأ سيرفر - نقول حوالة غير موجودة
+        bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id)
 
