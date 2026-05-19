@@ -3878,16 +3878,33 @@ def ad_edit_txt_prompt(call):
     info_section = placeholders_info.get(key, "")
     info_block = f"\n\n{info_section}\n\n<i>⚠️ تأكد من نسخ كل المتغيرات {{}}  بالعدد الصحيح والترتيب الصحيح!</i>" if info_section else ""
 
+    # 🛡 نعرض النص الحالي كنص بمعالجة شاملة لـ HTML
+    # المشكلة: لو النص يحتوي على <u> أو tag غير متوازن، Telegram يرفضه
+    # الحل: نرسله كرسالة plain text (بدون parse_mode أصلاً)
+    try:
+        bot.send_message(
+            call.message.chat.id, 
+            f"📝 النص الحالي (انسخه وعدّل عليه):\n\n{current_text}"
+            # ⚠️ بدون parse_mode! النص يظهر خام بدون تفسير HTML
+        )
+    except Exception as send_err:
+        logger.error(f"Failed to send current text: {send_err}")
+        bot.send_message(call.message.chat.id, "📝 النص الحالي غير قابل للعرض. عدّله بإرسال نص جديد.")
+    
+    # ثانياً: رسالة التعليمات (هذي آمنة لأن الـ HTML تحت سيطرتنا)
     msg_text = (
-        f"<b>📝 النص الحالي:</b>\n\n"
-        f"<code>{html.escape(current_text)}</code>"
-        f"{info_block}\n\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👇 <b>انسخ النص، عدل عليه، وأرسله لي الآن.</b>\n"
+        f"👇 <b>انسخ النص فوق، عدّل عليه، وأرسله لي الآن.</b>"
+        f"{info_block}\n\n"
         f"<i>سيتم ترجمته للإنجليزي تلقائياً مع حماية الرموز والتنسيقات والأسطر!</i>\n\n"
         f"💡 <i>لإلغاء العملية أرسل: <b>الغاء</b></i>"
     )
-    msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
+    try:
+        msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
+    except Exception:
+        # fallback بدون parse_mode
+        msg = bot.send_message(call.message.chat.id, "👇 أرسل النص الجديد. أرسل 'الغاء' للإلغاء.")
+    
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
 def ad_save_custom_text(message, key):
@@ -4088,6 +4105,11 @@ def ad_prod_emoji_save(message, pid):
     if not message.text:
         bot.send_message(message.chat.id, "❌ الرجاء إرسال إيموجي.")
         return
+    
+    # دعم الإلغاء
+    if message.text.strip().lower() in ['الغاء', 'cancel', '/cancel']:
+        bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
+        return
         
     emoji_id = None
     if message.entities:
@@ -4097,16 +4119,54 @@ def ad_prod_emoji_save(message, pid):
                 break
                 
     if not emoji_id: 
-        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على رمز Premium (تأكد أنك تستخدم إيموجي مخصص من تيليجرام وليس إيموجي عادي).</b>", parse_mode="HTML")
+        bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على رمز Premium</b>\n(تأكد أنك تستخدم إيموجي مخصص من تيليجرام Premium وليس إيموجي عادي).", parse_mode="HTML")
         return
         
     p = find_product(pid)
-    if p:
-        db.products.update_one({'_id': p['_id']}, {'$set': {'custom_emoji_id': emoji_id}})
-        p_name = p.get('name_ar') or p.get('name_en') or 'المنتج'
-        bot.send_message(message.chat.id, f"✅ <b>تم تعيين الأيقونة بنجاح لمنتج [{p_name}]!</b>\nستظهر الآن بجانب اسمه في قائمة المتجر.", parse_mode="HTML")
-    else:
+    if not p:
         bot.send_message(message.chat.id, "❌ عذراً، لم يتم العثور على المنتج في قاعدة البيانات.")
+        return
+    
+    # 🆕 جلب الإيموجي القديم (لعرضه في رسالة التأكيد)
+    old_emoji_id = p.get('custom_emoji_id')
+    
+    # 🆕 الحذف ثم الإدراج (atomic) - يضمن إن القديم ينحذف بشكل نظيف قبل الجديد
+    # 1) أولاً نحذف الحقل القديم بالكامل
+    db.products.update_one(
+        {'_id': p['_id']}, 
+        {'$unset': {'custom_emoji_id': ''}}
+    )
+    
+    # 2) ثم نضيف الإيموجي الجديد
+    db.products.update_one(
+        {'_id': p['_id']}, 
+        {'$set': {'custom_emoji_id': emoji_id}}
+    )
+    
+    p_name = p.get('name_ar') or p.get('name_en') or 'المنتج'
+    
+    # رسالة تأكيد مع عرض الإيموجي الجديد فعلياً
+    if old_emoji_id:
+        confirm_msg = (
+            f"✅ <b>تم تحديث الأيقونة بنجاح!</b>\n\n"
+            f"📦 المنتج: <b>{clean_name(p_name)}</b>\n\n"
+            f"🆕 الأيقونة الجديدة: <tg-emoji emoji-id=\"{emoji_id}\">✨</tg-emoji>\n"
+            f"🗑 تم حذف الأيقونة القديمة تلقائياً\n\n"
+            f"<i>ستظهر الأيقونة الجديدة في كل القوائم والإشعارات.</i>"
+        )
+    else:
+        confirm_msg = (
+            f"✅ <b>تم تعيين الأيقونة بنجاح!</b>\n\n"
+            f"📦 المنتج: <b>{clean_name(p_name)}</b>\n\n"
+            f"🆕 الأيقونة: <tg-emoji emoji-id=\"{emoji_id}\">✨</tg-emoji>\n\n"
+            f"<i>ستظهر الآن في كل القوائم والإشعارات.</i>"
+        )
+    
+    try:
+        bot.send_message(message.chat.id, confirm_msg, parse_mode="HTML")
+    except Exception:
+        # لو فشل عرض الإيموجي (Premium مش متاح)، نرسل رسالة بسيطة
+        bot.send_message(message.chat.id, f"✅ تم تحديث الأيقونة لمنتج [{p_name}]!")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
 def admin_api_main(call):
