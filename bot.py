@@ -957,6 +957,8 @@ DEFAULT_BUTTONS = {
         'btn_support': '👨‍💻 الدعم الفني',
         'btn_lang': '🌐 English',
         'btn_admin': '👑 لوحة الإدارة',
+        'btn_terms': '📜 شروط الاستخدام',
+        'terms_content': "📜 <b>شروط استخدام المتجر</b>\n\n━━━━━━━━━━━━━━\n\n<i>لم يتم إضافة شروط الاستخدام بعد.</i>\n\n<i>سيتم تحديث هذه الصفحة قريباً من قبل الإدارة.</i>\n\n━━━━━━━━━━━━━━\n\n💬 <i>لأي استفسار، تواصل مع الإدارة.</i>",
         'btn_stars': '⭐️ نجوم تيليجرام',
         'btn_binance': '🟡 Binance Pay',
         'btn_usdt_trc20': '🟢 USDT (TRC-20)',
@@ -982,6 +984,8 @@ DEFAULT_BUTTONS = {
         'btn_support': '👨‍💻 Support',
         'btn_lang': '🌐 العربية',
         'btn_admin': '👑 Admin Panel',
+        'btn_terms': '📜 Terms of Use',
+        'terms_content': "📜 <b>Store Terms of Use</b>\n\n━━━━━━━━━━━━━━\n\n<i>Terms of use have not been added yet.</i>\n\n<i>This page will be updated soon by the administration.</i>\n\n━━━━━━━━━━━━━━\n\n💬 <i>For any inquiries, contact support.</i>",
         'btn_stars': '⭐️ Telegram Stars',
         'btn_binance': '🟡 Binance Pay',
         'btn_usdt_trc20': '🟢 USDT (TRC-20)',
@@ -1184,7 +1188,7 @@ def safe_translate_for_cms(text, target_lang='en'):
         result = '\n'.join(translated_lines)
         
         # 🛡 فحص نهائي للسلامة
-        # 1. عدد {} placeholders
+        # 1. عدد {} placeholders (هذا الفحص صارم - مهم)
         original_placeholders = len(re.findall(r'\{[^}]*\}', text))
         translated_placeholders = len(re.findall(r'\{[^}]*\}', result))
         if original_placeholders != translated_placeholders:
@@ -1195,28 +1199,51 @@ def safe_translate_for_cms(text, target_lang='en'):
             )
             return text
         
-        # 2. عدد <tg-emoji>
+        # 2. عدد <tg-emoji> (هذا الفحص صارم - مهم للإيموجي المميز)
         original_emojis = len(re.findall(r'<tg-emoji', text))
         translated_emojis = len(re.findall(r'<tg-emoji', result))
         if original_emojis != translated_emojis:
             logger.warning(
                 f"⚠️ Translation lost premium emojis! "
                 f"Original: {original_emojis}, Translated: {translated_emojis}. "
-                f"Returning original text."
+                f"Trying to fix by appending missing emojis..."
             )
-            return text
+            # 🆕 لو فقدنا إيموجيات، نحاول نضيفها في نهاية النص بدل ما نرفض الترجمة كاملاً
+            try:
+                # نجلب كل tg-emoji tags من النص الأصلي
+                original_emoji_tags = re.findall(r'<tg-emoji[^>]*>.*?</tg-emoji>', text, re.DOTALL)
+                translated_emoji_set = set(re.findall(r'<tg-emoji[^>]*>.*?</tg-emoji>', result, re.DOTALL))
+                
+                # نضيف اللي مفقود في نهاية النص
+                missing_emojis = []
+                for emoji_tag in original_emoji_tags:
+                    if emoji_tag not in translated_emoji_set:
+                        missing_emojis.append(emoji_tag)
+                
+                if missing_emojis:
+                    result = result + ' ' + ' '.join(missing_emojis)
+                    logger.info(f"✅ Recovered {len(missing_emojis)} missing emojis")
+            except Exception as fix_err:
+                logger.error(f"Failed to recover emojis: {fix_err}")
+                return text
         
-        # 3. HTML tags متوازنة
+        # 3. HTML tags متوازنة (هذا الفحص أصبح تحذيري فقط - مو يرفض الترجمة)
+        unbalanced_tags = []
         for tag in ['b', 'i', 'u', 's', 'code', 'blockquote', 'pre']:
             open_count = len(re.findall(rf'<{tag}[^>]*>', result, re.IGNORECASE))
             close_count = len(re.findall(rf'</{tag}>', result, re.IGNORECASE))
             if open_count != close_count:
-                logger.warning(
-                    f"⚠️ Translation broke <{tag}> balance! "
-                    f"Open: {open_count}, Close: {close_count}. "
-                    f"Returning original text."
-                )
-                return text
+                unbalanced_tags.append(f"<{tag}>")
+                # نحاول نصلح: نضيف tags إغلاق ناقصة في النهاية
+                if open_count > close_count:
+                    diff = open_count - close_count
+                    result = result + (f'</{tag}>' * diff)
+                elif close_count > open_count:
+                    diff = close_count - open_count
+                    result = (f'<{tag}>' * diff) + result
+        
+        if unbalanced_tags:
+            logger.warning(f"⚠️ Fixed unbalanced tags: {unbalanced_tags}")
         
         return result
     except Exception as e:
@@ -1609,11 +1636,50 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_support', url=f"https://t.me/{OWNER_USER}"),
                create_btn(uid, 'btn_lang', callback_data="toggle_language"))
     
+    # 🆕 زر شروط الاستخدام
+    markup.add(create_btn(uid, 'btn_terms', callback_data="open_terms"))
+    
     if user.get('is_admin') == 1 or uid == OWNER_ID:
         markup.add(create_btn(uid, 'btn_admin', callback_data="admin_panel_main"))
 
     welcome_message = get_text(uid, 'welcome', uid, from_user.first_name, users_total, user.get('balance', 0.0))
     bot.send_message(chat_id, welcome_message, reply_markup=markup, parse_mode="HTML")
+
+
+# ============================================================
+# 📜 معالج زر شروط الاستخدام
+# ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "open_terms")
+def show_terms(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    
+    # نجيب النص (يستخدم CMS تلقائياً لو الأدمن عدّله)
+    terms_text = get_text(uid, 'terms_content')
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
+    
+    try:
+        bot.edit_message_text(
+            terms_text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        if 'message is not modified' in error_str:
+            pass  # الرسالة نفسها، طبيعي
+        else:
+            # محاولة إرسال جديدة
+            try:
+                bot.send_message(call.message.chat.id, terms_text, reply_markup=markup, parse_mode="HTML")
+            except:
+                pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("init_lang_"))
 def init_lang_selection(call):
@@ -3680,6 +3746,8 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
     markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
     markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
+    # 🆕 شروط الاستخدام
+    markup.add(InlineKeyboardButton("📜 محتوى شروط الاستخدام", callback_data="edit_txt_terms_content"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -3700,7 +3768,7 @@ def ad_cms_btns_list(call):
     cat = call.data.replace("ad_cms_b_", "")
     
     btn_categories = {
-        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_admin'],
+        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin'],
         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc'],
         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy'],
         'shop': ['btn_gh', 'btn_gemini', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
@@ -3776,6 +3844,16 @@ def ad_edit_txt_prompt(call):
             "💡 <b>المتغيرات (1 متغير):</b>\n"
             "<code>{}</code> 1 = اسم حساب GitHub (مخفي)\n\n"
             "💡 <i>هذا الإشعار يُرسل في اللوق عند كل تفعيل GitHub Student ناجح</i>"
+        ),
+        'terms_content': (
+            "💡 <b>محتوى شروط الاستخدام</b>\n\n"
+            "🎨 <b>يدعم:</b>\n"
+            "• Premium Emojis ✨\n"
+            "• تنسيقات HTML (<b>, <i>, <code>, <u>)\n"
+            "• الفواصل البصرية ━━━━\n"
+            "• الإيموجي العادي 📜🎉\n"
+            "• الأسطر الفارغة (تُحفظ كما هي)\n\n"
+            "💡 <i>لا توجد متغيرات في هذا النص - اكتبه بحرية!</i>"
         ),
         'new_stock': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
@@ -4140,18 +4218,52 @@ def ad_p_step1(call):
     bot.register_next_step_handler(msg, ad_p_step2)
 
 def ad_p_step2(message):
-    uid = message.from_user.id; n_ar = message.text
-    try: n_en = GoogleTranslator(source='auto', target='en').translate(n_ar)
-    except: n_en = n_ar
+    uid = message.from_user.id
+    # 🆕 نستخرج الـ Premium Emojis ونحولها لـ HTML
+    n_ar = extract_custom_emojis_to_html(message)
+    
+    # 🆕 نستخدم safe_translate_for_cms اللي يحمي التنسيقات والإيموجيات
+    n_en = safe_translate_for_cms(n_ar, 'en')
+    
     temp_product[uid] = {'n_ar': n_ar, 'n_en': n_en}
-    msg = bot.send_message(uid, f"✅ تم الحفظ (الترجمة: {n_en})\n📝 أرسل وصف المنتج (بالعربية فقط):")
+    # نعرض المعاينة بدون escape عشان يبان الإيموجي
+    bot.send_message(uid, f"✅ تم حفظ الاسم!\n\n🇸🇦 العربي: {n_ar}\n🇺🇸 الإنجليزي: {n_en}", parse_mode="HTML")
+    msg = bot.send_message(uid, "📝 أرسل وصف المنتج (بالعربية):\n💡 <i>يمكنك استخدام Premium Emojis، تنسيقات (Bold، Italic)، وأي رموز تعبيرية</i>", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_p_step3)
 
 def ad_p_step3(message):
-    uid = message.from_user.id; d_ar = message.text
-    try: d_en = GoogleTranslator(source='auto', target='en').translate(d_ar)
-    except: d_en = d_ar
+    uid = message.from_user.id
+    # 🆕 نستخرج الـ Premium Emojis ونحولها لـ HTML
+    d_ar = extract_custom_emojis_to_html(message)
+    
+    # 🆕 نستخدم safe_translate_for_cms للحفاظ على التنسيقات
+    d_en = safe_translate_for_cms(d_ar, 'en')
+    
+    # تحقق إن الترجمة نجحت فعلاً (مو نفس النص العربي)
+    is_translated = (d_en != d_ar)
+    
     temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
+    
+    # 🆕 عرض معاينة كاملة بالنسختين
+    preview_msg = (
+        f"✅ <b>تم حفظ الوصف!</b>\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🇸🇦 <b>العربي:</b>\n{d_ar}\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🇺🇸 <b>الإنجليزي:</b>\n{d_en}\n"
+        f"━━━━━━━━━━━━━━"
+    )
+    
+    if not is_translated:
+        preview_msg += "\n\n⚠️ <i>ملاحظة: الترجمة فشلت في الحفاظ على بعض التنسيقات. تم حفظ النسخة العربية في الإنجليزي.</i>"
+    
+    try:
+        bot.send_message(uid, preview_msg, parse_mode="HTML")
+    except Exception as preview_err:
+        # لو الـ HTML معطّل بسبب الترجمة، نرسل بدون parse_mode
+        logger.warning(f"Preview HTML error: {preview_err}")
+        bot.send_message(uid, "✅ تم حفظ الوصف (المعاينة تعذرت بسبب HTML).")
+    
     msg = bot.send_message(uid, "💰 أرسل السعر بالدولار ($):")
     bot.register_next_step_handler(msg, ad_p_price)
 
