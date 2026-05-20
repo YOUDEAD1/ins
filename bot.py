@@ -404,6 +404,21 @@ def initialize_referrals_v2():
         except Exception as e:
             logger.error(f"Error creating indexes: {e}")
 
+        # 🛡 4. حماية atomic ضد سرقة الحوالات (race conditions)
+        # هذولي الـ indexes حرجين - يمنعون أي مستخدمين من استخدام نفس الـ hash بنفس اللحظة
+        try:
+            db.used_transactions.create_index('transaction_id', unique=True)
+            logger.info("✅ تم إنشاء unique index على used_transactions")
+        except Exception as e:
+            # الـ index قد يكون موجود مسبقاً - هذا ok
+            logger.debug(f"used_transactions index info: {e}")
+        
+        try:
+            db.claimed_hashes.create_index('transaction_id', unique=True)
+            logger.info("✅ تم إنشاء unique index على claimed_hashes")
+        except Exception as e:
+            logger.debug(f"claimed_hashes index info: {e}")
+
         # 4. وضع علامة أن النظام تم تهيئته
         db.settings.update_one(
             {'key': REF_V2_INIT_KEY},
@@ -537,22 +552,58 @@ def update_referrer_balance(referrer_id):
                     return_document=True
                 )
                 
-                # 🔔 إذا التحديث نجح + هذا إنجاز جديد (وصول لمضاعف 10) → إشعار اللوق
+                # 🔔 إذا التحديث نجح + هذا إنجاز جديد (وصول لمضاعف 10) → إشعار اللوق + الخاص
                 if update_result is not None and diff > 0:
                     # diff > 0 يعني إن المُحيل ربح مكافأة جديدة (مو خسارة)
+                    
+                    # 🆕 1) إشعار حماسي للمُحيل في الخاص (يخبره أنه ربح)
+                    try:
+                        new_balance = float(update_result.get('balance', 0))
+                        ref_lang = referrer.get('lang', 'ar')
+                        
+                        if ref_lang == 'ar':
+                            milestone_msg = (
+                                f"🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n"
+                                f"━━━━━━━━━━━━━━\n"
+                                f"👥 <b>عدد إحالاتك النشطة:</b> <b>{active_count}</b>\n"
+                                f"💰 <b>مكافأتك:</b> <code>+${diff:.2f}</code> 🤩\n"
+                                f"💼 <b>رصيدك الحالي:</b> <b>${new_balance:.2f}</b>\n"
+                                f"━━━━━━━━━━━━━━\n\n"
+                                f"🔥 <b>كل ما زادت إحالاتك، زادت أرباحك!</b>\n"
+                                f"🚀 شارك رابطك أكثر = اكسب أكثر!\n\n"
+                                f"💪 <i>استمر! الفرصة مفتوحة بلا حدود.</i>"
+                            )
+                        else:
+                            milestone_msg = (
+                                f"🎉🎊 <b>Congrats! New Milestone!</b> 🏆\n\n"
+                                f"━━━━━━━━━━━━━━\n"
+                                f"👥 <b>Active Referrals:</b> <b>{active_count}</b>\n"
+                                f"💰 <b>Your Reward:</b> <code>+${diff:.2f}</code> 🤩\n"
+                                f"💼 <b>Current Balance:</b> <b>${new_balance:.2f}</b>\n"
+                                f"━━━━━━━━━━━━━━\n\n"
+                                f"🔥 <b>More referrals = More earnings!</b>\n"
+                                f"🚀 Share your link more = Earn more!\n\n"
+                                f"💪 <i>Keep going! No limits.</i>"
+                            )
+                        
+                        bot.send_message(rid, milestone_msg, parse_mode="HTML")
+                    except Exception as dm_err:
+                        logger.debug(f"Couldn't send milestone DM to {rid}: {dm_err}")
+                    
+                    # 🆕 2) إشعار لقناة اللوق
                     try:
                         log_ch = get_setting('log_channel')
                         if log_ch and log_ch != "Not Set":
                             referrer_display = obscure_text(referrer.get('username') or str(rid))
                             
-                            # 🆕 النص الافتراضي (3 متغيرات فقط - بدون إجمالي الأرباح)
+                            # النص الافتراضي
                             log_text = LANG['en']['log_ref_milestone'].format(
                                 referrer_display,
                                 active_count,
                                 f"{diff:.2f}"
                             )
                             
-                            # نشيك على النص المخصص لو الأدمن عدّله من CMS
+                            # شيك على النص المخصص من CMS
                             custom_milestone = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_milestone'})
                             if custom_milestone and custom_milestone.get('value'):
                                 try:
@@ -562,11 +613,13 @@ def update_referrer_balance(referrer_id):
                                         f"{diff:.2f}"
                                     )
                                 except:
-                                    pass  # لو في خطأ format، نستخدم الافتراضي
+                                    pass
                             
                             bot.send_message(log_ch, log_text, parse_mode="HTML")
                     except Exception as log_err:
                         logger.debug(f"Milestone log error: {log_err}")
+                    
+                    logger.info(f"🏆 إنجاز جديد: المستخدم {rid} وصل {active_count} إحالة نشطة → +${diff:.2f}")
     except Exception as e:
         logger.error(f"Error updating referrer balance: {e}")
 
@@ -2177,9 +2230,37 @@ def show_hist_detail(call):
                     out = "💳 <b>Your Last 10 Deposits</b>\n\n"
                 else:
                     out = "💳 <b>آخر 10 إيداعات لك</b>\n\n"
-                for r in recs: 
+                
+                for i, r in enumerate(recs, 1): 
                     date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
-                    out += f"💳 <b>{'Deposit' if l=='en' else 'إيداع'}</b>\n📅 <code>{date_str}</code>\n💰 <b>${r.get('amount', 0):.2f}</b>\n🆔 <code>{r.get('transaction_id', '')[:30]}...</code>\n────────────\n"
+                    amount = r.get('amount', 0)
+                    method = r.get('method', '')
+                    tx_id = r.get('transaction_id', '')
+                    
+                    if l == 'en':
+                        out += (
+                            f"━━━━━━━━━━━━━━\n"
+                            f"#{i} <b>Deposit</b> ✅\n"
+                            f"💰 <b>Amount:</b> <code>${amount:.2f}</code>\n"
+                            f"📅 <b>Date:</b> <code>{date_str}</code>\n"
+                        )
+                        if method:
+                            out += f"💳 <b>Method:</b> {method}\n"
+                        if tx_id:
+                            out += f"🆔 <b>TX ID:</b> <code>{tx_id}</code>\n"
+                    else:
+                        out += (
+                            f"━━━━━━━━━━━━━━\n"
+                            f"#{i} <b>إيداع</b> ✅\n"
+                            f"💰 <b>المبلغ:</b> <code>${amount:.2f}</code>\n"
+                            f"📅 <b>التاريخ:</b> <code>{date_str}</code>\n"
+                        )
+                        if method:
+                            out += f"💳 <b>الطريقة:</b> {method}\n"
+                        if tx_id:
+                            out += f"🆔 <b>رقم العملية:</b> <code>{tx_id}</code>\n"
+                
+                out += "━━━━━━━━━━━━━━"
             
             markup = InlineKeyboardMarkup()
             markup.add(create_btn(uid, 'btn_back', callback_data="history_menu_callback"))
@@ -3768,57 +3849,39 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
             thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
             
             admin_msg = (
-                f"🚨🚨🚨 <b>تنبيه أمني خطير!</b> 🚨🚨🚨\n\n"
-                f"📍 <b>اكتشف البوت محاولة سرقة حوالة!</b>\n"
-                f"⚠️ <b>تم حظر الحسابين وسحب الرصيد - مراجعة يدوية مطلوبة</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🆔 <b>الهاش:</b>\n<code>{tx_id_clean[:60]}</code>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>المستخدم الأول (الذي نجح إيداعه):</b>\n"
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
-                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n"
-                f"   • 🚫 الحالة: <b>محظور</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 <b>المستخدم الثاني (حاول استخدام نفس الهاش):</b>\n"
+                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
                 f"   • ID: <code>{thief_uid}</code>\n"
-                f"   • Username: @{thief_username}\n"
-                f"   • 🚫 الحالة: <b>محظور</b>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🤔 <b>الاحتمالات:</b>\n"
-                f"1️⃣ الأول صاحب الحوالة الفعلي، الثاني نصاب يراقب blockchain\n"
-                f"2️⃣ الاثنين متعاونين (نصب منظم)\n"
-                f"3️⃣ نفس الشخص بحسابين مختلفين\n\n"
-                f"💡 <b>مطلوب منك:</b>\n"
-                f"• راجع نشاط الحسابين\n"
-                f"• تحقق من الـ IP لو متاح\n"
-                f"• قرر يدوياً: إلغاء حظر الأول لو بريء + إرجاع رصيده\n"
-                f"• أو حظر دائم لو الاثنين متورطين"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
             )
             notify_admins(admin_msg)
         except Exception as notify_err:
             logger.error(f"Failed to notify admin about hash collision: {notify_err}")
         
-        # رسائل للمستخدمين
+        # رسائل بسيطة للمستخدمين
+        manipulation_msg = (
+            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+        )
+        
         try:
-            bot.send_message(
-                original_uid,
-                "🚫 <b>تم تعليق حسابك للمراجعة!</b>\n\n"
-                "📌 السبب: اكتشف نظامنا تضارب في الحوالة الخاصة بك.\n\n"
-                "💬 لو كنت بريء، تواصل مع الإدارة لمراجعة حسابك.",
-                parse_mode="HTML"
-            )
+            bot.send_message(original_uid, manipulation_msg, parse_mode="HTML")
         except Exception:
             pass
         
         try:
-            bot.send_message(
-                thief_uid,
-                "🚫 <b>تم حظر حسابك!</b>\n\n"
-                "📌 السبب: محاولة استخدام حوالة تخص مستخدم آخر.\n\n"
-                "💬 لو كنت تعتقد أن هذا خطأ، تواصل مع الإدارة.",
-                parse_mode="HTML"
-            )
+            bot.send_message(thief_uid, manipulation_msg, parse_mode="HTML")
         except Exception:
             pass
         
@@ -3836,11 +3899,16 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
 
 def claim_tx_hash(tx_id, uid):
     """
-    🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه.
+    🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه - atomic 100%.
+    
+    🔥 الاستراتيجية الجديدة (atomic-first):
+    - نحاول insert في claimed_hashes أولاً (atomic + unique index)
+    - لو نجح: أنت الأول → استمر
+    - لو فشل (duplicate): شخص آخر سبقك → نحظره فوراً
     
     يرجع:
-    - 'claimed' لو نجح الحجز (هذا أول استخدام)
-    - 'already_used' لو الـ hash استُخدم سابقاً ونُجح فحصه (إيداع مكتمل) - يُطبّق عقوبات
+    - 'claimed' لو نجح الحجز (هذا أول استخدام - استمر)
+    - 'already_used' لو الـ hash استُخدم سابقاً (إيداع مكتمل) - يُطبّق عقوبات
     - 'stolen_attempt' لو شخص آخر يحاول استخدام نفس الـ hash المعلق
     - 'own_pending' لو نفس المستخدم يعيد المحاولة (مسموح)
     - 'already_used_own' لو نفس المستخدم استخدمه قبل (مرفوض)
@@ -3849,23 +3917,58 @@ def claim_tx_hash(tx_id, uid):
         tx_id_clean = str(tx_id).strip().lower()
         uid = int(uid)
         
-        # 1. شيك على الإيداعات المكتملة (هذا الأخطر - شخص ثاني بعد نجاح الأول)
+        # 🛡 الخطوة 1: نحاول insert atomic في claimed_hashes (الـ unique index يحمي)
+        # هذا اللي يحل race condition - فقط مستخدم واحد ينجح
+        try:
+            db.claimed_hashes.insert_one({
+                'transaction_id': tx_id_clean,
+                'user_id': uid,
+                'claimed_at': int(time.time()),
+                'status': 'pending'
+            })
+            # ✅ نجح الـ insert - أنت الأول
+            # نشيك إن الـ hash مو مستخدم في used_transactions أصلاً
+            used_record = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+            if used_record:
+                # حالة نادرة: الـ hash استخدم بالفعل لكن ما كان في claimed_hashes
+                # نلغي الـ claim وننفذ العقوبات
+                db.claimed_hashes.delete_one({'transaction_id': tx_id_clean, 'user_id': uid})
+                
+                original_uid = used_record.get('user_id')
+                if original_uid == uid:
+                    return 'already_used_own'
+                
+                # نطبق العقوبات
+                original_amount = float(used_record.get('amount', 0))
+                original_user = db.users.find_one({'user_id': original_uid})
+                if original_user and original_user.get('is_banned') != 1:
+                    punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                return 'already_used'
+            
+            return 'claimed'
+        except Exception as insert_err:
+            # ❌ فشل الـ insert - شخص آخر سبقك (race condition محل)
+            err_str = str(insert_err).lower()
+            if 'duplicate' not in err_str and 'e11000' not in err_str:
+                # خطأ ثاني مو duplicate
+                logger.error(f"Unexpected claim error: {insert_err}")
+                return 'claimed'  # نسمح بالمحاولة عشان ما نقفله بسبب خطأ DB
+        
+        # 🛡 الخطوة 2: لقينا duplicate - نشوف من اللي سبقنا
+        # شيك على الـ used_transactions أولاً (أخطر حالة)
         used_record = db.used_transactions.find_one({'transaction_id': tx_id_clean})
         if used_record:
             original_uid = used_record.get('user_id')
             if original_uid == uid:
                 return 'already_used_own'
             
-            # 🚨 شخص ثاني بعد نجاح الأول → نطبق العقوبات على الاثنين
+            # 🚨 شخص ثاني بعد نجاح الأول - عقوبات كاملة
             original_amount = float(used_record.get('amount', 0))
-            
-            # نشيك إن الأصلي مو محظور أصلاً (عشان ما نكرر العقوبة)
             original_user = db.users.find_one({'user_id': original_uid})
             if original_user and original_user.get('is_banned') != 1:
-                # نطبق العقوبات
                 punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
             else:
-                # الأصلي محظور أصلاً، نحظر الثاني فقط ونرسل إشعار
+                # الأصلي محظور أصلاً
                 try:
                     db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
                     thief_data = db.users.find_one({'user_id': uid}) or {}
@@ -3874,73 +3977,125 @@ def claim_tx_hash(tx_id, uid):
                         f"🚨 <b>محاولة سرقة جديدة!</b>\n\n"
                         f"👤 المهاجم: <code>{uid}</code> @{thief_username}\n"
                         f"🆔 Hash: <code>{tx_id_clean[:30]}...</code>\n"
-                        f"💡 الحساب الأصلي محظور بالفعل من تضارب سابق.\n"
+                        f"💡 الحساب الأصلي محظور بالفعل.\n"
                         f"🚫 تم حظر هذا المستخدم تلقائياً."
                     )
-                except Exception:
-                    pass
-            
+                except: pass
             return 'already_used'
         
-        # 2. شيك على المحاولات المعلقة (claimed_hashes)
+        # 🛡 الخطوة 3: الـ hash موجود في claimed_hashes (شخص آخر حجزه)
         existing_claim = db.claimed_hashes.find_one({'transaction_id': tx_id_clean})
         
-        if existing_claim:
-            if existing_claim.get('user_id') == uid:
-                return 'own_pending'
-            else:
-                # 🚨 شخص ثاني يحاول استخدام hash معلق (قبل ما يتأكد نجاحه)
-                # هذا أقل خطورة - نسجله بس بدون حظر (قد يكون خطأ)
-                try:
-                    db.theft_attempts.insert_one({
-                        'transaction_id': tx_id_clean,
-                        'original_claimer': existing_claim.get('user_id'),
-                        'thief_attempt': uid,
-                        'thief_username': db.users.find_one({'user_id': uid}, {'username': 1}).get('username', 'unknown'),
-                        'timestamp': int(time.time()),
-                        'collision_type': 'pre_success',
-                        'status': 'pending_admin_review'
-                    })
-                except Exception:
-                    pass
-                
-                try:
-                    thief_data = db.users.find_one({'user_id': uid})
-                    thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
-                    
-                    notify_admins(
-                        f"⚠️ <b>محاولة استخدام حوالة معلقة!</b>\n\n"
-                        f"👤 الشخص الثاني:\n"
-                        f"   • ID: <code>{uid}</code>\n"
-                        f"   • Username: @{thief_username}\n\n"
-                        f"👤 صاحب الادعاء الأصلي:\n"
-                        f"   • ID: <code>{existing_claim.get('user_id')}</code>\n\n"
-                        f"🆔 Hash: <code>{tx_id_clean[:30]}...</code>\n\n"
-                        f"💡 <i>الحوالة لم يتم تأكيدها بعد. مراقب فقط.</i>\n"
-                        f"⚠️ <i>لو الأول نجح، سيتم حظر الاثنين تلقائياً.</i>"
-                    )
-                except Exception as notify_err:
-                    logger.error(f"Failed to notify pre-success collision: {notify_err}")
-                
-                logger.warning(f"⚠️ محاولة تضارب pre-success: المستخدم {uid} مقابل {existing_claim.get('user_id')}")
-                return 'stolen_attempt'
+        if not existing_claim:
+            # غريب - الـ insert فشل بـ duplicate لكن لا في claimed_hashes ولا used_transactions
+            # نحاول مرة ثانية
+            return claim_tx_hash(tx_id, uid)
         
-        # 3. ما فيه ادعاء سابق، نحجزه لهذا المستخدم
+        if existing_claim.get('user_id') == uid:
+            return 'own_pending'  # نفس المستخدم
+        
+        # 🚨 شخصين مختلفين، نفس الـ hash، نفس الوقت → race condition!
+        # نطبق عقوبات قوية فوراً لأن هذا سيناريو نصب واضح
+        original_uid = existing_claim.get('user_id')
+        
+        # تسجيل المحاولة
         try:
-            db.claimed_hashes.insert_one({
+            thief_data = db.users.find_one({'user_id': uid}) or {}
+            original_data = db.users.find_one({'user_id': original_uid}) or {}
+            
+            db.theft_attempts.insert_one({
                 'transaction_id': tx_id_clean,
-                'user_id': uid,
-                'claimed_at': int(time.time()),
-                'status': 'pending'
+                'original_claimer': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_attempt': uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'timestamp': int(time.time()),
+                'collision_type': 'simultaneous_race',
+                'status': 'pending_admin_review'
             })
-            return 'claimed'
         except Exception:
-            existing_claim = db.claimed_hashes.find_one({'transaction_id': tx_id_clean})
-            if existing_claim and existing_claim.get('user_id') == uid:
-                return 'own_pending'
-            elif existing_claim:
-                return 'stolen_attempt'
-            return 'claimed'
+            pass
+        
+        # 🚨 حظر الاثنين فوراً (race condition = نصب واضح)
+        try:
+            # حظر الاثنين
+            db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
+            db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+            
+            # سحب رصيد الأول (لأنه قد يكون استلم مبلغ من إيداع آخر)
+            original_user = db.users.find_one({'user_id': original_uid})
+            original_balance = float(original_user.get('balance', 0)) if original_user else 0
+            
+            if original_balance > 0:
+                try:
+                    db.balance_seizures.insert_one({
+                        'user_id': original_uid,
+                        'seized_amount': original_balance,
+                        'reason': 'simultaneous_hash_race',
+                        'related_tx': tx_id_clean,
+                        'collaborator': uid,
+                        'timestamp': int(time.time())
+                    })
+                except Exception: pass
+                
+                db.users.update_one(
+                    {'user_id': original_uid},
+                    {'$set': {'balance': 0.0}}
+                )
+        except Exception as ban_err:
+            logger.error(f"Failed to ban race users: {ban_err}")
+        
+        # إشعار قوي للأدمن
+        try:
+            original_username = original_data.get('username', 'unknown') if original_data else 'unknown'
+            thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
+            
+            admin_msg = (
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان أرسلا نفس الهاش/الأوردر في نفس اللحظة.\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
+                f"   • ID: <code>{uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
+            )
+            notify_admins(admin_msg)
+        except Exception:
+            pass
+        
+        # رسائل بسيطة للمستخدمين
+        cancel_msg_ar = (
+            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+        )
+        cancel_msg_en = (
+            "❌ <b>Manipulation detected!</b>\n\n"
+            "🚫 Your account has been banned for trying to use the same transaction with another account.\n\n"
+            "⚠️ <i>You attempted manipulation - contact admin if you believe this is a mistake.</i>"
+        )
+        
+        try:
+            bot.send_message(uid, cancel_msg_ar, parse_mode="HTML")
+        except: pass
+        try:
+            bot.send_message(original_uid, cancel_msg_ar, parse_mode="HTML")
+        except: pass
+        
+        logger.warning(
+            f"🚨 SIMULTANEOUS RACE DETECTED: "
+            f"users {original_uid} and {uid} both tried hash {tx_id_clean[:20]}... "
+            f"at the same time. Both banned."
+        )
+        
+        return 'stolen_attempt'
     except Exception as e:
         logger.error(f"Error in claim_tx_hash: {e}")
         return 'claimed'
@@ -3975,12 +4130,86 @@ threading.Thread(target=_cleanup_thread, daemon=True).start()
 
 
 def credit_user(uid, amt, tx_id, lang, method):
-    db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
-    db.used_transactions.insert_one({'transaction_id': tx_id, 'amount': amt, 'user_id': uid})
+    """
+    🛡 إضافة رصيد للمستخدم بشكل atomic (مقاوم لـ race conditions).
     
-    # 🛡 نظف الـ claimed_hashes بعد نجاح الإيداع (الـ used_transactions صار يحميه)
+    الترتيب الحرج:
+    1. أولاً نحاول insert_one في used_transactions (atomic + unique index)
+    2. لو نجح: نضيف الرصيد
+    3. لو فشل (duplicate): شخص آخر سبقنا → ما نضيف رصيد ونرسل تنبيه
+    """
+    tx_id_clean = str(tx_id).strip().lower() if isinstance(tx_id, str) else str(tx_id).lower()
+    
+    # 🛡 الخطوة 1: محاولة atomic insert (الـ unique index يحمي من race condition)
     try:
-        db.claimed_hashes.delete_one({'transaction_id': str(tx_id).strip().lower()})
+        db.used_transactions.insert_one({
+            'transaction_id': tx_id,
+            'amount': amt,
+            'user_id': uid,
+            'method': method,
+            'created_at': int(time.time())
+        })
+    except Exception as insert_err:
+        err_str = str(insert_err).lower()
+        if 'duplicate' in err_str or 'e11000' in err_str:
+            # ❌ الـ tx مستخدم بالفعل! شخص آخر سبقنا
+            logger.warning(
+                f"🚨 RACE CONDITION CAUGHT في credit_user: "
+                f"user {uid} حاول استخدام tx {tx_id_clean[:30]} لكن سبقه آخر"
+            )
+            
+            # نشوف من الأول
+            existing = db.used_transactions.find_one({'transaction_id': tx_id})
+            if existing:
+                original_uid = existing.get('user_id')
+                if original_uid != uid:
+                    # 🚨 نطبق العقوبات
+                    original_amount = float(existing.get('amount', 0))
+                    original_user = db.users.find_one({'user_id': original_uid})
+                    if original_user and original_user.get('is_banned') != 1:
+                        try:
+                            punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                        except Exception as punish_err:
+                            logger.error(f"Failed punishment: {punish_err}")
+            
+            # رسالة الإلغاء للمستخدم
+            try:
+                if lang == 'ar':
+                    bot.send_message(
+                        uid,
+                        "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                        "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                        "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                        parse_mode="HTML"
+                    )
+                else:
+                    bot.send_message(
+                        uid,
+                        "❌ <b>Manipulation detected!</b>\n\n"
+                        "🚫 Your account has been banned for trying to use the same transaction with another account.\n\n"
+                        "⚠️ <i>You attempted manipulation - contact admin if you believe this is a mistake.</i>",
+                        parse_mode="HTML"
+                    )
+            except Exception: pass
+            return  # ⛔ نوقف هنا - ما نضيف رصيد
+        else:
+            # خطأ آخر مو duplicate
+            logger.error(f"Failed to insert tx: {insert_err}")
+            try:
+                bot.send_message(
+                    uid,
+                    "❌ <b>حدث خطأ في معالجة الإيداع.</b>\n\nيرجى التواصل مع الإدارة.",
+                    parse_mode="HTML"
+                )
+            except: pass
+            return
+    
+    # ✅ نجح الـ insert - نضيف الرصيد
+    db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
+    
+    # 🛡 نظف الـ claimed_hashes بعد نجاح الإيداع
+    try:
+        db.claimed_hashes.delete_one({'transaction_id': tx_id_clean})
     except Exception:
         pass
     
@@ -5315,6 +5544,198 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
         if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
         else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_dep_"))
+def ad_uh_dep_handler(call):
+    """🛡 عرض كل إيداعات المستخدم للأدمن (مع الهاش الكامل)"""
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace("ad_uh_dep_", ""))
+    
+    # نجلب كل الإيداعات (مو 10 فقط)
+    recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1))
+    
+    if not recs:
+        text = f"📭 <b>لا توجد إيداعات لهذا المستخدم</b>\n\n🆔 ID: <code>{target_uid}</code>"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+        return
+    
+    # إجمالي
+    total_amount = sum([float(r.get('amount', 0)) for r in recs])
+    
+    # نجيب معلومات المستخدم
+    u = get_user_data_full(target_uid)
+    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
+    
+    text = (
+        f"💳 <b>سجل إيداعات المستخدم</b>\n\n"
+        f"👤 المستخدم: {uname}\n"
+        f"🆔 ID: <code>{target_uid}</code>\n"
+        f"📊 عدد الإيداعات: <b>{len(recs)}</b>\n"
+        f"💰 الإجمالي: <b>${total_amount:.2f}</b>\n\n"
+    )
+    
+    # نعرض آخر 15 إيداع (لتجنب تجاوز حد الرسالة)
+    display_count = min(len(recs), 15)
+    for i, r in enumerate(recs[:display_count], 1):
+        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+        amount = r.get('amount', 0)
+        method = r.get('method', 'غير محدد')
+        tx_id = r.get('transaction_id', '')
+        
+        text += (
+            f"━━━━━━━━━━━━━━\n"
+            f"#{i} ✅\n"
+            f"💰 <b>المبلغ:</b> <code>${amount:.2f}</code>\n"
+            f"📅 <b>التاريخ:</b> <code>{date_str}</code>\n"
+            f"💳 <b>الطريقة:</b> {method}\n"
+            f"🆔 <b>رقم العملية:</b>\n<code>{tx_id}</code>\n"
+        )
+    
+    text += "━━━━━━━━━━━━━━"
+    
+    if len(recs) > display_count:
+        text += f"\n\n📌 <i>عُرضت آخر {display_count} من أصل {len(recs)} إيداع</i>"
+    
+    markup = InlineKeyboardMarkup()
+    # زر تحميل ملف كامل لو فيه كثير إيداعات
+    if len(recs) > 5:
+        markup.add(InlineKeyboardButton("📄 تحميل السجل الكامل (ملف)", callback_data=f"ad_dldep_{target_uid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+    
+    try:
+        # نشيك إن الرسالة مو طويلة جداً
+        if len(text) > 4000:
+            # نرسل ملف بدلاً منها
+            content = f"=== سجل إيداعات المستخدم {target_uid} ===\n"
+            content += f"اليوزر: {uname}\n"
+            content += f"العدد: {len(recs)}\n"
+            content += f"الإجمالي: ${total_amount:.2f}\n"
+            content += "=" * 50 + "\n\n"
+            for i, r in enumerate(recs, 1):
+                date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+                content += f"#{i}\n"
+                content += f"التاريخ: {date_str}\n"
+                content += f"المبلغ: ${r.get('amount', 0):.2f}\n"
+                content += f"الطريقة: {r.get('method', 'غير محدد')}\n"
+                content += f"الهاش: {r.get('transaction_id', '')}\n"
+                content += "-" * 40 + "\n"
+            
+            f = io.BytesIO(content.encode('utf-8'))
+            f.name = f"deposits_{target_uid}.txt"
+            bot.send_document(call.message.chat.id, f, caption=f"📄 سجل إيداعات المستخدم {target_uid}")
+        else:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error showing deposits to admin: {e}")
+        try:
+            bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+        except:
+            bot.send_message(call.message.chat.id, "❌ تعذر عرض السجل، حاول مرة ثانية.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_buy_"))
+def ad_uh_buy_handler(call):
+    """🛡 عرض كل مشتريات المستخدم للأدمن"""
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace("ad_uh_buy_", ""))
+    
+    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
+    
+    if not recs:
+        text = f"📭 <b>لا توجد مشتريات لهذا المستخدم</b>\n\n🆔 ID: <code>{target_uid}</code>"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+        return
+    
+    # نجمعها حسب المنتج
+    grouped = {}
+    for r in recs:
+        pid = str(r.get('product_id', ''))
+        if pid not in grouped:
+            grouped[pid] = []
+        grouped[pid].append(r)
+    
+    u = get_user_data_full(target_uid)
+    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
+    
+    text = (
+        f"🛍 <b>سجل مشتريات المستخدم</b>\n\n"
+        f"👤 المستخدم: {uname}\n"
+        f"🆔 ID: <code>{target_uid}</code>\n"
+        f"📊 إجمالي الطلبات: <b>{len(recs)}</b>\n"
+        f"📦 المنتجات المختلفة: <b>{len(grouped)}</b>\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📋 <b>تفاصيل حسب المنتج:</b>\n\n"
+    )
+    
+    for pid, orders in grouped.items():
+        if pid in ['GitHub_Student', 'Gemini_Activation']:
+            p_name = pid.replace('_', ' ')
+        else:
+            p = find_product(pid)
+            p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج'))) if p else "منتج محذوف"
+        
+        text += f"📦 <b>{p_name}</b>\n   • العدد: <b>{len(orders)}</b>\n\n"
+    
+    text += "━━━━━━━━━━━━━━"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📄 تحميل السجل الكامل (ملف)", callback_data=f"ad_dlbuy_{target_uid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+    
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error showing purchases to admin: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dldep_"))
+def ad_dldep_handler(call):
+    """🛡 تحميل ملف كامل بكل إيداعات المستخدم"""
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    target_uid = int(call.data.replace("ad_dldep_", ""))
+    
+    recs = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', -1))
+    if not recs:
+        bot.send_message(call.message.chat.id, "📭 لا توجد إيداعات.")
+        return
+    
+    u = get_user_data_full(target_uid)
+    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
+    total_amount = sum([float(r.get('amount', 0)) for r in recs])
+    
+    content = f"=== سجل إيداعات المستخدم ===\n"
+    content += f"ID: {target_uid}\n"
+    content += f"Username: {uname}\n"
+    content += f"عدد الإيداعات: {len(recs)}\n"
+    content += f"الإجمالي: ${total_amount:.2f}\n"
+    content += f"تاريخ التصدير: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "=" * 50 + "\n\n"
+    
+    for i, r in enumerate(recs, 1):
+        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+        content += f"#{i}\n"
+        content += f"التاريخ: {date_str}\n"
+        content += f"المبلغ: ${r.get('amount', 0):.2f}\n"
+        content += f"الطريقة: {r.get('method', 'غير محدد')}\n"
+        content += f"رقم العملية: {r.get('transaction_id', '')}\n"
+        content += "-" * 50 + "\n"
+    
+    try:
+        f = io.BytesIO(content.encode('utf-8'))
+        f.name = f"deposits_{target_uid}.txt"
+        bot.send_document(call.message.chat.id, f, caption=f"📄 <b>سجل إيداعات المستخدم</b>\n\n👤 ID: <code>{target_uid}</code>\n💰 الإجمالي: <b>${total_amount:.2f}</b>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error sending deposits file: {e}")
+        bot.send_message(call.message.chat.id, "❌ فشل إرسال الملف.")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
 def admin_download_buy_hist(call):
