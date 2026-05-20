@@ -2952,6 +2952,23 @@ def verify_binance_pay(message, lang):
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
         PROCESSING_TXS.add(tx_id)
+    
+    # 🛡 حماية ضد سرقة الحوالات: حجز الـ hash لأول مستخدم
+    claim_status = claim_tx_hash(tx_id, uid)
+    if claim_status == 'stolen_attempt':
+        bot.send_message(
+            uid,
+            "❌ <b>هذه الحوالة تخص مستخدم آخر!</b>\n\n"
+            "🚫 لا يمكن استخدام نفس رقم العملية لأكثر من حساب.\n\n"
+            "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
+            parse_mode="HTML"
+        )
+        PROCESSING_TXS.discard(tx_id)
+        return
+    elif claim_status == 'already_used':
+        bot.reply_to(message, get_text(uid, 'tx_used'))
+        PROCESSING_TXS.discard(tx_id)
+        return
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
@@ -3060,6 +3077,23 @@ def verify_crypto_tx(message, lang, coin):
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
         PROCESSING_TXS.add(tx_id)
+    
+    # 🛡 حماية ضد سرقة الحوالات
+    claim_status = claim_tx_hash(tx_id, uid)
+    if claim_status == 'stolen_attempt':
+        bot.send_message(
+            uid,
+            "❌ <b>هذه الحوالة تخص مستخدم آخر!</b>\n\n"
+            "🚫 لا يمكن استخدام نفس الهاش لأكثر من حساب.\n\n"
+            "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
+            parse_mode="HTML"
+        )
+        PROCESSING_TXS.discard(tx_id)
+        return
+    elif claim_status == 'already_used':
+        bot.reply_to(message, get_text(uid, 'tx_used'))
+        PROCESSING_TXS.discard(tx_id)
+        return
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
@@ -3271,6 +3305,23 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         if db.used_transactions.find_one({'transaction_id': tx_track_key}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
         PROCESSING_TXS.add(tx_track_key)
+    
+    # 🛡 حماية ضد سرقة الحوالات
+    claim_status = claim_tx_hash(tx_track_key, uid)
+    if claim_status == 'stolen_attempt':
+        bot.send_message(
+            uid,
+            "❌ <b>هذه الحوالة تخص مستخدم آخر!</b>\n\n"
+            "🚫 لا يمكن استخدام نفس الهاش لأكثر من حساب.\n\n"
+            "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
+            parse_mode="HTML"
+        )
+        PROCESSING_TXS.discard(tx_track_key)
+        return
+    elif claim_status == 'already_used':
+        bot.reply_to(message, get_text(uid, 'tx_used'))
+        PROCESSING_TXS.discard(tx_track_key)
+        return
     
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
@@ -3503,6 +3554,23 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         if db.used_transactions.find_one({'transaction_id': tx_id}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
         PROCESSING_TXS.add(tx_id)
+    
+    # 🛡 حماية ضد سرقة الحوالات
+    claim_status = claim_tx_hash(tx_id, uid)
+    if claim_status == 'stolen_attempt':
+        bot.send_message(
+            uid,
+            "❌ <b>هذه الحوالة تخص مستخدم آخر!</b>\n\n"
+            "🚫 لا يمكن استخدام نفس الهاش لأكثر من حساب.\n\n"
+            "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
+            parse_mode="HTML"
+        )
+        PROCESSING_TXS.discard(tx_id)
+        return
+    elif claim_status == 'already_used':
+        bot.reply_to(message, get_text(uid, 'tx_used'))
+        PROCESSING_TXS.discard(tx_id)
+        return
         
     try:
         bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
@@ -3637,9 +3705,285 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     finally:
         PROCESSING_TXS.discard(tx_id)
 
+def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=0):
+    """
+    🚨 يطبّق العقوبات لما شخصين يحاولون استخدام نفس الـ hash:
+    1. يحظر الاثنين (الأصلي والمدّعي)
+    2. يسحب رصيد الأصلي لـ صفر
+    3. يسجل في theft_attempts للمراجعة
+    4. يرسل إشعار قوي للأدمن لمراجعتهم يدوياً
+    """
+    try:
+        # 1. سحب رصيد المستخدم الأصلي (المشكوك فيه - ممكن يكون متعاون مع النصاب)
+        original_user = db.users.find_one({'user_id': original_uid})
+        original_balance = float(original_user.get('balance', 0)) if original_user else 0
+        
+        # نسجل الرصيد المسحوب قبل ما نمسحه
+        try:
+            db.balance_seizures.insert_one({
+                'user_id': original_uid,
+                'seized_amount': original_balance,
+                'reason': 'hash_collision_suspicious',
+                'related_tx': tx_id_clean,
+                'thief_user': thief_uid,
+                'timestamp': int(time.time())
+            })
+        except Exception:
+            pass
+        
+        # نصفّر الرصيد
+        db.users.update_one(
+            {'user_id': original_uid},
+            {'$set': {'balance': 0.0, 'is_banned': 1}}
+        )
+        
+        # 2. حظر الـ thief
+        db.users.update_one(
+            {'user_id': thief_uid},
+            {'$set': {'is_banned': 1}}
+        )
+        
+        # 3. تسجيل في theft_attempts
+        try:
+            original_data = db.users.find_one({'user_id': original_uid}) or {}
+            thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+            
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'original_user_id': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'seized_balance': original_balance,
+                'collision_type': 'post_success',  # شخصين بعد نجاح الإيداع الأول
+                'timestamp': int(time.time()),
+                'status': 'pending_admin_review'
+            })
+        except Exception as log_err:
+            logger.error(f"Failed to log theft attempt: {log_err}")
+        
+        # 4. إشعار قوي للأدمن للمراجعة اليدوية
+        try:
+            original_username = original_data.get('username', 'unknown') if original_data else 'unknown'
+            thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
+            
+            admin_msg = (
+                f"🚨🚨🚨 <b>تنبيه أمني خطير!</b> 🚨🚨🚨\n\n"
+                f"📍 <b>اكتشف البوت محاولة سرقة حوالة!</b>\n"
+                f"⚠️ <b>تم حظر الحسابين وسحب الرصيد - مراجعة يدوية مطلوبة</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <b>الهاش:</b>\n<code>{tx_id_clean[:60]}</code>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>المستخدم الأول (الذي نجح إيداعه):</b>\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n"
+                f"   • 🚫 الحالة: <b>محظور</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>المستخدم الثاني (حاول استخدام نفس الهاش):</b>\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n"
+                f"   • 🚫 الحالة: <b>محظور</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤔 <b>الاحتمالات:</b>\n"
+                f"1️⃣ الأول صاحب الحوالة الفعلي، الثاني نصاب يراقب blockchain\n"
+                f"2️⃣ الاثنين متعاونين (نصب منظم)\n"
+                f"3️⃣ نفس الشخص بحسابين مختلفين\n\n"
+                f"💡 <b>مطلوب منك:</b>\n"
+                f"• راجع نشاط الحسابين\n"
+                f"• تحقق من الـ IP لو متاح\n"
+                f"• قرر يدوياً: إلغاء حظر الأول لو بريء + إرجاع رصيده\n"
+                f"• أو حظر دائم لو الاثنين متورطين"
+            )
+            notify_admins(admin_msg)
+        except Exception as notify_err:
+            logger.error(f"Failed to notify admin about hash collision: {notify_err}")
+        
+        # رسائل للمستخدمين
+        try:
+            bot.send_message(
+                original_uid,
+                "🚫 <b>تم تعليق حسابك للمراجعة!</b>\n\n"
+                "📌 السبب: اكتشف نظامنا تضارب في الحوالة الخاصة بك.\n\n"
+                "💬 لو كنت بريء، تواصل مع الإدارة لمراجعة حسابك.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        
+        try:
+            bot.send_message(
+                thief_uid,
+                "🚫 <b>تم حظر حسابك!</b>\n\n"
+                "📌 السبب: محاولة استخدام حوالة تخص مستخدم آخر.\n\n"
+                "💬 لو كنت تعتقد أن هذا خطأ، تواصل مع الإدارة.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+        
+        logger.warning(
+            f"🚨 HASH COLLISION PUNISHMENT APPLIED:\n"
+            f"   tx: {tx_id_clean[:30]}\n"
+            f"   original: {original_uid} (banned, balance ${original_balance:.2f} seized)\n"
+            f"   thief: {thief_uid} (banned)"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_hash_collision: {e}")
+        return False
+
+
+def claim_tx_hash(tx_id, uid):
+    """
+    🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه.
+    
+    يرجع:
+    - 'claimed' لو نجح الحجز (هذا أول استخدام)
+    - 'already_used' لو الـ hash استُخدم سابقاً ونُجح فحصه (إيداع مكتمل) - يُطبّق عقوبات
+    - 'stolen_attempt' لو شخص آخر يحاول استخدام نفس الـ hash المعلق
+    - 'own_pending' لو نفس المستخدم يعيد المحاولة (مسموح)
+    - 'already_used_own' لو نفس المستخدم استخدمه قبل (مرفوض)
+    """
+    try:
+        tx_id_clean = str(tx_id).strip().lower()
+        uid = int(uid)
+        
+        # 1. شيك على الإيداعات المكتملة (هذا الأخطر - شخص ثاني بعد نجاح الأول)
+        used_record = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+        if used_record:
+            original_uid = used_record.get('user_id')
+            if original_uid == uid:
+                return 'already_used_own'
+            
+            # 🚨 شخص ثاني بعد نجاح الأول → نطبق العقوبات على الاثنين
+            original_amount = float(used_record.get('amount', 0))
+            
+            # نشيك إن الأصلي مو محظور أصلاً (عشان ما نكرر العقوبة)
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                # نطبق العقوبات
+                punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+            else:
+                # الأصلي محظور أصلاً، نحظر الثاني فقط ونرسل إشعار
+                try:
+                    db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+                    thief_data = db.users.find_one({'user_id': uid}) or {}
+                    thief_username = thief_data.get('username', 'unknown')
+                    notify_admins(
+                        f"🚨 <b>محاولة سرقة جديدة!</b>\n\n"
+                        f"👤 المهاجم: <code>{uid}</code> @{thief_username}\n"
+                        f"🆔 Hash: <code>{tx_id_clean[:30]}...</code>\n"
+                        f"💡 الحساب الأصلي محظور بالفعل من تضارب سابق.\n"
+                        f"🚫 تم حظر هذا المستخدم تلقائياً."
+                    )
+                except Exception:
+                    pass
+            
+            return 'already_used'
+        
+        # 2. شيك على المحاولات المعلقة (claimed_hashes)
+        existing_claim = db.claimed_hashes.find_one({'transaction_id': tx_id_clean})
+        
+        if existing_claim:
+            if existing_claim.get('user_id') == uid:
+                return 'own_pending'
+            else:
+                # 🚨 شخص ثاني يحاول استخدام hash معلق (قبل ما يتأكد نجاحه)
+                # هذا أقل خطورة - نسجله بس بدون حظر (قد يكون خطأ)
+                try:
+                    db.theft_attempts.insert_one({
+                        'transaction_id': tx_id_clean,
+                        'original_claimer': existing_claim.get('user_id'),
+                        'thief_attempt': uid,
+                        'thief_username': db.users.find_one({'user_id': uid}, {'username': 1}).get('username', 'unknown'),
+                        'timestamp': int(time.time()),
+                        'collision_type': 'pre_success',
+                        'status': 'pending_admin_review'
+                    })
+                except Exception:
+                    pass
+                
+                try:
+                    thief_data = db.users.find_one({'user_id': uid})
+                    thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
+                    
+                    notify_admins(
+                        f"⚠️ <b>محاولة استخدام حوالة معلقة!</b>\n\n"
+                        f"👤 الشخص الثاني:\n"
+                        f"   • ID: <code>{uid}</code>\n"
+                        f"   • Username: @{thief_username}\n\n"
+                        f"👤 صاحب الادعاء الأصلي:\n"
+                        f"   • ID: <code>{existing_claim.get('user_id')}</code>\n\n"
+                        f"🆔 Hash: <code>{tx_id_clean[:30]}...</code>\n\n"
+                        f"💡 <i>الحوالة لم يتم تأكيدها بعد. مراقب فقط.</i>\n"
+                        f"⚠️ <i>لو الأول نجح، سيتم حظر الاثنين تلقائياً.</i>"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify pre-success collision: {notify_err}")
+                
+                logger.warning(f"⚠️ محاولة تضارب pre-success: المستخدم {uid} مقابل {existing_claim.get('user_id')}")
+                return 'stolen_attempt'
+        
+        # 3. ما فيه ادعاء سابق، نحجزه لهذا المستخدم
+        try:
+            db.claimed_hashes.insert_one({
+                'transaction_id': tx_id_clean,
+                'user_id': uid,
+                'claimed_at': int(time.time()),
+                'status': 'pending'
+            })
+            return 'claimed'
+        except Exception:
+            existing_claim = db.claimed_hashes.find_one({'transaction_id': tx_id_clean})
+            if existing_claim and existing_claim.get('user_id') == uid:
+                return 'own_pending'
+            elif existing_claim:
+                return 'stolen_attempt'
+            return 'claimed'
+    except Exception as e:
+        logger.error(f"Error in claim_tx_hash: {e}")
+        return 'claimed'
+
+
+def cleanup_old_claimed_hashes():
+    """ينظف الـ hashes المعلقة القديمة (أكثر من 48 ساعة)"""
+    try:
+        cutoff = int(time.time()) - (48 * 60 * 60)
+        result = db.claimed_hashes.delete_many({
+            'claimed_at': {'$lt': cutoff},
+            'status': 'pending'
+        })
+        if result.deleted_count > 0:
+            logger.info(f"🧹 تم تنظيف {result.deleted_count} hash معلق قديم.")
+    except Exception as e:
+        logger.error(f"Error cleaning old claimed hashes: {e}")
+
+
+def _cleanup_thread():
+    """Thread يشتغل كل ساعة لتنظيف الـ claimed_hashes القديمة"""
+    while True:
+        try:
+            time.sleep(3600)  # كل ساعة
+            cleanup_old_claimed_hashes()
+        except Exception as e:
+            logger.error(f"Cleanup thread error: {e}")
+            time.sleep(600)
+
+
+threading.Thread(target=_cleanup_thread, daemon=True).start()
+
+
 def credit_user(uid, amt, tx_id, lang, method):
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
     db.used_transactions.insert_one({'transaction_id': tx_id, 'amount': amt, 'user_id': uid})
+    
+    # 🛡 نظف الـ claimed_hashes بعد نجاح الإيداع (الـ used_transactions صار يحميه)
+    try:
+        db.claimed_hashes.delete_one({'transaction_id': str(tx_id).strip().lower()})
+    except Exception:
+        pass
+    
     bot.send_message(uid, get_text(uid, 'dep_success', amt), parse_mode="HTML")
     
     u = get_user_data_full(uid)
