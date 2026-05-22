@@ -1949,6 +1949,11 @@ def start_handler(message):
     uid = from_user.id
     uname = from_user.username.lower() if from_user.username else ""
     
+    # 🛡 نمسح أي next_step handlers معلقة (يمنع تفسير /start كـ tx_id)
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id=chat_id)
+    except Exception: pass
+    
     if is_user_banned(uid):
         bot.send_message(chat_id, get_text(uid, 'banned'), parse_mode="HTML")
         return
@@ -3677,14 +3682,20 @@ def ask_deposit_amount(message, coin):
         bot.send_message(uid, "❌ يجب إرسال رقم.", parse_mode="HTML")
         return
     
+    text = message.text.strip()
+    
+    # 🛡 فحص أوامر البوت - نوقف بصمت
+    if text.startswith('/'):
+        return
+    
     # إلغاء
-    if message.text.strip().lower() in ['الغاء', 'cancel', '/cancel']:
+    if text.lower() in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
         bot.send_message(uid, "❌ تم الإلغاء.")
         return
     
     # parsing المبلغ
     try:
-        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+        base_amount = float(text.replace(',', '.').replace('$', ''))
     except ValueError:
         bot.send_message(uid, "❌ أرسل رقم فقط.\nمثال: 5 أو 10.5", parse_mode="HTML")
         return
@@ -3838,6 +3849,11 @@ def verify_binance_pay(message, lang):
 
     tx_id = message.text.strip()
     
+    # 🛡 رفض أوامر البوت والرسائل العادية (مو tx_id فعلاً)
+    if tx_id.startswith('/') or tx_id.lower() in ['الغاء', 'cancel', 'إلغاء', 'الغاء', 'اغلاق']:
+        # المستخدم يستخدم أمر، نوقف عملية التحقق بصمت
+        return
+    
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
         return
@@ -3965,6 +3981,10 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML"); return
 
     tx_id = message.text.strip().lower()
+    
+    # 🛡 رفض أوامر البوت والرسائل العادية
+    if tx_id.startswith('/') or tx_id in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
+        return
     
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
@@ -4209,6 +4229,11 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML"); return
     
     tx_id = message.text.strip()
+    
+    # 🛡 رفض أوامر البوت والرسائل العادية
+    if tx_id.startswith('/') or tx_id.lower() in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
+        return
+    
     # 🛡 TON hashes case-sensitive - ما نسوي lower!
     tx_id_clean = tx_id.replace(' ', '').replace('\n', '')
     
@@ -4524,6 +4549,10 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         
     tx_id = message.text.strip().lower()
     
+    # 🛡 رفض أوامر البوت والرسائل العادية
+    if tx_id.startswith('/') or tx_id in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
+        return
+    
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
         return
@@ -4819,25 +4848,15 @@ def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_
 
 def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, original_amount=0, match_type='tx_id'):
     """
-    🚨 نسخة موسعة من punish_hash_collision تخبر الأدمن بنوع الكشف.
+    🚨 نسخة موسعة - تحظر الاثنين فقط (بدون سحب رصيد).
     """
     try:
-        # 1. سحب رصيد المستخدم الأصلي
+        # نجلب رصيد الأصلي (للعرض فقط - بدون سحب)
         original_user = db.users.find_one({'user_id': original_uid})
         original_balance = float(original_user.get('balance', 0)) if original_user else 0
         
-        try:
-            db.balance_seizures.insert_one({
-                'user_id': original_uid,
-                'seized_amount': original_balance,
-                'reason': f'duplicate_tx_{match_type}',
-                'related_tx': tx_id_clean,
-                'thief_user': thief_uid,
-                'timestamp': int(time.time())
-            })
-        except Exception: pass
-        
-        db.users.update_one({'user_id': original_uid}, {'$set': {'balance': 0.0, 'is_banned': 1}})
+        # حظر الاثنين فقط (بدون أي تعديل على الرصيد)
+        db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
         db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
         
         # تسجيل
@@ -4851,7 +4870,7 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
                 'original_username': original_data.get('username', 'unknown'),
                 'thief_user_id': thief_uid,
                 'thief_username': thief_data.get('username', 'unknown'),
-                'seized_balance': original_balance,
+                'current_balance': original_balance,
                 'match_type': match_type,
                 'timestamp': int(time.time()),
                 'status': 'pending_admin_review'
@@ -4882,7 +4901,7 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
-                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
                 f"👤 الحساب 2:\n"
                 f"   • ID: <code>{thief_uid}</code>\n"
                 f"   • Username: @{thief_username}\n\n"
@@ -4919,34 +4938,20 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
 
 def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=0):
     """
-    🚨 يطبّق العقوبات لما شخصين يحاولون استخدام نفس الـ hash:
-    1. يحظر الاثنين (الأصلي والمدّعي)
-    2. يسحب رصيد الأصلي لـ صفر
-    3. يسجل في theft_attempts للمراجعة
-    4. يرسل إشعار قوي للأدمن لمراجعتهم يدوياً
+    🚨 يحظر الاثنين (بدون سحب الرصيد):
+    1. حظر الاثنين (الأصلي والمدّعي)
+    2. تسجيل في theft_attempts للمراجعة
+    3. إشعار قوي للأدمن لمراجعتهم يدوياً
     """
     try:
-        # 1. سحب رصيد المستخدم الأصلي (المشكوك فيه - ممكن يكون متعاون مع النصاب)
+        # نجلب رصيد الأصلي (للعرض في الإشعار فقط - بدون سحب)
         original_user = db.users.find_one({'user_id': original_uid})
         original_balance = float(original_user.get('balance', 0)) if original_user else 0
         
-        # نسجل الرصيد المسحوب قبل ما نمسحه
-        try:
-            db.balance_seizures.insert_one({
-                'user_id': original_uid,
-                'seized_amount': original_balance,
-                'reason': 'hash_collision_suspicious',
-                'related_tx': tx_id_clean,
-                'thief_user': thief_uid,
-                'timestamp': int(time.time())
-            })
-        except Exception:
-            pass
-        
-        # نصفّر الرصيد
+        # 1. حظر الأصلي (بدون سحب الرصيد)
         db.users.update_one(
             {'user_id': original_uid},
-            {'$set': {'balance': 0.0, 'is_banned': 1}}
+            {'$set': {'is_banned': 1}}
         )
         
         # 2. حظر الـ thief
@@ -4988,7 +4993,7 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
-                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
                 f"👤 الحساب 2:\n"
                 f"   • ID: <code>{thief_uid}</code>\n"
                 f"   • Username: @{thief_username}\n\n"
@@ -5087,7 +5092,19 @@ def claim_tx_hash(tx_id, uid):
     - 'already_used_own' لو نفس المستخدم استخدمه قبل (مرفوض)
     """
     try:
+        # 🛡 validation صارمة: ما نقبل أوامر أو نصوص قصيرة
+        tx_id_str = str(tx_id).strip()
+        if not tx_id_str or tx_id_str.startswith('/') or len(tx_id_str) < 5:
+            logger.warning(f"⚠️ claim_tx_hash رفض tx_id غير صحيح: {tx_id_str[:30]} للمستخدم {uid}")
+            return 'invalid'
+        
         tx_id_clean = normalize_tx_id(tx_id)
+        
+        # 🛡 بعد التطبيع لازم يبقى أطول من 5 أحرف
+        if not tx_id_clean or len(tx_id_clean) < 5:
+            logger.warning(f"⚠️ claim_tx_hash رفض tx_id قصير بعد التطبيع: {tx_id_clean}")
+            return 'invalid'
+        
         uid = int(uid)
         
         # 🛡 الخطوة 1: نحاول insert atomic في claimed_hashes (الـ unique index يحمي)
@@ -5191,30 +5208,13 @@ def claim_tx_hash(tx_id, uid):
         
         # 🚨 حظر الاثنين فوراً (race condition = نصب واضح)
         try:
-            # حظر الاثنين
+            # حظر الاثنين فقط (بدون سحب رصيد)
             db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
             db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
             
-            # سحب رصيد الأول (لأنه قد يكون استلم مبلغ من إيداع آخر)
+            # نجلب رصيد الأول (للعرض في الإشعار فقط)
             original_user = db.users.find_one({'user_id': original_uid})
             original_balance = float(original_user.get('balance', 0)) if original_user else 0
-            
-            if original_balance > 0:
-                try:
-                    db.balance_seizures.insert_one({
-                        'user_id': original_uid,
-                        'seized_amount': original_balance,
-                        'reason': 'simultaneous_hash_race',
-                        'related_tx': tx_id_clean,
-                        'collaborator': uid,
-                        'timestamp': int(time.time())
-                    })
-                except Exception: pass
-                
-                db.users.update_one(
-                    {'user_id': original_uid},
-                    {'$set': {'balance': 0.0}}
-                )
         except Exception as ban_err:
             logger.error(f"Failed to ban race users: {ban_err}")
         
@@ -5232,7 +5232,7 @@ def claim_tx_hash(tx_id, uid):
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
-                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
                 f"👤 الحساب 2:\n"
                 f"   • ID: <code>{uid}</code>\n"
                 f"   • Username: @{thief_username}\n\n"
@@ -5881,6 +5881,100 @@ def ad_ref_save_min_purchase(message):
         bot.send_message(message.chat.id, "❌ أرسل رقم صحيح.")
     except Exception as e:
         logger.error(f"Error saving min purchase: {e}")
+
+
+@bot.message_handler(commands=['fix_innocent_bans'])
+def fix_innocent_bans_cmd(message):
+    """🛡 يفك حظر المستخدمين اللي حُظروا بسبب bug في النظام (إرسال /start)"""
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+    
+    # نبحث في theft_attempts عن المحاولات اللي الـ hash فيها /start أو نص قصير
+    bug_attempts = list(db.theft_attempts.find({
+        '$or': [
+            {'transaction_id': {'$regex': '^/'}},
+            {'transaction_id': {'$regex': '^start'}},
+            {'transaction_id': {'$lte': 'aaaaaa'}}
+        ]
+    }))
+    
+    if not bug_attempts:
+        bot.send_message(message.chat.id, "✅ ما في ضحايا للـ bug.")
+        return
+    
+    unbanned_users = set()
+    refunded_amounts = {}
+    
+    for attempt in bug_attempts:
+        # نجمع IDs
+        original_id = attempt.get('original_user_id') or attempt.get('original_claimer')
+        thief_id = attempt.get('thief_user_id') or attempt.get('thief_attempt')
+        seized = float(attempt.get('seized_balance', 0))
+        
+        for victim_id in [original_id, thief_id]:
+            if not victim_id:
+                continue
+            try:
+                victim_id = int(victim_id)
+                # فك الحظر
+                db.users.update_one(
+                    {'user_id': victim_id},
+                    {'$set': {'is_banned': 0}}
+                )
+                unbanned_users.add(victim_id)
+                
+                # إرجاع الرصيد لو فيه
+                if victim_id == original_id and seized > 0:
+                    refund = refunded_amounts.get(victim_id, 0) + seized
+                    refunded_amounts[victim_id] = refund
+                    db.users.update_one(
+                        {'user_id': victim_id},
+                        {'$inc': {'balance': seized}}
+                    )
+                    
+                # نرسل رسالة للمستخدم
+                try:
+                    bot.send_message(
+                        victim_id,
+                        "✅ <b>تم فك حظر حسابك!</b>\n\n"
+                        "🙏 نعتذر، كان هناك خطأ تقني في النظام حُظر بسببه حسابك.\n\n"
+                        "💼 رصيدك مُرجع بالكامل.\n\n"
+                        "<i>يمكنك استخدام البوت بشكل طبيعي الآن.</i>",
+                        parse_mode="HTML"
+                    )
+                except: pass
+            except Exception as e:
+                logger.error(f"Failed to unban {victim_id}: {e}")
+    
+    # نحذف الـ records الخاطئة من theft_attempts
+    db.theft_attempts.delete_many({
+        '$or': [
+            {'transaction_id': {'$regex': '^/'}},
+            {'transaction_id': {'$regex': '^start'}}
+        ]
+    })
+    
+    # تقرير
+    report = (
+        f"✅ <b>تم فك حظر الضحايا!</b>\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👥 عدد المستخدمين اللي فُك حظرهم: <b>{len(unbanned_users)}</b>\n"
+        f"💰 إجمالي المبالغ المُرجعة: <b>${sum(refunded_amounts.values()):.2f}</b>\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"📋 <b>التفاصيل:</b>\n"
+    )
+    for u in list(unbanned_users)[:20]:
+        refund = refunded_amounts.get(u, 0)
+        report += f"   • <code>{u}</code>"
+        if refund > 0:
+            report += f" (+${refund:.2f})"
+        report += "\n"
+    
+    if len(unbanned_users) > 20:
+        report += f"\n... و {len(unbanned_users) - 20} مستخدم آخر"
+    
+    bot.send_message(message.chat.id, report, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
