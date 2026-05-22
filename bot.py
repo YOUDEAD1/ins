@@ -231,7 +231,109 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, use_class_middlewares=False)
+
+
+# 🛡 دالة فحص صلاحية الأدمن (تُستخدم بكل دوال الأدمن)
+def _is_admin_check(uid):
+    """يتحقق إن المستخدم أدمن أو OWNER"""
+    if uid == OWNER_ID:
+        return True
+    try:
+        u = db.users.find_one({'user_id': int(uid)})
+        return u and u.get('is_admin') == 1
+    except Exception:
+        return False
+
+
+# 🛡 Middleware: يفحص كل callback queries اللي تبدأ بـ ad_ أو admin_
+# لو المستخدم مو أدمن، يرفض الطلب فوراً قبل ما يصير أي شي
+def _admin_only_middleware(call):
+    """
+    🛡 فحص أمني: يرفض أي محاولة وصول لدوال الأدمن من غير الأدمن.
+    """
+    if not call.data:
+        return True  # ما فيه callback data - نسمح (مو دالة admin)
+    
+    # الـ callbacks المحمية
+    is_admin_callback = (
+        call.data.startswith('ad_') or 
+        call.data.startswith('admin_') or
+        call.data.startswith('edit_txt_') or
+        call.data.startswith('toggle_amount_protection')
+    )
+    
+    if not is_admin_callback:
+        return True  # مو callback admin - نسمح
+    
+    # نشيك صلاحية المستخدم
+    uid = call.from_user.id
+    if _is_admin_check(uid):
+        return True  # admin - مسموح
+    
+    # 🚨 محاولة وصول غير مصرح بها!
+    try:
+        bot.answer_callback_query(
+            call.id, 
+            "❌ ليس لديك صلاحية للوصول لهذه القائمة!",
+            show_alert=True
+        )
+    except Exception:
+        pass
+    
+    # نسجل المحاولة
+    try:
+        db.unauthorized_attempts.insert_one({
+            'user_id': uid,
+            'username': call.from_user.username or 'unknown',
+            'callback_data': call.data[:200],
+            'timestamp': int(time.time())
+        })
+    except Exception:
+        pass
+    
+    logger.warning(f"🚨 محاولة وصول غير مصرح بها: المستخدم {uid} حاول {call.data}")
+    return False  # رفض المعالجة
+
+
+def admin_required(func):
+    """
+    🛡 Decorator يحمي دوال الأدمن من الوصول غير المصرح به.
+    
+    استخدامها:
+    @admin_required
+    def my_admin_function(call):
+        ...
+    """
+    def wrapper(call, *args, **kwargs):
+        uid = call.from_user.id
+        if not _is_admin_check(uid):
+            try:
+                bot.answer_callback_query(
+                    call.id,
+                    "❌ ليس لديك صلاحية!",
+                    show_alert=True
+                )
+            except Exception:
+                pass
+            
+            # نسجل المحاولة
+            try:
+                db.unauthorized_attempts.insert_one({
+                    'user_id': uid,
+                    'username': getattr(call.from_user, 'username', 'unknown') or 'unknown',
+                    'callback_data': str(call.data)[:200] if hasattr(call, 'data') else 'message',
+                    'timestamp': int(time.time())
+                })
+            except Exception:
+                pass
+            
+            logger.warning(f"🚨 محاولة وصول غير مصرح بها: المستخدم {uid}")
+            return
+        return func(call, *args, **kwargs)
+    
+    wrapper.__name__ = func.__name__
+    return wrapper
 
 logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB...")
 try:
@@ -430,8 +532,173 @@ def initialize_referrals_v2():
     except Exception as e:
         logger.error(f"❌ فشل تهيئة نظام الإحالات V2: {e}")
 
+
+# 🛡 دالة منفصلة لإنشاء الـ unique indexes - تتنفذ في كل تشغيل
+def ensure_critical_indexes():
+    """
+    🛡 تضمن وجود الـ unique indexes الحرجة في كل تشغيل للبوت.
+    هذي الـ indexes تمنع race conditions في race conditions.
+    لازم تتنفذ مهما كانت حالة DB.
+    """
+    # 🛡 الخطوة 0: نرملز كل الـ used_transactions القديمة (للتوافق مع normalize_tx_id الجديد)
+    try:
+        # نجلب كل الـ records اللي transaction_id فيها مو متطابق مع normalize
+        all_txs = list(db.used_transactions.find({}, {'transaction_id': 1}))
+        normalized_count = 0
+        for tx_doc in all_txs:
+            old_tx_id = tx_doc.get('transaction_id', '')
+            if not old_tx_id:
+                continue
+            new_tx_id = normalize_tx_id(old_tx_id)
+            if new_tx_id != old_tx_id:
+                # نشيك لو فيه duplicate بعد التطبيع
+                existing = db.used_transactions.find_one({'transaction_id': new_tx_id})
+                if existing and existing.get('_id') != tx_doc.get('_id'):
+                    # في duplicate - نحذف القديم (الأقل) ونحتفظ بالأول
+                    logger.warning(f"🚨 وجد duplicate بعد التطبيع: {old_tx_id[:30]} = {new_tx_id[:30]}")
+                    db.used_transactions.delete_one({'_id': tx_doc['_id']})
+                else:
+                    # نحدث الـ transaction_id لقيمته المطبّعة
+                    try:
+                        db.used_transactions.update_one(
+                            {'_id': tx_doc['_id']},
+                            {'$set': {'transaction_id': new_tx_id}}
+                        )
+                        normalized_count += 1
+                    except Exception:
+                        pass
+        if normalized_count > 0:
+            logger.info(f"✅ تم تطبيع {normalized_count} transaction_id قديم")
+    except Exception as e:
+        logger.error(f"Failed to normalize old transactions: {e}")
+    
+    try:
+        # 1. used_transactions - الحماية الأهم!
+        # لو فيه duplicates من قبل، نحاول ننظفها أولاً
+        try:
+            db.used_transactions.create_index('transaction_id', unique=True)
+            logger.info("✅ unique index على used_transactions.transaction_id جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                # في duplicates موجودة - نحذف المكررات أولاً (نحتفظ بالأقدم)
+                logger.warning("⚠️ وُجدت duplicates في used_transactions - جاري التنظيف...")
+                
+                # نجد كل الـ duplicates
+                pipeline = [
+                    {'$group': {
+                        '_id': '$transaction_id',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'},
+                        'amounts': {'$push': '$amount'},
+                        'users': {'$push': '$user_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                
+                duplicates = list(db.used_transactions.aggregate(pipeline))
+                
+                for dup in duplicates:
+                    # نحتفظ بأول واحد فقط، نحذف الباقي
+                    ids_to_keep = dup['ids'][0]
+                    ids_to_delete = dup['ids'][1:]
+                    
+                    # تسجيل للأدمن (الناس اللي خسروا فلوس بسبب التلاعب)
+                    logger.warning(
+                        f"🚨 وجدت {len(ids_to_delete)} تكرار للـ tx {dup['_id'][:30]}\n"
+                        f"   المستخدمين: {dup['users']}\n"
+                        f"   المبالغ: {dup['amounts']}"
+                    )
+                    
+                    # حذف المكررات
+                    db.used_transactions.delete_many({'_id': {'$in': ids_to_delete}})
+                
+                # نحاول ننشئ الـ index مرة ثانية
+                try:
+                    db.used_transactions.create_index('transaction_id', unique=True)
+                    logger.info("✅ تم إنشاء unique index بعد تنظيف المكررات")
+                except Exception as e2:
+                    logger.error(f"❌ فشل إنشاء unique index حتى بعد التنظيف: {e2}")
+            else:
+                logger.debug(f"used_transactions index info: {idx_err}")
+        
+        # 🆕 1.5. index على الـ fingerprint (للحماية ضد نفس الحوالة بـ tx_id مختلف)
+        try:
+            db.used_transactions.create_index('fingerprint', unique=True, sparse=True)
+            logger.info("✅ unique index على used_transactions.fingerprint جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                logger.warning("⚠️ duplicates في fingerprint - جاري التنظيف...")
+                # نحذف الـ records اللي ما عندهم fingerprint (records قديمة)
+                # نحتفظ بالأقدم لكل fingerprint
+                pipeline = [
+                    {'$match': {'fingerprint': {'$exists': True, '$ne': None}}},
+                    {'$group': {
+                        '_id': '$fingerprint',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                try:
+                    duplicates = list(db.used_transactions.aggregate(pipeline))
+                    for dup in duplicates:
+                        ids_to_delete = dup['ids'][1:]  # نحتفظ بالأول
+                        db.used_transactions.delete_many({'_id': {'$in': ids_to_delete}})
+                    
+                    db.used_transactions.create_index('fingerprint', unique=True, sparse=True)
+                    logger.info("✅ تم إنشاء unique index على fingerprint بعد التنظيف")
+                except Exception as e: 
+                    logger.error(f"فشل: {e}")
+            else:
+                logger.debug(f"fingerprint index info: {idx_err}")
+        
+        # 🆕 1.6. index على method+amount+created_at للفحص السريع
+        try:
+            db.used_transactions.create_index([
+                ('method', 1),
+                ('amount', 1),
+                ('created_at', 1)
+            ])
+            logger.info("✅ compound index على used_transactions جاهز")
+        except Exception as e:
+            logger.debug(f"compound index info: {e}")
+        
+        # 2. claimed_hashes
+        try:
+            db.claimed_hashes.create_index('transaction_id', unique=True)
+            logger.info("✅ unique index على claimed_hashes جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                # نظف الـ claimed_hashes المكررة (احتفظ بالأقدم)
+                pipeline = [
+                    {'$group': {
+                        '_id': '$transaction_id',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                duplicates = list(db.claimed_hashes.aggregate(pipeline))
+                for dup in duplicates:
+                    ids_to_delete = dup['ids'][1:]
+                    db.claimed_hashes.delete_many({'_id': {'$in': ids_to_delete}})
+                
+                try:
+                    db.claimed_hashes.create_index('transaction_id', unique=True)
+                    logger.info("✅ unique index على claimed_hashes جاهز (بعد التنظيف)")
+                except: pass
+            else:
+                logger.debug(f"claimed_hashes index info: {idx_err}")
+    except Exception as e:
+        logger.error(f"❌ فشل critical: {e}")
+
+
 # نُفّذها فوراً عند بدء البوت
 initialize_referrals_v2()
+ensure_critical_indexes()
 
 
 def register_new_referral(invited_id, referrer_id):
@@ -2983,14 +3250,488 @@ def dep_binance_ui(call):
     msg = bot.send_message(uid, get_text(uid, 'dep_pay', wallet), parse_mode="HTML")
     bot.register_next_step_handler(msg, verify_binance_pay, l)
 
+# ============================================================
+# 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
+# ============================================================
+# الفكرة: المستخدم يكتب المبلغ، البوت يضيف عشر سنتين عشوائيين
+# مثلاً: المستخدم يبي $5 → البوت يطلب $5.0023 بالضبط
+# هذا يربط الحوالة بالمستخدم بطريقة لا يقدر النصاب يكتشفها
+# ============================================================
+
+def generate_unique_amount_for_user(base_amount_usd, uid, coin):
+    """
+    🛡 يولّد مبلغ فريد عشوائي 100% لكل عملية إيداع.
+    
+    النطاق الجديد: 4-9 خانات عشرية = ملايين الاحتمالات
+    مستحيل التكرار بين أي مستخدمين.
+    
+    أمثلة:
+    - $5 → $5.001847
+    - $5 → $5.009274
+    - $5 → $5.003521
+    """
+    base = float(base_amount_usd)
+    
+    # نحاول 200 مرة لإيجاد مبلغ فريد
+    for attempt in range(200):
+        # 🎲 6 خانات عشرية عشوائية = مليون احتمال!
+        # نطاق: 0.000100 إلى 0.009999 (لا يزال أقل من سنت!)
+        random_micro = random.randint(100, 9999)
+        extra = random_micro / 1000000.0
+        unique_amount = round(base + extra, 6)
+        
+        # 🛡 نفحص ما في pending مشابه
+        existing = db.pending_deposits.find_one({
+            'unique_amount_usd': unique_amount,
+            'coin': coin,
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        
+        if not existing:
+            # ✅ مبلغ فريد!
+            return unique_amount
+    
+    # احتياط: نضيف 7 خانات (10 مليون احتمال)
+    for attempt in range(200):
+        random_nano = random.randint(1000, 99999)
+        extra = random_nano / 10000000.0
+        unique_amount = round(base + extra, 7)
+        
+        existing = db.pending_deposits.find_one({
+            'unique_amount_usd': unique_amount,
+            'coin': coin,
+            'status': 'pending'
+        })
+        
+        if not existing:
+            return unique_amount
+    
+    # احتياط أخير
+    return round(base + random.uniform(0.000001, 0.009999), 6)
+
+
+def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
+    """
+    يسجّل عملية إيداع متوقعة - عشان نطابقها مع الـ tx لاحقاً.
+    """
+    try:
+        # نحذف أي إيداعات سابقة معلقة لنفس المستخدم بنفس العملة (نظافة)
+        db.pending_deposits.delete_many({
+            'user_id': uid,
+            'coin': coin,
+            'status': 'pending'
+        })
+        
+        pending_id = f"PD{uid}{int(time.time())}{random.randint(100, 999)}"
+        record = {
+            'pending_id': pending_id,
+            'user_id': uid,
+            'base_amount_usd': float(base_amount_usd),
+            'unique_amount_usd': float(unique_amount_usd),
+            'coin': coin,
+            'status': 'pending',
+            'created_at': int(time.time()),
+            'expires_at': int(time.time()) + (60 * 30)  # 30 دقيقة
+        }
+        db.pending_deposits.insert_one(record)
+        return record
+    except Exception as e:
+        logger.error(f"Error registering pending deposit: {e}")
+        return None
+
+
+def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
+    """
+    🛡 يبحث عن إيداع معلق مطابق للمبلغ (مع تسامح صغير).
+    
+    يستخدم تسامح صغير جداً (0.0001$) للتعامل مع تذبذب أسعار العملات.
+    
+    يرجع المستخدم الذي سجل الإيداع.
+    """
+    try:
+        amount_usd = float(amount_usd)
+        records = list(db.pending_deposits.find({
+            'coin': coin,
+            'status': 'pending',
+            'unique_amount_usd': {
+                '$gte': amount_usd - tolerance,
+                '$lte': amount_usd + tolerance
+            },
+            'expires_at': {'$gt': int(time.time())}
+        }).sort('created_at', 1))
+        
+        # نأخذ الأقدم (أول من سجل)
+        return records[0] if records else None
+    except Exception as e:
+        logger.error(f"Error finding pending deposit: {e}")
+        return None
+
+
+def mark_pending_deposit_used(pending_id):
+    """يعلّم إيداع معلق كـ مستخدم"""
+    try:
+        db.pending_deposits.update_one(
+            {'pending_id': pending_id},
+            {'$set': {'status': 'completed', 'completed_at': int(time.time())}}
+        )
+    except Exception:
+        pass
+
+
+def cleanup_expired_pending_deposits():
+    """ينظف الإيداعات المعلقة المنتهية"""
+    try:
+        current_time = int(time.time())
+        result = db.pending_deposits.delete_many({
+            '$or': [
+                {'expires_at': {'$lt': current_time}},
+                {'status': 'completed', 'completed_at': {'$lt': current_time - 86400}}  # نحذف completed بعد يوم
+            ]
+        })
+        if result.deleted_count > 0:
+            logger.info(f"🧹 تم تنظيف {result.deleted_count} إيداع معلق منتهي.")
+    except Exception as e:
+        logger.error(f"Cleanup expired deposits error: {e}")
+
+
+def reject_wrong_amount_deposit(uid, coin, usd_amount_precise, tx_id, coin_label="العملة"):
+    """
+    ❌ يرفض إيداع بمبلغ خاطئ + يرسل إشعار للأدمن لاسترداده يدوياً.
+    """
+    try:
+        # نشيك لو فيه pending للمستخدم نفسه (مشكلة في الدقة)
+        user_pending = db.pending_deposits.find_one({
+            'user_id': uid,
+            'coin': coin,
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        
+        expected_text = ""
+        if user_pending:
+            expected = user_pending.get('unique_amount_usd', 0)
+            diff = abs(usd_amount_precise - expected)
+            expected_text = (
+                f"\n\n📊 <b>المبلغ المطلوب:</b> <code>${expected:.6f}</code>\n"
+                f"📊 <b>المبلغ المستلم:</b> <code>${usd_amount_precise:.6f}</code>\n"
+                f"📊 <b>الفرق:</b> <code>${diff:.6f}</code>"
+            )
+        
+        # 🚨 إشعار للأدمن للمراجعة اليدوية
+        try:
+            u_data = db.users.find_one({'user_id': uid}) or {}
+            uname = u_data.get('username', 'unknown')
+            notify_admins(
+                f"⚠️ <b>إيداع بمبلغ خاطئ - يحتاج مراجعة يدوية!</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code> @{uname}\n"
+                f"💳 العملة: <b>{coin_label}</b>\n"
+                f"💰 المبلغ المستلم: <b>${usd_amount_precise:.6f}</b>"
+                f"{expected_text}\n\n"
+                f"🆔 الهاش:\n<code>{tx_id}</code>\n\n"
+                f"💡 المستخدم حوّل مبلغ مختلف عن المطلوب.\n"
+                f"يحتاج مراجعة يدوية لاسترداد المبلغ أو إضافته للرصيد."
+            )
+        except Exception: pass
+        
+        # نسجل في DB
+        try:
+            db.wrong_amount_deposits.insert_one({
+                'user_id': uid,
+                'username': uname if 'uname' in locals() else 'unknown',
+                'coin': coin,
+                'received_amount': usd_amount_precise,
+                'expected_amount': user_pending.get('unique_amount_usd', 0) if user_pending else 0,
+                'tx_id': tx_id,
+                'timestamp': int(time.time()),
+                'status': 'pending_admin_review'
+            })
+        except Exception: pass
+        
+        # رسالة للمستخدم - بدون ذكر الإدارة
+        bot.send_message(
+            uid,
+            "❌ <b>المبلغ المحوّل غير صحيح!</b>\n\n"
+            "💡 لقد أرسلت مبلغ مختلف عن المبلغ المطلوب."
+            f"{expected_text}\n\n"
+            "━━━━━━━━━━━━━━\n"
+            "⚠️ <b>عند الإيداع التالي:</b>\n"
+            "• حوّل المبلغ <b>بالضبط</b> كما يعطيك إياه البوت\n"
+            "• لا تقرّب الرقم\n"
+            "• لا تنقص أو تزيد ولا حتى $0.0001\n\n"
+            "🔄 ابدأ عملية إيداع جديدة من القائمة.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in reject_wrong_amount: {e}")
+
+
+def punish_steal_attempt_thief_only(thief_uid, tx_id_clean, pending_owner_uid, attempted_amount):
+    """
+    🚨 يعاقب فقط بوت النصاب (المستخدم الأصلي ما يتلمس).
+    
+    لما بوت النصاب يحاول يستخدم حوالة مسجّلة لمستخدم آخر:
+    1. حظر بوت النصاب
+    2. سجل في theft_attempts
+    3. إشعار قوي للأدمن
+    """
+    try:
+        # حظر النصاب فقط
+        db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
+        
+        # تسجيل
+        thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+        owner_data = db.users.find_one({'user_id': pending_owner_uid}) or {}
+        
+        try:
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'pending_owner_id': pending_owner_uid,
+                'pending_owner_username': owner_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'attempted_amount': float(attempted_amount),
+                'attack_type': 'monitoring_bot_steal',
+                'timestamp': int(time.time()),
+                'status': 'auto_handled'
+            })
+        except Exception: pass
+        
+        # إشعار قوي للأدمن
+        try:
+            thief_username = thief_data.get('username', 'unknown')
+            owner_username = owner_data.get('username', 'unknown')
+            
+            notify_admins(
+                f"🚨 <b>هجوم بوت نصاب تم إيقافه!</b>\n\n"
+                f"⚡ <b>بوت نصاب حاول سرقة حوالة من blockchain</b>\n"
+                f"🛡 <b>تم حظر النصاب وحماية المستخدم الأصلي!</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🤖 <b>بوت النصاب (محظور):</b>\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"😇 <b>المستخدم الأصلي (آمن):</b>\n"
+                f"   • ID: <code>{pending_owner_uid}</code>\n"
+                f"   • Username: @{owner_username}\n"
+                f"   • <i>المستخدم الأصلي يقدر يكمل إيداعه بشكل طبيعي</i>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 المبلغ: <b>${attempted_amount:.4f}</b>\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
+            )
+        except Exception: pass
+        
+        # رسالة للنصاب (بدون كشف وجود نظام حماية)
+        try:
+            bot.send_message(
+                thief_uid,
+                "❌ <b>تم حظر حسابك!</b>\n\n"
+                "🚫 السبب: محاولة استخدام حوالة غير صحيحة.\n\n"
+                "⚠️ <i>للاستفسار، تواصل مع الإدارة.</i>",
+                parse_mode="HTML"
+            )
+        except Exception: pass
+        
+        logger.warning(
+            f"🚨 MONITORING BOT BLOCKED: "
+            f"thief {thief_uid} tried to steal tx {tx_id_clean[:30]} "
+            f"that belongs to {pending_owner_uid}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_steal_attempt: {e}")
+        return False
+
+
+def is_amount_protection_enabled():
+    """يشيك إن نظام المبلغ الفريد مفعّل"""
+    return get_setting('amount_protection', 'on') == 'on'
+
+
+# ============================================================
+# 🛡 معالج بداية الإيداع (يطلب المبلغ ثم يعطي مبلغ فريد)
+# ============================================================
+
+# نخزّن المستخدمين اللي بدأوا إيداع بمبلغ فريد
+PENDING_DEPOSIT_USERS = {}  # uid -> coin
+
+
+def start_amount_protected_deposit(call, coin):
+    """
+    🛡 يبدأ عملية إيداع محمية بمبلغ فريد.
+    """
+    uid = call.from_user.id
+    l = get_lang(uid)
+    
+    # رسالة طلب المبلغ
+    coin_name = {
+        'USDT': 'USDT (TRC-20)',
+        'USDT_BEP20': 'USDT (BEP-20)',
+        'TON': 'Toncoin (TON)',
+        'LTC': 'Litecoin (LTC)'
+    }.get(coin, coin)
+    
+    if l == 'ar':
+        msg_text = (
+            f"💵 <b>الإيداع عبر {coin_name}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
+            f"📌 <i>أمثلة: 5 / 10 / 25 / 50</i>\n"
+            f"⚠️ الحد الأدنى: <b>$1</b>"
+        )
+    else:
+        msg_text = (
+            f"💵 <b>Deposit via {coin_name}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💡 Send the USD amount you want to deposit:\n\n"
+            f"📌 <i>Examples: 5 / 10 / 25 / 50</i>\n"
+            f"⚠️ Minimum: <b>$1</b>"
+        )
+    
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    bot.register_next_step_handler(msg, ask_deposit_amount, coin)
+
+
+def ask_deposit_amount(message, coin):
+    """يستلم المبلغ من المستخدم ويعطيه المبلغ الفريد"""
+    uid = message.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+    
+    if not message.text:
+        bot.send_message(uid, "❌ يجب إرسال رقم.", parse_mode="HTML")
+        return
+    
+    # إلغاء
+    if message.text.strip().lower() in ['الغاء', 'cancel', '/cancel']:
+        bot.send_message(uid, "❌ تم الإلغاء.")
+        return
+    
+    # parsing المبلغ
+    try:
+        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+    except ValueError:
+        bot.send_message(uid, "❌ أرسل رقم فقط.\nمثال: 5 أو 10.5", parse_mode="HTML")
+        return
+    
+    # validation
+    if base_amount < 1:
+        bot.send_message(uid, "❌ الحد الأدنى للإيداع: <b>$1</b>", parse_mode="HTML")
+        return
+    
+    if base_amount > 10000:
+        bot.send_message(uid, "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.", parse_mode="HTML")
+        return
+    
+    # نولّد المبلغ الفريد
+    unique_amount = generate_unique_amount_for_user(base_amount, uid, coin)
+    
+    # نسجّل في DB
+    pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
+    if not pending:
+        bot.send_message(uid, "❌ حدث خطأ. حاول مرة ثانية.", parse_mode="HTML")
+        return
+    
+    # نجلب عنوان المحفظة
+    if coin == "USDT": db_key = "usdt_address"
+    elif coin == "USDT_BEP20": db_key = "usdt_bep20_address"
+    elif coin == "TON": db_key = "ton_address"
+    else: db_key = "ltc_address"
+    wallet = get_setting(db_key)
+    
+    coin_name = {
+        'USDT': 'USDT (TRC-20)',
+        'USDT_BEP20': 'USDT (BEP-20)',
+        'TON': 'Toncoin (TON)',
+        'LTC': 'Litecoin (LTC)'
+    }.get(coin, coin)
+    
+    # نحسب المبلغ بعملة الكريبتو
+    crypto_amount_text = ""
+    try:
+        if coin == 'LTC':
+            ltc_price = get_ltc_price_usd()
+            crypto_amount = unique_amount / ltc_price
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ LTC:</b> <code>{crypto_amount:.8f}</code> LTC"
+        elif coin == 'TON':
+            ton_price = get_ton_price_usd()
+            crypto_amount = unique_amount / ton_price
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ TON:</b> <code>{crypto_amount:.6f}</code> TON"
+        elif coin in ['USDT', 'USDT_BEP20']:
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ USDT:</b> <code>{unique_amount:.4f}</code> USDT"
+    except Exception: pass
+    
+    # رسالة التعليمات
+    if l == 'ar':
+        msg_text = (
+            f"💵 <b>تعليمات الإيداع</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>المبلغ المطلوب تحويله:</b>\n"
+            f"<code>${unique_amount:.6f}</code>\n"
+            f"☝️ <b>بالضبط هذا الرقم!</b>"
+            f"{crypto_amount_text}\n\n"
+            f"📬 <b>العنوان:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>تنبيهات هامة:</b>\n\n"
+            f"✅ حوّل بالضبط: <code>${unique_amount:.6f}</code>\n"
+            f"❌ <b>لا</b> تحوّل ${base_amount:.2f}\n"
+            f"❌ <b>لا</b> تقرّب الرقم\n"
+            f"❌ <b>لا</b> تنقص ولا تزيد ولا حتى $0.0001\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⏰ <b>صلاحية الطلب:</b> 30 دقيقة\n\n"
+            f"✅ بعد التحويل بالمبلغ <b>الصحيح</b>، أرسل الـ <b>TxID (الهاش)</b> هنا 👇"
+        )
+    else:
+        msg_text = (
+            f"💵 <b>Deposit Instructions</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>Amount to send:</b>\n"
+            f"<code>${unique_amount:.6f}</code>\n"
+            f"☝️ <b>EXACTLY this amount!</b>"
+            f"{crypto_amount_text}\n\n"
+            f"📬 <b>Address:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Important:</b>\n\n"
+            f"✅ Send EXACTLY: <code>${unique_amount:.6f}</code>\n"
+            f"❌ <b>DON'T</b> send ${base_amount:.2f}\n"
+            f"❌ <b>DON'T</b> round the number\n"
+            f"❌ <b>DON'T</b> change even by $0.0001\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⏰ <b>Valid for:</b> 30 minutes\n\n"
+            f"✅ After sending the <b>EXACT</b> amount, send the <b>TxID</b> here 👇"
+        )
+    
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    
+    # نسجّل المستخدم في PENDING
+    PENDING_DEPOSIT_USERS[uid] = coin
+    
+    # نسجّل next_step
+    if coin == "LTC":
+        bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
+    elif coin == "TON":
+        bot.register_next_step_handler(msg, verify_crypto_tx, l, "TON")
+    elif coin == "USDT_BEP20":
+        bot.register_next_step_handler(msg, verify_crypto_tx, l, "USDT")
+    else:
+        bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
 def dep_crypto_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); coin = call.data.replace('dep_crypto_', '')
+    coin = call.data.replace('dep_crypto_', '')
     bot.clear_step_handler_by_chat_id(chat_id=uid)
     
+    # 🛡 لو الحماية مفعّلة، نستخدم النظام الجديد (مبلغ فريد)
+    if is_amount_protection_enabled():
+        start_amount_protected_deposit(call, coin)
+        return
+    
+    # النظام القديم (لو الحماية معطّلة)
+    l = get_lang(uid)
     if coin == "USDT": db_key = "usdt_address"
     elif coin == "USDT_BEP20": db_key = "usdt_bep20_address"
     elif coin == "TON": db_key = "ton_address"
@@ -3025,17 +3766,20 @@ def verify_binance_pay(message, lang):
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
         return
-        
+    
+    # 🛡 توحيد الـ tx_id لمنع الالتفاف بـ 0x أو أحرف كبيرة
+    tx_id_normalized = normalize_tx_id(tx_id)
+    
     with tx_lock:
-        if tx_id in PROCESSING_TXS:
+        if tx_id_normalized in PROCESSING_TXS:
             bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
             return
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
+        if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
-        PROCESSING_TXS.add(tx_id)
+        PROCESSING_TXS.add(tx_id_normalized)
     
     # 🛡 حماية ضد سرقة الحوالات: حجز الـ hash لأول مستخدم
-    claim_status = claim_tx_hash(tx_id, uid)
+    claim_status = claim_tx_hash(tx_id_normalized, uid)
     if claim_status == 'stolen_attempt':
         bot.send_message(
             uid,
@@ -3044,11 +3788,11 @@ def verify_binance_pay(message, lang):
             "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
             parse_mode="HTML"
         )
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
     elif claim_status == 'already_used':
         bot.reply_to(message, get_text(uid, 'tx_used'))
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
         
     try:
@@ -3116,7 +3860,7 @@ def verify_binance_pay(message, lang):
                 amt = float(d.get('amount', 0.0))
                 break
                 
-        if found: credit_user(uid, amt, tx_id.lower(), lang, "Binance Pay")
+        if found: credit_user(uid, amt, tx_id_normalized, lang, "Binance Pay")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
         logger.debug(f"Unexpected error in verify_binance_tx: {e}")
@@ -3127,7 +3871,7 @@ def verify_binance_pay(message, lang):
             parse_mode="HTML"
         )
     finally:
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
 
 def verify_crypto_tx(message, lang, coin):
     """
@@ -3150,17 +3894,20 @@ def verify_crypto_tx(message, lang, coin):
     if len(tx_id) < 5:
         bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
         return
-        
+    
+    # 🛡 توحيد الـ tx_id لمنع الالتفاف بـ 0x أو تنسيقات مختلفة
+    tx_id_normalized = normalize_tx_id(tx_id)
+    
     with tx_lock:
-        if tx_id in PROCESSING_TXS:
+        if tx_id_normalized in PROCESSING_TXS:
             bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
             return
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
+        if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
-        PROCESSING_TXS.add(tx_id)
+        PROCESSING_TXS.add(tx_id_normalized)
     
     # 🛡 حماية ضد سرقة الحوالات
-    claim_status = claim_tx_hash(tx_id, uid)
+    claim_status = claim_tx_hash(tx_id_normalized, uid)
     if claim_status == 'stolen_attempt':
         bot.send_message(
             uid,
@@ -3169,11 +3916,11 @@ def verify_crypto_tx(message, lang, coin):
             "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
             parse_mode="HTML"
         )
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
     elif claim_status == 'already_used':
         bot.reply_to(message, get_text(uid, 'tx_used'))
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
         
     try:
@@ -3241,7 +3988,35 @@ def verify_crypto_tx(message, lang, coin):
                 break
                 
         if found:
-            if status == 1: credit_user(uid, amt, tx_id, lang, f"Crypto {coin}")
+            if status == 1:
+                # 🛡 فحص المبلغ الفريد (حماية من بوتات النصب)
+                if is_amount_protection_enabled():
+                    # USDT = 1$ تقريباً، فالمبلغ بالعملة = المبلغ بالدولار
+                    usd_amount_precise = round(float(amt), 4)
+                    
+                    pending = find_pending_deposit_for_amount(usd_amount_precise, coin, tolerance=0.0001)
+                    if pending is None:
+                        # نشيك مع USDT_BEP20 أيضاً
+                        pending = find_pending_deposit_for_amount(usd_amount_precise, 'USDT_BEP20', tolerance=0.0001)
+                    
+                    if pending is None:
+                        reject_wrong_amount_deposit(uid, coin, usd_amount_precise, tx_id_normalized, f"USDT ({coin})")
+                        return
+                    
+                    if pending['user_id'] != uid:
+                        punish_steal_attempt_thief_only(
+                            thief_uid=uid,
+                            tx_id_clean=tx_id_normalized,
+                            pending_owner_uid=pending['user_id'],
+                            attempted_amount=usd_amount_precise
+                        )
+                        return
+                    
+                    mark_pending_deposit_used(pending['pending_id'])
+                    base_amount = pending.get('base_amount_usd', amt)
+                    credit_user(uid, base_amount, tx_id_normalized, lang, f"Crypto {coin}")
+                else:
+                    credit_user(uid, amt, tx_id_normalized, lang, f"Crypto {coin}")
             else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
@@ -3249,7 +4024,7 @@ def verify_crypto_tx(message, lang, coin):
         # ⚠️ ما نطلع رسالة خطأ سيرفر - نقول حوالة غير موجودة
         bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     finally:
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
 
 
 def get_ltc_price_usd():
@@ -3362,12 +4137,43 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
     # 🛡 TON hashes case-sensitive - ما نسوي lower!
     tx_id_clean = tx_id.replace(' ', '').replace('\n', '')
     
-    if len(tx_id_clean) < 20:
+    # 🛡 رفض base64 hash (in_msg hash) - نقبل فقط TxID الكامل
+    # علامات الـ base64 hash اللي ما نقبله:
+    # - يحتوي على = (padding)
+    # - يحتوي على + أو / 
+    # - قصير نسبياً (40-50 حرف)
+    is_base64_hash = (
+        ('=' in tx_id_clean or '+' in tx_id_clean or '/' in tx_id_clean)
+        and len(tx_id_clean) < 60
+    )
+    
+    if is_base64_hash:
         bot.send_message(
             uid,
-            "❌ <b>رقم الهاش (TxID) غير صحيح!</b>\n\n"
-            "💡 <i>هاش TON يكون على شكل: <code>abc123...XYZ=</code> أو base64</i>\n"
-            "تأكد من نسخه بالكامل من محفظتك.",
+            "❌ <b>هذا ليس TxID صحيحاً!</b>\n\n"
+            "💡 <b>أنت أرسلت hash من نوع آخر (in_msg hash).</b>\n\n"
+            "📌 <b>الـ TxID الصحيح:</b>\n"
+            "• نص طويل (64 حرف على الأقل)\n"
+            "• حروف وأرقام فقط (a-z, 0-9)\n"
+            "• <b>ما يحتوي على</b> = أو + أو /\n\n"
+            "🔍 <b>وين تلقى TxID الصحيح؟</b>\n"
+            "1️⃣ افتح محفظتك (Tonkeeper / Tonhub)\n"
+            "2️⃣ اضغط على الحوالة\n"
+            "3️⃣ اضغط <b>'View in Explorer'</b> أو <b>'عرض في المتصفح'</b>\n"
+            "4️⃣ انسخ <b>Transaction Hash</b> الطويل (مو in_msg)\n\n"
+            "<i>أو من tonviewer.com / tonscan.org بعد البحث عن حوالتك.</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    if len(tx_id_clean) < 32:
+        bot.send_message(
+            uid,
+            "❌ <b>رقم الهاش (TxID) قصير جداً!</b>\n\n"
+            "💡 <b>الـ TxID الصحيح لـ TON:</b>\n"
+            "• 64 حرف (hex) — مثل: <code>abc123...def</code>\n"
+            "• أو 44+ حرف base64 بدون = و + و /\n\n"
+            "تأكد من نسخه بالكامل من المتصفح (Tonviewer).",
             parse_mode="HTML"
         )
         return
@@ -3376,8 +4182,8 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, "❌ <b>خطأ:</b> عنوان محفظة TON غير معين في البوت.", parse_mode="HTML")
         return
     
-    # نستخدم lowercase للـ tracking في PROCESSING_TXS فقط
-    tx_track_key = tx_id_clean.lower()
+    # 🛡 استخدام normalize_tx_id للحماية الموحدة
+    tx_track_key = normalize_tx_id(tx_id_clean)
     
     with tx_lock:
         if tx_track_key in PROCESSING_TXS:
@@ -3600,7 +4406,30 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
             f"   data_source: {data_source}"
         )
         
-        credit_user(uid, usd_amount, tx_track_key, lang, "Toncoin (TON)")
+        # 🛡 فحص المبلغ الفريد (حماية من بوتات النصب)
+        if is_amount_protection_enabled():
+            usd_amount_precise = round(received_ton * ton_price, 4)
+            
+            pending = find_pending_deposit_for_amount(usd_amount_precise, 'TON', tolerance=0.0001)
+            
+            if pending is None:
+                reject_wrong_amount_deposit(uid, 'TON', usd_amount_precise, tx_track_key, "Toncoin (TON)")
+                return
+            
+            if pending['user_id'] != uid:
+                punish_steal_attempt_thief_only(
+                    thief_uid=uid,
+                    tx_id_clean=tx_track_key,
+                    pending_owner_uid=pending['user_id'],
+                    attempted_amount=usd_amount_precise
+                )
+                return
+            
+            mark_pending_deposit_used(pending['pending_id'])
+            base_amount = pending.get('base_amount_usd', usd_amount)
+            credit_user(uid, base_amount, tx_track_key, lang, "Toncoin (TON)")
+        else:
+            credit_user(uid, usd_amount, tx_track_key, lang, "Toncoin (TON)")
     
     except Exception as e:
         logger.error(f"Unexpected error in verify_ton_public_blockchain: {e}")
@@ -3627,17 +4456,20 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     if wallet_address == "Not Set" or len(wallet_address) < 10:
         bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
         return
-        
+    
+    # 🛡 توحيد الـ tx_id لمنع الالتفاف
+    tx_id_normalized = normalize_tx_id(tx_id)
+    
     with tx_lock:
-        if tx_id in PROCESSING_TXS:
+        if tx_id_normalized in PROCESSING_TXS:
             bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
             return
-        if db.used_transactions.find_one({'transaction_id': tx_id}):
+        if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
-        PROCESSING_TXS.add(tx_id)
+        PROCESSING_TXS.add(tx_id_normalized)
     
     # 🛡 حماية ضد سرقة الحوالات
-    claim_status = claim_tx_hash(tx_id, uid)
+    claim_status = claim_tx_hash(tx_id_normalized, uid)
     if claim_status == 'stolen_attempt':
         bot.send_message(
             uid,
@@ -3646,11 +4478,11 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
             parse_mode="HTML"
         )
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
     elif claim_status == 'already_used':
         bot.reply_to(message, get_text(uid, 'tx_used'))
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
         return
         
     try:
@@ -3775,7 +4607,34 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                     f"   data_source: {data_source}"
                 )
                 
-                credit_user(uid, usd_amount, tx_id, lang, "Litecoin (LTC)")
+                # 🛡 فحص المبلغ الفريد (حماية من بوتات النصب)
+                if is_amount_protection_enabled():
+                    # نحسب المبلغ بدقة أكثر (4 خانات)
+                    usd_amount_precise = round(received_ltc * ltc_price, 4)
+                    
+                    pending = find_pending_deposit_for_amount(usd_amount_precise, 'LTC', tolerance=0.0001)
+                    
+                    if pending is None:
+                        reject_wrong_amount_deposit(uid, 'LTC', usd_amount_precise, tx_id, "Litecoin (LTC)")
+                        return
+                    
+                    if pending['user_id'] != uid:
+                        # 🚨 المبلغ مسجّل لمستخدم آخر - بوت نصاب!
+                        punish_steal_attempt_thief_only(
+                            thief_uid=uid,
+                            tx_id_clean=tx_id_normalized,
+                            pending_owner_uid=pending['user_id'],
+                            attempted_amount=usd_amount_precise
+                        )
+                        return
+                    
+                    # ✅ المبلغ مطابق ولنفس المستخدم
+                    mark_pending_deposit_used(pending['pending_id'])
+                    # نستخدم المبلغ الأساسي (بدون عشر سنتين الإضافية)
+                    base_amount = pending.get('base_amount_usd', usd_amount)
+                    credit_user(uid, base_amount, tx_id_normalized, lang, "Litecoin (LTC)")
+                else:
+                    credit_user(uid, usd_amount, tx_id_normalized, lang, "Litecoin (LTC)")
             else: 
                 bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: 
@@ -3784,7 +4643,204 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     except Exception as e:
         bot.send_message(uid, f"❌ حدث خطأ أثناء فحص الشبكة.", parse_mode="HTML")
     finally:
-        PROCESSING_TXS.discard(tx_id)
+        PROCESSING_TXS.discard(tx_id_normalized)
+
+def generate_tx_fingerprint(amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None):
+    """
+    🛡 يولّد بصمة فريدة لكل حوالة (مو فقط tx_id).
+    
+    البصمة = MD5( amount + method + sender + receiver + minute_timestamp )
+    
+    هذا يمنع استخدام نفس الحوالة بـ tx_id مختلفة (مثل in_msg vs tx_hash في TON).
+    """
+    import hashlib
+    
+    # نقرب الـ timestamp لأقرب دقيقة (عشان لو في فرق ثوانٍ بين الـ APIs)
+    if tx_timestamp:
+        minute_ts = int(tx_timestamp / 60) * 60
+    else:
+        minute_ts = int(time.time() / 60) * 60
+    
+    # نطبّع العناوين
+    sender = (sender_addr or '').strip().lower()
+    receiver = (receiver_addr or '').strip().lower()
+    
+    # نقرّب المبلغ لـ 8 خانات عشرية
+    amt_str = f"{float(amount):.8f}"
+    
+    # نولّد البصمة
+    fingerprint_str = f"{amt_str}|{method}|{sender}|{receiver}|{minute_ts}"
+    fingerprint = hashlib.md5(fingerprint_str.encode()).hexdigest()
+    
+    return fingerprint
+
+
+def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None, tx_id_clean=None):
+    """
+    🛡 يفحص لو الحوالة مستخدمة بالفعل (حتى لو الـ tx_id مختلف).
+    
+    يستخدم 3 طبقات فحص:
+    1. tx_id المطبّع (لو موجود)
+    2. بصمة الحوالة (fingerprint)
+    3. فحص ذكي للحوالات المشابهة (نفس المبلغ + نفس الدقيقة)
+    
+    يرجع:
+    - None لو الحوالة جديدة
+    - dict فيه معلومات المُستخدم القديم لو فيه duplicate
+    """
+    try:
+        # الطبقة 1: tx_id المطبّع
+        if tx_id_clean:
+            existing = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+            if existing:
+                return {
+                    'match_type': 'tx_id',
+                    'original_uid': existing.get('user_id'),
+                    'original_amount': existing.get('amount', 0),
+                    'original_record': existing
+                }
+        
+        # الطبقة 2: بصمة الحوالة
+        fingerprint = generate_tx_fingerprint(amount, method, sender_addr, receiver_addr, tx_timestamp)
+        existing_fp = db.used_transactions.find_one({'fingerprint': fingerprint})
+        if existing_fp:
+            return {
+                'match_type': 'fingerprint',
+                'original_uid': existing_fp.get('user_id'),
+                'original_amount': existing_fp.get('amount', 0),
+                'original_record': existing_fp
+            }
+        
+        # الطبقة 3: فحص ذكي - نفس المبلغ + نفس الطريقة + نفس الدقيقة
+        # (للحوالات اللي ما عندها sender/receiver معروف)
+        if tx_timestamp:
+            minute_start = int(tx_timestamp / 60) * 60
+            minute_end = minute_start + 60
+            
+            # نبحث عن أي حوالة بنفس المبلغ والطريقة في نفس الدقيقة
+            similar = db.used_transactions.find_one({
+                'amount': float(amount),
+                'method': method,
+                'created_at': {
+                    '$gte': minute_start,
+                    '$lt': minute_end
+                },
+                'user_id': {'$ne': uid}  # مستخدم آخر
+            })
+            
+            if similar:
+                return {
+                    'match_type': 'similar_time_amount',
+                    'original_uid': similar.get('user_id'),
+                    'original_amount': similar.get('amount', 0),
+                    'original_record': similar
+                }
+        
+        return None  # حوالة جديدة، آمنة
+    except Exception as e:
+        logger.error(f"Error in check_duplicate_transaction: {e}")
+        return None
+
+
+def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, original_amount=0, match_type='tx_id'):
+    """
+    🚨 نسخة موسعة من punish_hash_collision تخبر الأدمن بنوع الكشف.
+    """
+    try:
+        # 1. سحب رصيد المستخدم الأصلي
+        original_user = db.users.find_one({'user_id': original_uid})
+        original_balance = float(original_user.get('balance', 0)) if original_user else 0
+        
+        try:
+            db.balance_seizures.insert_one({
+                'user_id': original_uid,
+                'seized_amount': original_balance,
+                'reason': f'duplicate_tx_{match_type}',
+                'related_tx': tx_id_clean,
+                'thief_user': thief_uid,
+                'timestamp': int(time.time())
+            })
+        except Exception: pass
+        
+        db.users.update_one({'user_id': original_uid}, {'$set': {'balance': 0.0, 'is_banned': 1}})
+        db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
+        
+        # تسجيل
+        original_data = db.users.find_one({'user_id': original_uid}) or {}
+        thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+        
+        try:
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'original_user_id': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'seized_balance': original_balance,
+                'match_type': match_type,
+                'timestamp': int(time.time()),
+                'status': 'pending_admin_review'
+            })
+        except: pass
+        
+        # شرح نوع الكشف
+        match_descriptions = {
+            'tx_id': 'نفس رقم العملية (TxID)',
+            'fingerprint': 'نفس بصمة الحوالة (مبلغ + وقت + عناوين)',
+            'similar_time_amount': 'نفس المبلغ في نفس الدقيقة بنفس طريقة الدفع',
+            'unknown': 'تطابق غير محدد'
+        }
+        match_desc = match_descriptions.get(match_type, match_type)
+        
+        # إشعار للأدمن
+        try:
+            original_username = original_data.get('username', 'unknown')
+            thief_username = thief_data.get('username', 'unknown')
+            
+            admin_msg = (
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
+                f"🔍 <b>نوع الكشف:</b> {match_desc}\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد المسحوب: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش/الرقم: <code>{tx_id_clean[:40]}...</code>"
+            )
+            notify_admins(admin_msg)
+        except Exception as notify_err:
+            logger.error(f"Failed to notify: {notify_err}")
+        
+        # رسائل للمستخدمين
+        manipulation_msg = (
+            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+        )
+        
+        try: bot.send_message(original_uid, manipulation_msg, parse_mode="HTML")
+        except: pass
+        try: bot.send_message(thief_uid, manipulation_msg, parse_mode="HTML")
+        except: pass
+        
+        logger.warning(
+            f"🚨 EXTENDED COLLISION PUNISHMENT ({match_type}):\n"
+            f"   tx: {tx_id_clean[:30]}\n"
+            f"   original: {original_uid} (banned, ${original_balance:.2f} seized)\n"
+            f"   thief: {thief_uid} (banned)"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_hash_collision_extended: {e}")
+        return False
+
 
 def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=0):
     """
@@ -3897,6 +4953,48 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
         return False
 
 
+def normalize_tx_id(tx_id):
+    """
+    🛡 توحيد رقم العملية (TxID) لمنع الالتفاف على الحماية.
+    
+    يتعامل مع الحالات:
+    - 0x1db4... و 1db4... → نفس الشي
+    - ABCdef... و abcdef... → نفس الشي
+    - " abc " (مع مسافات) → "abc"
+    - "abc\n" (سطر جديد) → "abc"
+    - أحرف غير مرئية → تُحذف
+    """
+    if not tx_id:
+        return ""
+    
+    # 1. تحويل لـ string وتنظيف
+    s = str(tx_id).strip()
+    
+    # 2. إزالة المسافات والأسطر الجديدة من داخل النص (احتياط)
+    s = re.sub(r'\s+', '', s)
+    
+    # 3. إزالة أحرف غير مرئية (zero-width chars)
+    s = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]', '', s)
+    
+    # 4. تحويل لـ lowercase
+    s = s.lower()
+    
+    # 5. إزالة بادئات شائعة:
+    # - 0x (Ethereum/USDT-BEP20/USDT-ERC20)
+    # - 0X (نسخة كبيرة)
+    if s.startswith('0x'):
+        s = s[2:]
+    
+    # 6. إزالة أحرف غريبة (نحتفظ بأحرف وأرقام فقط)
+    # ملاحظة: TON hashes ممكن تحتوي على = و / و +
+    # فما نحذفها لو الـ tx_id فيها هذي الحروف
+    if not any(c in s for c in '=/+'):
+        # ما فيها رموز TON - نحذف أي رمز غير alphanumeric
+        s = re.sub(r'[^a-z0-9]', '', s)
+    
+    return s
+
+
 def claim_tx_hash(tx_id, uid):
     """
     🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه - atomic 100%.
@@ -3914,7 +5012,7 @@ def claim_tx_hash(tx_id, uid):
     - 'already_used_own' لو نفس المستخدم استخدمه قبل (مرفوض)
     """
     try:
-        tx_id_clean = str(tx_id).strip().lower()
+        tx_id_clean = normalize_tx_id(tx_id)
         uid = int(uid)
         
         # 🛡 الخطوة 1: نحاول insert atomic في claimed_hashes (الـ unique index يحمي)
@@ -4116,11 +5214,12 @@ def cleanup_old_claimed_hashes():
 
 
 def _cleanup_thread():
-    """Thread يشتغل كل ساعة لتنظيف الـ claimed_hashes القديمة"""
+    """Thread يشتغل كل ساعة لتنظيف الـ claimed_hashes و pending_deposits"""
     while True:
         try:
             time.sleep(3600)  # كل ساعة
             cleanup_old_claimed_hashes()
+            cleanup_expired_pending_deposits()
         except Exception as e:
             logger.error(f"Cleanup thread error: {e}")
             time.sleep(600)
@@ -4134,16 +5233,173 @@ def credit_user(uid, amt, tx_id, lang, method):
     🛡 إضافة رصيد للمستخدم بشكل atomic (مقاوم لـ race conditions).
     
     الترتيب الحرج:
-    1. أولاً نحاول insert_one في used_transactions (atomic + unique index)
-    2. لو نجح: نضيف الرصيد
-    3. لو فشل (duplicate): شخص آخر سبقنا → ما نضيف رصيد ونرسل تنبيه
+    1. validation للمبلغ والـ tx_id
+    2. توحيد tx_id إلى lowercase (يطابق claim_tx_hash)
+    3. فحص duplicate قبل insert (احتياطي لو الـ index ما اشتغل)
+    4. insert_one في used_transactions (atomic + unique index)
+    5. لو نجح: نضيف الرصيد
+    6. لو فشل (duplicate): شخص آخر سبقنا → ما نضيف رصيد ونحظر
     """
-    tx_id_clean = str(tx_id).strip().lower() if isinstance(tx_id, str) else str(tx_id).lower()
+    # 🛡 الخطوة 0: Validation حرجة!
+    try:
+        amt = float(amt)
+    except (ValueError, TypeError):
+        logger.error(f"❌ مبلغ غير صحيح في credit_user: {amt!r} للمستخدم {uid}")
+        return
     
-    # 🛡 الخطوة 1: محاولة atomic insert (الـ unique index يحمي من race condition)
+    # 🛡 رفض المبالغ الصفر والسالبة (الحد الأدنى 0.10$)
+    if amt <= 0:
+        logger.error(f"🚨 محاولة إيداع بمبلغ صفر/سالب: amt={amt} للمستخدم {uid}")
+        try:
+            bot.send_message(uid, "❌ <b>المبلغ غير صالح.</b>", parse_mode="HTML")
+        except: pass
+        return
+    
+    if amt < 0.10:
+        logger.warning(f"⚠️ مبلغ إيداع تحت الحد الأدنى: amt={amt} للمستخدم {uid}")
+        try:
+            bot.send_message(uid, f"❌ <b>المبلغ ${amt:.2f} أقل من الحد الأدنى ($0.10).</b>", parse_mode="HTML")
+        except: pass
+        return
+    
+    # 🛡 رفض المبالغ الضخمة المشبوهة (أكثر من $50,000 = خطأ بالتأكيد)
+    if amt > 50000:
+        logger.error(f"🚨 مبلغ ضخم مشبوه: amt={amt} للمستخدم {uid} - تم رفضه!")
+        try:
+            notify_admins(
+                f"🚨 <b>مبلغ ضخم مشبوه!</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code>\n"
+                f"💰 المبلغ: <b>${amt:.2f}</b>\n"
+                f"💳 الطريقة: {method}\n\n"
+                f"⚠️ تم رفض الإيداع تلقائياً. راجع يدوياً."
+            )
+        except: pass
+        try:
+            bot.send_message(uid, "❌ <b>المبلغ كبير جداً.</b>\n\nتواصل مع الإدارة.", parse_mode="HTML")
+        except: pass
+        return
+    
+    # 🛡 validation للـ tx_id
+    if not tx_id or len(str(tx_id).strip()) < 5:
+        logger.error(f"🚨 tx_id غير صحيح: {tx_id!r} للمستخدم {uid}")
+        return
+    
+    # 🛡 الخطوة 1: توحيد tx_id - يشيل 0x والأحرف الكبيرة والمسافات
+    tx_id_clean = normalize_tx_id(tx_id)
+    
+    # 🛡 رفض tx_id قصير جداً بعد التطبيع
+    if len(tx_id_clean) < 5:
+        logger.error(f"🚨 tx_id قصير بعد التطبيع: {tx_id_clean!r}")
+        return
+    
+    # 🛡 الخطوة 2: فحص duplicate شامل (3 طبقات)
+    # هذا يكتشف نفس الحوالة حتى لو الـ tx_id مختلف
+    current_time = int(time.time())
+    dup_check = check_duplicate_transaction(
+        uid=uid,
+        amount=amt,
+        method=method,
+        tx_timestamp=current_time,
+        tx_id_clean=tx_id_clean
+    )
+    
+    if dup_check:
+        original_uid = dup_check.get('original_uid')
+        match_type = dup_check.get('match_type', 'unknown')
+        original_amount = float(dup_check.get('original_amount', 0))
+        
+        if original_uid != uid:
+            # 🚨 شخص آخر استخدم نفس الحوالة (بأي طريقة)
+            logger.warning(
+                f"🚨 DUPLICATE DETECTED ({match_type}): "
+                f"user {uid} حاول حوالة مستخدمة من user {original_uid}"
+            )
+            
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                try:
+                    punish_hash_collision_extended(
+                        original_uid, uid, tx_id_clean, original_amount, match_type
+                    )
+                except Exception as punish_err:
+                    logger.error(f"Failed extended punishment: {punish_err}")
+            else:
+                # الأصلي محظور بالفعل، نحظر الجديد
+                try:
+                    db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+                    notify_admins(
+                        f"🚨 <b>محاولة استخدام حوالة مستخدمة!</b>\n\n"
+                        f"👤 المهاجم: <code>{uid}</code>\n"
+                        f"🔍 نوع الكشف: <b>{match_type}</b>\n"
+                        f"💰 المبلغ: <b>${amt:.2f}</b>\n"
+                        f"🚫 تم حظره تلقائياً (الأصلي محظور بالفعل)"
+                    )
+                except: pass
+            
+            # رسالة للمستخدم
+            try:
+                bot.send_message(
+                    uid,
+                    "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                    "🚫 تم حظر حسابك بسبب محاولة استخدام حوالة مستخدمة بالفعل.\n\n"
+                    "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                    parse_mode="HTML"
+                )
+            except: pass
+            return
+        else:
+            # نفس المستخدم - يا إما أعاد المحاولة، يا إما الإيداع موجود
+            if dup_check.get('match_type') == 'tx_id':
+                try:
+                    bot.send_message(uid, "✅ <b>هذا الإيداع تم تأكيده بالفعل.</b>", parse_mode="HTML")
+                except: pass
+            return
+    
+    # 🛡 الخطوة 3: نحسب البصمة الفريدة للحوالة
+    tx_fingerprint = generate_tx_fingerprint(
+        amount=amt,
+        method=method,
+        tx_timestamp=current_time
+    )
+    
+    # 🛡 الخطوة 4: فحص duplicate صريح ثاني (احتياط)
+    existing_check = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+    if existing_check:
+        original_uid = existing_check.get('user_id')
+        if original_uid != uid:
+            original_amount = float(existing_check.get('amount', 0))
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                try:
+                    punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                except Exception as punish_err:
+                    logger.error(f"Failed punishment in pre-check: {punish_err}")
+        
+        try:
+            if lang == 'ar':
+                bot.send_message(
+                    uid,
+                    "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                    "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                    "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                    parse_mode="HTML"
+                )
+            else:
+                bot.send_message(
+                    uid,
+                    "❌ <b>Manipulation detected!</b>\n\n"
+                    "🚫 Your account has been banned.\n\n"
+                    "⚠️ <i>Contact admin if you believe this is a mistake.</i>",
+                    parse_mode="HTML"
+                )
+        except Exception: pass
+        return
+    
+    # 🛡 الخطوة 5: محاولة atomic insert (الـ unique index يحمي من race condition)
     try:
         db.used_transactions.insert_one({
-            'transaction_id': tx_id,
+            'transaction_id': tx_id_clean,
+            'fingerprint': tx_fingerprint,
             'amount': amt,
             'user_id': uid,
             'method': method,
@@ -4152,27 +5408,33 @@ def credit_user(uid, amt, tx_id, lang, method):
     except Exception as insert_err:
         err_str = str(insert_err).lower()
         if 'duplicate' in err_str or 'e11000' in err_str:
-            # ❌ الـ tx مستخدم بالفعل! شخص آخر سبقنا
+            # ❌ duplicate - race condition محل بالـ index
             logger.warning(
-                f"🚨 RACE CONDITION CAUGHT في credit_user: "
-                f"user {uid} حاول استخدام tx {tx_id_clean[:30]} لكن سبقه آخر"
+                f"🚨 RACE CONDITION CAUGHT: "
+                f"user {uid} حاول tx {tx_id_clean[:30]} لكن سبقه آخر"
             )
             
             # نشوف من الأول
-            existing = db.used_transactions.find_one({'transaction_id': tx_id})
+            existing = db.used_transactions.find_one({
+                '$or': [
+                    {'transaction_id': tx_id_clean},
+                    {'fingerprint': tx_fingerprint}
+                ]
+            })
             if existing:
                 original_uid = existing.get('user_id')
                 if original_uid != uid:
-                    # 🚨 نطبق العقوبات
                     original_amount = float(existing.get('amount', 0))
                     original_user = db.users.find_one({'user_id': original_uid})
                     if original_user and original_user.get('is_banned') != 1:
                         try:
-                            punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                            punish_hash_collision_extended(
+                                original_uid, uid, tx_id_clean, original_amount, 'race_condition'
+                            )
                         except Exception as punish_err:
                             logger.error(f"Failed punishment: {punish_err}")
             
-            # رسالة الإلغاء للمستخدم
+            # رسالة الإلغاء
             try:
                 if lang == 'ar':
                     bot.send_message(
@@ -4186,14 +5448,13 @@ def credit_user(uid, amt, tx_id, lang, method):
                     bot.send_message(
                         uid,
                         "❌ <b>Manipulation detected!</b>\n\n"
-                        "🚫 Your account has been banned for trying to use the same transaction with another account.\n\n"
-                        "⚠️ <i>You attempted manipulation - contact admin if you believe this is a mistake.</i>",
+                        "🚫 Your account has been banned.\n\n"
+                        "⚠️ <i>Contact admin if you believe this is a mistake.</i>",
                         parse_mode="HTML"
                     )
             except Exception: pass
-            return  # ⛔ نوقف هنا - ما نضيف رصيد
+            return  # ⛔ ما نضيف رصيد
         else:
-            # خطأ آخر مو duplicate
             logger.error(f"Failed to insert tx: {insert_err}")
             try:
                 bot.send_message(
@@ -4204,7 +5465,7 @@ def credit_user(uid, amt, tx_id, lang, method):
             except: pass
             return
     
-    # ✅ نجح الـ insert - نضيف الرصيد
+    # ✅ الخطوة 4: نجح الـ insert - نضيف الرصيد
     db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
     
     # 🛡 نظف الـ claimed_hashes بعد نجاح الإيداع
@@ -4243,7 +5504,45 @@ def credit_user(uid, amt, tx_id, lang, method):
 # ============================================================
 # 👑 14. لوحة الإدارة ونظام التقارير 
 # ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_amount_protection")
+@admin_required
+def toggle_amount_protection(call):
+    """🛡 يفعّل/يعطّل نظام الحماية بالمبلغ الفريد"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    
+    current = is_amount_protection_enabled()
+    new_value = 'off' if current else 'on'
+    
+    db.settings.update_one(
+        {'key': 'amount_protection'},
+        {'$set': {'value': new_value}},
+        upsert=True
+    )
+    
+    if new_value == 'on':
+        msg = (
+            "✅ <b>تم تفعيل نظام حماية الإيداعات!</b>\n\n"
+            "🛡 الآن:\n"
+            "• كل مستخدم يحتاج يسجّل عملية الإيداع أولاً (يكتب المبلغ)\n"
+            "• البوت يعطيه مبلغ فريد (مثل $5.0023)\n"
+            "• المستخدم يحوّل المبلغ الفريد بالضبط\n"
+            "• بوتات النصب اللي تراقب blockchain ما تقدر تسرق\n\n"
+            "✅ <b>هذا الحل الوحيد ضد بوتات النصب التلقائية!</b>"
+        )
+    else:
+        msg = (
+            "⚠️ <b>تم تعطيل نظام حماية الإيداعات!</b>\n\n"
+            "🚨 <b>تحذير شديد:</b>\n"
+            "بدون هذا النظام، أي بوت نصب يراقب blockchain يقدر يسرق حوالات مستخدميك!\n\n"
+            "💡 ننصح بتفعيله فوراً."
+        )
+    
+    bot.send_message(uid, msg, parse_mode="HTML")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
+@admin_required
 def admin_main_ui(call):
     bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
@@ -4282,6 +5581,10 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
+        # 🛡 زر الحماية ضد سرقة الحوالات
+        protection_on = is_amount_protection_enabled()
+        protection_label = "✅ مفعّلة (موصى به)" if protection_on else "⚠️ معطّلة (خطر!)"
+        markup.add(InlineKeyboardButton(f"🛡 حماية الإيداعات: {protection_label}", callback_data="toggle_amount_protection"))
         markup.add(InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu_refresh"))
         text = "👑 <b>لوحة القيادة (الإدارة):</b>"
         
@@ -4292,6 +5595,7 @@ def admin_main_ui(call):
 # ✏️ نظام تخصيص نصوص البوت والأزرار المتقدم (CMS)
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "ad_texts_main")
+@admin_required
 def ad_texts_main_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=2)
@@ -4301,6 +5605,7 @@ def ad_texts_main_ui(call):
     bot.edit_message_text("✏️ <b>نظام التخصيص (CMS):</b>\nاختر ماذا تريد أن تخصص:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_msgs")
+@admin_required
 def ad_cms_msgs_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=1)
@@ -4325,6 +5630,7 @@ def ad_cms_msgs_ui(call):
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_btns_cats")
+@admin_required
 def ad_cms_btns_cats_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=1)
@@ -4632,6 +5938,7 @@ def ad_save_custom_btn(message, key):
 
 # ----------- تعيين أيقونة لمنتج -----------
 @bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
+@admin_required
 def ad_prod_emoji_start(call):
     bot.answer_callback_query(call.id) 
     l = get_lang(call.from_user.id)
@@ -4742,6 +6049,7 @@ def ad_prod_emoji_save(message, pid):
         bot.send_message(message.chat.id, f"✅ تم تحديث الأيقونة لمنتج [{p_name}]!")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_api_main")
+@admin_required
 def admin_api_main(call):
     bot.answer_callback_query(call.id)
     gh_price = float(get_setting("github_price", 15.0))
@@ -4756,6 +6064,7 @@ def admin_api_main(call):
     bot.edit_message_text("⚙️ <b>إعدادات التفعيلات التلقائية:</b>\nمن هنا تتحكم بالأسعار وتفاصيل الربط مع اليوزربوت.", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data in ["ad_set_session", "ad_set_provider"])
+@admin_required
 def admin_set_userbot_vars(call):
     bot.answer_callback_query(call.id)
     key = 'userbot_session' if call.data == "ad_set_session" else 'provider_bot'
@@ -4769,6 +6078,7 @@ def admin_set_userbot_vars(call):
     bot.register_next_step_handler(msg, save_and_restart)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_gh_credits")
+@admin_required
 def admin_github_credits(call):
     bot.answer_callback_query(call.id, "⏳ جاري الاتصال بـ AhsanLabs...")
     try:
@@ -4803,6 +6113,7 @@ def admin_github_credits(call):
         bot.send_message(call.message.chat.id, f"❌ خطأ داخلي: <code>{err_str}</code>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data in ["ad_gh_price", "ad_gem_price"])
+@admin_required
 def admin_set_price(call):
     bot.answer_callback_query(call.id)
     key = 'github_price' if call.data == "ad_gh_price" else 'gemini_price'
@@ -4845,6 +6156,7 @@ def admin_set_price(call):
     bot.register_next_step_handler(msg, save_price)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
+@admin_required
 def ad_p_step1(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.from_user.id, "📦 أرسل اسم المنتج (بالعربية فقط):")
@@ -4931,6 +6243,7 @@ def ad_p_final(call):
     bot.edit_message_text(f"✅ <b>تم إضافة المنتج بنجاح بنظام ({type_txt})!</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
+@admin_required
 def admin_edit_list(call):
     bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
@@ -5176,6 +6489,7 @@ def admin_save_edit(message, field, pid):
             bot.send_message(message.chat.id, "✅ <b>تم التحديث بنجاح.</b>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
+@admin_required
 def admin_del_list(call):
     bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
@@ -5229,6 +6543,7 @@ def admin_del_exec(call):
     except: bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_s_list")
+@admin_required
 def admin_stock_list_ui(call):
     bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
@@ -5458,6 +6773,7 @@ def admin_stock_edit_step3(message):
         bot.send_message(message.chat.id, "❌ حدث خطأ، يرجى المحاولة مرة أخرى.", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ban_user")
+@admin_required
 def ad_ban_start(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.message.chat.id, "🚫 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username) للحظر أو فك الحظر:</b>", parse_mode="HTML")
@@ -5481,6 +6797,7 @@ def ad_ban_exec(message):
         bot.send_message(message.chat.id, "❌ لم يتم العثور على المستخدم في قاعدة البيانات.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_users_main")
+@admin_required
 def ad_users_main_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=2)
@@ -5491,6 +6808,7 @@ def ad_users_main_ui(call):
     except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_u_top")
+@admin_required
 def ad_u_top_ui(call):
     bot.answer_callback_query(call.id)
     top_users = list(db.users.find().sort('balance', -1).limit(10))
@@ -5504,6 +6822,7 @@ def ad_u_top_ui(call):
     except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_u_search")
+@admin_required
 def ad_u_search_prompt(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.message.chat.id, "🔍 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username):</b>", parse_mode="HTML")
@@ -5809,6 +7128,7 @@ def ad_ugift_exec(message, target_uid):
     except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
+@admin_required
 def admin_fsub_list(call):
     bot.answer_callback_query(call.id)
     chans = list(db.required_channels.find())
@@ -5821,6 +7141,7 @@ def admin_fsub_list(call):
     except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
+@admin_required
 def admin_fsub_add(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه:</b> ارفع البوت مشرف أولاً!", parse_mode="HTML")
@@ -5847,6 +7168,7 @@ def del_fsub_btn(call):
     admin_fsub_list(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_new_admin")
+@admin_required
 def admin_add_admin_start(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.from_user.id, "👑 Send <b>ID</b> or <b>@username</b>:")
@@ -5863,6 +7185,7 @@ def admin_add_admin_save(message):
     else: bot.send_message(message.chat.id, "❌ Not found.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_gift")
+@admin_required
 def ad_gift_start(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.from_user.id, "👤 <b>Send User ID or @username:</b>")
@@ -5886,6 +7209,7 @@ def ad_gift_finish(message, tid):
     except: bot.send_message(message.from_user.id, "❌ Error.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
+@admin_required
 def admin_all_logs(call):
     bot.answer_callback_query(call.id)
     recs = list(db.used_transactions.find().sort('_id', -1).limit(10))
@@ -5897,6 +7221,7 @@ def admin_all_logs(call):
     except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_bc")
+@admin_required
 def admin_bc_init(call):
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.from_user.id, "📢 Send Broadcast Message:")
@@ -5910,6 +7235,7 @@ def admin_bc_exe(message):
     bot.send_message(message.chat.id, "✅ Broadcast Sent.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
+@admin_required
 def admin_shop_settings(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=2)
