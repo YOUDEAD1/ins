@@ -347,6 +347,47 @@ except Exception as e:
 
 REFERRAL_REWARD = 0.10
 REFERRAL_MIN_PURCHASE = 2.0  # الحد الأدنى لقيمة الشراء عشان يربح المُحيل المكافأة
+
+
+# 🆕 دوال للحصول على الإعدادات (قابلة للتعديل من الأدمن)
+def get_referral_threshold():
+    """يجلب عدد الإحالات المطلوبة لكل مكافأة (افتراضي: 10)"""
+    try:
+        val = get_setting('referral_threshold')
+        if val and val != "Not Set":
+            return max(1, int(val))
+    except: pass
+    return 10
+
+
+def get_referral_reward():
+    """يجلب قيمة المكافأة لكل دفعة إحالات (افتراضي: 0.10)"""
+    try:
+        val = get_setting('referral_reward')
+        if val and val != "Not Set":
+            return max(0.01, float(val))
+    except: pass
+    return REFERRAL_REWARD
+
+
+def get_referral_purchase_reward():
+    """يجلب قيمة المكافأة لكل شراء من المُحال (افتراضي: 0.10)"""
+    try:
+        val = get_setting('referral_purchase_reward')
+        if val and val != "Not Set":
+            return max(0.01, float(val))
+    except: pass
+    return REFERRAL_REWARD
+
+
+def get_referral_min_purchase():
+    """يجلب الحد الأدنى لقيمة الشراء (افتراضي: $2)"""
+    try:
+        val = get_setting('referral_min_purchase')
+        if val and val != "Not Set":
+            return max(0.10, float(val))
+    except: pass
+    return REFERRAL_MIN_PURCHASE
 temp_product = {}
 temp_stock_edit = {}
 temp_github_data = {} 
@@ -794,8 +835,12 @@ def update_referrer_balance(referrer_id):
         
         # 🛡 lock على هذا الـ referrer لمنع تحديثين بنفس الوقت
         with _get_referrer_lock(rid):
+            # 🆕 نجلب الإعدادات الحالية من DB (قابلة للتغيير من الأدمن)
+            threshold = get_referral_threshold()  # افتراضي 10
+            reward = get_referral_reward()  # افتراضي 0.10
+            
             active_count = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
-            expected = round((active_count // 10) * REFERRAL_REWARD, 2)
+            expected = round((active_count // threshold) * reward, 2)
 
             referrer = db.users.find_one({'user_id': rid})
             if not referrer:
@@ -879,14 +924,40 @@ def update_referrer_balance(referrer_id):
                                         active_count,
                                         f"{diff:.2f}"
                                     )
-                                except:
-                                    pass
+                                except Exception as fmt_err:
+                                    logger.warning(f"⚠️ خطأ في format CMS milestone: {fmt_err}")
                             
                             bot.send_message(log_ch, log_text, parse_mode="HTML")
+                            logger.info(f"✅ تم إرسال إشعار milestone لقناة اللوق: {rid} → {active_count} إحالة")
+                        else:
+                            logger.warning(f"⚠️ قناة اللوق غير معينة - ما تم إرسال إشعار الإحالة لـ {rid}")
                     except Exception as log_err:
-                        logger.debug(f"Milestone log error: {log_err}")
+                        logger.error(f"❌ فشل إرسال إشعار اللوق: {log_err}")
+                    
+                    # 🆕 3) إشعار للأدمن (إنك تعرف إن واحد ربح مكافأة)
+                    try:
+                        ref_username = referrer.get('username') or 'بدون'
+                        admin_notif = (
+                            f"💎 <b>إنجاز إحالة جديد!</b>\n\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"👤 <b>المُحيل:</b>\n"
+                            f"   • ID: <code>{rid}</code>\n"
+                            f"   • Username: @{ref_username}\n\n"
+                            f"📊 <b>التفاصيل:</b>\n"
+                            f"   • عدد الإحالات النشطة: <b>{active_count}</b>\n"
+                            f"   • المكافأة المضافة: <b>+${diff:.2f}</b>\n"
+                            f"   • إجمالي ما ربحه من الإحالات: <b>${expected:.2f}</b>\n"
+                            f"   • الرصيد الحالي: <b>${new_balance:.2f}</b>\n"
+                            f"━━━━━━━━━━━━━━\n\n"
+                            f"<i>تم منح المكافأة تلقائياً ✅</i>"
+                        )
+                        notify_admins(admin_notif)
+                    except Exception as admin_err:
+                        logger.debug(f"Couldn't notify admin: {admin_err}")
                     
                     logger.info(f"🏆 إنجاز جديد: المستخدم {rid} وصل {active_count} إحالة نشطة → +${diff:.2f}")
+                elif update_result is None and expected != current_earned:
+                    logger.warning(f"⚠️ فشل update المتزامن للمستخدم {rid} - حد ثاني عدّل في نفس الوقت")
     except Exception as e:
         logger.error(f"Error updating referrer balance: {e}")
 
@@ -907,8 +978,12 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         buyer_uid = int(buyer_uid)
         purchase_amount = round(float(purchase_amount), 2)
         
-        # ⚠️ شرط الحد الأدنى: قيمة الشراء لازم تكون أكثر من 2$
-        if purchase_amount <= REFERRAL_MIN_PURCHASE:
+        # 🆕 نجلب الإعدادات الحالية
+        min_purchase = get_referral_min_purchase()
+        purchase_reward = get_referral_purchase_reward()
+        
+        # ⚠️ شرط الحد الأدنى
+        if purchase_amount <= min_purchase:
             return False  # الشراء أقل من الحد الأدنى - لا مكافأة
         
         # نشوف هل المشتري عنده مُحيل في النظام الجديد
@@ -930,8 +1005,8 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
             {'user_id': referrer_id},
             {
                 '$inc': {
-                    'balance': REFERRAL_REWARD,
-                    'ref_v2_purchase_earned': REFERRAL_REWARD  # مجموع أرباح المشتريات
+                    'balance': purchase_reward,
+                    'ref_v2_purchase_earned': purchase_reward
                 }
             },
             return_document=True
@@ -945,7 +1020,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
             db.purchase_rewards.insert_one({
                 'referrer_id': referrer_id,
                 'buyer_id': buyer_uid,
-                'amount': REFERRAL_REWARD,
+                'amount': purchase_reward,
                 'product': product_name,
                 'purchase_amount': purchase_amount,
                 'timestamp': int(time.time())
@@ -962,7 +1037,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
             # 🆕 نستخدم نص CMS قابل للتعديل (إنجليزي افتراضياً)
             celebration = LANG['en']['ref_purchase_dm'].format(
                 buyer_display,
-                f"{REFERRAL_REWARD:.2f}",
+                f"{purchase_reward:.2f}",
                 f"{new_balance:.2f}"
             )
             
@@ -972,7 +1047,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                 try:
                     celebration = custom_dm['value'].format(
                         buyer_display,
-                        f"{REFERRAL_REWARD:.2f}",
+                        f"{purchase_reward:.2f}",
                         f"{new_balance:.2f}"
                     )
                 except:
@@ -982,7 +1057,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         except Exception as notify_err:
             logger.debug(f"Couldn't notify referrer {referrer_id}: {notify_err}")
         
-        logger.info(f"🎁 مكافأة شراء: {referrer_id} ربح ${REFERRAL_REWARD} من شراء {buyer_uid}")
+        logger.info(f"🎁 مكافأة شراء: {referrer_id} ربح ${purchase_reward:.2f} من شراء {buyer_uid}")
         
         # 🔔 إشعار قناة اللوق (مع تخفي الأسماء بنجمات)
         # 🔔 إشعار قناة اللوق (مختصر + بالإنجليزي)
@@ -995,7 +1070,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                 # 🆕 نستخدم النص الإنجليزي المختصر (بدون ذكر السبب أو المُدعى)
                 log_text = LANG['en']['log_ref_purchase'].format(
                     referrer_display,
-                    f"{REFERRAL_REWARD:.2f}"
+                    f"{purchase_reward:.2f}"
                 )
                 
                 # نشيك على النص المخصص لو الأدمن عدّله من CMS
@@ -1004,7 +1079,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                     try:
                         log_text = custom_log['value'].format(
                             referrer_display,
-                            f"{REFERRAL_REWARD:.2f}"
+                            f"{purchase_reward:.2f}"
                         )
                     except:
                         pass  # لو في خطأ format، نستخدم الافتراضي
@@ -5541,6 +5616,273 @@ def toggle_amount_protection(call):
     bot.send_message(uid, msg, parse_mode="HTML")
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ref_settings")
+@admin_required
+def ad_ref_settings_ui(call):
+    """🛡 واجهة إعدادات نظام الإحالات"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    
+    # نجلب الإعدادات الحالية
+    threshold = get_referral_threshold()
+    reward = get_referral_reward()
+    purchase_reward = get_referral_purchase_reward()
+    min_purchase = get_referral_min_purchase()
+    
+    text = (
+        f"👥 <b>إعدادات نظام الإحالات</b>\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📊 <b>الإعدادات الحالية:</b>\n\n"
+        f"🎯 عدد الإحالات المطلوبة لكل مكافأة:\n"
+        f"   <b>{threshold}</b> إحالة\n\n"
+        f"💰 قيمة المكافأة لكل دفعة:\n"
+        f"   <b>${reward:.2f}</b>\n\n"
+        f"🛍 قيمة مكافأة الشراء (لكل شراء من مُحال):\n"
+        f"   <b>${purchase_reward:.2f}</b>\n\n"
+        f"💵 الحد الأدنى لقيمة الشراء:\n"
+        f"   <b>${min_purchase:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"💡 <b>مثال على آلية العمل:</b>\n"
+        f"• كل <b>{threshold}</b> إحالة نشطة = <b>${reward:.2f}</b>\n"
+        f"• شراء أي مُحال > <b>${min_purchase:.2f}</b> = <b>${purchase_reward:.2f}</b> للمُحيل\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🛠 <b>اختر ما تريد تعديله:</b>"
+    )
+    
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton(f"🎯 عدد الإحالات المطلوبة ({threshold})", callback_data="ad_ref_set_threshold"))
+    markup.add(InlineKeyboardButton(f"💰 قيمة مكافأة الإحالات (${reward:.2f})", callback_data="ad_ref_set_reward"))
+    markup.add(InlineKeyboardButton(f"🛍 قيمة مكافأة الشراء (${purchase_reward:.2f})", callback_data="ad_ref_set_purchase_reward"))
+    markup.add(InlineKeyboardButton(f"💵 الحد الأدنى للشراء (${min_purchase:.2f})", callback_data="ad_ref_set_min_purchase"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ref_set_threshold")
+@admin_required
+def ad_ref_set_threshold(call):
+    """تغيير عدد الإحالات المطلوبة"""
+    bot.answer_callback_query(call.id)
+    current = get_referral_threshold()
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🎯 <b>تغيير عدد الإحالات المطلوبة</b>\n\n"
+        f"📊 القيمة الحالية: <b>{current}</b>\n\n"
+        f"💡 <b>مثال:</b>\n"
+        f"• 10 = كل 10 إحالات نشطة → مكافأة\n"
+        f"• 5 = كل 5 إحالات نشطة → مكافأة\n\n"
+        f"⚠️ <b>الحد الأدنى:</b> 1\n"
+        f"⚠️ <b>الموصى به:</b> 5 - 20\n\n"
+        f"📤 أرسل الرقم الجديد (أو 'الغاء' للإلغاء):",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, ad_ref_save_threshold)
+
+
+def ad_ref_save_threshold(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+    
+    if message.text and message.text.strip().lower() in ['الغاء', 'cancel']:
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    
+    try:
+        value = int(message.text.strip())
+        if value < 1:
+            bot.send_message(message.chat.id, "❌ الحد الأدنى هو 1.")
+            return
+        if value > 1000:
+            bot.send_message(message.chat.id, "❌ الحد الأقصى هو 1000.")
+            return
+        
+        db.settings.update_one(
+            {'key': 'referral_threshold'},
+            {'$set': {'value': str(value)}},
+            upsert=True
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ <b>تم الحفظ!</b>\n\n"
+            f"🎯 عدد الإحالات المطلوبة الآن: <b>{value}</b>\n\n"
+            f"📌 <i>أي مستخدم يصل إلى {value} إحالة نشطة سيحصل على المكافأة تلقائياً.</i>",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ أرسل رقم صحيح فقط.")
+    except Exception as e:
+        logger.error(f"Error saving threshold: {e}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ref_set_reward")
+@admin_required
+def ad_ref_set_reward(call):
+    """تغيير قيمة المكافأة"""
+    bot.answer_callback_query(call.id)
+    current = get_referral_reward()
+    threshold = get_referral_threshold()
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"💰 <b>تغيير قيمة مكافأة الإحالات</b>\n\n"
+        f"📊 القيمة الحالية: <b>${current:.2f}</b>\n\n"
+        f"💡 <b>هذه المكافأة تُعطى لكل {threshold} إحالة نشطة.</b>\n\n"
+        f"📌 <b>أمثلة:</b>\n"
+        f"• 0.10 = $0.10 لكل {threshold} إحالة\n"
+        f"• 0.50 = $0.50 لكل {threshold} إحالة\n"
+        f"• 1.00 = $1.00 لكل {threshold} إحالة\n\n"
+        f"⚠️ <b>الحد الأدنى:</b> 0.01\n\n"
+        f"📤 أرسل القيمة الجديدة (أو 'الغاء' للإلغاء):",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, ad_ref_save_reward)
+
+
+def ad_ref_save_reward(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+    
+    if message.text and message.text.strip().lower() in ['الغاء', 'cancel']:
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    
+    try:
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
+        if value < 0.01:
+            bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.01.")
+            return
+        if value > 100:
+            bot.send_message(message.chat.id, "❌ الحد الأقصى هو $100.")
+            return
+        
+        db.settings.update_one(
+            {'key': 'referral_reward'},
+            {'$set': {'value': str(value)}},
+            upsert=True
+        )
+        
+        threshold = get_referral_threshold()
+        bot.send_message(
+            message.chat.id,
+            f"✅ <b>تم الحفظ!</b>\n\n"
+            f"💰 المكافأة الآن: <b>${value:.2f}</b> لكل <b>{threshold}</b> إحالة نشطة.",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ أرسل رقم صحيح (مثل: 0.10).")
+    except Exception as e:
+        logger.error(f"Error saving reward: {e}")
+        bot.send_message(message.chat.id, "❌ حدث خطأ.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ref_set_purchase_reward")
+@admin_required
+def ad_ref_set_purchase_reward(call):
+    """تغيير قيمة مكافأة الشراء"""
+    bot.answer_callback_query(call.id)
+    current = get_referral_purchase_reward()
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"🛍 <b>تغيير قيمة مكافأة الشراء</b>\n\n"
+        f"📊 القيمة الحالية: <b>${current:.2f}</b>\n\n"
+        f"💡 <b>هذه المكافأة تُعطى للمُحيل لما يشتري المُحال أي منتج فوق الحد الأدنى.</b>\n\n"
+        f"📌 <b>أمثلة:</b>\n"
+        f"• 0.10 = $0.10 لكل شراء\n"
+        f"• 0.50 = $0.50 لكل شراء\n\n"
+        f"📤 أرسل القيمة الجديدة (أو 'الغاء' للإلغاء):",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, ad_ref_save_purchase_reward)
+
+
+def ad_ref_save_purchase_reward(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+    
+    if message.text and message.text.strip().lower() in ['الغاء', 'cancel']:
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    
+    try:
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
+        if value < 0.01:
+            bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.01.")
+            return
+        
+        db.settings.update_one(
+            {'key': 'referral_purchase_reward'},
+            {'$set': {'value': str(value)}},
+            upsert=True
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ <b>تم الحفظ!</b>\n\n💰 مكافأة الشراء الآن: <b>${value:.2f}</b>",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ أرسل رقم صحيح (مثل: 0.10).")
+    except Exception as e:
+        logger.error(f"Error saving purchase reward: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ref_set_min_purchase")
+@admin_required
+def ad_ref_set_min_purchase(call):
+    """تغيير الحد الأدنى لقيمة الشراء"""
+    bot.answer_callback_query(call.id)
+    current = get_referral_min_purchase()
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"💵 <b>تغيير الحد الأدنى لقيمة الشراء</b>\n\n"
+        f"📊 القيمة الحالية: <b>${current:.2f}</b>\n\n"
+        f"💡 <b>المُحال لازم يشتري بأكثر من هذه القيمة عشان يربح المُحيل المكافأة.</b>\n\n"
+        f"📤 أرسل القيمة الجديدة (أو 'الغاء' للإلغاء):",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, ad_ref_save_min_purchase)
+
+
+def ad_ref_save_min_purchase(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+    
+    if message.text and message.text.strip().lower() in ['الغاء', 'cancel']:
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    
+    try:
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
+        if value < 0.10:
+            bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.10.")
+            return
+        
+        db.settings.update_one(
+            {'key': 'referral_min_purchase'},
+            {'$set': {'value': str(value)}},
+            upsert=True
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ <b>تم الحفظ!</b>\n\n💵 الحد الأدنى للشراء الآن: <b>${value:.2f}</b>",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ أرسل رقم صحيح.")
+    except Exception as e:
+        logger.error(f"Error saving min purchase: {e}")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 @admin_required
 def admin_main_ui(call):
@@ -5581,6 +5923,8 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
+        # 🆕 إعدادات نظام الإحالات
+        markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
         protection_on = is_amount_protection_enabled()
         protection_label = "✅ مفعّلة (موصى به)" if protection_on else "⚠️ معطّلة (خطر!)"
