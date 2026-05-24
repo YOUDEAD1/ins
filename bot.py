@@ -3497,21 +3497,19 @@ def dep_binance_ui(call):
             f"━━━━━━━━━━━━━━\n"
             f"📬 <b>محفظة الاستلام:</b>\n<code>{wallet}</code>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>مهم جداً - اقرأ بعناية!</b>\n\n"
-            f"🔑 <b>في خانة 'الملاحظة' (Remark/Note) ضع:</b>\n"
-            f"<code>@{bot_username} {uid}</code>\n\n"
-            f"☝️ <b>انسخ السطر فوق كما هو بالضبط!</b>\n\n"
+            f"⚠️ <b>مهم جداً!</b>\n\n"
+            f"🔑 <b>في خانة 'الملاحظة' (Remark/Note) ضع هذا الرقم:</b>\n"
+            f"<code>{uid}</code>\n\n"
+            f"☝️ <b>هذا رقمك الخاص - لا تغيّره!</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"💡 <b>كيف يعمل النظام:</b>\n"
+            f"💡 <b>الخطوات:</b>\n"
             f"1️⃣ افتح Binance Pay\n"
             f"2️⃣ أرسل المبلغ للعنوان أعلاه\n"
-            f"3️⃣ في خانة الملاحظة، ضع: <code>@{bot_username} {uid}</code>\n"
+            f"3️⃣ في خانة الملاحظة ضع فقط: <code>{uid}</code>\n"
             f"4️⃣ نفذ التحويل\n"
-            f"5️⃣ خلال 1-3 دقائق، الرصيد سيُضاف <b>تلقائياً</b>\n\n"
+            f"5️⃣ خلال 1-3 دقائق يُضاف الرصيد <b>تلقائياً</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>تحذيرات:</b>\n"
-            f"❌ بدون الملاحظة الصحيحة، لن نتمكن من ربط الإيداع بحسابك!\n"
-            f"❌ تأكد من نسخ المعرف بدقة: <code>{uid}</code>\n\n"
+            f"❌ بدون الملاحظة الصحيحة لن يُضاف الرصيد!\n\n"
             f"💡 <i>لا حاجة لإرسال Order ID - البوت يكتشفه تلقائياً.</i>"
         )
     else:
@@ -3520,22 +3518,20 @@ def dep_binance_ui(call):
             f"━━━━━━━━━━━━━━\n"
             f"📬 <b>Receiving wallet:</b>\n<code>{wallet}</code>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>IMPORTANT - Read carefully!</b>\n\n"
-            f"🔑 <b>In the 'Remark/Note' field write:</b>\n"
-            f"<code>@{bot_username} {uid}</code>\n\n"
-            f"☝️ <b>Copy EXACTLY!</b>\n\n"
+            f"⚠️ <b>IMPORTANT!</b>\n\n"
+            f"🔑 <b>In the 'Remark/Note' field put this number:</b>\n"
+            f"<code>{uid}</code>\n\n"
+            f"☝️ <b>This is your unique ID - don't change it!</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"💡 <b>How it works:</b>\n"
+            f"💡 <b>Steps:</b>\n"
             f"1️⃣ Open Binance Pay\n"
             f"2️⃣ Send amount to the address above\n"
-            f"3️⃣ In Remark field, put: <code>@{bot_username} {uid}</code>\n"
+            f"3️⃣ In the Remark field put only: <code>{uid}</code>\n"
             f"4️⃣ Execute the transfer\n"
-            f"5️⃣ Within 1-3 minutes, balance will be added <b>AUTOMATICALLY</b>\n\n"
+            f"5️⃣ Within 1-3 minutes balance added <b>AUTOMATICALLY</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>Warnings:</b>\n"
-            f"❌ Without the correct Remark, we cannot link the deposit to your account!\n"
-            f"❌ Make sure to copy ID correctly: <code>{uid}</code>\n\n"
-            f"💡 <i>No need to send Order ID - bot detects it automatically.</i>"
+            f"❌ Without correct Remark, balance won't be added!\n\n"
+            f"💡 <i>No need to send Order ID - bot detects automatically.</i>"
         )
     
     # نرسل الرسالة - بدون next_step (الكشف تلقائي عبر memo)
@@ -3999,32 +3995,42 @@ def check_binance_pay_auto():
                 if amount <= 0:
                     continue
                 
-                # 🛡 نقرأ الـ remark/note عشان نلقى @bot_username + user_id
-                remark = str(tx.get('remark', '') or tx.get('orderInfo', '') or '').lower()
+                # 🛡 نقرأ الـ remark/note
+                remark = str(tx.get('remark', '') or tx.get('orderInfo', '') or '').strip()
                 if not remark:
                     continue
                 
-                # نبحث عن @bot_username في الملاحظة
-                if f'@{bot_username}' not in remark:
-                    continue
-                
-                # نستخرج الـ user_id من الملاحظة
-                # الفورمات: "@stock_lara_bot 123456789" أو "@stock_lara_bot 123456789 extra text"
                 import re as re_module
-                user_id_match = re_module.search(r'@' + re_module.escape(bot_username) + r'\s+(\d{5,15})', remark)
-                if not user_id_match:
-                    continue
+                target_uid = None
                 
-                target_uid = int(user_id_match.group(1))
+                # طريقة 1: رقم فقط (الجديدة - أقصر من 20 حرف)
+                # المستخدم يكتب فقط: 123456789
+                id_only_match = re_module.fullmatch(r'\s*(\d{5,15})\s*', remark)
+                if id_only_match:
+                    target_uid = int(id_only_match.group(1))
+                
+                # طريقة 2: @bot_username ID (القديمة - للتوافق)
+                if not target_uid:
+                    remark_lower = remark.lower()
+                    if f'@{bot_username}' in remark_lower:
+                        old_match = re_module.search(
+                            r'@' + re_module.escape(bot_username) + r'\s+(\d{5,15})',
+                            remark_lower
+                        )
+                        if old_match:
+                            target_uid = int(old_match.group(1))
+                
+                if not target_uid:
+                    continue
                 
                 # نتأكد إن المستخدم موجود
                 target_user = db.users.find_one({'user_id': target_uid})
                 if not target_user:
-                    logger.warning(f"⚠️ Binance Pay لمستخدم غير موجود: {target_uid}")
+                    logger.warning(f"⚠️ Binance Pay: user {target_uid} not found")
                     continue
                 
                 if target_user.get('is_banned') == 1:
-                    logger.warning(f"⚠️ Binance Pay لمستخدم محظور: {target_uid}")
+                    logger.warning(f"⚠️ Binance Pay: user {target_uid} is banned")
                     continue
                 
                 # نضيف الرصيد
