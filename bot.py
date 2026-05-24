@@ -2146,7 +2146,19 @@ def start_handler(message):
         markup.add(create_btn(uid, 'btn_admin', callback_data="admin_panel_main"))
 
     welcome_message = get_text(uid, 'welcome', uid, from_user.first_name, users_total, user.get('balance', 0.0))
-    bot.send_message(chat_id, welcome_message, reply_markup=markup, parse_mode="HTML")
+    try:
+        bot.send_message(chat_id, welcome_message, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        if 'parse entities' in str(e).lower() or 'can\'t parse' in str(e).lower():
+            # HTML مكسور في CMS - نرسل بدون parse_mode
+            import re as _re
+            clean_msg = _re.sub(r'<[^>]+>', '', welcome_message)
+            try:
+                bot.send_message(chat_id, clean_msg, reply_markup=markup)
+            except Exception:
+                bot.send_message(chat_id, "مرحباً! 👋", reply_markup=markup)
+        else:
+            raise
 
 
 # ============================================================
@@ -6186,16 +6198,10 @@ threading.Thread(target=_cleanup_thread, daemon=True).start()
 
 def credit_user(uid, amt, tx_id, lang, method):
     """
-    🛡 إضافة رصيد للمستخدم بشكل atomic (مقاوم لـ race conditions).
-    
-    الترتيب الحرج:
-    1. validation للمبلغ والـ tx_id
-    2. توحيد tx_id إلى lowercase (يطابق claim_tx_hash)
-    3. فحص duplicate قبل insert (احتياطي لو الـ index ما اشتغل)
-    4. insert_one في used_transactions (atomic + unique index)
-    5. لو نجح: نضيف الرصيد
-    6. لو فشل (duplicate): شخص آخر سبقنا → ما نضيف رصيد ونحظر
+    🛡 إضافة رصيد للمستخدم بشكل atomic.
     """
+    # نحفظ النسخة الأصلية للعرض في الإشعارات
+    tx_id_original = str(tx_id).strip() if tx_id else ''
     # 🛡 الخطوة 0: Validation حرجة!
     try:
         amt = float(amt)
@@ -6435,7 +6441,7 @@ def credit_user(uid, amt, tx_id, lang, method):
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
     
-    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id}</code>"
+    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id_original}</code>"
     notify_admins(admin_msg)
     
     log_ch = get_setting('log_channel')
