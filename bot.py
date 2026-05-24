@@ -275,7 +275,7 @@ def _admin_only_middleware(call):
     try:
         bot.answer_callback_query(
             call.id, 
-            "❌ ليس لديك صلاحية للوصول لهذه القائمة!",
+            bil(uid, "❌ ليس لديك صلاحية للوصول لهذه القائمة!", "❌ You don't have permission to access this menu!"),
             show_alert=True
         )
     except Exception:
@@ -311,7 +311,7 @@ def admin_required(func):
             try:
                 bot.answer_callback_query(
                     call.id,
-                    "❌ ليس لديك صلاحية!",
+                    bil(uid, "❌ ليس لديك صلاحية!", "❌ You don't have permission!"),
                     show_alert=True
                 )
             except Exception:
@@ -799,11 +799,10 @@ def mark_referral_status(invited_id, new_status):
         invited_id = int(invited_id)
         
         # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
-        # هذا يمنع تحديثات مكررة من threads متعددة
         result = db.referrals_v2.find_one_and_update(
             {
                 'invited_id': invited_id,
-                'status': {'$ne': new_status}  # فقط لو الحالة الحالية مختلفة
+                'status': {'$ne': new_status}
             },
             {
                 '$set': {
@@ -811,17 +810,73 @@ def mark_referral_status(invited_id, new_status):
                     'updated_at': int(time.time())
                 }
             },
-            return_document=False  # نريد القيمة القديمة
+            return_document=False
         )
         
-        # result = None يعني إما الإحالة غير موجودة أو الحالة نفسها (طبيعي)
         if result is None:
             return
         
-        # تحديث رصيد المُحيل (آمن - update_referrer_balance بحد ذاته atomic)
-        update_referrer_balance(result['referrer_id'])
+        old_status = result.get('status', 'pending')
+        referrer_id = result['referrer_id']
+        
+        # تحديث رصيد المُحيل
+        update_referrer_balance(referrer_id)
+        
+        # 🆕 لما إحالة تصير active (جديدة)، نرسل إشعار "باقي X"
+        if new_status == 'active' and old_status != 'active':
+            try:
+                send_progress_log_notification(referrer_id)
+            except Exception as prog_err:
+                logger.debug(f"Progress notification failed: {prog_err}")
     except Exception as e:
         logger.error(f"Error marking referral status: {e}")
+
+
+def send_progress_log_notification(referrer_id):
+    """
+    📢 يرسل إشعار "باقي X لتصل للمكافأة" لقناة اللوق
+    لكل إحالة نشطة جديدة (مو فقط عند milestone).
+    """
+    try:
+        threshold = get_referral_threshold()
+        reward = get_referral_reward()
+        
+        # نحسب: كم إحالة عند المستخدم، وكم باقي للمكافأة القادمة
+        active_count = db.referrals_v2.count_documents({
+            'referrer_id': referrer_id,
+            'status': 'active'
+        })
+        
+        # كم في الـ "خانة" الحالية (مودولو)
+        current_in_batch = active_count % threshold
+        
+        # كم باقي للمكافأة القادمة
+        remaining = threshold - current_in_batch
+        
+        # لو remaining == threshold يعني وصل milestone (0 باقي) - ما نرسل (الـ milestone notify بيرسل بنفسه)
+        if remaining == threshold:
+            return
+        
+        # نرسل لقناة اللوق
+        log_ch = get_setting('log_channel')
+        if not log_ch or log_ch == "Not Set":
+            return
+        
+        # 🔒 إخفاء اليوزر بـ ** (مو a***d)
+        log_text = (
+            f"📈 <b>إحالة جديدة!</b>\n\n"
+            f"👤 المُحيل: <b>**</b>\n"
+            f"✅ الإحالات النشطة: <b>{active_count}</b>\n"
+            f"⏳ باقي <b>{remaining}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n\n"
+            f"🚀 <i>ادعُ أصدقاءك للبوت واربح!</i>"
+        )
+        
+        try:
+            bot.send_message(log_ch, log_text, parse_mode="HTML")
+        except Exception as send_err:
+            logger.debug(f"Failed to send progress log: {send_err}")
+    except Exception as e:
+        logger.error(f"send_progress_log_notification error: {e}")
 
 
 def update_referrer_balance(referrer_id):
@@ -957,7 +1012,7 @@ def update_referrer_balance(referrer_id):
                     
                     logger.info(f"🏆 إنجاز جديد: المستخدم {rid} وصل {active_count} إحالة نشطة → +${diff:.2f}")
                 elif update_result is None and expected != current_earned:
-                    logger.warning(f"⚠️ فشل update المتزامن للمستخدم {rid} - حد ثاني عدّل في نفس الوقت")
+                    logger.debug(f"Optimistic lock retry for user {rid} - safe")
     except Exception as e:
         logger.error(f"Error updating referrer balance: {e}")
 
@@ -1323,7 +1378,7 @@ def start_gemini_session(uid, price):
     if client and USERBOT_LOOP: asyncio.run_coroutine_threadsafe(_init_chat(), USERBOT_LOOP)
     else:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-        bot.send_message(uid, "❌ <b>النظام غير متصل (اليوزربوت معطل).</b> تم إرجاع رصيدك.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>النظام غير متصل (اليوزربوت معطل).</b> تم إرجاع رصيدك.", "❌ <b>System offline (userbot disabled).</b> Balance refunded."), parse_mode="HTML")
         ACTIVE_GEMINI_SESSION = None
         process_next_gemini()
 
@@ -1864,15 +1919,8 @@ def clean_name(text):
     return html.escape(cleaned)
 
 def obscure_text(text):
-    if not text: return "***"
-    if '@' in text:
-        parts = text.split('@')
-        name = parts[0]; domain = parts[1]
-        if len(name) > 2: return name[0] + "***" + name[-1] + "@" + domain
-        else: return name[0] + "***@" + domain
-    else:
-        if len(text) > 2: return text[0] + "***" + text[-1]
-        return text[0] + "***"
+    """🔒 يخفي النص بـ ** فقط (مو a***d)"""
+    return "**"
 
 def find_product(pid):
     pid_str = str(pid)
@@ -1910,6 +1958,11 @@ def get_user_data_full(uid):
 def get_lang(uid):
     u = get_user_data_full(uid)
     return u.get('lang', 'ar') if u else 'ar' 
+
+
+def bil(uid, ar_text, en_text):
+    """يرجع النص بلغة المستخدم (عربي أو إنجليزي)"""
+    return en_text if get_lang(uid) == 'en' else ar_text
 
 def is_user_banned(uid):
     u = get_user_data_full(uid)
@@ -1985,6 +2038,12 @@ def start_handler(message):
     else:
         # ⚠️ المستخدم موجود من قبل — لا تُسجَّل أي إحالة جديدة له
         db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
+    
+    # 🆕 مكافآت رجعية: نتأكد إن المستخدم استلم كل مكافآته (لو فاته شي)
+    try:
+        update_referrer_balance(uid)
+    except Exception as ref_err:
+        logger.debug(f"Retroactive reward check error: {ref_err}")
 
     if not user.get('lang_chosen'):
         markup = InlineKeyboardMarkup(row_width=2)
@@ -2147,10 +2206,7 @@ def gemini_buy_prompt(call):
     
     # 🛡 Rate Limiting
     if not _acquire_purchase_lock(uid):
-        if l == 'ar':
-            bot.send_message(uid, "⏳ <b>يوجد عملية شراء قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", parse_mode="HTML")
-        else:
-            bot.send_message(uid, "⏳ <b>You have a purchase in progress!</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "⏳ <b>يوجد عملية شراء قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes."), parse_mode="HTML")
         return
     
     try:
@@ -2216,10 +2272,7 @@ def github_buy_prompt(call):
     
     # 🛡 Rate Limiting - منع طلبين بنفس الوقت
     if not _acquire_purchase_lock(uid):
-        if l == 'ar':
-            bot.send_message(uid, "⏳ <b>يوجد عملية شراء أو تفعيل قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", parse_mode="HTML")
-        else:
-            bot.send_message(uid, "⏳ <b>You have a purchase/activation in progress!</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "⏳ <b>يوجد عملية شراء أو تفعيل قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", "⏳ <b>You have a purchase/activation in progress!</b>\nWait until it finishes."), parse_mode="HTML")
         return
     
     gh_price = float(get_setting("github_price", 15.0))
@@ -2616,7 +2669,7 @@ def show_hist_detail(call):
         except: pass
     except Exception as e:
         logger.error(f"Error in show_hist_detail: {e}")
-        try: bot.send_message(uid, "❌ حدث خطأ، حاول مرة ثانية.", parse_mode="HTML")
+        try: bot.send_message(uid, bil(uid, "❌ حدث خطأ، حاول مرة ثانية.", "❌ An error occurred, please try again."), parse_mode="HTML")
         except: pass
 
 
@@ -2685,7 +2738,7 @@ def download_product_history(call):
         bot.send_document(uid, f, caption=caption, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to send product history file: {e}")
-        bot.send_message(uid, "❌ فشل إرسال الملف، حاول مرة ثانية.")
+        bot.send_message(uid, bil(uid, "❌ فشل إرسال الملف، حاول مرة ثانية.", "❌ Failed to send file, please try again."))
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_invite")
 def invite_ui(call):
@@ -2700,7 +2753,7 @@ def invite_ui(call):
     l = u.get('lang', 'ar') if u else 'ar'
     b_n = bot.get_me().username
     
-    # تحديث فوري للرصيد قبل العرض
+    # 🆕 تحديث رجعي - لو فيه إحالات نشطة لم يستلم مكافأتها، يضيف الآن
     try:
         update_referrer_balance(uid)
         u = get_user_data_full(uid)
@@ -2709,52 +2762,95 @@ def invite_ui(call):
     
     # جلب الإحصائيات من الجدول الجديد
     pending_count, active_count, left_count, total_clicks = get_ref_counts(uid)
-    actual_earned = round(float(u.get('ref_v2_earned', 0.0)), 2)
+    
+    # 🆕 الأرباح من الإحالات (milestones - كل 10 إحالات)
+    earnings_from_referrals = round(float(u.get('ref_v2_earned', 0.0)), 2)
+    
+    # 🆕 الأرباح من مشتريات المُحالين
+    earnings_from_purchases = round(float(u.get('ref_v2_purchase_earned', 0.0)), 2)
+    
+    # 🆕 الإجمالي
+    total_earnings = round(earnings_from_referrals + earnings_from_purchases, 2)
+    
+    # 🆕 حساب باقي للمكافأة القادمة
+    threshold = get_referral_threshold()
+    reward = get_referral_reward()
+    current_in_batch = active_count % threshold
+    remaining_to_milestone = threshold - current_in_batch if current_in_batch > 0 else 0
 
     markup = InlineKeyboardMarkup()
     markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     
-    # 🛡 جلب النص بشكل آمن مع 3 مستويات من الـ fallback
-    final_text = None
-    
-    # المستوى 1: محاولة النص المخصص + format
-    try:
-        final_text = get_text(uid, 'invite_txt', total_clicks, pending_count, active_count, left_count, actual_earned, b_n, uid)
-    except Exception as e:
-        logger.error(f"Error getting invite_txt (level 1): {e}")
-    
-    # المستوى 2: لو فشل، نستخدم النص الافتراضي مباشرة من الكود
-    if not final_text:
-        try:
-            default_text = LANG.get(l, LANG['ar']).get('invite_txt', '')
-            final_text = default_text.format(total_clicks, pending_count, active_count, left_count, actual_earned, b_n, uid)
-            logger.warning(f"⚠️ Fell back to default invite_txt for user {uid} (lang={l})")
-        except Exception as e:
-            logger.error(f"Error formatting default invite_txt (level 2): {e}")
-    
-    # المستوى 3: لو حتى الافتراضي فشل، نسوي رسالة بسيطة
-    if not final_text:
-        if l == 'en':
-            final_text = (
-                f"👥 <b>Referrals</b>\n\n"
-                f"🔗 <code>https://t.me/{b_n}?start={uid}</code>\n\n"
-                f"👥 Clicks: <b>{total_clicks}</b>\n"
-                f"⏳ Pending: <b>{pending_count}</b>\n"
-                f"✅ Active: <b>{active_count}</b>\n"
-                f"❌ Left: <b>{left_count}</b>\n\n"
-                f"💰 Balance: <b>${actual_earned:.2f}</b>"
+    # نبني الرسالة يدوياً (نتجاوز LANG عشان نضمن العرض الجديد)
+    if l == 'en':
+        final_text = (
+            f"💎 <b>Referral System</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📊 <b>Your Stats</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"👥 Clicks:  <b>{total_clicks}</b>\n"
+            f"⏳ Pending:  <b>{pending_count}</b>\n"
+            f"✅ Active:  <b>{active_count}</b>\n"
+            f"❌ Left:  <b>{left_count}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>Your Earnings</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"🎯 From referrals:  <b>${earnings_from_referrals:.2f}</b>\n"
+            f"🛍 From purchases:  <b>${earnings_from_purchases:.2f}</b>\n"
+            f"💎 <b>Total:</b>  <b>${total_earnings:.2f}</b>\n"
+        )
+        
+        if remaining_to_milestone > 0:
+            final_text += (
+                f"\n━━━━━━━━━━━━━━\n"
+                f"⏳ <b>{remaining_to_milestone}</b> more active referrals to earn <b>${reward:.2f}</b>!\n"
             )
-        else:
-            final_text = (
-                f"👥 <b>الإحالات</b>\n\n"
-                f"🔗 <code>https://t.me/{b_n}?start={uid}</code>\n\n"
-                f"👥 الزيارات: <b>{total_clicks}</b>\n"
-                f"⏳ معلق: <b>{pending_count}</b>\n"
-                f"✅ نشط: <b>{active_count}</b>\n"
-                f"❌ غادر: <b>{left_count}</b>\n\n"
-                f"💰 الرصيد: <b>${actual_earned:.2f}</b>"
+        
+        final_text += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"🔗 <b>Your Link:</b>\n"
+            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎁 <b>Two Ways to Earn:</b>\n\n"
+            f"🔥 Every {threshold} active joins = <b>${reward:.2f}</b>\n"
+            f"💸 Friend buys > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+            f"⚡ <i>Real-time updates</i>"
+        )
+    else:
+        final_text = (
+            f"💎 <b>نظام الإحالات</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📊 <b>إحصائياتك</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"👥 الزيارات:  <b>{total_clicks}</b>\n"
+            f"⏳ معلق:  <b>{pending_count}</b>\n"
+            f"✅ نشط:  <b>{active_count}</b>\n"
+            f"❌ غادر:  <b>{left_count}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>أرباحك</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"🎯 من الإحالات:  <b>${earnings_from_referrals:.2f}</b>\n"
+            f"🛍 من المشتريات:  <b>${earnings_from_purchases:.2f}</b>\n"
+            f"💎 <b>المجموع:</b>  <b>${total_earnings:.2f}</b>\n"
+        )
+        
+        if remaining_to_milestone > 0:
+            final_text += (
+                f"\n━━━━━━━━━━━━━━\n"
+                f"⏳ باقي <b>{remaining_to_milestone}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n"
             )
+        
+        final_text += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"🔗 <b>رابطك:</b>\n"
+            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎁 <b>طريقتان للربح:</b>\n\n"
+            f"🔥 كل {threshold} إحالة نشطة = <b>${reward:.2f}</b>\n"
+            f"💸 شراء صديق > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+            f"⚡ <i>تحديثات لحظية</i>"
+        )
     
     # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
     sent_successfully = False
@@ -2898,12 +2994,12 @@ def shop_detail_ui(call):
     
     p = find_product(pid)
     if not p: 
-        bot.send_message(uid, "❌ عذراً، المنتج غير متوفر.", parse_mode="HTML"); return
+        bot.send_message(uid, bil(uid, "❌ عذراً، المنتج غير متوفر.", "❌ Sorry, product is unavailable."), parse_mode="HTML"); return
     
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
     if p.get('is_hidden', False) and not is_admin:
-        bot.send_message(uid, "❌ عذراً، هذا المنتج غير متوفر حالياً.", parse_mode="HTML"); return
+        bot.send_message(uid, bil(uid, "❌ عذراً، هذا المنتج غير متوفر حالياً.", "❌ Sorry, this product is currently unavailable."), parse_mode="HTML"); return
 
     is_manual = p.get('is_manual', False)
     st = get_product_stock_count(pid)
@@ -2963,17 +3059,14 @@ def execute_bulk_buy(message, pid, lang):
     
     # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
     if not _acquire_purchase_lock(uid):
-        if lang == 'ar':
-            bot.send_message(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", parse_mode="HTML")
-        else:
-            bot.send_message(uid, "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another."), parse_mode="HTML")
         return
 
     try:
         u = get_user_data_full(uid)
         p = find_product(pid)
         if not p:
-            bot.send_message(uid, "❌ المنتج غير موجود.", parse_mode="HTML")
+            bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
             return
 
         is_manual = p.get('is_manual', False)
@@ -3049,7 +3142,7 @@ def execute_bulk_buy(message, pid, lang):
                 # فشل تسجيل الطلب - نرجع الرصيد
                 logger.error(f"Failed to insert manual order: {e}")
                 db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
-                bot.send_message(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", parse_mode="HTML")
+                bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
                 return
             
             if lang == 'ar':
@@ -3276,18 +3369,51 @@ def dep_stars_ui(call):
 
 def process_stars_amount(message, lang):
     uid = message.from_user.id
+    if not message.text:
+        return
+    
+    text = message.text.strip()
+    
+    # 🛡 رفض الأوامر
+    if text.startswith('/'):
+        return
+    
+    # رفض الإلغاء
+    if text.lower() in ['الغاء', 'cancel', 'إلغاء']:
+        bot.send_message(uid, bil(uid, "❌ تم الإلغاء.", "❌ Cancelled."))
+        return
+    
     try:
-        usd_amount = float(message.text.strip())
-        if usd_amount < 0.1:
-            err = "❌ الحد الأدنى للشحن هو 0.1$" if lang == 'ar' else "❌ Minimum deposit is $0.1"
-            bot.send_message(uid, err, parse_mode="HTML")
-            return
-            
-        stars_amount = int(usd_amount * STARS_RATE)
-        title = "شحن رصيد المتجر" if lang == 'ar' else "Shop Balance Deposit"
-        desc = f"شحن حساب بمبلغ ${usd_amount:.2f}" if lang == 'ar' else f"Deposit ${usd_amount:.2f} to your account"
-        prices = [LabeledPrice(label=f"Deposit ${usd_amount:.2f}", amount=stars_amount)]
+        usd_amount = float(text.replace(',', '.').replace('$', ''))
+    except ValueError:
+        err = "❌ الرجاء إرسال أرقام فقط (مثال: 5 أو 10.5)." if lang == 'ar' else "❌ Please send numbers only (e.g., 5 or 10.5)."
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    # 🛡 validation
+    if usd_amount < 0.1:
+        err = "❌ الحد الأدنى للشحن هو $0.10" if lang == 'ar' else "❌ Minimum deposit is $0.10"
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    if usd_amount > 1000:
+        err = "❌ الحد الأقصى للشحن هو $1000" if lang == 'ar' else "❌ Maximum deposit is $1000"
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
         
+    stars_amount = int(usd_amount * STARS_RATE)
+    
+    # 🛡 stars_amount يجب يكون >= 1 (Telegram يرفض 0)
+    if stars_amount < 1:
+        err = "❌ المبلغ صغير جداً. زده قليلاً." if lang == 'ar' else "❌ Amount too small. Please increase."
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    title = "شحن رصيد المتجر" if lang == 'ar' else "Shop Balance Deposit"
+    desc = f"شحن حساب بمبلغ ${usd_amount:.2f}" if lang == 'ar' else f"Deposit ${usd_amount:.2f} to your account"
+    prices = [LabeledPrice(label=f"Deposit ${usd_amount:.2f}", amount=stars_amount)]
+    
+    try:
         bot.send_invoice(
             chat_id=uid,
             title=title,
@@ -3297,9 +3423,26 @@ def process_stars_amount(message, lang):
             currency="XTR",
             prices=prices
         )
-    except ValueError:
-        err = "❌ الرجاء إرسال أرقام فقط." if lang == 'ar' else "❌ Please send numbers only."
-        bot.send_message(uid, err, parse_mode="HTML")
+    except Exception as e:
+        err_str = str(e).lower()
+        if 'currency_total_amount_invalid' in err_str:
+            msg = (
+                "❌ <b>المبلغ غير صحيح!</b>\n\n"
+                "💡 جرّب مبلغ أكبر أو تحقق من معدل التحويل."
+            ) if lang == 'ar' else (
+                "❌ <b>Invalid amount!</b>\n\n"
+                "💡 Try a larger amount or check the conversion rate."
+            )
+        else:
+            msg = (
+                "❌ <b>حدث خطأ في إنشاء فاتورة الدفع.</b>\n\n"
+                "💡 حاول مرة ثانية بعد قليل."
+            ) if lang == 'ar' else (
+                "❌ <b>Error creating invoice.</b>\n\n"
+                "💡 Please try again later."
+            )
+        bot.send_message(uid, msg, parse_mode="HTML")
+        logger.error(f"send_invoice error for user {uid}: {e}")
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def checkout(pre_checkout_query):
@@ -3327,8 +3470,70 @@ def dep_binance_ui(call):
     bot.clear_step_handler_by_chat_id(chat_id=uid)
     
     wallet = get_setting('wallet_address')
-    msg = bot.send_message(uid, get_text(uid, 'dep_pay', wallet), parse_mode="HTML")
-    bot.register_next_step_handler(msg, verify_binance_pay, l)
+    
+    # 🆕 نجلب اسم البوت
+    bot_username = get_setting('bot_username', '')
+    if not bot_username:
+        try:
+            me = bot.get_me()
+            bot_username = me.username if me.username else 'YourBot'
+            db.settings.update_one(
+                {'key': 'bot_username'},
+                {'$set': {'value': bot_username}},
+                upsert=True
+            )
+        except: bot_username = 'YourBot'
+    
+    # 🆕 رسالة جديدة تطلب من المستخدم وضع memo
+    if l == 'ar':
+        msg_text = (
+            f"🟡 <b>الإيداع عبر Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📬 <b>محفظة الاستلام:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>مهم جداً - اقرأ بعناية!</b>\n\n"
+            f"🔑 <b>في خانة 'الملاحظة' (Remark/Note) ضع:</b>\n"
+            f"<code>@{bot_username} {uid}</code>\n\n"
+            f"☝️ <b>انسخ السطر فوق كما هو بالضبط!</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💡 <b>كيف يعمل النظام:</b>\n"
+            f"1️⃣ افتح Binance Pay\n"
+            f"2️⃣ أرسل المبلغ للعنوان أعلاه\n"
+            f"3️⃣ في خانة الملاحظة، ضع: <code>@{bot_username} {uid}</code>\n"
+            f"4️⃣ نفذ التحويل\n"
+            f"5️⃣ خلال 1-3 دقائق، الرصيد سيُضاف <b>تلقائياً</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>تحذيرات:</b>\n"
+            f"❌ بدون الملاحظة الصحيحة، لن نتمكن من ربط الإيداع بحسابك!\n"
+            f"❌ تأكد من نسخ المعرف بدقة: <code>{uid}</code>\n\n"
+            f"💡 <i>لا حاجة لإرسال Order ID - البوت يكتشفه تلقائياً.</i>"
+        )
+    else:
+        msg_text = (
+            f"🟡 <b>Deposit via Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📬 <b>Receiving wallet:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>IMPORTANT - Read carefully!</b>\n\n"
+            f"🔑 <b>In the 'Remark/Note' field write:</b>\n"
+            f"<code>@{bot_username} {uid}</code>\n\n"
+            f"☝️ <b>Copy EXACTLY!</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💡 <b>How it works:</b>\n"
+            f"1️⃣ Open Binance Pay\n"
+            f"2️⃣ Send amount to the address above\n"
+            f"3️⃣ In Remark field, put: <code>@{bot_username} {uid}</code>\n"
+            f"4️⃣ Execute the transfer\n"
+            f"5️⃣ Within 1-3 minutes, balance will be added <b>AUTOMATICALLY</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Warnings:</b>\n"
+            f"❌ Without the correct Remark, we cannot link the deposit to your account!\n"
+            f"❌ Make sure to copy ID correctly: <code>{uid}</code>\n\n"
+            f"💡 <i>No need to send Order ID - bot detects it automatically.</i>"
+        )
+    
+    # نرسل الرسالة - بدون next_step (الكشف تلقائي عبر memo)
+    bot.send_message(uid, msg_text, parse_mode="HTML")
 
 # ============================================================
 # 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
@@ -3448,6 +3653,423 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
         return None
 
 
+# ============================================================
+# 🤖 نظام Auto-Detect: يفحص blockchain تلقائياً ويضيف الرصيد
+# ============================================================
+
+def auto_credit_from_pending(pending, tx_id_for_record, method_label):
+    """
+    يضيف رصيد للمستخدم تلقائياً من pending deposit (بدون ما يرسل tx_id).
+    """
+    try:
+        uid = pending['user_id']
+        base_amount = float(pending.get('base_amount_usd', 0))
+        unique_amount = float(pending.get('unique_amount_usd', 0))
+        pending_id = pending.get('pending_id', '')
+        
+        # نعلم الـ pending كـ completed
+        result = db.pending_deposits.update_one(
+            {'pending_id': pending_id, 'status': 'pending'},
+            {'$set': {'status': 'completed', 'completed_at': int(time.time()), 'tx_id_detected': tx_id_for_record}}
+        )
+        
+        if result.modified_count == 0:
+            # شخص آخر استخدمها قبلنا (race condition)
+            return False
+        
+        # 🎉 رسالة تأكيد للمستخدم قبل ما نضيف الرصيد
+        try:
+            lang = get_lang(uid)
+            if lang == 'ar':
+                msg = (
+                    f"✅ <b>تم استلام إيداعك تلقائياً!</b> 🎉\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 <b>المبلغ:</b> <b>${base_amount:.2f}</b>\n"
+                    f"💳 <b>الطريقة:</b> {method_label}\n"
+                    f"⚡ <b>كُشفت الحوالة تلقائياً</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"💼 <i>جاري إضافة الرصيد لحسابك...</i>"
+                )
+            else:
+                msg = (
+                    f"✅ <b>Deposit auto-detected!</b> 🎉\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 <b>Amount:</b> <b>${base_amount:.2f}</b>\n"
+                    f"💳 <b>Method:</b> {method_label}\n"
+                    f"⚡ <b>Auto-detected from blockchain</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"💼 <i>Adding balance to your account...</i>"
+                )
+            bot.send_message(uid, msg, parse_mode="HTML")
+        except Exception: pass
+        
+        # نضيف الرصيد
+        credit_user(uid, base_amount, tx_id_for_record, get_lang(uid), method_label)
+        return True
+    except Exception as e:
+        logger.error(f"Error in auto_credit: {e}")
+        return False
+
+
+def check_ltc_blockchain_auto():
+    """
+    🔍 يفحص LTC blockchain ويلقى الحوالات اللي وصلت
+    ويربطها بـ pending_deposits تلقائياً.
+    """
+    try:
+        wallet_address = get_setting('ltc_address')
+        if not wallet_address or wallet_address == "Not Set":
+            return
+        
+        # نجيب الـ pending deposits لـ LTC
+        pending_count = db.pending_deposits.count_documents({
+            'coin': 'LTC',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return  # ما فيه pending - نوفر الـ API calls
+        
+        # نجيب آخر transactions من litecoinspace
+        url = f"https://litecoinspace.org/api/address/{wallet_address}/txs"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return
+            txs = res.json()
+        except Exception:
+            return
+        
+        # نجيب سعر LTC
+        ltc_price = get_ltc_price_usd()
+        if not ltc_price or ltc_price < 10:
+            return
+        
+        current_time_ms = int(time.time() * 1000)
+        cutoff_time_ms = current_time_ms - (45 * 60 * 1000)  # آخر 45 دقيقة
+        
+        for tx in txs[:30]:  # آخر 30 معاملة فقط
+            try:
+                tx_id = tx.get('txid', '')
+                if not tx_id:
+                    continue
+                
+                # شيك التاريخ - نتجاهل المعاملات القديمة
+                tx_time = (tx.get('status', {}).get('block_time', 0) or 0) * 1000
+                if tx_time and tx_time < cutoff_time_ms:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_id)
+                
+                # شيك إن المعاملة ما تم معالجتها
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                # نحسب الـ amount المُستلم
+                received_ltc = 0.0
+                for vout in tx.get('vout', []):
+                    if vout.get('scriptpubkey_address') == wallet_address:
+                        received_ltc += vout.get('value', 0) / 100000000  # satoshi → LTC
+                
+                if received_ltc <= 0:
+                    continue
+                
+                usd_amount = round(received_ltc * ltc_price, 6)
+                
+                # نشوف لو في pending مطابق
+                pending = find_pending_deposit_for_amount(usd_amount, 'LTC', tolerance=0.001)
+                if pending:
+                    success = auto_credit_from_pending(pending, tx_id_normalized, "Litecoin (LTC) Auto")
+                    if success:
+                        logger.info(f"✅ AUTO-CREDITED LTC: user {pending['user_id']} → ${pending['base_amount_usd']:.2f} (tx: {tx_id[:16]})")
+            except Exception as tx_err:
+                logger.debug(f"Skip tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_ltc_blockchain_auto error: {e}")
+
+
+def check_ton_blockchain_auto():
+    """🔍 يفحص TON blockchain تلقائياً"""
+    try:
+        wallet_address = get_setting('ton_address')
+        if not wallet_address or wallet_address == "Not Set":
+            return
+        
+        pending_count = db.pending_deposits.count_documents({
+            'coin': 'TON',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return
+        
+        # TONCenter API
+        url = f"https://toncenter.com/api/v2/getTransactions?address={wallet_address}&limit=30"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return
+            data = res.json()
+            if not data.get('ok'):
+                return
+            txs = data.get('result', [])
+        except Exception:
+            return
+        
+        ton_price = get_ton_price_usd()
+        if not ton_price or ton_price < 0.5:
+            return
+        
+        current_time = int(time.time())
+        cutoff_time = current_time - (45 * 60)  # 45 دقيقة
+        
+        for tx in txs:
+            try:
+                tx_hash = tx.get('transaction_id', {}).get('hash', '')
+                if not tx_hash:
+                    continue
+                
+                tx_time = tx.get('utime', 0)
+                if tx_time and tx_time < cutoff_time:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_hash)
+                
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                # نحسب الـ TON المُستلم
+                in_msg = tx.get('in_msg', {})
+                value_nanoton = int(in_msg.get('value', 0))
+                if value_nanoton <= 0:
+                    continue
+                
+                received_ton = value_nanoton / 1_000_000_000
+                usd_amount = round(received_ton * ton_price, 6)
+                
+                # نشوف pending مطابق
+                pending = find_pending_deposit_for_amount(usd_amount, 'TON', tolerance=0.001)
+                if pending:
+                    success = auto_credit_from_pending(pending, tx_id_normalized, "Toncoin (TON) Auto")
+                    if success:
+                        logger.info(f"✅ AUTO-CREDITED TON: user {pending['user_id']} → ${pending['base_amount_usd']:.2f} (tx: {tx_hash[:16]})")
+            except Exception as tx_err:
+                logger.debug(f"Skip TON tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_ton_blockchain_auto error: {e}")
+
+
+def check_usdt_blockchain_auto():
+    """🔍 يفحص USDT (TRC-20 و BEP-20) تلقائياً عبر Binance API"""
+    try:
+        # نشيك إن في pending
+        pending_count = db.pending_deposits.count_documents({
+            'coin': {'$in': ['USDT', 'USDT_BEP20']},
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return
+        
+        # نجلب آخر deposits من Binance
+        res = execute_binance_call(
+            lambda c: c.get_deposit_history(coin='USDT'),
+            max_retries=3
+        )
+        
+        if res is None:
+            return
+        
+        current_time_ms = int(time.time() * 1000)
+        cutoff_time_ms = current_time_ms - (45 * 60 * 1000)
+        
+        for d in res[:30]:
+            try:
+                tx_id = str(d.get('txId', ''))
+                if not tx_id:
+                    continue
+                
+                tx_time = int(d.get('insertTime', 0))
+                if tx_time and tx_time < cutoff_time_ms:
+                    continue
+                
+                # فقط الحوالات المؤكدة
+                if int(d.get('status', -1)) != 1:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_id)
+                
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                amt = float(d.get('amount', 0))
+                if amt <= 0:
+                    continue
+                
+                # نطابق مع pending (TRC20 أو BEP20)
+                network = d.get('network', '').upper()
+                coins_to_check = []
+                if 'TRX' in network or 'TRC' in network:
+                    coins_to_check = ['USDT']
+                elif 'BSC' in network or 'BEP' in network:
+                    coins_to_check = ['USDT_BEP20']
+                else:
+                    coins_to_check = ['USDT', 'USDT_BEP20']
+                
+                for coin_check in coins_to_check:
+                    pending = find_pending_deposit_for_amount(amt, coin_check, tolerance=0.001)
+                    if pending:
+                        success = auto_credit_from_pending(pending, tx_id_normalized, f"USDT ({coin_check}) Auto")
+                        if success:
+                            logger.info(f"✅ AUTO-CREDITED USDT: user {pending['user_id']} → ${pending['base_amount_usd']:.2f}")
+                        break
+            except Exception as tx_err:
+                logger.debug(f"Skip USDT tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_usdt_blockchain_auto error: {e}")
+
+
+def check_binance_pay_auto():
+    """
+    🔍 يفحص Binance Pay تلقائياً ويربط بالـ user من الـ memo/remark.
+    
+    المستخدم يرسل الملاحظة: @stock_lara_bot <user_id>
+    البوت يلقى الحوالة ويضيف الرصيد للـ user_id المذكور.
+    """
+    try:
+        bot_username = get_setting('bot_username', '').lower().lstrip('@')
+        if not bot_username:
+            # نحاول نجيب من البوت نفسه
+            try:
+                me = bot.get_me()
+                bot_username = me.username.lower() if me.username else ''
+                if bot_username:
+                    db.settings.update_one(
+                        {'key': 'bot_username'},
+                        {'$set': {'value': bot_username}},
+                        upsert=True
+                    )
+            except: return
+        
+        if not bot_username:
+            return
+        
+        # نجلب آخر معاملات Binance Pay
+        pay_response = execute_binance_call(
+            lambda c: c.get_pay_trade_history(),
+            max_retries=3
+        )
+        
+        if not pay_response:
+            return
+        
+        pay_history = pay_response.get('data', [])
+        current_time_ms = int(time.time() * 1000)
+        cutoff_time_ms = current_time_ms - (24 * 60 * 60 * 1000)  # 24 ساعة
+        
+        for tx in pay_history[:30]:
+            try:
+                tx_id = str(tx.get('orderId', tx.get('transactionId', '')))
+                if not tx_id:
+                    continue
+                
+                tx_time = int(tx.get('transactionTime', 0))
+                if tx_time and tx_time < cutoff_time_ms:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_id)
+                
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                # نشوف لو الإيداع وارد (مو صادر)
+                if tx.get('bizType') != 'PAY' or tx.get('orderType') != 'PAY':
+                    continue
+                
+                amount = float(tx.get('amount', 0))
+                if amount <= 0:
+                    continue
+                
+                # 🛡 نقرأ الـ remark/note عشان نلقى @bot_username + user_id
+                remark = str(tx.get('remark', '') or tx.get('orderInfo', '') or '').lower()
+                if not remark:
+                    continue
+                
+                # نبحث عن @bot_username في الملاحظة
+                if f'@{bot_username}' not in remark:
+                    continue
+                
+                # نستخرج الـ user_id من الملاحظة
+                # الفورمات: "@stock_lara_bot 123456789" أو "@stock_lara_bot 123456789 extra text"
+                import re as re_module
+                user_id_match = re_module.search(r'@' + re_module.escape(bot_username) + r'\s+(\d{5,15})', remark)
+                if not user_id_match:
+                    continue
+                
+                target_uid = int(user_id_match.group(1))
+                
+                # نتأكد إن المستخدم موجود
+                target_user = db.users.find_one({'user_id': target_uid})
+                if not target_user:
+                    logger.warning(f"⚠️ Binance Pay لمستخدم غير موجود: {target_uid}")
+                    continue
+                
+                if target_user.get('is_banned') == 1:
+                    logger.warning(f"⚠️ Binance Pay لمستخدم محظور: {target_uid}")
+                    continue
+                
+                # نضيف الرصيد
+                logger.info(f"✅ Binance Pay AUTO: user {target_uid} → ${amount:.2f}")
+                credit_user(target_uid, amount, tx_id_normalized, get_lang(target_uid), "Binance Pay Auto")
+                
+                # نرسل رسالة للمستخدم
+                try:
+                    bot.send_message(
+                        target_uid,
+                        f"✅ <b>تم استلام إيداعك تلقائياً!</b>\n\n"
+                        f"💰 المبلغ: <b>${amount:.2f}</b>\n"
+                        f"💳 الطريقة: Binance Pay\n\n"
+                        f"🎉 تم إضافة الرصيد لحسابك بنجاح.",
+                        parse_mode="HTML"
+                    )
+                except: pass
+            except Exception as tx_err:
+                logger.debug(f"Skip Binance Pay tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_binance_pay_auto error: {e}")
+
+
+def auto_deposit_monitor_thread():
+    """Thread خلفي يفحص كل طرق الإيداع تلقائياً"""
+    # ننتظر شوي قبل البداية
+    time.sleep(60)
+    
+    while True:
+        try:
+            # نشغل كل الفحوصات
+            check_ltc_blockchain_auto()
+            time.sleep(2)
+            check_ton_blockchain_auto()
+            time.sleep(2)
+            check_usdt_blockchain_auto()
+            time.sleep(2)
+            check_binance_pay_auto()
+            
+            # ننتظر 30 ثانية قبل الجولة التالية
+            time.sleep(30)
+        except Exception as e:
+            logger.error(f"Auto deposit monitor error: {e}")
+            time.sleep(60)
+
+
+# نشغل الـ monitor في الخلفية
+threading.Thread(target=auto_deposit_monitor_thread, daemon=True).start()
+
+
 def mark_pending_deposit_used(pending_id):
     """يعلّم إيداع معلق كـ مستخدم"""
     try:
@@ -3529,19 +4151,34 @@ def reject_wrong_amount_deposit(uid, coin, usd_amount_precise, tx_id, coin_label
         except Exception: pass
         
         # رسالة للمستخدم - بدون ذكر الإدارة
-        bot.send_message(
-            uid,
-            "❌ <b>المبلغ المحوّل غير صحيح!</b>\n\n"
-            "💡 لقد أرسلت مبلغ مختلف عن المبلغ المطلوب."
-            f"{expected_text}\n\n"
-            "━━━━━━━━━━━━━━\n"
-            "⚠️ <b>عند الإيداع التالي:</b>\n"
-            "• حوّل المبلغ <b>بالضبط</b> كما يعطيك إياه البوت\n"
-            "• لا تقرّب الرقم\n"
-            "• لا تنقص أو تزيد ولا حتى $0.0001\n\n"
-            "🔄 ابدأ عملية إيداع جديدة من القائمة.",
-            parse_mode="HTML"
-        )
+        if get_lang(uid) == 'en':
+            bot.send_message(
+                uid,
+                f"❌ <b>Incorrect amount transferred!</b>\n\n"
+                f"💡 You sent a different amount than requested."
+                f"{expected_text}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"⚠️ <b>For next deposit:</b>\n"
+                f"• Send <b>exactly</b> the amount the bot gives you\n"
+                f"• Do not round the number\n"
+                f"• Do not add or subtract even $0.0001\n\n"
+                f"🔄 Start a new deposit from the menu.",
+                parse_mode="HTML"
+            )
+        else:
+            bot.send_message(
+                uid,
+                f"❌ <b>المبلغ المحوّل غير صحيح!</b>\n\n"
+                f"💡 لقد أرسلت مبلغ مختلف عن المبلغ المطلوب."
+                f"{expected_text}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"⚠️ <b>عند الإيداع التالي:</b>\n"
+                f"• حوّل المبلغ <b>بالضبط</b> كما يعطيك إياه البوت\n"
+                f"• لا تقرّب الرقم\n"
+                f"• لا تنقص أو تزيد ولا حتى $0.0001\n\n"
+                f"🔄 ابدأ عملية إيداع جديدة من القائمة.",
+                parse_mode="HTML"
+            )
     except Exception as e:
         logger.error(f"Error in reject_wrong_amount: {e}")
 
@@ -3679,7 +4316,7 @@ def ask_deposit_amount(message, coin):
     l = get_lang(uid)
     
     if not message.text:
-        bot.send_message(uid, "❌ يجب إرسال رقم.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ يجب إرسال رقم.", "❌ Please send a number."), parse_mode="HTML")
         return
     
     text = message.text.strip()
@@ -3697,16 +4334,16 @@ def ask_deposit_amount(message, coin):
     try:
         base_amount = float(text.replace(',', '.').replace('$', ''))
     except ValueError:
-        bot.send_message(uid, "❌ أرسل رقم فقط.\nمثال: 5 أو 10.5", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ أرسل رقم فقط.\nمثال: 5 أو 10.5", "❌ Send numbers only.\nExample: 5 or 10.5"), parse_mode="HTML")
         return
     
     # validation
     if base_amount < 1:
-        bot.send_message(uid, "❌ الحد الأدنى للإيداع: <b>$1</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ الحد الأدنى للإيداع: <b>$1</b>", "❌ Minimum deposit: <b>$1</b>"), parse_mode="HTML")
         return
     
     if base_amount > 10000:
-        bot.send_message(uid, "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.", "❌ Amount too large. Max: <b>$10,000</b>\n\nFor large deposits, contact admin."), parse_mode="HTML")
         return
     
     # نولّد المبلغ الفريد
@@ -3715,7 +4352,7 @@ def ask_deposit_amount(message, coin):
     # نسجّل في DB
     pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
     if not pending:
-        bot.send_message(uid, "❌ حدث خطأ. حاول مرة ثانية.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ حدث خطأ. حاول مرة ثانية.", "❌ An error occurred. Please try again."), parse_mode="HTML")
         return
     
     # نجلب عنوان المحفظة
@@ -3765,7 +4402,8 @@ def ask_deposit_amount(message, coin):
             f"❌ <b>لا</b> تنقص ولا تزيد ولا حتى $0.0001\n\n"
             f"━━━━━━━━━━━━━━\n"
             f"⏰ <b>صلاحية الطلب:</b> 30 دقيقة\n\n"
-            f"✅ بعد التحويل بالمبلغ <b>الصحيح</b>، أرسل الـ <b>TxID (الهاش)</b> هنا 👇"
+            f"✨ <b>بعد التحويل بالمبلغ الصحيح، البوت سيضيف الرصيد تلقائياً خلال 1-3 دقائق.</b>\n\n"
+            f"💡 <i>لا حاجة لإرسال أي شيء - فقط حوّل وانتظر.</i>"
         )
     else:
         msg_text = (
@@ -3784,23 +4422,15 @@ def ask_deposit_amount(message, coin):
             f"❌ <b>DON'T</b> change even by $0.0001\n\n"
             f"━━━━━━━━━━━━━━\n"
             f"⏰ <b>Valid for:</b> 30 minutes\n\n"
-            f"✅ After sending the <b>EXACT</b> amount, send the <b>TxID</b> here 👇"
+            f"✨ <b>After sending the EXACT amount, balance will be added AUTOMATICALLY within 1-3 minutes.</b>\n\n"
+            f"💡 <i>No need to send anything - just transfer and wait.</i>"
         )
     
-    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    # رسالة الإيداع - بدون next_step (الكشف تلقائي)
+    bot.send_message(uid, msg_text, parse_mode="HTML")
     
     # نسجّل المستخدم في PENDING
     PENDING_DEPOSIT_USERS[uid] = coin
-    
-    # نسجّل next_step
-    if coin == "LTC":
-        bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
-    elif coin == "TON":
-        bot.register_next_step_handler(msg, verify_crypto_tx, l, "TON")
-    elif coin == "USDT_BEP20":
-        bot.register_next_step_handler(msg, verify_crypto_tx, l, "USDT")
-    else:
-        bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
@@ -3855,7 +4485,7 @@ def verify_binance_pay(message, lang):
         return
     
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", "❌ <b>Invalid Order ID! Please send a valid Order ID.</b>"), parse_mode="HTML")
         return
     
     # 🛡 توحيد الـ tx_id لمنع الالتفاف بـ 0x أو أحرف كبيرة
@@ -3863,7 +4493,7 @@ def verify_binance_pay(message, lang):
     
     with tx_lock:
         if tx_id_normalized in PROCESSING_TXS:
-            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            bot.send_message(uid, bil(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", "⏳ <b>This transaction is already being processed, please do not repeat.</b>"), parse_mode="HTML")
             return
         if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
@@ -3987,7 +4617,7 @@ def verify_crypto_tx(message, lang, coin):
         return
     
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً!</b>", "❌ <b>TxID is invalid or too short!</b>"), parse_mode="HTML")
         return
     
     # 🛡 توحيد الـ tx_id لمنع الالتفاف بـ 0x أو تنسيقات مختلفة
@@ -4279,7 +4909,7 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         return
     
     if wallet_address == "Not Set" or len(wallet_address) < 10:
-        bot.send_message(uid, "❌ <b>خطأ:</b> عنوان محفظة TON غير معين في البوت.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>خطأ:</b> عنوان محفظة TON غير معين في البوت.", "❌ <b>Error:</b> TON wallet address not set in bot."), parse_mode="HTML")
         return
     
     # 🛡 استخدام normalize_tx_id للحماية الموحدة
@@ -4554,11 +5184,11 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         return
     
     if len(tx_id) < 5:
-        bot.send_message(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>رقم الهاش (TxID) غير صحيح أو قصير جداً! تأكد من نسخه بالكامل.</b>", "❌ <b>TxID is invalid or too short! Make sure to copy it completely.</b>"), parse_mode="HTML")
         return
         
     if wallet_address == "Not Set" or len(wallet_address) < 10:
-        bot.send_message(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", parse_mode="HTML")
+        bot.send_message(uid, bil(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", "❌ <b>Error:</b> Wallet address not set."), parse_mode="HTML")
         return
     
     # 🛡 توحيد الـ tx_id لمنع الالتفاف
@@ -4745,7 +5375,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             
     except Exception as e:
-        bot.send_message(uid, f"❌ حدث خطأ أثناء فحص الشبكة.", parse_mode="HTML")
+        bot.send_message(uid, fbil(uid, "❌ حدث خطأ أثناء فحص الشبكة.", "❌ Network check error."), parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id_normalized)
 
@@ -4913,15 +5543,21 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
             logger.error(f"Failed to notify: {notify_err}")
         
         # رسائل للمستخدمين
-        manipulation_msg = (
-            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
-            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
-            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
-        )
+        if True:  # نبني حسب اللغة
+            ar_msg = (
+                "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+            )
+            en_msg = (
+                "❌ <b>Manipulation detected!</b>\n\n"
+                "🚫 Your account has been banned for attempting to use the same transaction with another account.\n\n"
+                "⚠️ <i>Contact admin if you believe this is a mistake.</i>"
+            )
         
-        try: bot.send_message(original_uid, manipulation_msg, parse_mode="HTML")
+        try: bot.send_message(original_uid, bil(original_uid, ar_msg, en_msg), parse_mode="HTML")
         except: pass
-        try: bot.send_message(thief_uid, manipulation_msg, parse_mode="HTML")
+        try: bot.send_message(thief_uid, bil(thief_uid, ar_msg, en_msg), parse_mode="HTML")
         except: pass
         
         logger.warning(
@@ -5326,7 +5962,7 @@ def credit_user(uid, amt, tx_id, lang, method):
     if amt <= 0:
         logger.error(f"🚨 محاولة إيداع بمبلغ صفر/سالب: amt={amt} للمستخدم {uid}")
         try:
-            bot.send_message(uid, "❌ <b>المبلغ غير صالح.</b>", parse_mode="HTML")
+            bot.send_message(uid, bil(uid, "❌ <b>المبلغ غير صالح.</b>", "❌ <b>Invalid amount.</b>"), parse_mode="HTML")
         except: pass
         return
     
@@ -5534,7 +6170,7 @@ def credit_user(uid, amt, tx_id, lang, method):
             try:
                 bot.send_message(
                     uid,
-                    "❌ <b>حدث خطأ في معالجة الإيداع.</b>\n\nيرجى التواصل مع الإدارة.",
+                    bil(uid, "❌ <b>حدث خطأ في معالجة الإيداع.</b>\n\nيرجى التواصل مع الإدارة.", "❌ <b>Error processing deposit.</b>\n\nPlease contact admin."),
                     parse_mode="HTML"
                 )
             except: pass
@@ -7089,34 +7725,60 @@ def admin_stock_save(message, pid):
                 bot.send_message(admin_id, "❌ فشل البرودكاست: المنتج غير موجود.")
                 return
             stk_total = get_product_stock_count(pid_for_thread)
+            custom_emoji_id = p.get('custom_emoji_id')
             users = list(db.users.find())
             logger.info(f"📢 جاري الإرسال لـ {len(users)} مستخدم")
             success = 0
             fail = 0
             for u in users:
-                try: 
+                try:
+                    uid_u = u['user_id']
                     u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                     if u_lang not in ['ar', 'en']: u_lang = 'en'
                     
-                    custom_emoji_id = p.get('custom_emoji_id')
+                    # اسم المنتج مع الإيموجي المميز (للرسالة)
                     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> ' if custom_emoji_id else '📦 '
-                    p_name = icon_html + clean_name(p.get(f'name_{u_lang}', p.get('name_en')))
+                    p_name = icon_html + clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
+                    p_name_plain = clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
                     
-                    alert_msg = get_text(u['user_id'], 'new_stock', p_name, stk_total)
-                    bot.send_message(u['user_id'], alert_msg, parse_mode="HTML")
+                    alert_msg = get_text(uid_u, 'new_stock', p_name, stk_total)
+                    
+                    # 🟢 زر الشراء الأخضر (Telegram الجديد)
+                    markup = InlineKeyboardMarkup()
+                    btn_label = f"🛒 {p_name_plain}" if u_lang == 'ar' else f"🛒 {p_name_plain}"
+                    
+                    if custom_emoji_id:
+                        # زر أخضر مع الإيموجي المميز للمنتج
+                        buy_btn = CustomInlineButton(
+                            text=btn_label,
+                            callback_data=f"buy_{pid_for_thread}",
+                            pay=True,                           # ← يجعل الزر أخضر
+                            icon_custom_emoji_id=custom_emoji_id  # ← الإيموجي المميز
+                        )
+                    else:
+                        # زر أخضر بدون إيموجي مميز
+                        buy_btn = CustomInlineButton(
+                            text=f"🟢 {btn_label}",
+                            callback_data=f"buy_{pid_for_thread}",
+                            pay=True
+                        )
+                    
+                    markup.add(buy_btn)
+                    
+                    bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
                     success += 1
-                    time.sleep(0.05) 
-                except Exception as send_err: 
+                    time.sleep(0.05)
+                except Exception as send_err:
                     fail += 1
                     logger.debug(f"فشل الإرسال للمستخدم {u.get('user_id')}: {send_err}")
-                    pass
+            
             logger.info(f"📢 انتهى البرودكاست - نجح: {success} | فشل: {fail}")
             bot.send_message(
-                admin_id, 
+                admin_id,
                 f"📢 <b>تقرير إشعار المخزون للمنتج ({p.get('name_ar')}):</b>\n"
                 f"🟢 مستلمين: {success}\n"
                 f"🔴 محظورين: {fail}\n"
-                f"👥 المجموع: {success + fail}", 
+                f"👥 المجموع: {success + fail}",
                 parse_mode="HTML"
             )
         except Exception as e:
