@@ -1970,6 +1970,29 @@ def bil(uid, ar_text, en_text):
     """يرجع النص بلغة المستخدم (عربي أو إنجليزي)"""
     return en_text if get_lang(uid) == 'en' else ar_text
 
+
+def safe_next_step(func):
+    """
+    🛡 Decorator يحمي next_step_handlers من CallbackQuery.
+    لو وصل CallbackQuery بدل Message، يمسح الـ handler ويتجاهله.
+    """
+    def wrapper(message, *args, **kwargs):
+        try:
+            # لو CallbackQuery وصل بدل Message
+            if not hasattr(message, 'text') or hasattr(message, 'data'):
+                # نمسح أي step handlers معلقة
+                try:
+                    chat_id = message.message.chat.id if hasattr(message, 'message') else message.from_user.id
+                    bot.clear_step_handler_by_chat_id(chat_id=chat_id)
+                except Exception:
+                    pass
+                return
+            return func(message, *args, **kwargs)
+        except AttributeError:
+            return
+    wrapper.__name__ = func.__name__
+    return wrapper
+
 def is_user_banned(uid):
     u = get_user_data_full(uid)
     return True if u and u.get('is_banned') == 1 else False
@@ -2294,6 +2317,7 @@ def github_buy_prompt(call):
     msg = bot.send_message(uid, get_text(uid, 'gh_prompt_user'), parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_user)
 
+@safe_next_step
 def process_gh_step_user(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
@@ -2309,6 +2333,7 @@ def process_gh_step_user(message):
     msg = bot.send_message(uid, get_text(uid, 'gh_prompt_pass'), parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_pass)
 
+@safe_next_step
 def process_gh_step_pass(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
@@ -2324,6 +2349,7 @@ def process_gh_step_pass(message):
     msg = bot.send_message(uid, get_text(uid, 'gh_prompt_2fa'), parse_mode="HTML")
     bot.register_next_step_handler(msg, process_gh_step_2fa)
 
+@safe_next_step
 def process_gh_step_2fa(message):
     uid = message.from_user.id
     if uid not in temp_github_data: return
@@ -3377,6 +3403,7 @@ def dep_stars_ui(call):
     msg = bot.send_message(uid, prompt, parse_mode="HTML")
     bot.register_next_step_handler(msg, process_stars_amount, l)
 
+@safe_next_step
 def process_stars_amount(message, lang):
     uid = message.from_user.id
     if not message.text:
@@ -3472,6 +3499,37 @@ def got_payment(message):
         credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
+def dep_binance_ui(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+
+    wallet = get_setting('wallet_address')
+
+    if l == 'ar':
+        msg_text = (
+            f"🟡 <b>الإيداع عبر Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
+            f"📌 أمثلة: 5 / 10 / 25 / 50\n"
+            f"⚠️ الحد الأدنى: <b>$1</b>"
+        )
+    else:
+        msg_text = (
+            f"🟡 <b>Deposit via Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💡 Send the USD amount you want to deposit:\n\n"
+            f"📌 Examples: 5 / 10 / 25 / 50\n"
+            f"⚠️ Minimum: <b>$1</b>"
+        )
+
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    bot.register_next_step_handler(msg, ask_binance_deposit_amount)
+
+
+@safe_next_step
 def ask_binance_deposit_amount(message):
     """يستلم المبلغ ويعطي مبلغ فريد لـ Binance Pay"""
     uid = message.from_user.id
@@ -4474,6 +4532,7 @@ def start_amount_protected_deposit(call, coin):
     bot.register_next_step_handler(msg, ask_deposit_amount, coin)
 
 
+@safe_next_step
 def ask_deposit_amount(message, coin):
     """يستلم المبلغ من المستخدم ويعطيه المبلغ الفريد"""
     uid = message.from_user.id
@@ -4636,6 +4695,7 @@ def dep_crypto_ui(call):
     elif coin == "USDT_BEP20": bot.register_next_step_handler(msg, verify_crypto_tx, l, "USDT")
     else: bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
+@safe_next_step
 def verify_binance_pay(message, lang):
     uid = message.from_user.id
     if is_user_banned(uid): return
@@ -4759,6 +4819,7 @@ def verify_binance_pay(message, lang):
     finally:
         PROCESSING_TXS.discard(tx_id_normalized)
 
+@safe_next_step
 def verify_crypto_tx(message, lang, coin):
     """
     🛡 توجيه ذكي: TON يفحص من TONCenter (الـ blockchain العام)
@@ -5013,6 +5074,7 @@ def get_ton_price_usd():
     return None
 
 
+@safe_next_step
 def verify_ton_public_blockchain(message, lang, wallet_address):
     """
     🛡 يفحص حوالات TON مباشرة من TON blockchain (بدون Binance، بدون بروكسي)
@@ -5336,6 +5398,7 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
     finally:
         PROCESSING_TXS.discard(tx_track_key)
 
+@safe_next_step
 def verify_ltc_public_blockchain(message, lang, wallet_address):
     uid = message.from_user.id
     if is_user_banned(uid): return
@@ -6484,6 +6547,7 @@ def ad_ref_set_threshold(call):
     bot.register_next_step_handler(msg, ad_ref_save_threshold)
 
 
+@safe_next_step
 def ad_ref_save_threshold(message):
     uid = message.from_user.id
     if not _is_admin_check(uid):
@@ -6545,6 +6609,7 @@ def ad_ref_set_reward(call):
     bot.register_next_step_handler(msg, ad_ref_save_reward)
 
 
+@safe_next_step
 def ad_ref_save_reward(message):
     uid = message.from_user.id
     if not _is_admin_check(uid):
@@ -6603,6 +6668,7 @@ def ad_ref_set_purchase_reward(call):
     bot.register_next_step_handler(msg, ad_ref_save_purchase_reward)
 
 
+@safe_next_step
 def ad_ref_save_purchase_reward(message):
     uid = message.from_user.id
     if not _is_admin_check(uid):
@@ -6652,6 +6718,7 @@ def ad_ref_set_min_purchase(call):
     bot.register_next_step_handler(msg, ad_ref_save_min_purchase)
 
 
+@safe_next_step
 def ad_ref_save_min_purchase(message):
     uid = message.from_user.id
     if not _is_admin_check(uid):
@@ -7123,6 +7190,7 @@ def ad_edit_txt_prompt(call):
     
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
+@safe_next_step
 def ad_save_custom_text(message, key):
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
@@ -7238,6 +7306,7 @@ def ad_edit_btn_prompt(call):
     msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_save_custom_btn, key)
 
+@safe_next_step
 def ad_save_custom_btn(message, key):
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
@@ -7318,6 +7387,7 @@ def ad_prod_emoji_ask(call):
     msg = bot.send_message(call.message.chat.id, "🌟 <b>أرسل الآن الإيموجي المميز (Premium Emoji) لهذا المنتج:</b>\n(أرسله كرسالة عادية وسأقوم بالتقاطه)", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_prod_emoji_save, pid)
 
+@safe_next_step
 def ad_prod_emoji_save(message, pid):
     if not message.text:
         bot.send_message(message.chat.id, "❌ الرجاء إرسال إيموجي.")
@@ -7408,6 +7478,8 @@ def admin_set_userbot_vars(call):
     msg = bot.send_message(call.message.chat.id, f"📝 <b>أرسل القيمة الجديدة لـ ({key}):</b>", parse_mode="HTML")
     
     def save_and_restart(message):
+        if not hasattr(message, 'text') or hasattr(message, 'data'):
+            return
         db.settings.update_one({'key': key}, {'$set': {'value': message.text.strip()}}, upsert=True)
         bot.send_message(message.chat.id, "✅ تم حفظ الإعداد بنجاح. جاري إعادة تشغيل اليوزربوت في الخلفية...")
         start_dynamic_userbot()
@@ -7457,6 +7529,8 @@ def admin_set_price(call):
     msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل السعر الجديد بالدولار ($):</b>", parse_mode="HTML")
     
     def save_price(message):
+        if not hasattr(message, 'text') or hasattr(message, 'data'):
+            return
         try:
             new_price = float(message.text.strip())
             db.settings.update_one({'key': key}, {'$set': {'value': new_price}}, upsert=True)
