@@ -3468,74 +3468,222 @@ def got_payment(message):
         credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
-def dep_binance_ui(call):
+def ask_binance_deposit_amount(message):
+    """يستلم المبلغ ويعطي مبلغ فريد لـ Binance Pay"""
+    uid = message.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+
+    if not message.text or message.text.startswith('/'):
+        return
+
+    if message.text.lower() in ['الغاء', 'cancel']:
+        bot.send_message(uid, bil(uid, "❌ تم الإلغاء.", "❌ Cancelled."))
+        return
+
+    try:
+        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+    except ValueError:
+        bot.send_message(uid, bil(uid, "❌ أرسل رقماً فقط. مثال: 10", "❌ Numbers only. Example: 10"), parse_mode="HTML")
+        return
+
+    if base_amount < 1:
+        bot.send_message(uid, bil(uid, "❌ الحد الأدنى $1", "❌ Minimum $1"), parse_mode="HTML")
+        return
+
+    if base_amount > 10000:
+        bot.send_message(uid, bil(uid, "❌ الحد الأقصى $10,000", "❌ Maximum $10,000"), parse_mode="HTML")
+        return
+
+    # نولّد مبلغ فريد بـ 4 خانات عشرية = 9000 احتمال
+    unique_amount = generate_unique_amount_for_user(base_amount, uid, 'BINANCE')
+
+    # نسجّل في DB
+    pending = register_pending_deposit(uid, base_amount, unique_amount, 'BINANCE')
+    if not pending:
+        bot.send_message(uid, bil(uid, "❌ حدث خطأ. حاول مرة ثانية.", "❌ Error. Try again."), parse_mode="HTML")
+        return
+
+    wallet = get_setting('wallet_address')
+
+    if l == 'ar':
+        msg_text = (
+            f"🟡 <b>تعليمات الإيداع - Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>المبلغ المطلوب تحويله:</b>\n"
+            f"<code>${unique_amount:.4f}</code>\n"
+            f"☝️ <b>بالضبط هذا الرقم!</b>\n\n"
+            f"📬 <b>المحفظة:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>تنبيهات:</b>\n"
+            f"✅ حوّل بالضبط: <code>${unique_amount:.4f}</code>\n"
+            f"❌ لا تحوّل ${base_amount:.2f} (المبلغ الأساسي)\n"
+            f"❌ لا تغيّر الرقم\n\n"
+            f"⏰ <b>صلاحية الطلب:</b> 30 دقيقة\n\n"
+            f"✨ <b>سيُضاف الرصيد تلقائياً بمجرد استلام التحويل.</b>\n"
+            f"<i>لا حاجة لأي إجراء آخر.</i>"
+        )
+    else:
+        msg_text = (
+            f"🟡 <b>Deposit Instructions - Binance Pay</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>Amount to send:</b>\n"
+            f"<code>${unique_amount:.4f}</code>\n"
+            f"☝️ <b>EXACTLY this amount!</b>\n\n"
+            f"📬 <b>Wallet:</b>\n<code>{wallet}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Important:</b>\n"
+            f"✅ Send exactly: <code>${unique_amount:.4f}</code>\n"
+            f"❌ Don't send ${base_amount:.2f} (base amount)\n"
+            f"❌ Don't change the number\n\n"
+            f"⏰ <b>Valid for:</b> 30 minutes\n\n"
+            f"✨ <b>Balance added automatically once received.</b>\n"
+            f"<i>No further action needed.</i>"
+        )
+
+    bot.send_message(uid, msg_text, parse_mode="HTML")
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
     bot.clear_step_handler_by_chat_id(chat_id=uid)
-    
+
     wallet = get_setting('wallet_address')
-    
-    # 🆕 نجلب اسم البوت
-    bot_username = get_setting('bot_username', '')
-    if not bot_username:
-        try:
-            me = bot.get_me()
-            bot_username = me.username if me.username else 'YourBot'
-            db.settings.update_one(
-                {'key': 'bot_username'},
-                {'$set': {'value': bot_username}},
-                upsert=True
-            )
-        except: bot_username = 'YourBot'
-    
-    # 🆕 رسالة جديدة تطلب من المستخدم وضع memo
+
     if l == 'ar':
         msg_text = (
             f"🟡 <b>الإيداع عبر Binance Pay</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📬 <b>محفظة الاستلام:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>مهم جداً!</b>\n\n"
-            f"🔑 <b>في خانة 'الملاحظة' (Remark/Note) ضع هذا الرقم:</b>\n"
-            f"<code>{uid}</code>\n\n"
-            f"☝️ <b>هذا رقمك الخاص - لا تغيّره!</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 <b>الخطوات:</b>\n"
-            f"1️⃣ افتح Binance Pay\n"
-            f"2️⃣ أرسل المبلغ للعنوان أعلاه\n"
-            f"3️⃣ في خانة الملاحظة ضع فقط: <code>{uid}</code>\n"
-            f"4️⃣ نفذ التحويل\n"
-            f"5️⃣ خلال 1-3 دقائق يُضاف الرصيد <b>تلقائياً</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ بدون الملاحظة الصحيحة لن يُضاف الرصيد!\n\n"
-            f"💡 <i>لا حاجة لإرسال Order ID - البوت يكتشفه تلقائياً.</i>"
+            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
+            f"📌 أمثلة: 5 / 10 / 25 / 50\n"
+            f"⚠️ الحد الأدنى: <b>$1</b>"
         )
     else:
         msg_text = (
             f"🟡 <b>Deposit via Binance Pay</b>\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"📬 <b>Receiving wallet:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>IMPORTANT!</b>\n\n"
-            f"🔑 <b>In the 'Remark/Note' field put this number:</b>\n"
-            f"<code>{uid}</code>\n\n"
-            f"☝️ <b>This is your unique ID - don't change it!</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 <b>Steps:</b>\n"
-            f"1️⃣ Open Binance Pay\n"
-            f"2️⃣ Send amount to the address above\n"
-            f"3️⃣ In the Remark field put only: <code>{uid}</code>\n"
-            f"4️⃣ Execute the transfer\n"
-            f"5️⃣ Within 1-3 minutes balance added <b>AUTOMATICALLY</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"❌ Without correct Remark, balance won't be added!\n\n"
-            f"💡 <i>No need to send Order ID - bot detects automatically.</i>"
+            f"💡 Send the USD amount you want to deposit:\n\n"
+            f"📌 Examples: 5 / 10 / 25 / 50\n"
+            f"⚠️ Minimum: <b>$1</b>"
         )
+
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    bot.register_next_step_handler(msg, ask_binance_deposit_amount)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("binance_check_"))
+def binance_check_payment(call):
+    """يفحص Binance Pay فوراً لما المستخدم يضغط الزر"""
+    bot.answer_callback_query(call.id, "⏳ جاري الفحص..." if get_lang(call.from_user.id) == 'ar' else "⏳ Checking...")
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
     
-    # نرسل الرسالة - بدون next_step (الكشف تلقائي عبر memo)
-    bot.send_message(uid, msg_text, parse_mode="HTML")
+    # نرسل رسالة "جاري الفحص"
+    checking_msg = bot.send_message(
+        uid,
+        bil(uid, "🔍 <b>جاري فحص Binance Pay...</b>\nانتظر ثوانٍ.", "🔍 <b>Checking Binance Pay...</b>\nPlease wait."),
+        parse_mode="HTML"
+    )
+    
+    found = False
+    try:
+        pay_response = execute_binance_call(
+            lambda c: c.get_pay_trade_history(),
+            max_retries=5
+        )
+        
+        if pay_response:
+            pay_history = pay_response.get('data', [])
+            uid_str = str(uid)
+            current_time_ms = int(time.time() * 1000)
+            cutoff_ms = current_time_ms - (24 * 60 * 60 * 1000)
+            
+            import re as re_module
+            
+            for tx in pay_history[:50]:
+                try:
+                    # نجلب الـ Order ID
+                    tx_id = str(
+                        tx.get('orderId') or tx.get('transactionId') or
+                        tx.get('merchantTradeNo') or ''
+                    )
+                    if not tx_id:
+                        continue
+                    
+                    # نفحص الوقت
+                    tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
+                    if tx_time and tx_time < cutoff_ms:
+                        continue
+                    
+                    tx_id_norm = normalize_tx_id(tx_id)
+                    
+                    # لو مستخدم مسبقاً
+                    if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
+                        continue
+                    
+                    # المبلغ
+                    amount = float(tx.get('amount') or tx.get('totalFee') or 0)
+                    if amount <= 0:
+                        continue
+                    
+                    # نقرأ كل الحقول الممكنة للـ remark
+                    remark = str(
+                        tx.get('remarks') or tx.get('remark') or
+                        tx.get('memo') or tx.get('note') or
+                        tx.get('orderInfo') or ''
+                    ).strip()
+                    
+                    # نشوف لو الـ uid موجود في الـ remark
+                    if uid_str not in remark:
+                        continue
+                    
+                    # تأكيد: الـ uid موجود كرقم في الـ remark
+                    if not re_module.search(r'\b' + re_module.escape(uid_str) + r'\b', remark):
+                        continue
+                    
+                    # ✅ وجدنا الحوالة!
+                    credit_user(uid, amount, tx_id_norm, l, "Binance Pay")
+                    found = True
+                    
+                    try:
+                        bot.delete_message(uid, checking_msg.message_id)
+                    except: pass
+                    break
+                    
+                except Exception:
+                    continue
+    
+    except Exception as e:
+        logger.error(f"binance_check_payment error: {e}")
+    
+    if not found:
+        try:
+            bot.edit_message_text(
+                bil(uid,
+                    "❌ <b>لم نجد حوالة بعد!</b>\n\n"
+                    "💡 تأكد من:\n"
+                    "• وضع رقمك في الملاحظة بالضبط\n"
+                    f"• الرقم: <code>{uid}</code>\n"
+                    "• إتمام التحويل بالكامل\n\n"
+                    "🔄 حاول مرة ثانية بعد دقيقة.",
+                    "❌ <b>No transaction found yet!</b>\n\n"
+                    "💡 Make sure:\n"
+                    "• Your ID is in the Remark exactly\n"
+                    f"• Your ID: <code>{uid}</code>\n"
+                    "• Transfer is completed\n\n"
+                    "🔄 Try again in a minute."
+                ),
+                uid, checking_msg.message_id,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup().add(
+                    InlineKeyboardButton(
+                        "🔄 أعد المحاولة" if l == 'ar' else "🔄 Try Again",
+                        callback_data=f"binance_check_{uid}"
+                    )
+                )
+            )
+        except: pass
 
 # ============================================================
 # 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
@@ -3934,148 +4082,149 @@ def check_usdt_blockchain_auto():
         logger.error(f"check_usdt_blockchain_auto error: {e}")
 
 
+def _binance_pay_request():
+    """
+    يجلب آخر معاملات Binance Pay باستخدام REST API مباشرة.
+    يستخدم /sapi/v1/pay/transactions endpoint.
+    يرجع list من المعاملات أو None لو فشل.
+    """
+    import hmac, hashlib, urllib.parse
+
+    api_key = BINANCE_API_KEY
+    api_secret = BINANCE_API_SECRET
+    
+    if not api_key or not api_secret:
+        return None
+    
+    try:
+        timestamp = int(time.time() * 1000)
+        params = {
+            'timestamp': timestamp,
+            'limit': 100,
+            'recvWindow': 60000
+        }
+        
+        # نعمل signature
+        query_string = urllib.parse.urlencode(params)
+        signature = hmac.new(
+            api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        params['signature'] = signature
+        
+        headers = {'X-MBX-APIKEY': api_key}
+        
+        url = "https://api.binance.com/sapi/v1/pay/transactions"
+        
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'SUCCESS' or data.get('code') == '000000':
+                return data.get('data', [])
+            else:
+                logger.warning(f"Binance Pay API: {data.get('code')} - {data.get('errorMessage', data.get('msg', ''))}")
+                return None
+        else:
+            logger.warning(f"Binance Pay API HTTP {resp.status_code}: {resp.text[:100]}")
+            return None
+    except Exception as e:
+        logger.error(f"_binance_pay_request error: {e}")
+        return None
+
+
 def check_binance_pay_auto():
     """
-    🔍 يفحص Binance Pay تلقائياً ويربط بالـ user من الـ memo/remark.
-    
-    المستخدم يرسل الملاحظة: @stock_lara_bot <user_id>
-    البوت يلقى الحوالة ويضيف الرصيد للـ user_id المذكور.
+    🔍 يفحص Binance Pay كل 10 ثواني بالمبلغ الفريد.
+    المستخدم يحوّل المبلغ الفريد → البوت يطابقه مع pending_deposits → يضيف الرصيد.
     """
     try:
-        bot_username = get_setting('bot_username', '').lower().lstrip('@')
-        if not bot_username:
-            # نحاول نجيب من البوت نفسه
-            try:
-                me = bot.get_me()
-                bot_username = me.username.lower() if me.username else ''
-                if bot_username:
-                    db.settings.update_one(
-                        {'key': 'bot_username'},
-                        {'$set': {'value': bot_username}},
-                        upsert=True
-                    )
-            except: return
+        if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+            return
+
+        transactions = _binance_pay_request()
         
-        if not bot_username:
+        if transactions is None:
             return
         
-        # نجلب آخر معاملات Binance Pay
-        pay_response = execute_binance_call(
-            lambda c: c.get_pay_trade_history(),
-            max_retries=3
-        )
-        
-        if not pay_response:
+        if not transactions:
             return
         
-        pay_history = pay_response.get('data', [])
+        # نشيك إن في pending لـ BINANCE قبل ما نكلّم API
+        pending_count = db.pending_deposits.count_documents({
+            'coin': 'BINANCE',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return
+
         current_time_ms = int(time.time() * 1000)
-        cutoff_time_ms = current_time_ms - (24 * 60 * 60 * 1000)  # 24 ساعة
-        
-        for tx in pay_history[:30]:
+        cutoff_ms = current_time_ms - (2 * 60 * 60 * 1000)  # آخر ساعتين
+
+        for tx in transactions:
             try:
-                tx_id = str(tx.get('orderId', tx.get('transactionId', '')))
+                tx_id = str(
+                    tx.get('transactionId') or tx.get('orderId') or tx.get('bizOrderNo') or ''
+                )
                 if not tx_id:
                     continue
-                
-                tx_time = int(tx.get('transactionTime', 0))
-                if tx_time and tx_time < cutoff_time_ms:
+
+                tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
+                if tx_time and tx_time < cutoff_ms:
                     continue
-                
-                tx_id_normalized = normalize_tx_id(tx_id)
-                
-                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+
+                tx_id_norm = normalize_tx_id(tx_id)
+
+                if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
                     continue
-                
-                # نشوف لو الإيداع وارد (مو صادر)
-                if tx.get('bizType') != 'PAY' or tx.get('orderType') != 'PAY':
-                    continue
-                
-                amount = float(tx.get('amount', 0))
+
+                amount = float(tx.get('amount') or tx.get('totalFee') or 0)
                 if amount <= 0:
                     continue
-                
-                # 🛡 نقرأ الـ remark/note
-                remark = str(tx.get('remark', '') or tx.get('orderInfo', '') or '').strip()
-                if not remark:
+
+                # 🛡 نطابق بالمبلغ الفريد (tolerance صغير جداً = 0.0001)
+                pending = find_pending_deposit_for_amount(amount, 'BINANCE', tolerance=0.0001)
+                if not pending:
                     continue
-                
-                import re as re_module
-                target_uid = None
-                
-                # طريقة 1: رقم فقط (الجديدة - أقصر من 20 حرف)
-                # المستخدم يكتب فقط: 123456789
-                id_only_match = re_module.fullmatch(r'\s*(\d{5,15})\s*', remark)
-                if id_only_match:
-                    target_uid = int(id_only_match.group(1))
-                
-                # طريقة 2: @bot_username ID (القديمة - للتوافق)
-                if not target_uid:
-                    remark_lower = remark.lower()
-                    if f'@{bot_username}' in remark_lower:
-                        old_match = re_module.search(
-                            r'@' + re_module.escape(bot_username) + r'\s+(\d{5,15})',
-                            remark_lower
-                        )
-                        if old_match:
-                            target_uid = int(old_match.group(1))
-                
-                if not target_uid:
+
+                uid = pending['user_id']
+                base_amount = float(pending.get('base_amount_usd', amount))
+
+                user = db.users.find_one({'user_id': uid})
+                if not user or user.get('is_banned') == 1:
                     continue
-                
-                # نتأكد إن المستخدم موجود
-                target_user = db.users.find_one({'user_id': target_uid})
-                if not target_user:
-                    logger.warning(f"⚠️ Binance Pay: user {target_uid} not found")
-                    continue
-                
-                if target_user.get('is_banned') == 1:
-                    logger.warning(f"⚠️ Binance Pay: user {target_uid} is banned")
-                    continue
-                
-                # نضيف الرصيد
-                logger.info(f"✅ Binance Pay AUTO: user {target_uid} → ${amount:.2f}")
-                credit_user(target_uid, amount, tx_id_normalized, get_lang(target_uid), "Binance Pay Auto")
-                
-                # نرسل رسالة للمستخدم
-                try:
-                    bot.send_message(
-                        target_uid,
-                        f"✅ <b>تم استلام إيداعك تلقائياً!</b>\n\n"
-                        f"💰 المبلغ: <b>${amount:.2f}</b>\n"
-                        f"💳 الطريقة: Binance Pay\n\n"
-                        f"🎉 تم إضافة الرصيد لحسابك بنجاح.",
-                        parse_mode="HTML"
-                    )
-                except: pass
+
+                logger.info(f"✅ Binance Pay MATCH: user {uid} amount=${amount:.4f} → base=${base_amount:.2f}")
+                success = auto_credit_from_pending(pending, tx_id_norm, "Binance Pay")
+                if success:
+                    logger.info(f"✅ Binance Pay credited: user {uid} ${base_amount:.2f}")
+
             except Exception as tx_err:
-                logger.debug(f"Skip Binance Pay tx: {tx_err}")
+                logger.debug(f"Binance Pay tx error: {tx_err}")
                 continue
+
     except Exception as e:
         logger.error(f"check_binance_pay_auto error: {e}")
 
 
 def auto_deposit_monitor_thread():
-    """Thread خلفي يفحص كل طرق الإيداع تلقائياً"""
-    # ننتظر شوي قبل البداية
-    time.sleep(60)
-    
+    """Thread خلفي يفحص كل طرق الإيداع تلقائياً كل 10 ثواني"""
+    time.sleep(30)  # ننتظر شوي قبل البداية
     while True:
         try:
-            # نشغل كل الفحوصات
             check_ltc_blockchain_auto()
-            time.sleep(2)
+            time.sleep(1)
             check_ton_blockchain_auto()
-            time.sleep(2)
+            time.sleep(1)
             check_usdt_blockchain_auto()
-            time.sleep(2)
+            time.sleep(1)
             check_binance_pay_auto()
-            
-            # ننتظر 30 ثانية قبل الجولة التالية
-            time.sleep(30)
+            time.sleep(10)  # كل 10 ثواني
         except Exception as e:
             logger.error(f"Auto deposit monitor error: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
 
 # نشغل الـ monitor في الخلفية
