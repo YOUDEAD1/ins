@@ -3033,6 +3033,10 @@ def shop_detail_ui(call):
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=f"buy_qty_{pid}"))
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
     
+    # 🛡 زر التعديل للأدمن فقط
+    if _is_admin_check(uid):
+        markup.add(InlineKeyboardButton("⚙️ ...", callback_data=f"edit_p_{pid}"))
+    
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
