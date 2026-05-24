@@ -1971,6 +1971,21 @@ def bil(uid, ar_text, en_text):
     return en_text if get_lang(uid) == 'en' else ar_text
 
 
+def send_no_balance(uid):
+    """يرسل رسالة رصيد غير كافٍ + زر الشحن مباشرة"""
+    l = get_lang(uid)
+    if l == 'ar':
+        msg = "❌ <b>رصيدك غير كافٍ!</b>\n\nاشحن رصيدك وحاول مرة ثانية."
+        btn = "💳 شحن الرصيد"
+    else:
+        msg = "❌ <b>Insufficient balance!</b>\n\nDeposit and try again."
+        btn = "💳 Deposit Now"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(btn, callback_data="open_deposit"))
+    bot.send_message(uid, msg, parse_mode="HTML", reply_markup=markup)
+
+
 def safe_next_step(func):
     """
     🛡 Decorator يحمي next_step_handlers من CallbackQuery.
@@ -2252,7 +2267,7 @@ def gemini_buy_prompt(call):
         )
         
         if updated_user is None:
-            bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+            send_no_balance(uid)
             return
         
         # ✅ نجح الخصم - أضفه للقائمة
@@ -2309,7 +2324,7 @@ def github_buy_prompt(call):
     
     if float(u.get('balance', 0)) < gh_price:
         _release_purchase_lock(uid)  # حرّر القفل
-        bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+        send_no_balance(uid)
         return
         
     temp_github_data[uid] = {'price': gh_price, 'lang': l}
@@ -3154,7 +3169,7 @@ def execute_bulk_buy(message, pid, lang):
         if updated_user is None:
             # الرصيد غير كافي - نُرجع الأكواد المحجوزة
             _release_reservation(reservation_id)
-            bot.send_message(uid, get_text(uid, 'no_balance'), parse_mode="HTML")
+            send_no_balance(uid)
             return
         
         # ✅ نجح الخصم - نكمل العملية
