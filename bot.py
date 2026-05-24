@@ -3892,15 +3892,17 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
         # 🎉 رسالة تأكيد للمستخدم قبل ما نضيف الرصيد
         try:
             lang = get_lang(uid)
+            # نعرض الـ tx_id مختصراً
+            tx_short = tx_id_for_record[:20] + "..." if len(tx_id_for_record) > 20 else tx_id_for_record
             if lang == 'ar':
                 msg = (
                     f"✅ <b>تم استلام إيداعك تلقائياً!</b> 🎉\n\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"💰 <b>المبلغ:</b> <b>${base_amount:.2f}</b>\n"
                     f"💳 <b>الطريقة:</b> {method_label}\n"
-                    f"⚡ <b>كُشفت الحوالة تلقائياً</b>\n"
+                    f"🆔 <b>رقم العملية:</b>\n<code>{tx_id_for_record}</code>\n"
                     f"━━━━━━━━━━━━━━\n\n"
-                    f"💼 <i>جاري إضافة الرصيد لحسابك...</i>"
+                    f"💼 <i>تم إضافة الرصيد لحسابك.</i>"
                 )
             else:
                 msg = (
@@ -3908,9 +3910,9 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
                     f"━━━━━━━━━━━━━━\n"
                     f"💰 <b>Amount:</b> <b>${base_amount:.2f}</b>\n"
                     f"💳 <b>Method:</b> {method_label}\n"
-                    f"⚡ <b>Auto-detected from blockchain</b>\n"
+                    f"🆔 <b>Transaction ID:</b>\n<code>{tx_id_for_record}</code>\n"
                     f"━━━━━━━━━━━━━━\n\n"
-                    f"💼 <i>Adding balance to your account...</i>"
+                    f"💼 <i>Balance added to your account.</i>"
                 )
             bot.send_message(uid, msg, parse_mode="HTML")
         except Exception: pass
@@ -8080,26 +8082,16 @@ def admin_stock_save(message, pid):
                     
                     alert_msg = get_text(uid_u, 'new_stock', p_name, stk_total)
                     
-                    # 🟢 زر الشراء الأخضر (Telegram الجديد)
+                    # 🟢 زر الشراء الأخضر (Bot API 9.4)
                     markup = InlineKeyboardMarkup()
-                    btn_label = f"🛒 {p_name_plain}" if u_lang == 'ar' else f"🛒 {p_name_plain}"
+                    btn_label = f"🛒 {p_name_plain}"
                     
-                    if custom_emoji_id:
-                        # زر أخضر مع الإيموجي المميز للمنتج
-                        buy_btn = CustomInlineButton(
-                            text=btn_label,
-                            callback_data=f"buy_{pid_for_thread}",
-                            pay=True,                           # ← يجعل الزر أخضر
-                            icon_custom_emoji_id=custom_emoji_id  # ← الإيموجي المميز
-                        )
-                    else:
-                        # زر أخضر بدون إيموجي مميز
-                        buy_btn = CustomInlineButton(
-                            text=f"🟢 {btn_label}",
-                            callback_data=f"buy_{pid_for_thread}",
-                            pay=True
-                        )
-                    
+                    buy_btn = CustomInlineButton(
+                        text=btn_label,
+                        callback_data=f"buy_qty_{pid_for_thread}",
+                        style="success",
+                        icon_custom_emoji_id=custom_emoji_id if custom_emoji_id else None
+                    )
                     markup.add(buy_btn)
                     
                     bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
