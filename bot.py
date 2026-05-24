@@ -834,65 +834,74 @@ def mark_referral_status(invited_id, new_status):
 
 def send_progress_log_notification(referrer_id):
     """
-    📢 يرسل إشعار "باقي X لتصل للمكافأة" لقناة اللوق
-    لكل إحالة نشطة جديدة (مو فقط عند milestone).
+    📢 لكل إحالة نشطة جديدة:
+    1. رسالة في قناة اللوق بالإنجليزي: "باقي X للمكافأة"
+    2. DM للمُحيل: "شخص جديد انضم عبر رابطك"
     """
     try:
         threshold = get_referral_threshold()
         reward = get_referral_reward()
-        
-        # نحسب: كم إحالة عند المستخدم، وكم باقي للمكافأة القادمة
+
         active_count = db.referrals_v2.count_documents({
             'referrer_id': referrer_id,
             'status': 'active'
         })
-        
-        # كم في الـ "خانة" الحالية (مودولو)
+
         current_in_batch = active_count % threshold
-        
-        # كم باقي للمكافأة القادمة
-        remaining = threshold - current_in_batch
-        
-        # لو remaining == threshold يعني وصل milestone (0 باقي) - ما نرسل (الـ milestone notify بيرسل بنفسه)
-        if remaining == threshold:
-            return
-        
-        # نرسل لقناة اللوق
-        log_ch = get_setting('log_channel')
-        if not log_ch or log_ch == "Not Set":
-            return
-        
-        # 🔒 إخفاء اليوزر بـ ** (مو a***d)
-        log_text = (
-            f"📈 <b>إحالة جديدة!</b>\n\n"
-            f"👤 المُحيل: <b>**</b>\n"
-            f"✅ الإحالات النشطة: <b>{active_count}</b>\n"
-            f"⏳ باقي <b>{remaining}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n\n"
-            f"🚀 <i>ادعُ أصدقاءك للبوت واربح!</i>"
-        )
-        
+        remaining = threshold - current_in_batch if current_in_batch > 0 else threshold
+
+        # 1) DM للمُحيل (بلغته)
         try:
-            bot.send_message(log_ch, log_text, parse_mode="HTML")
-        except Exception as send_err:
-            logger.debug(f"Failed to send progress log: {send_err}")
+            referrer = db.users.find_one({'user_id': referrer_id})
+            if referrer and referrer.get('is_banned') != 1:
+                ref_lang = referrer.get('lang', 'ar')
+                if ref_lang == 'ar':
+                    dm_text = (
+                        f"🎉 <b>شخص جديد انضم عبر رابطك!</b>\n\n"
+                        f"✅ إحالاتك النشطة الآن: <b>{active_count}</b>\n"
+                        f"⏳ باقي <b>{remaining}</b> فقط للحصول على <b>${reward:.2f}</b>"
+                    )
+                else:
+                    dm_text = (
+                        f"🎉 <b>Someone joined via your link!</b>\n\n"
+                        f"✅ Your active referrals: <b>{active_count}</b>\n"
+                        f"⏳ Only <b>{remaining}</b> more to earn <b>${reward:.2f}</b>"
+                    )
+                bot.send_message(referrer_id, dm_text, parse_mode="HTML")
+        except Exception as dm_err:
+            logger.debug(f"Progress DM failed for {referrer_id}: {dm_err}")
+
+        # 2) قناة اللوق (بالإنجليزي دائماً)
+        if remaining == threshold:
+            return  # milestone - الـ update_referrer_balance سيرسل
+
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                log_text = (
+                    f"📈 <b>New Active Referral!</b>\n\n"
+                    f"👤 Referrer: <b>**</b>\n"
+                    f"✅ Active Referrals: <b>{active_count}</b>\n"
+                    f"⏳ <b>{remaining}</b> more to earn <b>${reward:.2f}</b>"
+                )
+                bot.send_message(log_ch, log_text, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Progress log failed: {log_err}")
+
     except Exception as e:
         logger.error(f"send_progress_log_notification error: {e}")
 
 
 def update_referrer_balance(referrer_id):
     """
-    تحديث رصيد المُحيل بناءً على النشطين الحاليين.
-    🛡 محمي من race conditions باستخدام lock لكل referrer_id
-    🔔 يرسل إشعار للوق عند وصول إنجاز جديد (10، 20، 30 إحالة...)
+    تحديث رصيد المُحيل.
+    الإصلاح الرئيسي: الـ optimistic lock يفشل لو ref_v2_earned غير موجود في DB.
     """
     try:
         rid = int(referrer_id)
-        
-        # 🛡 lock على هذا الـ referrer لمنع تحديثين بنفس الوقت
         with _get_referrer_lock(rid):
-            # 🆕 نجلب الإعدادات الحالية من DB (قابلة للتغيير من الأدمن)
-            threshold = get_referral_threshold()  # افتراضي 10
-            reward = get_referral_reward()  # افتراضي 0.10
+            threshold = get_referral_threshold()
+            reward = get_referral_reward()
             
             active_count = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
             expected = round((active_count // threshold) * reward, 2)
@@ -901,120 +910,117 @@ def update_referrer_balance(referrer_id):
             if not referrer:
                 return
 
-            current_earned = round(float(referrer.get('ref_v2_earned', 0.0)), 2)
+            # 🛡 الإصلاح: نتعامل مع الحقل المفقود أو القيمة الخاطئة
+            raw_earned = referrer.get('ref_v2_earned', 0.0)
+            try:
+                current_earned = round(float(raw_earned), 2)
+            except (ValueError, TypeError):
+                current_earned = 0.0
 
-            if expected != current_earned:
-                diff = round(expected - current_earned, 2)
-                # 🛡 atomic update مع شرط ref_v2_earned القديم
-                # لو حد ثاني عدّل في نفس الوقت، الـ update هذا ما ينفّذ
+            if expected == current_earned:
+                return  # لا يوجد تغيير
+
+            diff = round(expected - current_earned, 2)
+
+            # 🛡 الإصلاح الأساسي: شرط يقبل الحقل المفقود أو 0.0
+            if current_earned == 0.0:
+                match_condition = {
+                    'user_id': rid,
+                    '$or': [
+                        {'ref_v2_earned': 0.0},
+                        {'ref_v2_earned': 0},
+                        {'ref_v2_earned': ''},
+                        {'ref_v2_earned': {'$exists': False}}
+                    ]
+                }
+            else:
+                match_condition = {
+                    'user_id': rid,
+                    'ref_v2_earned': current_earned
+                }
+
+            update_result = db.users.find_one_and_update(
+                match_condition,
+                {
+                    '$inc': {'balance': diff},
+                    '$set': {'ref_v2_earned': expected}
+                },
+                return_document=True
+            )
+
+            if update_result is None:
+                # فشل الـ optimistic lock - نعيد المحاولة مرة واحدة
                 update_result = db.users.find_one_and_update(
-                    {
-                        'user_id': rid,
-                        'ref_v2_earned': current_earned  # شرط optimistic locking
-                    },
+                    {'user_id': rid},
                     {
                         '$inc': {'balance': diff},
                         '$set': {'ref_v2_earned': expected}
                     },
                     return_document=True
                 )
-                
-                # 🔔 إذا التحديث نجح + هذا إنجاز جديد (وصول لمضاعف 10) → إشعار اللوق + الخاص
-                if update_result is not None and diff > 0:
-                    # diff > 0 يعني إن المُحيل ربح مكافأة جديدة (مو خسارة)
-                    
-                    # 🆕 1) إشعار حماسي للمُحيل في الخاص (يخبره أنه ربح)
-                    try:
-                        new_balance = float(update_result.get('balance', 0))
-                        ref_lang = referrer.get('lang', 'ar')
-                        
-                        if ref_lang == 'ar':
-                            milestone_msg = (
-                                f"🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n"
-                                f"━━━━━━━━━━━━━━\n"
-                                f"👥 <b>عدد إحالاتك النشطة:</b> <b>{active_count}</b>\n"
-                                f"💰 <b>مكافأتك:</b> <code>+${diff:.2f}</code> 🤩\n"
-                                f"💼 <b>رصيدك الحالي:</b> <b>${new_balance:.2f}</b>\n"
-                                f"━━━━━━━━━━━━━━\n\n"
-                                f"🔥 <b>كل ما زادت إحالاتك، زادت أرباحك!</b>\n"
-                                f"🚀 شارك رابطك أكثر = اكسب أكثر!\n\n"
-                                f"💪 <i>استمر! الفرصة مفتوحة بلا حدود.</i>"
-                            )
-                        else:
-                            milestone_msg = (
-                                f"🎉🎊 <b>Congrats! New Milestone!</b> 🏆\n\n"
-                                f"━━━━━━━━━━━━━━\n"
-                                f"👥 <b>Active Referrals:</b> <b>{active_count}</b>\n"
-                                f"💰 <b>Your Reward:</b> <code>+${diff:.2f}</code> 🤩\n"
-                                f"💼 <b>Current Balance:</b> <b>${new_balance:.2f}</b>\n"
-                                f"━━━━━━━━━━━━━━\n\n"
-                                f"🔥 <b>More referrals = More earnings!</b>\n"
-                                f"🚀 Share your link more = Earn more!\n\n"
-                                f"💪 <i>Keep going! No limits.</i>"
-                            )
-                        
-                        bot.send_message(rid, milestone_msg, parse_mode="HTML")
-                    except Exception as dm_err:
-                        logger.debug(f"Couldn't send milestone DM to {rid}: {dm_err}")
-                    
-                    # 🆕 2) إشعار لقناة اللوق
-                    try:
-                        log_ch = get_setting('log_channel')
-                        if log_ch and log_ch != "Not Set":
-                            referrer_display = obscure_text(referrer.get('username') or str(rid))
-                            
-                            # النص الافتراضي
-                            log_text = LANG['en']['log_ref_milestone'].format(
-                                referrer_display,
-                                active_count,
-                                f"{diff:.2f}"
-                            )
-                            
-                            # شيك على النص المخصص من CMS
-                            custom_milestone = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_milestone'})
-                            if custom_milestone and custom_milestone.get('value'):
-                                try:
-                                    log_text = custom_milestone['value'].format(
-                                        referrer_display,
-                                        active_count,
-                                        f"{diff:.2f}"
-                                    )
-                                except Exception as fmt_err:
-                                    logger.warning(f"⚠️ خطأ في format CMS milestone: {fmt_err}")
-                            
-                            bot.send_message(log_ch, log_text, parse_mode="HTML")
-                            logger.info(f"✅ تم إرسال إشعار milestone لقناة اللوق: {rid} → {active_count} إحالة")
-                        else:
-                            logger.warning(f"⚠️ قناة اللوق غير معينة - ما تم إرسال إشعار الإحالة لـ {rid}")
-                    except Exception as log_err:
-                        logger.error(f"❌ فشل إرسال إشعار اللوق: {log_err}")
-                    
-                    # 🆕 3) إشعار للأدمن (إنك تعرف إن واحد ربح مكافأة)
-                    try:
-                        ref_username = referrer.get('username') or 'بدون'
-                        admin_notif = (
-                            f"💎 <b>إنجاز إحالة جديد!</b>\n\n"
+
+            if update_result is not None and diff > 0:
+                new_balance = round(float(update_result.get('balance', 0)), 2)
+                ref_lang = referrer.get('lang', 'ar')
+
+                # 1) رسالة للمُحيل في الخاص
+                try:
+                    if ref_lang == 'ar':
+                        milestone_msg = (
+                            f"🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n"
                             f"━━━━━━━━━━━━━━\n"
-                            f"👤 <b>المُحيل:</b>\n"
-                            f"   • ID: <code>{rid}</code>\n"
-                            f"   • Username: @{ref_username}\n\n"
-                            f"📊 <b>التفاصيل:</b>\n"
-                            f"   • عدد الإحالات النشطة: <b>{active_count}</b>\n"
-                            f"   • المكافأة المضافة: <b>+${diff:.2f}</b>\n"
-                            f"   • إجمالي ما ربحه من الإحالات: <b>${expected:.2f}</b>\n"
-                            f"   • الرصيد الحالي: <b>${new_balance:.2f}</b>\n"
+                            f"👥 <b>إحالاتك النشطة:</b> {active_count}\n"
+                            f"💰 <b>مكافأتك:</b> <code>+${diff:.2f}</code>\n"
+                            f"💼 <b>رصيدك الآن:</b> ${new_balance:.2f}\n"
                             f"━━━━━━━━━━━━━━\n\n"
-                            f"<i>تم منح المكافأة تلقائياً ✅</i>"
+                            f"🔥 شارك رابطك أكثر = اكسب أكثر!"
                         )
-                        notify_admins(admin_notif)
-                    except Exception as admin_err:
-                        logger.debug(f"Couldn't notify admin: {admin_err}")
-                    
-                    logger.info(f"🏆 إنجاز جديد: المستخدم {rid} وصل {active_count} إحالة نشطة → +${diff:.2f}")
-                elif update_result is None and expected != current_earned:
-                    logger.debug(f"Optimistic lock retry for user {rid} - safe")
+                    else:
+                        milestone_msg = (
+                            f"🎉🎊 <b>Congrats! New Milestone Reached!</b> 🏆\n\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"👥 <b>Active Referrals:</b> {active_count}\n"
+                            f"💰 <b>Your Reward:</b> <code>+${diff:.2f}</code>\n"
+                            f"💼 <b>Balance Now:</b> ${new_balance:.2f}\n"
+                            f"━━━━━━━━━━━━━━\n\n"
+                            f"🔥 Share your link more = Earn more!"
+                        )
+                    bot.send_message(rid, milestone_msg, parse_mode="HTML")
+                except Exception as dm_err:
+                    logger.debug(f"Milestone DM failed for {rid}: {dm_err}")
+
+                # 2) إشعار قناة اللوق (بالإنجليزي دائماً)
+                try:
+                    log_ch = get_setting('log_channel')
+                    if log_ch and log_ch != "Not Set":
+                        log_text = (
+                            f"🏆 <b>Referral Milestone!</b>\n\n"
+                            f"👤 User: <b>**</b>\n"
+                            f"✅ Active Referrals: <b>{active_count}</b>\n"
+                            f"💰 Reward Earned: <b>+${diff:.2f}</b>\n"
+                            f"📊 Total from Referrals: <b>${expected:.2f}</b>"
+                        )
+                        bot.send_message(log_ch, log_text, parse_mode="HTML")
+                except Exception as log_err:
+                    logger.debug(f"Milestone log failed: {log_err}")
+
+                # 3) إشعار للأدمن
+                try:
+                    admin_notif = (
+                        f"💎 <b>Referral Milestone!</b>\n\n"
+                        f"👤 ID: <code>{rid}</code>\n"
+                        f"✅ Active: <b>{active_count}</b>\n"
+                        f"💰 Reward: <b>+${diff:.2f}</b>\n"
+                        f"💼 New Balance: <b>${new_balance:.2f}</b>"
+                    )
+                    notify_admins(admin_notif)
+                except Exception:
+                    pass
+
+                logger.info(f"✅ Referral reward: user {rid} → +${diff:.2f} (active: {active_count})")
+
     except Exception as e:
-        logger.error(f"Error updating referrer balance: {e}")
+        logger.error(f"Error in update_referrer_balance({referrer_id}): {e}")
 
 
 def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0):
@@ -6520,6 +6526,104 @@ def ad_ref_save_min_purchase(message):
 
 
 @bot.message_handler(commands=['fix_innocent_bans'])
+@bot.message_handler(commands=['fix_referrals'])
+def fix_referrals_cmd(message):
+    """🔧 يصلح ref_v2_earned لكل المستخدمين ويعطيهم مكافآتهم الفائتة"""
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+
+    bot.send_message(message.chat.id, "⏳ جاري إصلاح نظام الإحالات لكل المستخدمين...", parse_mode="HTML")
+
+    # الخطوة 1: إصلاح ref_v2_earned المكسورة (string فارغة أو مفقودة)
+    try:
+        # نحول كل "" أو null إلى 0.0
+        db.users.update_many(
+            {'$or': [
+                {'ref_v2_earned': ''},
+                {'ref_v2_earned': None},
+                {'ref_v2_earned': {'$exists': False}}
+            ]},
+            {'$set': {'ref_v2_earned': 0.0}}
+        )
+        bot.send_message(message.chat.id, "✅ تم إصلاح حقول ref_v2_earned الفارغة")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ خطأ في الخطوة 1: {e}")
+
+    # الخطوة 2: إعطاء كل مستخدم مكافآته الفائتة
+    threshold = get_referral_threshold()
+    reward = get_referral_reward()
+
+    referrers = list(db.referrals_v2.distinct('referrer_id'))
+    fixed = 0
+    total_paid = 0.0
+
+    for referrer_id in referrers:
+        try:
+            active_count = db.referrals_v2.count_documents({
+                'referrer_id': referrer_id,
+                'status': 'active'
+            })
+            expected = round((active_count // threshold) * reward, 2)
+            if expected <= 0:
+                continue
+
+            user = db.users.find_one({'user_id': referrer_id})
+            if not user:
+                continue
+
+            raw = user.get('ref_v2_earned', 0.0)
+            try:
+                current = round(float(raw), 2)
+            except:
+                current = 0.0
+
+            if expected > current:
+                diff = round(expected - current, 2)
+                db.users.update_one(
+                    {'user_id': referrer_id},
+                    {
+                        '$inc': {'balance': diff},
+                        '$set': {'ref_v2_earned': expected}
+                    }
+                )
+                fixed += 1
+                total_paid += diff
+
+                # نرسل للمستخدم
+                try:
+                    ref_lang = user.get('lang', 'ar')
+                    if ref_lang == 'ar':
+                        bot.send_message(
+                            referrer_id,
+                            f"🎉 <b>مبروك! تم إضافة مكافآتك الفائتة!</b>\n\n"
+                            f"💰 المبلغ المضاف: <b>+${diff:.2f}</b>\n"
+                            f"👥 إحالاتك النشطة: <b>{active_count}</b>",
+                            parse_mode="HTML"
+                        )
+                    else:
+                        bot.send_message(
+                            referrer_id,
+                            f"🎉 <b>Your missed referral rewards have been added!</b>\n\n"
+                            f"💰 Amount Added: <b>+${diff:.2f}</b>\n"
+                            f"👥 Active Referrals: <b>{active_count}</b>",
+                            parse_mode="HTML"
+                        )
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"fix_referrals error for {referrer_id}: {e}")
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>اكتمل إصلاح الإحالات!</b>\n\n"
+        f"👥 مستخدمين استلموا مكافآتهم: <b>{fixed}</b>\n"
+        f"💰 إجمالي الدفع: <b>${total_paid:.2f}</b>\n"
+        f"📊 العتبة: كل <b>{threshold}</b> إحالة = <b>${reward:.2f}</b>",
+        parse_mode="HTML"
+    )
+
+
 def fix_innocent_bans_cmd(message):
     """🛡 يفك حظر المستخدمين اللي حُظروا بسبب bug في النظام (إرسال /start)"""
     uid = message.from_user.id
