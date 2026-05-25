@@ -850,23 +850,25 @@ def send_progress_log_notification(referrer_id):
         current_in_batch = active_count % threshold
         remaining = threshold - current_in_batch if current_in_batch > 0 else threshold
 
-        # 1) DM للمُحيل (بلغته)
+        # 1) DM للمُحيل (بلغته مع CMS)
         try:
             referrer = db.users.find_one({'user_id': referrer_id})
             if referrer and referrer.get('is_banned') != 1:
                 ref_lang = referrer.get('lang', 'ar')
-                if ref_lang == 'ar':
-                    dm_text = (
-                        f"🎉 <b>شخص جديد انضم عبر رابطك!</b>\n\n"
-                        f"✅ إحالاتك النشطة الآن: <b>{active_count}</b>\n"
-                        f"⏳ باقي <b>{remaining}</b> فقط للحصول على <b>${reward:.2f}</b>"
-                    )
+                
+                # نجلب النص من CMS أو الافتراضي
+                cms_key = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_progress_dm'})
+                if cms_key and cms_key.get('value'):
+                    try:
+                        dm_text = cms_key['value'].format(active_count, remaining, f"{reward:.2f}")
+                    except:
+                        dm_text = LANG['en']['ref_progress_dm'].format(active_count, remaining, f"{reward:.2f}")
                 else:
-                    dm_text = (
-                        f"🎉 <b>Someone joined via your link!</b>\n\n"
-                        f"✅ Your active referrals: <b>{active_count}</b>\n"
-                        f"⏳ Only <b>{remaining}</b> more to earn <b>${reward:.2f}</b>"
-                    )
+                    lang_key = 'ar' if ref_lang == 'ar' else 'en'
+                    dm_text = LANG[lang_key].get('ref_progress_dm',
+                        LANG['en']['ref_progress_dm']
+                    ).format(active_count, remaining, f"{reward:.2f}")
+                
                 bot.send_message(referrer_id, dm_text, parse_mode="HTML")
         except Exception as dm_err:
             logger.debug(f"Progress DM failed for {referrer_id}: {dm_err}")
@@ -963,28 +965,19 @@ def update_referrer_balance(referrer_id):
                 new_balance = round(float(update_result.get('balance', 0)), 2)
                 ref_lang = referrer.get('lang', 'ar')
 
-                # 1) رسالة للمُحيل في الخاص
+                # 1) رسالة للمُحيل في الخاص (من CMS)
                 try:
-                    if ref_lang == 'ar':
-                        milestone_msg = (
-                            f"🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n"
-                            f"━━━━━━━━━━━━━━\n"
-                            f"👥 <b>إحالاتك النشطة:</b> {active_count}\n"
-                            f"💰 <b>مكافأتك:</b> <code>+${diff:.2f}</code>\n"
-                            f"💼 <b>رصيدك الآن:</b> ${new_balance:.2f}\n"
-                            f"━━━━━━━━━━━━━━\n\n"
-                            f"🔥 شارك رابطك أكثر = اكسب أكثر!"
-                        )
+                    cms_key = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_milestone_dm'})
+                    if cms_key and cms_key.get('value'):
+                        try:
+                            milestone_msg = cms_key['value'].format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
+                        except:
+                            milestone_msg = LANG['en']['ref_milestone_dm'].format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
                     else:
-                        milestone_msg = (
-                            f"🎉🎊 <b>Congrats! New Milestone Reached!</b> 🏆\n\n"
-                            f"━━━━━━━━━━━━━━\n"
-                            f"👥 <b>Active Referrals:</b> {active_count}\n"
-                            f"💰 <b>Your Reward:</b> <code>+${diff:.2f}</code>\n"
-                            f"💼 <b>Balance Now:</b> ${new_balance:.2f}\n"
-                            f"━━━━━━━━━━━━━━\n\n"
-                            f"🔥 Share your link more = Earn more!"
-                        )
+                        lang_key = 'ar' if ref_lang == 'ar' else 'en'
+                        milestone_msg = LANG[lang_key].get('ref_milestone_dm',
+                            LANG['en']['ref_milestone_dm']
+                        ).format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
                     bot.send_message(rid, milestone_msg, parse_mode="HTML")
                 except Exception as dm_err:
                     logger.debug(f"Milestone DM failed for {rid}: {dm_err}")
@@ -1476,7 +1469,12 @@ LANG = {
         # 🆕 إشعار خاص للمُحيل لما يشتري شخص من دعواته (في خاص البوت)
         'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
         
-        # 🆕 إشعارات قناة اللوق العامة (قابلة للتعديل من CMS)
+        # رسالة التقدم (كل إحالة نشطة جديدة) - {0}=active_count {1}=remaining {2}=reward
+        'ref_progress_dm': "🎉 <b>شخص جديد انضم عبر رابطك!</b>\n\n✅ إحالاتك النشطة: <b>{0}</b>\n⏳ باقي <b>{1}</b> فقط للحصول على <b>${2}</b>!",
+        
+        # رسالة المكافأة للمُحيل - {0}=active_count {1}=reward {2}=balance
+        'ref_milestone_dm': "🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n👥 إحالاتك النشطة: <b>{0}</b>\n💰 مكافأتك: <code>+${1}</code>\n💼 رصيدك الآن: <b>${2}</b>\n\n🔥 شارك رابطك أكثر = اكسب أكثر!",
+        
         'log_purchase': "🛒 <b>New Purchase!</b> 🛍\n\n👤 <b>User:</b> {}\n📦 <b>Product:</b> {}\n🔢 <b>QTY:</b> {}\n\n<i>Thank you for choosing us 🛡️</i>",
         
         'log_deposit': "💳 <b>New Deposit!</b> 💵\n\n👤 <b>User:</b> {}\n💰 <b>Amount:</b> <b>${}</b>\n🟢 <b>Method:</b> {}\n\n<i>Processed automatically ⚡</i>",
@@ -3120,6 +3118,26 @@ def execute_bulk_buy(message, pid, lang):
     if qty <= 0:
         bot.send_message(uid, get_text(uid, 'qty_invalid'), parse_mode="HTML"); return
     
+    # 🔒 منع الشراء أثناء عملية إيداع جارية
+    if is_deposit_locked(uid):
+        l = get_lang(uid)
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(
+            "❌ إلغاء عملية الإيداع" if l == 'ar' else "❌ Cancel Deposit",
+            callback_data="cancel_deposit"
+        ))
+        bot.send_message(
+            uid,
+            bil(uid,
+                "⚠️ <b>لديك عملية إيداع جارية!</b>\n\n"
+                "يجب إكمال الإيداع أو إلغاؤه أولاً.",
+                "⚠️ <b>You have a pending deposit!</b>\n\n"
+                "Please complete or cancel it first."
+            ),
+            parse_mode="HTML", reply_markup=markup
+        )
+        return
+    
     # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
     if not _acquire_purchase_lock(uid):
         bot.send_message(uid, bil(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another."), parse_mode="HTML")
@@ -3397,6 +3415,33 @@ threading.Thread(target=_cleanup_stale_purchase_locks, daemon=True).start()
 # ============================================================
 # 🏦 13. بوابات الدفع (تحديث لقبول الهاش القصير)
 # ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "cancel_deposit")
+def cancel_deposit_handler(call):
+    """يلغي عملية الإيداع الجارية"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    l = get_lang(uid)
+    
+    # نحذف الـ pending
+    db.pending_deposits.update_many(
+        {'user_id': uid, 'status': 'pending'},
+        {'$set': {'status': 'cancelled'}}
+    )
+    
+    # 🔓 فك القفل
+    unlock_deposit(uid)
+    
+    if l == 'ar':
+        msg = "❌ <b>تم إلغاء عملية الإيداع.</b>\n\nيمكنك البدء من جديد في أي وقت."
+    else:
+        msg = "❌ <b>Deposit cancelled.</b>\n\nYou can start a new deposit anytime."
+    
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except: pass
+    bot.send_message(uid, msg, parse_mode="HTML")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
     bot.answer_callback_query(call.id)
@@ -3630,10 +3675,14 @@ def ask_binance_deposit_amount(message):
             f"<i>No further action needed.</i>"
         )
 
-    bot.send_message(uid, msg_text, parse_mode="HTML")
-    bot.answer_callback_query(call.id)
-    uid = call.from_user.id
-    if is_user_banned(uid): return
+    # زر الإلغاء
+    cancel_markup = InlineKeyboardMarkup()
+    cancel_markup.add(InlineKeyboardButton(
+        "❌ إلغاء العملية" if l == 'ar' else "❌ Cancel Deposit",
+        callback_data="cancel_deposit"
+    ))
+    
+    bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
     l = get_lang(uid)
     bot.clear_step_handler_by_chat_id(chat_id=uid)
 
@@ -3837,17 +3886,13 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
 
 def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
     """
-    يسجّل عملية إيداع متوقعة - عشان نطابقها مع الـ tx لاحقاً.
+    يسجّل عملية إيداع متوقعة ويقفل المستخدم حتى يكتمل أو يُلغى.
     """
     try:
-        # نحذف أي إيداعات سابقة معلقة لنفس المستخدم بنفس العملة (نظافة)
-        db.pending_deposits.delete_many({
-            'user_id': uid,
-            'coin': coin,
-            'status': 'pending'
-        })
+        db.pending_deposits.delete_many({'user_id': uid, 'coin': coin, 'status': 'pending'})
         
         pending_id = f"PD{uid}{int(time.time())}{random.randint(100, 999)}"
+        expires = int(time.time()) + (60 * 30)
         record = {
             'pending_id': pending_id,
             'user_id': uid,
@@ -3856,13 +3901,57 @@ def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
             'coin': coin,
             'status': 'pending',
             'created_at': int(time.time()),
-            'expires_at': int(time.time()) + (60 * 30)  # 30 دقيقة
+            'expires_at': expires
         }
         db.pending_deposits.insert_one(record)
+        
+        # 🔒 قفل المستخدم أثناء الإيداع
+        db.users.update_one(
+            {'user_id': uid},
+            {'$set': {
+                'deposit_locked': True,
+                'deposit_lock_pending_id': pending_id,
+                'deposit_lock_expires': expires
+            }}
+        )
         return record
     except Exception as e:
         logger.error(f"Error registering pending deposit: {e}")
         return None
+
+
+def unlock_deposit(uid):
+    """فك قفل الإيداع عند الاكتمال أو الإلغاء"""
+    try:
+        db.users.update_one(
+            {'user_id': uid},
+            {'$unset': {'deposit_locked': '', 'deposit_lock_pending_id': '', 'deposit_lock_expires': ''}}
+        )
+    except Exception: pass
+
+
+def is_deposit_locked(uid):
+    """هل المستخدم في عملية إيداع جارية؟"""
+    try:
+        u = db.users.find_one({'user_id': uid}, {'deposit_locked': 1, 'deposit_lock_expires': 1})
+        if not u or not u.get('deposit_locked'):
+            return False
+        # نفحص إن القفل ما انتهت صلاحيته
+        if u.get('deposit_lock_expires', 0) < int(time.time()):
+            unlock_deposit(uid)
+            return False
+        # نفحص إن في pending فعلاً
+        pending = db.pending_deposits.find_one({
+            'user_id': uid,
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if not pending:
+            unlock_deposit(uid)
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
@@ -3913,8 +4002,10 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
         )
         
         if result.modified_count == 0:
-            # شخص آخر استخدمها قبلنا (race condition)
             return False
+        
+        # 🔓 فك قفل الإيداع
+        unlock_deposit(uid)
         
         # 🎉 رسالة تأكيد للمستخدم قبل ما نضيف الرصيد
         try:
@@ -4256,10 +4347,16 @@ def check_binance_pay_auto():
 
         for tx in transactions:
             try:
-                tx_id = str(
-                    tx.get('transactionId') or tx.get('orderId') or tx.get('bizOrderNo') or ''
-                )
-                if not tx_id:
+                # نفضّل orderId الرقمي (مثل 433332644536672256)
+                # على transactionId الحروفي (مثل pa223f41nn6s7111a)
+                order_id = str(tx.get('orderId') or '').strip()
+                trans_id = str(tx.get('transactionId') or tx.get('bizOrderNo') or '').strip()
+                
+                if order_id and order_id.isdigit():
+                    tx_id = order_id
+                elif trans_id:
+                    tx_id = trans_id
+                else:
                     continue
 
                 tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
@@ -4679,10 +4776,13 @@ def ask_deposit_amount(message, coin):
             f"💡 <i>No need to send anything - just transfer and wait.</i>"
         )
     
-    # رسالة الإيداع - بدون next_step (الكشف تلقائي)
-    bot.send_message(uid, msg_text, parse_mode="HTML")
-    
-    # نسجّل المستخدم في PENDING
+    # رسالة الإيداع مع زر الإلغاء
+    cancel_markup = InlineKeyboardMarkup()
+    cancel_markup.add(InlineKeyboardButton(
+        "❌ إلغاء العملية" if l == 'ar' else "❌ Cancel Deposit",
+        callback_data="cancel_deposit"
+    ))
+    bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
     PENDING_DEPOSIT_USERS[uid] = coin
 
 
@@ -7046,6 +7146,8 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
     markup.add(InlineKeyboardButton("🏆 لوق: إنجاز 10 إحالات", callback_data="edit_txt_log_ref_milestone"))
     markup.add(InlineKeyboardButton("💌 رسالة المُحيل (شراء صديقه)", callback_data="edit_txt_ref_purchase_dm"))
+    markup.add(InlineKeyboardButton("📈 رسالة التقدم (باقي X للمكافأة)", callback_data="edit_txt_ref_progress_dm"))
+    markup.add(InlineKeyboardButton("🎉 رسالة المُحيل (وصل للمكافأة)", callback_data="edit_txt_ref_milestone_dm"))
     # 🆕 إشعارات اللوق العامة
     markup.add(InlineKeyboardButton("🛒 لوق: شراء بنجاح", callback_data="edit_txt_log_purchase"))
     markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
@@ -8109,7 +8211,7 @@ def admin_stock_save(message, pid):
                     
                     buy_btn = CustomInlineButton(
                         text=btn_label,
-                        callback_data=f"buy_qty_{pid_for_thread}",
+                        callback_data=f"vi_p_{pid_for_thread}",
                         style="success",
                         icon_custom_emoji_id=custom_emoji_id if custom_emoji_id else None
                     )
@@ -8304,9 +8406,11 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     
     text = f"📂 <b>ملف العميل (نظرة الإدارة)</b>\n\n👤 الاسم: <b>{clean_name(u.get('name', 'بدون'))}</b>\n🔗 المعرف: {uname_str}\n🆔 الأيدي: <code>{target_uid}</code>\n🛡️ الحالة: <b>{ban_str}</b>\n\n💰 الرصيد الحالي: <b>${u.get('balance', 0):.2f}</b>\n✅ المشتريات: <b>{buy_count}</b>\n📦 إجمالي الإيداعات: <b>${dep_total:.2f}</b>"
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("🛍 إيصالات المشتريات", callback_data=f"ad_uh_buy_{target_uid}"),
-               InlineKeyboardButton("💳 إيصالات الإيداع", callback_data=f"ad_uh_dep_{target_uid}"))
-    markup.add(InlineKeyboardButton("📄 تحميل سجل المشتريات (ملف)", callback_data=f"ad_dlbuy_{target_uid}"))
+    markup.add(
+        InlineKeyboardButton("🛍 المشتريات", callback_data=f"ad_uh_buy_{target_uid}"),
+        InlineKeyboardButton("💳 الإيداعات", callback_data=f"ad_uh_dep_{target_uid}")
+    )
+    markup.add(InlineKeyboardButton("📥 تحميل السجل الكامل", callback_data=f"ad_full_hist_{target_uid}"))
     markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
     try:
@@ -8408,61 +8512,146 @@ def ad_uh_dep_handler(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_buy_"))
 def ad_uh_buy_handler(call):
-    """🛡 عرض كل مشتريات المستخدم للأدمن"""
+    """عرض مشتريات المستخدم للأدمن مع التفاصيل الكاملة"""
     bot.answer_callback_query(call.id)
     target_uid = int(call.data.replace("ad_uh_buy_", ""))
     
     recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
-    
-    if not recs:
-        text = f"📭 <b>لا توجد مشتريات لهذا المستخدم</b>\n\n🆔 ID: <code>{target_uid}</code>"
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
-        try:
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-        except: pass
-        return
-    
-    # نجمعها حسب المنتج
-    grouped = {}
-    for r in recs:
-        pid = str(r.get('product_id', ''))
-        if pid not in grouped:
-            grouped[pid] = []
-        grouped[pid].append(r)
-    
     u = get_user_data_full(target_uid)
     uname = f"@{u['username']}" if u and u.get('username') else "بدون"
     
+    if not recs:
+        text = f"📭 <b>لا توجد مشتريات</b>\n\n👤 {uname} | <code>{target_uid}</code>"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+        try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+        return
+    
+    # إجمالي المبالغ
+    total_spent = 0.0
+    for r in recs:
+        try:
+            p = find_product(str(r.get('product_id', '')))
+            price = float(p.get('price', 0)) if p else 0
+            qty = int(r.get('quantity', 1))
+            total_spent += price * qty
+        except: pass
+    
     text = (
-        f"🛍 <b>سجل مشتريات المستخدم</b>\n\n"
-        f"👤 المستخدم: {uname}\n"
-        f"🆔 ID: <code>{target_uid}</code>\n"
-        f"📊 إجمالي الطلبات: <b>{len(recs)}</b>\n"
-        f"📦 المنتجات المختلفة: <b>{len(grouped)}</b>\n\n"
+        f"🛍 <b>مشتريات المستخدم</b>\n\n"
+        f"👤 {uname} | <code>{target_uid}</code>\n"
+        f"📊 عدد الطلبات: <b>{len(recs)}</b>\n"
+        f"💰 إجمالي الإنفاق: <b>${total_spent:.2f}</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"📋 <b>تفاصيل حسب المنتج:</b>\n\n"
     )
     
-    for pid, orders in grouped.items():
-        if pid in ['GitHub_Student', 'Gemini_Activation']:
-            p_name = pid.replace('_', ' ')
-        else:
-            p = find_product(pid)
-            p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج'))) if p else "منتج محذوف"
-        
-        text += f"📦 <b>{p_name}</b>\n   • العدد: <b>{len(orders)}</b>\n\n"
+    # آخر 10 مشتريات
+    for i, r in enumerate(recs[:10], 1):
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
+            pid = str(r.get('product_id', ''))
+            qty = int(r.get('quantity', 1))
+            
+            if pid in ['GitHub_Student', 'Gemini_Activation']:
+                p_name = pid.replace('_', ' ')
+                price = 0
+            else:
+                p = find_product(pid)
+                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
+                price = float(p.get('price', 0)) if p else 0
+            
+            text += (
+                f"\n#{i} 📦 <b>{p_name}</b>\n"
+                f"   📅 {date_str}\n"
+                f"   🔢 الكمية: {qty} | 💵 السعر: ${price:.2f}/قطعة\n"
+                f"   💰 الإجمالي: ${price * qty:.2f}\n"
+            )
+        except: pass
     
-    text += "━━━━━━━━━━━━━━"
+    if len(recs) > 10:
+        text += f"\n<i>... و {len(recs) - 10} طلب آخر في الملف</i>"
     
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📄 تحميل السجل الكامل (ملف)", callback_data=f"ad_dlbuy_{target_uid}"))
+    markup.add(InlineKeyboardButton("📄 تحميل الملف الكامل", callback_data=f"ad_dlbuy_{target_uid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
     
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
+@admin_required
+def ad_dlbuy_handler(call):
+    """تحميل ملف كامل بكل مشتريات المستخدم"""
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    target_uid = int(call.data.replace("ad_dlbuy_", ""))
+    
+    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
+    u = get_user_data_full(target_uid)
+    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
+    balance = float(u.get('balance', 0)) if u else 0
+    
+    total_spent = 0.0
+    lines = []
+    
+    for i, r in enumerate(recs, 1):
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            pid = str(r.get('product_id', ''))
+            qty = int(r.get('quantity', 1))
+            
+            if pid in ['GitHub_Student', 'Gemini_Activation']:
+                p_name = pid.replace('_', ' ')
+                price = 0
+            else:
+                p = find_product(pid)
+                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
+                price = float(p.get('price', 0)) if p else 0
+            
+            subtotal = price * qty
+            total_spent += subtotal
+            
+            lines.append(
+                f"#{i}\n"
+                f"  التاريخ    : {date_str}\n"
+                f"  المنتج     : {p_name}\n"
+                f"  الكمية     : {qty}\n"
+                f"  سعر الوحدة : ${price:.2f}\n"
+                f"  الإجمالي   : ${subtotal:.2f}\n"
+                f"  {'─' * 40}"
+            )
+        except Exception as e:
+            lines.append(f"#{i} - خطأ: {e}\n{'─' * 40}")
+    
+    content = (
+        f"=== سجل مشتريات المستخدم ===\n"
+        f"المستخدم : {uname}\n"
+        f"الـ ID    : {target_uid}\n"
+        f"الرصيد   : ${balance:.2f}\n"
+        f"عدد الطلبات : {len(recs)}\n"
+        f"إجمالي الإنفاق : ${total_spent:.2f}\n"
+        f"{'=' * 50}\n\n"
+        + "\n".join(lines)
+    )
+    
+    try:
+        f = io.BytesIO(content.encode('utf-8'))
+        f.name = f"purchases_{target_uid}.txt"
+        bot.send_document(
+            call.message.chat.id, f,
+            caption=(
+                f"🛍 <b>مشتريات المستخدم</b>\n"
+                f"👤 {uname} | <code>{target_uid}</code>\n"
+                f"📊 العدد: {len(recs)}\n"
+                f"💰 الإجمالي: ${total_spent:.2f}"
+            ),
+            parse_mode="HTML"
+        )
     except Exception as e:
-        logger.error(f"Error showing purchases to admin: {e}")
+        bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dldep_"))
@@ -8532,6 +8721,118 @@ def admin_download_buy_hist(call):
     f = io.BytesIO(content.encode('utf-8'))
     f.name = f"Purchases_User_{target_uid}.txt"
     bot.send_document(call.message.chat.id, f, caption=f"📄 سجل مشتريات العميل {target_uid}.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_full_hist_"))
+@admin_required
+def ad_full_history_handler(call):
+    """📥 تحميل السجل الكامل (مشتريات + إيداعات)"""
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    target_uid = int(call.data.replace("ad_full_hist_", ""))
+    u = get_user_data_full(target_uid)
+    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
+    balance = float(u.get('balance', 0)) if u else 0
+
+    # المشتريات
+    orders = list(db.orders.find({'user_id': target_uid}).sort('_id', 1))
+    total_spent = 0.0
+    buy_lines = []
+    for i, r in enumerate(orders, 1):
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            pid = str(r.get('product_id', ''))
+            qty = int(r.get('quantity', 1))
+            if pid in ['GitHub_Student', 'Gemini_Activation']:
+                p_name = pid.replace('_', ' '); price = 0.0
+            else:
+                p = find_product(pid)
+                p_name = clean_name(p.get('name_ar', p.get('name_en', 'محذوف'))) if p else 'محذوف'
+                price = float(p.get('price', 0)) if p else 0.0
+            subtotal = price * qty; total_spent += subtotal
+            buy_lines.append(
+                f"  #{i}\n"
+                f"    التاريخ  : {date_str}\n"
+                f"    المنتج   : {p_name}\n"
+                f"    الكمية   : {qty}\n"
+                f"    السعر    : ${price:.2f} × {qty} = ${subtotal:.2f}\n"
+            )
+        except Exception as e:
+            buy_lines.append(f"  #{i} - خطأ: {e}\n")
+
+    # الإيداعات
+    deposits = list(db.used_transactions.find({'user_id': target_uid}).sort('_id', 1))
+    total_deposited = 0.0
+    dep_lines = []
+    for i, r in enumerate(deposits, 1):
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            amount = float(r.get('amount', 0))
+            method = r.get('method', 'غير محدد')
+            tx_id = r.get('transaction_id', '-')
+            total_deposited += amount
+            m = method.lower()
+            if 'admin' in m or 'gift' in m or 'هدية' in m or 'manual' in m:
+                source = '🎁 هدية من الأدمن'
+            elif 'auto' in m or 'تلقائي' in m:
+                source = '⚡ تلقائي'
+            elif 'stars' in m: source = '⭐ Telegram Stars'
+            elif 'binance' in m: source = '🟡 Binance Pay'
+            elif 'ltc' in m: source = '🔵 LTC'
+            elif 'ton' in m: source = '💎 TON'
+            elif 'usdt' in m: source = '🟢 USDT'
+            else: source = f'💳 {method}'
+            dep_lines.append(
+                f"  #{i}\n"
+                f"    التاريخ : {date_str}\n"
+                f"    المبلغ  : ${amount:.2f}\n"
+                f"    المصدر  : {source}\n"
+                f"    رقم العملية: {tx_id}\n"
+            )
+        except Exception as e:
+            dep_lines.append(f"  #{i} - خطأ: {e}\n")
+
+    sep = "=" * 55
+    content = (
+        f"{sep}\n"
+        f"           السجل الكامل للمستخدم\n"
+        f"{sep}\n"
+        f"المستخدم      : {uname}\n"
+        f"الـ ID         : {target_uid}\n"
+        f"الرصيد الحالي : ${balance:.2f}\n"
+        f"الحالة         : {'محظور 🚫' if u and u.get('is_banned') else 'نشط ✅'}\n"
+        f"{sep}\n\n"
+        f"ملخص مالي:\n"
+        f"  إجمالي الإيداعات : ${total_deposited:.2f}\n"
+        f"  إجمالي الإنفاق   : ${total_spent:.2f}\n"
+        f"  الرصيد الحالي    : ${balance:.2f}\n\n"
+        f"{sep}\n"
+        f"  المشتريات ({len(orders)} طلب | إجمالي ${total_spent:.2f})\n"
+        f"{sep}\n"
+        f"{''.join(buy_lines) or '  لا توجد مشتريات'}\n\n"
+        f"{sep}\n"
+        f"  الإيداعات ({len(deposits)} عملية | إجمالي ${total_deposited:.2f})\n"
+        f"{sep}\n"
+        f"{''.join(dep_lines) or '  لا توجد إيداعات'}\n\n"
+        f"{sep}\n"
+        f"تصدير: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"{sep}\n"
+    )
+    try:
+        f = io.BytesIO(content.encode('utf-8'))
+        f.name = f"full_history_{target_uid}.txt"
+        bot.send_document(
+            call.message.chat.id, f,
+            caption=(
+                f"📥 <b>السجل الكامل</b>\n\n"
+                f"👤 {uname} | <code>{target_uid}</code>\n"
+                f"💰 الرصيد: <b>${balance:.2f}</b>\n"
+                f"🛍 مشتريات: <b>{len(orders)}</b> = <b>${total_spent:.2f}</b>\n"
+                f"💳 إيداعات: <b>{len(deposits)}</b> = <b>${total_deposited:.2f}</b>"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_"))
 def show_admin_hist_detail(call):
