@@ -880,12 +880,21 @@ def send_progress_log_notification(referrer_id):
         try:
             log_ch = get_setting('log_channel')
             if log_ch and log_ch != "Not Set":
-                log_text = (
+                # نجلب النص من CMS أو الافتراضي
+                default_log = (
                     f"📈 <b>New Active Referral!</b>\n\n"
                     f"👤 Referrer: <b>**</b>\n"
                     f"✅ Active Referrals: <b>{active_count}</b>\n"
                     f"⏳ <b>{remaining}</b> more to earn <b>${reward:.2f}</b>"
                 )
+                cms = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_progress'})
+                if cms and cms.get('value'):
+                    try:
+                        log_text = cms['value'].format(active_count, remaining, f"{reward:.2f}")
+                    except:
+                        log_text = default_log
+                else:
+                    log_text = default_log
                 bot.send_message(log_ch, log_text, parse_mode="HTML")
         except Exception as log_err:
             logger.debug(f"Progress log failed: {log_err}")
@@ -1470,10 +1479,13 @@ LANG = {
         'ref_purchase_dm': "🎉 <b>Great News!</b> 💰\n\n🛒 One of your invited friends (<b>{}</b>) just made a purchase!\n\n💵 <b>You earned:</b> <code>+${}</code>\n💼 <b>Your new balance:</b> <b>${}</b>\n\n🔥 <i>Keep inviting friends — every purchase they make earns you more money!</i>\n🚀 <i>Share your link and watch your balance grow!</i>",
         
         # رسالة التقدم (كل إحالة نشطة جديدة) - {0}=active_count {1}=remaining {2}=reward
-        'ref_progress_dm': "🎉 <b>شخص جديد انضم عبر رابطك!</b>\n\n✅ إحالاتك النشطة: <b>{0}</b>\n⏳ باقي <b>{1}</b> فقط للحصول على <b>${2}</b>!",
+        'ref_progress_dm': "📈 <b>New Active Referral!</b>\n\n✅ Active Referrals: <b>{0}</b>\n⏳ <b>{1}</b> more to earn <b>${2}</b>",
+        
+        # رسالة لوق قناة الإحالات (كل إحالة) - {0}=active_count {1}=remaining {2}=reward
+        'log_ref_progress': "📈 <b>New Active Referral!</b>\n\n👤 Referrer: <b>**</b>\n✅ Active Referrals: <b>{0}</b>\n⏳ <b>{1}</b> more to earn <b>${2}</b>",
         
         # رسالة المكافأة للمُحيل - {0}=active_count {1}=reward {2}=balance
-        'ref_milestone_dm': "🎉🎊 <b>مبروك! وصلت لإنجاز جديد!</b> 🏆\n\n👥 إحالاتك النشطة: <b>{0}</b>\n💰 مكافأتك: <code>+${1}</code>\n💼 رصيدك الآن: <b>${2}</b>\n\n🔥 شارك رابطك أكثر = اكسب أكثر!",
+        'ref_milestone_dm': "🎉 <b>Milestone Reached!</b> 🏆\n\n👥 Active Referrals: <b>{0}</b>\n💰 Reward: <code>+${1}</code>\n💼 Balance: <b>${2}</b>\n\n🔥 Keep sharing your link!",
         
         'log_purchase': "🛒 <b>New Purchase!</b> 🛍\n\n👤 <b>User:</b> {}\n📦 <b>Product:</b> {}\n🔢 <b>QTY:</b> {}\n\n<i>Thank you for choosing us 🛡️</i>",
         
@@ -3074,10 +3086,26 @@ def shop_detail_ui(call):
     custom_emoji_id = p.get('custom_emoji_id')
     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '📦'
     
+    # 🏷 عرض الخصومات
+    discount_tiers = p.get('discount_tiers', [])
+    discount_text = ""
+    if discount_tiers:
+        sorted_tiers = sorted(discount_tiers, key=lambda x: x.get('min_qty', 0))
+        if l == 'ar':
+            discount_text = "\n\n🏷 <b>خصومات الكمية:</b>\n"
+            for t in sorted_tiers:
+                t_price = float(t.get('price', 0))
+                discount_text += f"  • {t.get('min_qty')}+ قطعة = <b>${t_price:.2f}</b>/قطعة\n"
+        else:
+            discount_text = "\n\n🏷 <b>Quantity Discounts:</b>\n"
+            for t in sorted_tiers:
+                t_price = float(t.get('price', 0))
+                discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
+    
     if l == 'en':
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}"
+        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
     else:
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}"
+        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
     
     markup = InlineKeyboardMarkup()
     if is_manual or st > 0: 
@@ -3096,27 +3124,165 @@ def prompt_quantity(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid); pid = call.data.replace('buy_qty_', '')
+    l = get_lang(uid)
+    pid = call.data.replace('buy_qty_', '')
     
     p = find_product(pid)
     if not p: return
     
     is_manual = p.get('is_manual', False)
     if not is_manual and get_product_stock_count(pid) == 0:
-        bot.send_message(uid, get_text(uid, 'out_stock'), parse_mode="HTML"); return
-        
-    msg = bot.send_message(uid, get_text(uid, 'qty_prompt'), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'out_stock'), parse_mode="HTML")
+        return
+    
+    unit_price = float(p.get('price', 0))
+    p_name = clean_name(p.get('name_ar') if l == 'ar' else p.get('name_en', p.get('name_ar', '')))
+    custom_emoji_id = p.get('custom_emoji_id')
+    icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> ' if custom_emoji_id else '📦 '
+    
+    # نبني جدول الخصومات
+    discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0))
+    
+    if l == 'ar':
+        qty_msg = (
+            f"{icon_html}<b>{p_name}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>السعر:</b> ${unit_price:.2f} / قطعة\n"
+        )
+        if discount_tiers:
+            qty_msg += "\n🏷 <b>خصومات الكمية:</b>\n"
+            for t in discount_tiers:
+                t_price = float(t.get('price', unit_price))
+                qty_msg += f"  • {t['min_qty']}+ قطعة → <b>${t_price:.2f}</b>/قطعة\n"
+        qty_msg += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"📝 <b>أرسل الكمية المطلوبة:</b>"
+        )
+    else:
+        qty_msg = (
+            f"{icon_html}<b>{p_name}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>Price:</b> ${unit_price:.2f} / unit\n"
+        )
+        if discount_tiers:
+            qty_msg += "\n🏷 <b>Quantity Discounts:</b>\n"
+            for t in discount_tiers:
+                t_price = float(t.get('price', unit_price))
+                qty_msg += f"  • {t['min_qty']}+ units → <b>${t_price:.2f}</b>/unit\n"
+        qty_msg += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"📝 <b>Send the quantity:</b>"
+        )
+    
+    msg = bot.send_message(uid, qty_msg, parse_mode="HTML")
     bot.register_next_step_handler(msg, execute_bulk_buy, pid, l)
 
 def execute_bulk_buy(message, pid, lang):
     uid = message.from_user.id
     if is_user_banned(uid): return
-    if not message.text or not message.text.isdigit():
+    if not hasattr(message, 'text') or hasattr(message, 'data'): return
+    if not message.text or not message.text.strip().isdigit():
         bot.send_message(uid, get_text(uid, 'qty_invalid'), parse_mode="HTML"); return
         
     qty = int(message.text.strip())
     if qty <= 0:
         bot.send_message(uid, get_text(uid, 'qty_invalid'), parse_mode="HTML"); return
+    
+    # نجلب المنتج لحساب السعر مع الخصم
+    p = find_product(pid)
+    if not p:
+        bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
+        return
+    
+    unit_price = float(p.get('price', 0))
+    p_name = clean_name(p.get('name_ar') if lang == 'ar' else p.get('name_en', p.get('name_ar', '')))
+    discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('discount', 0), reverse=True)
+    
+    # 🏷 حساب الخصم - سعر ثابت بالدولار
+    discounted_unit = unit_price
+    for tier in sorted(discount_tiers, key=lambda x: x.get('min_qty', 0), reverse=True):
+        if qty >= tier.get('min_qty', 0):
+            discounted_unit = float(tier.get('price', unit_price))
+            break
+    total_price = round(discounted_unit * qty, 2)
+    has_discount = (discounted_unit < unit_price)
+    
+    # ملخص السعر للتأكيد
+    if has_discount:
+        if lang == 'ar':
+            price_summary = (
+                f"📦 <b>{p_name}</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔢 الكمية: <b>{qty}</b>\n"
+                f"💵 السعر الأصلي: <strike>${unit_price:.2f}</strike>/قطعة\n"
+                f"✅ سعر الخصم: <b>${discounted_unit:.2f}</b>/قطعة\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 <b>الإجمالي: ${total_price:.2f}</b>\n\n"
+                f"هل تؤكد الشراء؟"
+            )
+        else:
+            price_summary = (
+                f"📦 <b>{p_name}</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔢 Qty: <b>{qty}</b>\n"
+                f"💵 Original: <strike>${unit_price:.2f}</strike>/unit\n"
+                f"✅ Discounted: <b>${discounted_unit:.2f}</b>/unit\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 <b>Total: ${total_price:.2f}</b>\n\n"
+                f"Confirm purchase?"
+            )
+    else:
+        if lang == 'ar':
+            price_summary = (
+                f"📦 <b>{p_name}</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔢 الكمية: <b>{qty}</b>\n"
+                f"💵 السعر: <b>${unit_price:.2f}</b>/قطعة\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 <b>الإجمالي: ${total_price:.2f}</b>\n\n"
+                f"هل تؤكد الشراء؟"
+            )
+        else:
+            price_summary = (
+                f"📦 <b>{p_name}</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔢 Qty: <b>{qty}</b>\n"
+                f"💵 Price: <b>${unit_price:.2f}</b>/unit\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 <b>Total: ${total_price:.2f}</b>\n\n"
+                f"Confirm purchase?"
+            )
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton(
+            "✅ تأكيد" if lang == 'ar' else "✅ Confirm",
+            callback_data=f"confirm_buy_{pid}_{qty}"
+        ),
+        InlineKeyboardButton(
+            "❌ إلغاء" if lang == 'ar' else "❌ Cancel",
+            callback_data="open_shop"
+        )
+    )
+    bot.send_message(uid, price_summary, parse_mode="HTML", reply_markup=markup)
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_buy_"))
+def confirm_buy_handler(call):
+    """تأكيد الشراء بعد عرض السعر والخصم"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    lang = get_lang(uid)
+    
+    parts = call.data.split('_')
+    # format: confirm_buy_{pid}_{qty}
+    try:
+        qty = int(parts[-1])
+        pid = '_'.join(parts[2:-1])
+    except:
+        return
     
     # 🔒 منع الشراء أثناء عملية إيداع جارية
     if is_deposit_locked(uid):
@@ -3126,229 +3292,270 @@ def execute_bulk_buy(message, pid, lang):
             "❌ إلغاء عملية الإيداع" if l == 'ar' else "❌ Cancel Deposit",
             callback_data="cancel_deposit"
         ))
-        bot.send_message(
-            uid,
-            bil(uid,
-                "⚠️ <b>لديك عملية إيداع جارية!</b>\n\n"
-                "يجب إكمال الإيداع أو إلغاؤه أولاً.",
-                "⚠️ <b>You have a pending deposit!</b>\n\n"
-                "Please complete or cancel it first."
-            ),
-            parse_mode="HTML", reply_markup=markup
-        )
+        bot.send_message(uid, bil(uid,
+            "⚠️ <b>لديك عملية إيداع جارية!</b>\n\nيجب إكمال الإيداع أو إلغاؤه أولاً.",
+            "⚠️ <b>You have a pending deposit!</b>\n\nPlease complete or cancel it first."
+        ), parse_mode="HTML", reply_markup=markup)
         return
     
-    # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
+    # نعيد تنفيذ منطق الشراء الفعلي
+    _do_purchase(uid, pid, qty, lang)
+
+
+def _do_purchase(uid, pid, qty, lang):
+    """المنطق الفعلي للشراء"""
+    # 🛡 Rate Limiting
     if not _acquire_purchase_lock(uid):
-        bot.send_message(uid, bil(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another."), parse_mode="HTML")
+        bot.send_message(uid, bil(uid,
+            "⏳ <b>يوجد طلب شراء قيد المعالجة!</b>\nانتظر انتهاءه.",
+            "⏳ <b>Purchase in progress!</b>\nWait until it finishes."
+        ), parse_mode="HTML")
         return
 
-    try:
-        u = get_user_data_full(uid)
-        p = find_product(pid)
-        if not p:
-            bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
+        # 🔒 منع الشراء أثناء عملية إيداع جارية
+        if is_deposit_locked(uid):
+            l = get_lang(uid)
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(
+                "❌ إلغاء عملية الإيداع" if l == 'ar' else "❌ Cancel Deposit",
+                callback_data="cancel_deposit"
+            ))
+            bot.send_message(
+                uid,
+                bil(uid,
+                    "⚠️ <b>لديك عملية إيداع جارية!</b>\n\n"
+                    "يجب إكمال الإيداع أو إلغاؤه أولاً.",
+                    "⚠️ <b>You have a pending deposit!</b>\n\n"
+                    "Please complete or cancel it first."
+                ),
+                parse_mode="HTML", reply_markup=markup
+            )
             return
 
-        is_manual = p.get('is_manual', False)
-        total_price = round(float(p.get('price', 0)) * qty, 2)
-        
-        # 🛡 حماية #2.1: حجز الأكواد بشكل atomic قبل خصم الرصيد
-        # نحجزها بـ "is_sold: True" + "reserved_by: uid + timestamp"
-        # لو فشل الدفع نرجعها
-        reserved_items = []
-        reservation_id = f"{uid}_{int(time.time() * 1000)}"
-        
-        if not is_manual:
-            pid_str = str(pid)
-            queries = [{'product_id': pid_str}]
-            if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-            try: queries.append({'product_id': float(pid_str)})
-            except: pass
-            
-            # 🛡 حجز ذري: نحجز كود واحد بكل مرة باستخدام find_one_and_update
-            # هذا يضمن إن نفس الكود ما ينباع لشخصين
-            for _ in range(qty):
-                reserved = db.product_stock.find_one_and_update(
-                    {'$or': queries, 'is_sold': False},
-                    {'$set': {
-                        'is_sold': True,
-                        'reservation_id': reservation_id,
-                        'reserved_at': int(time.time())
-                    }},
-                    return_document=True
-                )
-                if reserved is None:
-                    # لم نجد كود متاح - نُرجع كل المحجوزات
-                    _release_reservation(reservation_id)
-                    bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
-                    return
-                reserved_items.append(reserved)
-        
-        # 🛡 حماية #2.2: خصم الرصيد بشكل atomic - فقط لو الرصيد كافي
-        # find_one_and_update مع شرط balance >= total_price يمنع double-spend
-        updated_user = db.users.find_one_and_update(
-            {
-                'user_id': uid,
-                'balance': {'$gte': total_price}  # شرط الرصيد الكافي
-            },
-            {'$inc': {'balance': -total_price}},
-            return_document=True  # نريد القيمة الجديدة
-        )
-        
-        if updated_user is None:
-            # الرصيد غير كافي - نُرجع الأكواد المحجوزة
-            _release_reservation(reservation_id)
-            send_no_balance(uid)
+        # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
+        if not _acquire_purchase_lock(uid):
+            bot.send_message(uid, bil(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another."), parse_mode="HTML")
             return
-        
-        # ✅ نجح الخصم - نكمل العملية
-        u = updated_user  # استخدم الإصدار المحدث
-        
-        support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
-        buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
-        log_ch = get_setting('log_channel')
 
-        if is_manual:
-            order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
-            try:
-                db.orders.insert_one({
-                    'user_id': uid, 
-                    'product_id': str(pid), 
-                    'code_delivered': f"طلب يدوي: {order_id}",
-                    'qty': qty,
-                    'total_price': total_price
-                })
-            except Exception as e:
-                # فشل تسجيل الطلب - نرجع الرصيد
-                logger.error(f"Failed to insert manual order: {e}")
-                db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
-                bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
-                return
-            
-            if lang == 'ar':
-                msg_txt = f"✅ <b>تم الطلب بنجاح! وتم خصم (${total_price:.2f})</b>\n\nهذا المنتج يتطلب (تسليم يدوي).\nرقم طلبك: <code>{order_id}</code>\n\nيرجى التواصل مع {support_user} لتنفيذ طلبك."
-            else:
-                msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nThis is a manual delivery product.\nOrder ID: <code>{order_id}</code>\n\nPlease contact {support_user}."
-            bot.send_message(uid, msg_txt, parse_mode="HTML")
-            
-            admin_msg = f"🔐 <b>إشعار إدارة (طلب تسليم يدوي) 🤝</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}\n🔖 رقم الطلب: <code>{order_id}</code>\n\n⚠️ <b>تواصل مع العميل لتسليمه طلبه!</b>"
-            notify_admins(admin_msg)
-        else:
-            # تثبيت الأكواد المحجوزة (إزالة reservation_id - أصبحت مباعة فعلياً)
-            delivered_codes = []
-            try:
-                for item in reserved_items:
-                    db.product_stock.update_one(
-                        {'_id': item['_id']},
-                        {'$unset': {'reservation_id': "", 'reserved_at': ""}}
-                    )
-                    db.orders.insert_one({
-                        'user_id': uid,
-                        'product_id': str(pid),
-                        'code_delivered': item['code_line'],
-                        'qty': 1,
-                        'price': float(p.get('price', 0))
-                    })
-                    delivered_codes.append(item['code_line'])
-            except Exception as e:
-                # فشل في تسليم بعض الأكواد - حذف نظيف
-                logger.error(f"Critical: Failed during code delivery: {e}")
-                # ما نقدر نرجع الكل بأمان هنا، نسجل الحادثة
-                notify_admins(f"⚠️ <b>تنبيه أمني!</b>\nفشل في تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}\n\n<b>راجع يدوياً!</b>")
-                
-            # 📦 منطق إرسال موحّد:
-            # دائماً نرسل ملف (حتى لو كود واحد) - حسب طلب المستخدم
-            # - أوضح للعميل (الكود في ملف منظم)
-            # - ما يصير في مشاكل HTML أو طول رسالة
-            
-            sent_successfully = False
-            
-            # إرسال ملف لكل عملية شراء (الطريقة الموحدة)
-            try:
-                file_content = ""
-                p_name_for_file = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
-                file_content += f"=== {p_name_for_file} ===\n"
-                file_content += f"Quantity: {qty}\n"
-                file_content += f"Total Paid: ${total_price:.2f}\n"
-                file_content += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                file_content += "=" * 40 + "\n\n"
-                
-                for i, code in enumerate(delivered_codes, 1):
-                    file_content += f"{i}. {code}\n"
-                
-                f = io.BytesIO(file_content.encode('utf-8'))
-                safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
-                f.name = f"Your_Codes_{safe_name}.txt"
-                
-                if lang == 'ar':
-                    if qty == 1:
-                        success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الكود مرفق في الملف.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
-                    else:
-                        success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 الكمية: <b>{qty}</b> كود\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الأكواد مرفقة في الملف لسهولة النسخ.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
-                else:
-                    if qty == 1:
-                        success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Code attached as file.\n\n<i>Thank you for choosing us 🛡️</i>"
-                    else:
-                        success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Quantity: <b>{qty}</b> codes\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Codes attached as file for easy copying.\n\n<i>Thank you for choosing us 🛡️</i>"
-                    
-                bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
-                sent_successfully = True
-            except Exception as file_err:
-                logger.error(f"Failed to send file for user {uid}: {file_err}")
-                # Fallback 1: رسالة شات بسيطة بدون HTML
-                try:
-                    simple_msg = f"✅ تم الشراء!\n\nالأكواد:\n\n" + "\n".join(delivered_codes)
-                    bot.send_message(uid, simple_msg[:4000])
-                    sent_successfully = True
-                except Exception as e2:
-                    logger.error(f"Critical failure delivering codes: {e2}")
-                    notify_admins(f"🚨 <b>عاجل!</b>\nفشل تسليم {qty} كود للمستخدم <code>{uid}</code>!\nالأكواد محجوزة وتم خصم ${total_price:.2f}.\n<b>راجع وسلّمها يدوياً!</b>")
-            
-            admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
-            notify_admins(admin_msg)
-
-        # 🔔 إشعار قناة اللوق (قابل للتعديل من CMS)
-        if log_ch and log_ch != "Not Set":
-            try: 
-                obs_user = obscure_text(u.get('username') or str(uid))
-                
-                # 🆕 إضافة Premium Emoji للمنتج (لو موجود)
-                product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
-                custom_emoji_id = p.get('custom_emoji_id')
-                
-                if custom_emoji_id:
-                    # نستخدم Premium Emoji بدل 📦 العادي
-                    product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>'
-                else:
-                    product_name_log = f'📦 <b>{product_name_clean}</b>'
-                
-                # النص الافتراضي
-                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
-                
-                # شيك على النص المخصص من CMS
-                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
-                if custom_pub and custom_pub.get('value'):
-                    try:
-                        pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
-                    except:
-                        pass
-                
-                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-            except Exception as log_err: 
-                logger.debug(f"Log channel error: {log_err}")
-
-        # 🎁 منح مكافأة الإحالة للشخص اللي دعا هذا المشتري (لو موجود)
-        # تشتغل في كل عملية شراء (ليست مرة واحدة)
         try:
-            product_display = clean_name(p.get('name_ar') or p.get('name_en') or 'منتج')
-            award_purchase_referral_reward(uid, product_display, total_price)
-        except Exception as ref_err:
-            logger.error(f"Error awarding referral on purchase: {ref_err}")
-    
-    finally:
-        # 🛡 تحرير قفل الشراء دائماً (حتى لو حصل خطأ)
-        _release_purchase_lock(uid)
+            u = get_user_data_full(uid)
+            p = find_product(pid)
+            if not p:
+                bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
+                return
+
+            is_manual = p.get('is_manual', False)
+            unit_price = float(p.get('price', 0))
+
+            # 🏷 نظام الخصومات بحسب الكمية
+            discount_pct = 0
+            discount_tiers = p.get('discount_tiers', [])
+            # discount_tiers: [{'min_qty': 3, 'discount': 10}, {'min_qty': 5, 'discount': 15}]
+            # الـ tier اللي ينطبق هو الأعلى خصماً بين كل تايرز مناسبة للكمية
+            for tier in sorted(discount_tiers, key=lambda x: x.get('discount', 0), reverse=True):
+                if qty >= tier.get('min_qty', 0):
+                    discount_pct = float(tier.get('discount', 0))
+                    break
+
+            discounted_unit = round(unit_price * (1 - discount_pct / 100), 4)
+            total_price = round(discounted_unit * qty, 2)
+
+            # 🛡 حماية #2.1: حجز الأكواد بشكل atomic قبل خصم الرصيد
+            # نحجزها بـ "is_sold: True" + "reserved_by: uid + timestamp"
+            # لو فشل الدفع نرجعها
+            reserved_items = []
+            reservation_id = f"{uid}_{int(time.time() * 1000)}"
+
+            if not is_manual:
+                pid_str = str(pid)
+                queries = [{'product_id': pid_str}]
+                if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+                try: queries.append({'product_id': float(pid_str)})
+                except: pass
+
+                # 🛡 حجز ذري: نحجز كود واحد بكل مرة باستخدام find_one_and_update
+                # هذا يضمن إن نفس الكود ما ينباع لشخصين
+                for _ in range(qty):
+                    reserved = db.product_stock.find_one_and_update(
+                        {'$or': queries, 'is_sold': False},
+                        {'$set': {
+                            'is_sold': True,
+                            'reservation_id': reservation_id,
+                            'reserved_at': int(time.time())
+                        }},
+                        return_document=True
+                    )
+                    if reserved is None:
+                        # لم نجد كود متاح - نُرجع كل المحجوزات
+                        _release_reservation(reservation_id)
+                        bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
+                        return
+                    reserved_items.append(reserved)
+
+            # 🛡 حماية #2.2: خصم الرصيد بشكل atomic - فقط لو الرصيد كافي
+            # find_one_and_update مع شرط balance >= total_price يمنع double-spend
+            updated_user = db.users.find_one_and_update(
+                {
+                    'user_id': uid,
+                    'balance': {'$gte': total_price}  # شرط الرصيد الكافي
+                },
+                {'$inc': {'balance': -total_price}},
+                return_document=True  # نريد القيمة الجديدة
+            )
+
+            if updated_user is None:
+                # الرصيد غير كافي - نُرجع الأكواد المحجوزة
+                _release_reservation(reservation_id)
+                send_no_balance(uid)
+                return
+
+            # ✅ نجح الخصم - نكمل العملية
+            u = updated_user  # استخدم الإصدار المحدث
+
+            support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
+            buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
+            log_ch = get_setting('log_channel')
+
+            if is_manual:
+                order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
+                try:
+                    db.orders.insert_one({
+                        'user_id': uid, 
+                        'product_id': str(pid), 
+                        'code_delivered': f"طلب يدوي: {order_id}",
+                        'qty': qty,
+                        'total_price': total_price
+                    })
+                except Exception as e:
+                    # فشل تسجيل الطلب - نرجع الرصيد
+                    logger.error(f"Failed to insert manual order: {e}")
+                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                    bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
+                    return
+
+                if lang == 'ar':
+                    msg_txt = f"✅ <b>تم الطلب بنجاح! وتم خصم (${total_price:.2f})</b>\n\nهذا المنتج يتطلب (تسليم يدوي).\nرقم طلبك: <code>{order_id}</code>\n\nيرجى التواصل مع {support_user} لتنفيذ طلبك."
+                else:
+                    msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nThis is a manual delivery product.\nOrder ID: <code>{order_id}</code>\n\nPlease contact {support_user}."
+                bot.send_message(uid, msg_txt, parse_mode="HTML")
+
+                admin_msg = f"🔐 <b>إشعار إدارة (طلب تسليم يدوي) 🤝</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}\n🔖 رقم الطلب: <code>{order_id}</code>\n\n⚠️ <b>تواصل مع العميل لتسليمه طلبه!</b>"
+                notify_admins(admin_msg)
+            else:
+                # تثبيت الأكواد المحجوزة (إزالة reservation_id - أصبحت مباعة فعلياً)
+                delivered_codes = []
+                try:
+                    for item in reserved_items:
+                        db.product_stock.update_one(
+                            {'_id': item['_id']},
+                            {'$unset': {'reservation_id': "", 'reserved_at': ""}}
+                        )
+                        db.orders.insert_one({
+                            'user_id': uid,
+                            'product_id': str(pid),
+                            'code_delivered': item['code_line'],
+                            'qty': 1,
+                            'price': float(p.get('price', 0))
+                        })
+                        delivered_codes.append(item['code_line'])
+                except Exception as e:
+                    # فشل في تسليم بعض الأكواد - حذف نظيف
+                    logger.error(f"Critical: Failed during code delivery: {e}")
+                    # ما نقدر نرجع الكل بأمان هنا، نسجل الحادثة
+                    notify_admins(f"⚠️ <b>تنبيه أمني!</b>\nفشل في تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}\n\n<b>راجع يدوياً!</b>")
+
+                # 📦 منطق إرسال موحّد:
+                # دائماً نرسل ملف (حتى لو كود واحد) - حسب طلب المستخدم
+                # - أوضح للعميل (الكود في ملف منظم)
+                # - ما يصير في مشاكل HTML أو طول رسالة
+
+                sent_successfully = False
+
+                # إرسال ملف لكل عملية شراء (الطريقة الموحدة)
+                try:
+                    file_content = ""
+                    p_name_for_file = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
+                    file_content += f"=== {p_name_for_file} ===\n"
+                    file_content += f"Quantity: {qty}\n"
+                    file_content += f"Total Paid: ${total_price:.2f}\n"
+                    file_content += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    file_content += "=" * 40 + "\n\n"
+
+                    for i, code in enumerate(delivered_codes, 1):
+                        file_content += f"{i}. {code}\n"
+
+                    f = io.BytesIO(file_content.encode('utf-8'))
+                    safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
+                    f.name = f"Your_Codes_{safe_name}.txt"
+
+                    if lang == 'ar':
+                        if qty == 1:
+                            success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الكود مرفق في الملف.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+                        else:
+                            success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 الكمية: <b>{qty}</b> كود\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الأكواد مرفقة في الملف لسهولة النسخ.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
+                    else:
+                        if qty == 1:
+                            success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Code attached as file.\n\n<i>Thank you for choosing us 🛡️</i>"
+                        else:
+                            success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Quantity: <b>{qty}</b> codes\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Codes attached as file for easy copying.\n\n<i>Thank you for choosing us 🛡️</i>"
+
+                    bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+                    sent_successfully = True
+                except Exception as file_err:
+                    logger.error(f"Failed to send file for user {uid}: {file_err}")
+                    # Fallback 1: رسالة شات بسيطة بدون HTML
+                    try:
+                        simple_msg = f"✅ تم الشراء!\n\nالأكواد:\n\n" + "\n".join(delivered_codes)
+                        bot.send_message(uid, simple_msg[:4000])
+                        sent_successfully = True
+                    except Exception as e2:
+                        logger.error(f"Critical failure delivering codes: {e2}")
+                        notify_admins(f"🚨 <b>عاجل!</b>\nفشل تسليم {qty} كود للمستخدم <code>{uid}</code>!\nالأكواد محجوزة وتم خصم ${total_price:.2f}.\n<b>راجع وسلّمها يدوياً!</b>")
+
+                admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
+                notify_admins(admin_msg)
+
+            # 🔔 إشعار قناة اللوق (قابل للتعديل من CMS)
+            if log_ch and log_ch != "Not Set":
+                try: 
+                    obs_user = obscure_text(u.get('username') or str(uid))
+
+                    # 🆕 إضافة Premium Emoji للمنتج (لو موجود)
+                    product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
+                    custom_emoji_id = p.get('custom_emoji_id')
+
+                    if custom_emoji_id:
+                        # نستخدم Premium Emoji بدل 📦 العادي
+                        product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>'
+                    else:
+                        product_name_log = f'📦 <b>{product_name_clean}</b>'
+
+                    # النص الافتراضي
+                    pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+
+                    # شيك على النص المخصص من CMS
+                    custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                    if custom_pub and custom_pub.get('value'):
+                        try:
+                            pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                        except:
+                            pass
+
+                    bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+                except Exception as log_err: 
+                    logger.debug(f"Log channel error: {log_err}")
+
+            # 🎁 منح مكافأة الإحالة للشخص اللي دعا هذا المشتري (لو موجود)
+            # تشتغل في كل عملية شراء (ليست مرة واحدة)
+            try:
+                product_display = clean_name(p.get('name_ar') or p.get('name_en') or 'منتج')
+                award_purchase_referral_reward(uid, product_display, total_price)
+            except Exception as ref_err:
+                logger.error(f"Error awarding referral on purchase: {ref_err}")
+
+        finally:
+            # 🛡 تحرير قفل الشراء دائماً (حتى لو حصل خطأ)
+            _release_purchase_lock(uid)
 
 
 def _release_reservation(reservation_id):
@@ -3449,8 +3656,44 @@ def dep_init_ui(call):
     if is_user_banned(uid): return
     if not check_forced_sub(uid): start_handler(call.message); return
     
-    markup = InlineKeyboardMarkup(row_width=1)
+    u = get_user_data_full(uid)
+    balance = float(u.get('balance', 0)) if u else 0
+    name = clean_name(u.get('name', '')) if u else ''
+    uname = f"@{u['username']}" if u and u.get('username') else ''
+    l = get_lang(uid)
     
+    # إجمالي الإيداعات
+    deps = list(db.used_transactions.find({'user_id': uid}))
+    total_dep = sum(float(d.get('amount', 0)) for d in deps)
+    
+    if l == 'ar':
+        wallet_text = (
+            f"👛 <b>محفظتي</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👤 <b>الاسم:</b> {name}\n"
+            f"{f'🔗 <b>المعرف:</b> {uname}' if uname else ''}\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💰 <b>الرصيد الحالي:</b>\n"
+            f"<b>${balance:.2f}</b>\n\n"
+            f"📦 <b>إجمالي ما شحنته:</b> ${total_dep:.2f}\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💳 اختر طريقة الشحن:"
+        )
+    else:
+        wallet_text = (
+            f"👛 <b>My Wallet</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👤 <b>Name:</b> {name}\n"
+            f"{f'🔗 <b>Username:</b> {uname}' if uname else ''}\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💰 <b>Current Balance:</b>\n"
+            f"<b>${balance:.2f}</b>\n\n"
+            f"📦 <b>Total Deposited:</b> ${total_dep:.2f}\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💳 Choose deposit method:"
+        )
+    
+    markup = InlineKeyboardMarkup(row_width=1)
     markup.add(create_btn(uid, 'btn_stars', callback_data="dep_stars"))
     markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
     markup.add(create_btn(uid, 'btn_usdt_trc20', callback_data="dep_crypto_USDT"))
@@ -3459,8 +3702,10 @@ def dep_init_ui(call):
     markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
     markup.add(create_btn(uid, 'btn_back', callback_data="open_profile"))
     
-    try: bot.edit_message_text(get_text(uid, 'dep_choose'), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    try:
+        bot.edit_message_text(wallet_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(uid, wallet_text, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_stars")
 def dep_stars_ui(call):
@@ -7106,7 +7351,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
-        # 🆕 إعدادات نظام الإحالات
+        markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
         protection_on = is_amount_protection_enabled()
@@ -7121,6 +7366,111 @@ def admin_main_ui(call):
 # ============================================================
 # ✏️ نظام تخصيص نصوص البوت والأزرار المتقدم (CMS)
 # ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "ad_reports")
+@admin_required
+def ad_reports_ui(call):
+    bot.answer_callback_query(call.id)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("📦 تقرير الطلبات الكاملة (CSV)", callback_data="ad_csv_orders"))
+    markup.add(InlineKeyboardButton("💳 تقرير الإيداعات (CSV)", callback_data="ad_csv_deposits"))
+    markup.add(InlineKeyboardButton("📊 تقرير المبيعات لكل منتج (CSV)", callback_data="ad_csv_products"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    try:
+        bot.edit_message_text("📊 <b>تقارير المبيعات</b>\n\nاختر نوع التقرير:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(call.message.chat.id, "📊 <b>تقارير المبيعات</b>\n\nاختر نوع التقرير:", reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_csv_orders")
+@admin_required
+def ad_csv_orders(call):
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    chat_id = call.message.chat.id
+    orders = list(db.orders.find().sort('_id', -1))
+    if not orders:
+        bot.send_message(chat_id, "📭 لا توجد طلبات."); return
+
+    lines = ["التاريخ,المستخدم_ID,اليوزر,المنتج,الكمية,السعر/قطعة,الإجمالي,حالة التسليم"]
+    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
+
+    for r in orders:
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            uid_r = r.get('user_id', '')
+            u = db.users.find_one({'user_id': uid_r})
+            uname = f"@{u['username']}" if u and u.get('username') else str(uid_r)
+            pid = str(r.get('product_id', ''))
+            qty = int(r.get('quantity', 1))
+            p = all_prods.get(pid)
+            p_name = p.get('name_ar', p.get('name_en', pid)) if p else pid
+            price = float(p.get('price', 0)) if p else 0
+            total = round(price * qty, 2)
+            delivered = "✅" if r.get('code_delivered') else "⏳"
+            lines.append(f"{date_str},{uid_r},{uname},{p_name},{qty},{price:.2f},{total:.2f},{delivered}")
+        except: pass
+
+    content = "\n".join(lines)
+    f = io.BytesIO(("\ufeff" + content).encode('utf-8-sig'))
+    f.name = f"orders_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+    bot.send_document(chat_id, f, caption=f"📦 <b>تقرير الطلبات</b>\nإجمالي: <b>{len(orders)}</b> طلب", parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_csv_deposits")
+@admin_required
+def ad_csv_deposits(call):
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    chat_id = call.message.chat.id
+    deps = list(db.used_transactions.find().sort('_id', -1))
+    if not deps:
+        bot.send_message(chat_id, "📭 لا توجد إيداعات."); return
+
+    lines = ["التاريخ,المستخدم_ID,اليوزر,المبلغ,الطريقة,رقم_العملية"]
+    for r in deps:
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            uid_r = r.get('user_id', '')
+            u = db.users.find_one({'user_id': uid_r})
+            uname = f"@{u['username']}" if u and u.get('username') else str(uid_r)
+            amount = float(r.get('amount', 0))
+            method = r.get('method', '-')
+            tx = r.get('transaction_id', '-')
+            lines.append(f"{date_str},{uid_r},{uname},{amount:.2f},{method},{tx}")
+        except: pass
+
+    content = "\n".join(lines)
+    f = io.BytesIO(("\ufeff" + content).encode('utf-8-sig'))
+    f.name = f"deposits_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+    total = sum(float(d.get('amount', 0)) for d in deps)
+    bot.send_document(chat_id, f, caption=f"💳 <b>تقرير الإيداعات</b>\nإجمالي: <b>${total:.2f}</b> من <b>{len(deps)}</b> عملية", parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_csv_products")
+@admin_required
+def ad_csv_products(call):
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    chat_id = call.message.chat.id
+    products = list(db.products.find())
+    if not products:
+        bot.send_message(chat_id, "📭 لا توجد منتجات."); return
+
+    lines = ["المنتج,الكمية_المباعة,إجمالي_الإيرادات,السعر_الحالي,المتوفر_الآن"]
+    for p in products:
+        try:
+            pid = str(p.get('id', p.get('_id', '')))
+            p_name = p.get('name_ar', p.get('name_en', pid))
+            price = float(p.get('price', 0))
+            sold_count = db.orders.count_documents({'product_id': pid})
+            revenue = round(sold_count * price, 2)
+            stock = db.stock.count_documents({'product_id': pid, 'is_sold': {'$ne': True}}) if 'stock' in db.list_collection_names() else 0
+            lines.append(f"{p_name},{sold_count},{revenue:.2f},{price:.2f},{stock}")
+        except: pass
+
+    content = "\n".join(lines)
+    f = io.BytesIO(("\ufeff" + content).encode('utf-8-sig'))
+    f.name = f"products_report_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+    bot.send_document(chat_id, f, caption=f"📊 <b>تقرير المنتجات</b>\nإجمالي: <b>{len(products)}</b> منتج", parse_mode="HTML")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_texts_main")
 @admin_required
 def ad_texts_main_ui(call):
@@ -7142,18 +7492,25 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
     markup.add(InlineKeyboardButton("🏪 عنوان المتجر", callback_data="edit_txt_store_title"))
+    # 🆕 Wallet وإيداع
+    markup.add(InlineKeyboardButton("👛 رسالة الـ Wallet (عنوان + رصيد)", callback_data="edit_txt_wallet_header"))
+    markup.add(InlineKeyboardButton("✅ رسالة إيداع تلقائي (تم استلام)", callback_data="edit_txt_auto_deposit_msg"))
+    markup.add(InlineKeyboardButton("❌ رسالة مبلغ خاطئ (رفض)", callback_data="edit_txt_wrong_amount_msg"))
+    # 🆕 شراء
+    markup.add(InlineKeyboardButton("💰 رسالة رصيد غير كافٍ", callback_data="edit_txt_no_balance"))
+    markup.add(InlineKeyboardButton("✅ رسالة شراء ناجح", callback_data="edit_txt_buy_success"))
     # 🆕 إشعارات اللوق لنظام الإحالات
     markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
     markup.add(InlineKeyboardButton("🏆 لوق: إنجاز 10 إحالات", callback_data="edit_txt_log_ref_milestone"))
     markup.add(InlineKeyboardButton("💌 رسالة المُحيل (شراء صديقه)", callback_data="edit_txt_ref_purchase_dm"))
     markup.add(InlineKeyboardButton("📈 رسالة التقدم (باقي X للمكافأة)", callback_data="edit_txt_ref_progress_dm"))
+    markup.add(InlineKeyboardButton("📊 لوق: إحالة جديدة (قناة اللوق)", callback_data="edit_txt_log_ref_progress"))
     markup.add(InlineKeyboardButton("🎉 رسالة المُحيل (وصل للمكافأة)", callback_data="edit_txt_ref_milestone_dm"))
     # 🆕 إشعارات اللوق العامة
     markup.add(InlineKeyboardButton("🛒 لوق: شراء بنجاح", callback_data="edit_txt_log_purchase"))
     markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
     markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
     markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
-    # 🆕 شروط الاستخدام
     markup.add(InlineKeyboardButton("📜 محتوى شروط الاستخدام", callback_data="edit_txt_terms_content"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -7273,6 +7630,47 @@ def ad_edit_txt_prompt(call):
             "<code>{}</code> 1 = اسم المنتج\n"
             "<code>{}</code> 2 = السعر القديم\n"
             "<code>{}</code> 3 = السعر الجديد"
+        ),
+        'wallet_header': (
+            "💡 <b>رسالة الـ Wallet - المتغيرات:</b>\n"
+            "لا متغيرات ثابتة - الرصيد والاسم يُضافان تلقائياً من الكود\n\n"
+            "✏️ <i>يمكنك تغيير العنوان والتنسيق فقط</i>"
+        ),
+        'auto_deposit_msg': (
+            "💡 <b>رسالة الإيداع التلقائي - المتغيرات:</b>\n"
+            "<code>{0}</code> = المبلغ (مثل 5.00)\n"
+            "<code>{1}</code> = طريقة الدفع (Binance Pay / LTC ...)\n"
+            "<code>{2}</code> = رقم العملية (TxID)\n\n"
+            "💡 <i>تُرسل للمستخدم بعد كشف الإيداع تلقائياً</i>"
+        ),
+        'wrong_amount_msg': (
+            "💡 <b>رسالة رفض المبلغ الخاطئ - بدون متغيرات</b>\n\n"
+            "💡 <i>تُرسل لما يحوّل مبلغ مختلف عن المطلوب</i>"
+        ),
+        'no_balance': (
+            "💡 <b>رسالة رصيد غير كافٍ - بدون متغيرات</b>\n\n"
+            "💡 <i>تُرسل لما يحاول المستخدم الشراء ورصيده غير كافٍ</i>"
+        ),
+        'buy_success': (
+            "💡 <b>رسالة الشراء الناجح - المتغيرات:</b>\n"
+            "<code>{}</code> 1 = اسم المنتج\n"
+            "<code>{}</code> 2 = الكمية\n"
+            "<code>{}</code> 3 = المبلغ الكلي\n\n"
+            "💡 <i>تُرسل للمستخدم بعد اكتمال الشراء</i>"
+        ),
+        'ref_progress_dm': (
+            "💡 <b>رسالة التقدم للمُحيل - المتغيرات:</b>\n"
+            "<code>{0}</code> = عدد الإحالات النشطة (مثل 88)\n"
+            "<code>{1}</code> = عدد الباقي للمكافأة (مثل 2)\n"
+            "<code>{2}</code> = قيمة المكافأة (مثل 0.30)\n\n"
+            "💡 <i>تُرسل للمُحيل كل ما انضم شخص عبر رابطه</i>"
+        ),
+        'log_ref_progress': (
+            "💡 <b>رسالة لوق الإحالة الجديدة - المتغيرات:</b>\n"
+            "<code>{0}</code> = عدد الإحالات النشطة\n"
+            "<code>{1}</code> = عدد الباقي للمكافأة\n"
+            "<code>{2}</code> = قيمة المكافأة\n\n"
+            "💡 <i>تُرسل في قناة اللوق كل ما انضم شخص</i>"
         ),
         'welcome': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
@@ -7828,14 +8226,96 @@ def admin_edit_opts(call):
                InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}"))
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"))
-    
+    markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}"))
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}"))
-    
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit"))
     
     try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_disc_"))
+@admin_required
+def ep_disc_ui(call):
+    """إدارة خصومات الكمية للمنتج"""
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("ep_disc_", "")
+    p = find_product(pid)
+    if not p: return
+
+    tiers = p.get('discount_tiers', [])
+    tiers_sorted = sorted(tiers, key=lambda x: x.get('min_qty', 0))
+
+    text = f"🏷 <b>خصومات الكمية - {clean_name(p.get('name_ar', ''))}</b>\n\n"
+    if tiers_sorted:
+        text += "<b>الخصومات الحالية:</b>\n"
+        for t in tiers_sorted:
+            t_price = float(t.get('price', 0))
+            text += f"  • {t.get('min_qty')}+ قطعة = <b>${t_price:.2f}</b>/قطعة\n"
+    else:
+        text += "<i>لا توجد خصومات بعد.</i>\n"
+
+    text += (
+        "\n━━━━━━━━━━━━━━\n"
+        "💡 <b>لإضافة خصم:</b>\n"
+        "أرسل: <b>العدد المطلوب</b> ثم <b>السعر الجديد</b>\n\n"
+        "<code>3 4.50</code> = 3+ قطع بسعر $4.50/قطعة\n"
+        "<code>5 4.00</code> = 5+ قطع بسعر $4.00/قطعة\n\n"
+        "لحذف كل الخصومات: <code>clear</code>"
+    )
+
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_p_{pid}"))
+    msg = bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+    bot.register_next_step_handler(msg, _save_discount_tier, pid)
+
+
+def _save_discount_tier(message, pid):
+    if not hasattr(message, 'text') or hasattr(message, 'data'):
+        return
+    uid = message.from_user.id
+    if not _is_admin_check(uid): return
+
+    text = message.text.strip()
+
+    if text.lower() == 'clear':
+        db.products.update_one({'id': pid}, {'$set': {'discount_tiers': []}})
+        db.products.update_one({'id': int(pid)} if str(pid).isdigit() else {'id': pid},
+                               {'$set': {'discount_tiers': []}})
+        bot.send_message(uid, "✅ تم حذف كل الخصومات.")
+        return
+
+    try:
+        parts = text.split()
+        min_qty = int(parts[0])
+        price = float(parts[1])
+        if min_qty < 1 or price <= 0:
+            raise ValueError()
+    except:
+        bot.send_message(uid, "❌ صيغة خاطئة. مثال: <code>3 4.50</code>\n(العدد ثم السعر بالدولار)", parse_mode="HTML")
+        return
+
+    p = find_product(pid)
+    if not p:
+        bot.send_message(uid, "❌ المنتج غير موجود.")
+        return
+
+    unit_price = float(p.get('price', 0))
+    tiers = p.get('discount_tiers', [])
+    tiers = [t for t in tiers if t.get('min_qty') != min_qty]
+    tiers.append({'min_qty': min_qty, 'price': price})
+    tiers = sorted(tiers, key=lambda x: x.get('min_qty', 0))
+
+    db.products.update_one({'_id': p['_id']}, {'$set': {'discount_tiers': tiers}})
+    bot.send_message(
+        uid,
+        f"✅ <b>تم حفظ الخصم!</b>\n\n"
+        f"كل <b>{min_qty}+</b> قطعة = <b>${price:.2f}</b>/قطعة\n\n"
+        f"📋 الخصومات الحالية:\n" +
+        "".join(f"  • {t['min_qty']}+ = ${t.get('price', 0):.2f}\n" for t in tiers),
+        parse_mode="HTML"
+    )
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_hide_"))
 def admin_toggle_hide(call):
@@ -8198,12 +8678,28 @@ def admin_stock_save(message, pid):
                     u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                     if u_lang not in ['ar', 'en']: u_lang = 'en'
                     
-                    # اسم المنتج مع الإيموجي المميز (للرسالة)
                     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> ' if custom_emoji_id else '📦 '
                     p_name = icon_html + clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
                     p_name_plain = clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
+                    unit_price = float(p.get('price', 0))
                     
                     alert_msg = get_text(uid_u, 'new_stock', p_name, stk_total)
+                    
+                    # إضافة الخصومات لرسالة البرودكاست
+                    discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0))
+                    if discount_tiers:
+                        if u_lang == 'ar':
+                            alert_msg += f"\n\n💰 <b>السعر:</b> ${unit_price:.2f}/قطعة\n🏷 <b>خصومات الكمية:</b>\n"
+                        else:
+                            alert_msg += f"\n\n💰 <b>Price:</b> ${unit_price:.2f}/unit\n🏷 <b>Qty Discounts:</b>\n"
+                        for t in sorted(discount_tiers, key=lambda x: x.get('min_qty', 0)):
+                            t_price = float(t.get('price', unit_price))
+                            if u_lang == 'ar':
+                                alert_msg += f"  • {t['min_qty']}+ قطعة → <b>${t_price:.2f}</b>/قطعة\n"
+                            else:
+                                alert_msg += f"  • {t['min_qty']}+ units → <b>${t_price:.2f}</b>/unit\n"
+                    else:
+                        alert_msg += f"\n\n💰 <b>{'السعر' if u_lang == 'ar' else 'Price'}:</b> ${unit_price:.2f}"
                     
                     # 🟢 زر الشراء الأخضر (Bot API 9.4)
                     markup = InlineKeyboardMarkup()
@@ -8748,12 +9244,37 @@ def ad_full_history_handler(call):
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'محذوف'))) if p else 'محذوف'
                 price = float(p.get('price', 0)) if p else 0.0
             subtotal = price * qty; total_spent += subtotal
+            
+            # نجمع كل الأكواد من هذا الطلب
+            # الطريقة 1: code_delivered مباشرة
+            single_code = r.get('code_delivered', '')
+            # الطريقة 2: نبحث عن كل الأكواد في orders بنفس order_id
+            all_codes = []
+            order_id = r.get('order_id') or str(r.get('_id', ''))
+            if order_id:
+                code_recs = list(db.orders.find({
+                    'order_id': order_id,
+                    'user_id': target_uid
+                }))
+                if len(code_recs) > 1:
+                    all_codes = [c.get('code_delivered', '') for c in code_recs if c.get('code_delivered')]
+            
+            if not all_codes and single_code:
+                all_codes = [single_code]
+            
+            codes_text = ""
+            if all_codes:
+                codes_text = "    الأكواد/الحسابات المُسلَّمة:\n"
+                for j, code in enumerate(all_codes, 1):
+                    codes_text += f"      [{j}] {code}\n"
+            
             buy_lines.append(
                 f"  #{i}\n"
                 f"    التاريخ  : {date_str}\n"
                 f"    المنتج   : {p_name}\n"
                 f"    الكمية   : {qty}\n"
                 f"    السعر    : ${price:.2f} × {qty} = ${subtotal:.2f}\n"
+                f"{codes_text}"
             )
         except Exception as e:
             buy_lines.append(f"  #{i} - خطأ: {e}\n")
