@@ -2571,7 +2571,7 @@ def history_menu_ui(call):
                create_btn(uid, 'btn_dep_hist', callback_data="h_view_dep"))
     
     markup.add(create_btn(uid, 'btn_dl_buy', callback_data="h_dl_buy"))
-    markup.add(create_btn(uid, 'btn_back', callback_data="open_profile"))
+    markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
     try: bot.edit_message_text(get_text(uid, 'history_title'), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
@@ -3270,26 +3270,32 @@ def execute_bulk_buy(message, pid, lang):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_buy_"))
 def confirm_buy_handler(call):
-    """تأكيد الشراء بعد عرض السعر والخصم"""
-    bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
     lang = get_lang(uid)
     
+    # 🛡 أول شيء: نحذف أزرار الرسالة فوراً عشان ما يضغط مرتين
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+    except: pass
+    
+    bot.answer_callback_query(call.id)
+    
     parts = call.data.split('_')
-    # format: confirm_buy_{pid}_{qty}
     try:
         qty = int(parts[-1])
         pid = '_'.join(parts[2:-1])
     except:
         return
-    
-    # 🔒 منع الشراء أثناء عملية إيداع جارية
+
     if is_deposit_locked(uid):
-        l = get_lang(uid)
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(
-            "❌ إلغاء عملية الإيداع" if l == 'ar' else "❌ Cancel Deposit",
+            "❌ إلغاء عملية الإيداع" if lang == 'ar' else "❌ Cancel Deposit",
             callback_data="cancel_deposit"
         ))
         bot.send_message(uid, bil(uid,
@@ -3297,8 +3303,14 @@ def confirm_buy_handler(call):
             "⚠️ <b>You have a pending deposit!</b>\n\nPlease complete or cancel it first."
         ), parse_mode="HTML", reply_markup=markup)
         return
-    
-    # نعيد تنفيذ منطق الشراء الفعلي
+
+    # رسالة "جاري المعالجة" من CMS
+    try:
+        cms_proc = db.custom_texts.find_one({'lang': 'en', 'key': 'processing_msg'})
+        proc_text = cms_proc['value'] if cms_proc and cms_proc.get('value') else bil(uid, "⏳ <b>جاري معالجة طلبك...</b>", "⏳ <b>Processing your order...</b>")
+        bot.edit_message_text(proc_text, call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    except: pass
+
     _do_purchase(uid, pid, qty, lang)
 
 
@@ -3700,7 +3712,7 @@ def dep_init_ui(call):
     markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
     markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
     markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
-    markup.add(create_btn(uid, 'btn_back', callback_data="open_profile"))
+    markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
     
     try:
         bot.edit_message_text(wallet_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -7498,6 +7510,7 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("❌ رسالة مبلغ خاطئ (رفض)", callback_data="edit_txt_wrong_amount_msg"))
     # 🆕 شراء
     markup.add(InlineKeyboardButton("💰 رسالة رصيد غير كافٍ", callback_data="edit_txt_no_balance"))
+    markup.add(InlineKeyboardButton("⏳ رسالة جاري المعالجة", callback_data="edit_txt_processing_msg"))
     markup.add(InlineKeyboardButton("✅ رسالة شراء ناجح", callback_data="edit_txt_buy_success"))
     # 🆕 إشعارات اللوق لنظام الإحالات
     markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
@@ -7650,6 +7663,10 @@ def ad_edit_txt_prompt(call):
         'no_balance': (
             "💡 <b>رسالة رصيد غير كافٍ - بدون متغيرات</b>\n\n"
             "💡 <i>تُرسل لما يحاول المستخدم الشراء ورصيده غير كافٍ</i>"
+        ),
+        'processing_msg': (
+            "💡 <b>رسالة جاري المعالجة - بدون متغيرات</b>\n\n"
+            "💡 <i>تظهر لما يضغط المستخدم تأكيد الشراء</i>"
         ),
         'buy_success': (
             "💡 <b>رسالة الشراء الناجح - المتغيرات:</b>\n"
@@ -8246,7 +8263,12 @@ def ep_disc_ui(call):
     tiers = p.get('discount_tiers', [])
     tiers_sorted = sorted(tiers, key=lambda x: x.get('min_qty', 0))
 
-    text = f"🏷 <b>خصومات الكمية - {clean_name(p.get('name_ar', ''))}</b>\n\n"
+    unit_price = float(p.get('price', 0))
+    text = (
+        f"🏷 <b>خصومات الكمية</b>\n"
+        f"📦 {clean_name(p.get('name_ar', ''))}\n"
+        f"💰 <b>السعر الأصلي: ${unit_price:.2f}/قطعة</b>\n\n"
+    )
     if tiers_sorted:
         text += "<b>الخصومات الحالية:</b>\n"
         for t in tiers_sorted:
@@ -8256,12 +8278,12 @@ def ep_disc_ui(call):
         text += "<i>لا توجد خصومات بعد.</i>\n"
 
     text += (
-        "\n━━━━━━━━━━━━━━\n"
-        "💡 <b>لإضافة خصم:</b>\n"
-        "أرسل: <b>العدد المطلوب</b> ثم <b>السعر الجديد</b>\n\n"
-        "<code>3 4.50</code> = 3+ قطع بسعر $4.50/قطعة\n"
-        "<code>5 4.00</code> = 5+ قطع بسعر $4.00/قطعة\n\n"
-        "لحذف كل الخصومات: <code>clear</code>"
+        f"\n━━━━━━━━━━━━━━\n"
+        f"💡 <b>لإضافة خصم:</b>\n"
+        f"أرسل: العدد ثم السعر الجديد\n\n"
+        f"مثال: <code>3 {unit_price*0.9:.2f}</code> = 3+ قطع بسعر ${unit_price*0.9:.2f}\n"
+        f"مثال: <code>5 {unit_price*0.8:.2f}</code> = 5+ قطع بسعر ${unit_price*0.8:.2f}\n\n"
+        f"لحذف كل الخصومات: <code>clear</code>"
     )
 
     markup = InlineKeyboardMarkup()
