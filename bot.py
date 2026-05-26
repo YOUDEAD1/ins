@@ -3324,250 +3324,175 @@ def _do_purchase(uid, pid, qty, lang):
         ), parse_mode="HTML")
         return
 
-        # 🔒 منع الشراء أثناء عملية إيداع جارية
-        if is_deposit_locked(uid):
-            l = get_lang(uid)
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(
-                "❌ إلغاء عملية الإيداع" if l == 'ar' else "❌ Cancel Deposit",
-                callback_data="cancel_deposit"
-            ))
-            bot.send_message(
-                uid,
-                bil(uid,
-                    "⚠️ <b>لديك عملية إيداع جارية!</b>\n\n"
-                    "يجب إكمال الإيداع أو إلغاؤه أولاً.",
-                    "⚠️ <b>You have a pending deposit!</b>\n\n"
-                    "Please complete or cancel it first."
-                ),
-                parse_mode="HTML", reply_markup=markup
-            )
+    # 🔒 منع الشراء أثناء عملية إيداع جارية
+    if is_deposit_locked(uid):
+        _release_purchase_lock(uid)
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(
+            "❌ إلغاء عملية الإيداع" if lang == 'ar' else "❌ Cancel Deposit",
+            callback_data="cancel_deposit"
+        ))
+        bot.send_message(uid, bil(uid,
+            "⚠️ <b>لديك عملية إيداع جارية!</b>\n\nيجب إكمال الإيداع أو إلغاؤه أولاً.",
+            "⚠️ <b>You have a pending deposit!</b>\n\nPlease complete or cancel it first."
+        ), parse_mode="HTML", reply_markup=markup)
+        return
+
+    try:
+        u = get_user_data_full(uid)
+        p = find_product(pid)
+        if not p:
+            bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
             return
 
-        # 🛡 حماية #4: Rate Limiting - منع المستخدم من شراء مرتين بنفس اللحظة
-        if not _acquire_purchase_lock(uid):
-            bot.send_message(uid, bil(uid, "⏳ <b>يوجد طلب شراء قيد المعالجة لك بالفعل!</b>\nانتظر انتهاءه قبل بدء طلب جديد.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes before starting another."), parse_mode="HTML")
-            return
+        is_manual = p.get('is_manual', False)
+        unit_price = float(p.get('price', 0))
 
-        try:
-            u = get_user_data_full(uid)
-            p = find_product(pid)
-            if not p:
-                bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
-                return
+        # 🏷 نظام الخصومات - سعر ثابت بالدولار
+        discounted_unit = unit_price
+        discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0), reverse=True)
+        for tier in discount_tiers:
+            if qty >= tier.get('min_qty', 0):
+                discounted_unit = float(tier.get('price', unit_price))
+                break
+        total_price = round(discounted_unit * qty, 2)
 
-            is_manual = p.get('is_manual', False)
-            unit_price = float(p.get('price', 0))
+        # 🛡 حجز الأكواد atomically
+        reserved_items = []
+        reservation_id = f"{uid}_{int(time.time() * 1000)}"
 
-            # 🏷 نظام الخصومات بحسب الكمية
-            discount_pct = 0
-            discount_tiers = p.get('discount_tiers', [])
-            # discount_tiers: [{'min_qty': 3, 'discount': 10}, {'min_qty': 5, 'discount': 15}]
-            # الـ tier اللي ينطبق هو الأعلى خصماً بين كل تايرز مناسبة للكمية
-            for tier in sorted(discount_tiers, key=lambda x: x.get('discount', 0), reverse=True):
-                if qty >= tier.get('min_qty', 0):
-                    discount_pct = float(tier.get('discount', 0))
-                    break
+        if not is_manual:
+            pid_str = str(pid)
+            queries = [{'product_id': pid_str}]
+            if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+            try: queries.append({'product_id': float(pid_str)})
+            except: pass
 
-            discounted_unit = round(unit_price * (1 - discount_pct / 100), 4)
-            total_price = round(discounted_unit * qty, 2)
-
-            # 🛡 حماية #2.1: حجز الأكواد بشكل atomic قبل خصم الرصيد
-            # نحجزها بـ "is_sold: True" + "reserved_by: uid + timestamp"
-            # لو فشل الدفع نرجعها
-            reserved_items = []
-            reservation_id = f"{uid}_{int(time.time() * 1000)}"
-
-            if not is_manual:
-                pid_str = str(pid)
-                queries = [{'product_id': pid_str}]
-                if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-                try: queries.append({'product_id': float(pid_str)})
-                except: pass
-
-                # 🛡 حجز ذري: نحجز كود واحد بكل مرة باستخدام find_one_and_update
-                # هذا يضمن إن نفس الكود ما ينباع لشخصين
-                for _ in range(qty):
-                    reserved = db.product_stock.find_one_and_update(
-                        {'$or': queries, 'is_sold': False},
-                        {'$set': {
-                            'is_sold': True,
-                            'reservation_id': reservation_id,
-                            'reserved_at': int(time.time())
-                        }},
-                        return_document=True
-                    )
-                    if reserved is None:
-                        # لم نجد كود متاح - نُرجع كل المحجوزات
-                        _release_reservation(reservation_id)
-                        bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
-                        return
-                    reserved_items.append(reserved)
-
-            # 🛡 حماية #2.2: خصم الرصيد بشكل atomic - فقط لو الرصيد كافي
-            # find_one_and_update مع شرط balance >= total_price يمنع double-spend
-            updated_user = db.users.find_one_and_update(
-                {
-                    'user_id': uid,
-                    'balance': {'$gte': total_price}  # شرط الرصيد الكافي
-                },
-                {'$inc': {'balance': -total_price}},
-                return_document=True  # نريد القيمة الجديدة
-            )
-
-            if updated_user is None:
-                # الرصيد غير كافي - نُرجع الأكواد المحجوزة
-                _release_reservation(reservation_id)
-                send_no_balance(uid)
-                return
-
-            # ✅ نجح الخصم - نكمل العملية
-            u = updated_user  # استخدم الإصدار المحدث
-
-            support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
-            buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
-            log_ch = get_setting('log_channel')
-
-            if is_manual:
-                order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
-                try:
-                    db.orders.insert_one({
-                        'user_id': uid, 
-                        'product_id': str(pid), 
-                        'code_delivered': f"طلب يدوي: {order_id}",
-                        'qty': qty,
-                        'total_price': total_price
-                    })
-                except Exception as e:
-                    # فشل تسجيل الطلب - نرجع الرصيد
-                    logger.error(f"Failed to insert manual order: {e}")
-                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
-                    bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
+            for _ in range(qty):
+                reserved = db.product_stock.find_one_and_update(
+                    {'$or': queries, 'is_sold': False},
+                    {'$set': {
+                        'is_sold': True,
+                        'reservation_id': reservation_id,
+                        'reserved_at': int(time.time())
+                    }},
+                    return_document=True
+                )
+                if reserved is None:
+                    _release_reservation(reservation_id)
+                    bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
                     return
+                reserved_items.append(reserved)
+
+        # 🛡 خصم الرصيد atomically
+        updated_user = db.users.find_one_and_update(
+            {'user_id': uid, 'balance': {'$gte': total_price}},
+            {'$inc': {'balance': -total_price}},
+            return_document=True
+        )
+
+        if updated_user is None:
+            _release_reservation(reservation_id)
+            send_no_balance(uid)
+            return
+
+        u = updated_user
+        support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
+        buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
+        log_ch = get_setting('log_channel')
+
+        if is_manual:
+            order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
+            try:
+                db.orders.insert_one({
+                    'user_id': uid,
+                    'product_id': str(pid),
+                    'code_delivered': f"طلب يدوي: {order_id}",
+                    'qty': qty,
+                    'total_price': total_price
+                })
+            except Exception as e:
+                logger.error(f"Failed to insert manual order: {e}")
+                db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
+                return
+
+            if lang == 'ar':
+                msg_txt = f"✅ <b>تم الطلب بنجاح! (${total_price:.2f})</b>\n\nهذا المنتج يتطلب تسليم يدوي.\nرقم طلبك: <code>{order_id}</code>\n\nتواصل مع {support_user}"
+            else:
+                msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nManual delivery product.\nOrder ID: <code>{order_id}</code>\n\nContact {support_user}"
+            bot.send_message(uid, msg_txt, parse_mode="HTML")
+            notify_admins(f"🔐 <b>إشعار إدارة (يدوي)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🔖 <code>{order_id}</code>")
+        else:
+            delivered_codes = []
+            try:
+                for item in reserved_items:
+                    db.product_stock.update_one(
+                        {'_id': item['_id']},
+                        {'$unset': {'reservation_id': "", 'reserved_at': ""}}
+                    )
+                    db.orders.insert_one({
+                        'user_id': uid,
+                        'product_id': str(pid),
+                        'code_delivered': item['code_line'],
+                        'qty': 1,
+                        'price': float(p.get('price', 0))
+                    })
+                    delivered_codes.append(item['code_line'])
+            except Exception as e:
+                logger.error(f"Critical: Failed during code delivery: {e}")
+                notify_admins(f"⚠️ <b>تنبيه!</b>\nفشل تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}")
+
+            # إرسال الأكواد كملف
+            try:
+                p_name = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
+                file_content = f"=== {clean_name(p_name)} ===\nQty: {qty} | Total: ${total_price:.2f}\nDate: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*40}\n\n"
+                for i, code in enumerate(delivered_codes, 1):
+                    file_content += f"{i}. {code}\n"
+
+                f = io.BytesIO(file_content.encode('utf-8'))
+                safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
+                f.name = f"codes_{safe_name}.txt"
 
                 if lang == 'ar':
-                    msg_txt = f"✅ <b>تم الطلب بنجاح! وتم خصم (${total_price:.2f})</b>\n\nهذا المنتج يتطلب (تسليم يدوي).\nرقم طلبك: <code>{order_id}</code>\n\nيرجى التواصل مع {support_user} لتنفيذ طلبك."
+                    success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 {clean_name(p.get('name_ar'))}\n🔢 الكمية: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 الأكواد في الملف أدناه 👇"
                 else:
-                    msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nThis is a manual delivery product.\nOrder ID: <code>{order_id}</code>\n\nPlease contact {support_user}."
-                bot.send_message(uid, msg_txt, parse_mode="HTML")
+                    success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 {clean_name(p.get('name_en', p.get('name_ar')))}\n🔢 Qty: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 Codes in the file below 👇"
 
-                admin_msg = f"🔐 <b>إشعار إدارة (طلب تسليم يدوي) 🤝</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}\n🔖 رقم الطلب: <code>{order_id}</code>\n\n⚠️ <b>تواصل مع العميل لتسليمه طلبه!</b>"
-                notify_admins(admin_msg)
-            else:
-                # تثبيت الأكواد المحجوزة (إزالة reservation_id - أصبحت مباعة فعلياً)
-                delivered_codes = []
+                bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+            except Exception as file_err:
+                logger.error(f"Failed to send file: {file_err}")
                 try:
-                    for item in reserved_items:
-                        db.product_stock.update_one(
-                            {'_id': item['_id']},
-                            {'$unset': {'reservation_id': "", 'reserved_at': ""}}
-                        )
-                        db.orders.insert_one({
-                            'user_id': uid,
-                            'product_id': str(pid),
-                            'code_delivered': item['code_line'],
-                            'qty': 1,
-                            'price': float(p.get('price', 0))
-                        })
-                        delivered_codes.append(item['code_line'])
-                except Exception as e:
-                    # فشل في تسليم بعض الأكواد - حذف نظيف
-                    logger.error(f"Critical: Failed during code delivery: {e}")
-                    # ما نقدر نرجع الكل بأمان هنا، نسجل الحادثة
-                    notify_admins(f"⚠️ <b>تنبيه أمني!</b>\nفشل في تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}\n\n<b>راجع يدوياً!</b>")
+                    bot.send_message(uid, "✅ Done!\n\n" + "\n".join(delivered_codes))
+                except:
+                    notify_admins(f"🚨 فشل تسليم أكواد للمستخدم <code>{uid}</code>!")
 
-                # 📦 منطق إرسال موحّد:
-                # دائماً نرسل ملف (حتى لو كود واحد) - حسب طلب المستخدم
-                # - أوضح للعميل (الكود في ملف منظم)
-                # - ما يصير في مشاكل HTML أو طول رسالة
+            notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}")
 
-                sent_successfully = False
-
-                # إرسال ملف لكل عملية شراء (الطريقة الموحدة)
-                try:
-                    file_content = ""
-                    p_name_for_file = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
-                    file_content += f"=== {p_name_for_file} ===\n"
-                    file_content += f"Quantity: {qty}\n"
-                    file_content += f"Total Paid: ${total_price:.2f}\n"
-                    file_content += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    file_content += "=" * 40 + "\n\n"
-
-                    for i, code in enumerate(delivered_codes, 1):
-                        file_content += f"{i}. {code}\n"
-
-                    f = io.BytesIO(file_content.encode('utf-8'))
-                    safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
-                    f.name = f"Your_Codes_{safe_name}.txt"
-
-                    if lang == 'ar':
-                        if qty == 1:
-                            success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 المنتج: <b>{clean_name(p.get('name_ar'))}</b>\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الكود مرفق في الملف.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
-                        else:
-                            success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 الكمية: <b>{qty}</b> كود\n💰 المبلغ: <b>${total_price:.2f}</b>\n\n📄 الأكواد مرفقة في الملف لسهولة النسخ.\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>"
-                    else:
-                        if qty == 1:
-                            success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Product: <b>{clean_name(p.get('name_en', p.get('name_ar')))}</b>\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Code attached as file.\n\n<i>Thank you for choosing us 🛡️</i>"
-                        else:
-                            success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 Quantity: <b>{qty}</b> codes\n💰 Total: <b>${total_price:.2f}</b>\n\n📄 Codes attached as file for easy copying.\n\n<i>Thank you for choosing us 🛡️</i>"
-
-                    bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
-                    sent_successfully = True
-                except Exception as file_err:
-                    logger.error(f"Failed to send file for user {uid}: {file_err}")
-                    # Fallback 1: رسالة شات بسيطة بدون HTML
-                    try:
-                        simple_msg = f"✅ تم الشراء!\n\nالأكواد:\n\n" + "\n".join(delivered_codes)
-                        bot.send_message(uid, simple_msg[:4000])
-                        sent_successfully = True
-                    except Exception as e2:
-                        logger.error(f"Critical failure delivering codes: {e2}")
-                        notify_admins(f"🚨 <b>عاجل!</b>\nفشل تسليم {qty} كود للمستخدم <code>{uid}</code>!\nالأكواد محجوزة وتم خصم ${total_price:.2f}.\n<b>راجع وسلّمها يدوياً!</b>")
-
-                admin_msg = f"🔐 <b>إشعار إدارة (شراء تلقائي) ⚡</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n📦 المنتج: {clean_name(p.get('name_ar'))}\n🔢 الكمية: {qty}\n💰 دفع: ${total_price:.2f}"
-                notify_admins(admin_msg)
-
-            # 🔔 إشعار قناة اللوق (قابل للتعديل من CMS)
-            if log_ch and log_ch != "Not Set":
-                try: 
-                    obs_user = obscure_text(u.get('username') or str(uid))
-
-                    # 🆕 إضافة Premium Emoji للمنتج (لو موجود)
-                    product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
-                    custom_emoji_id = p.get('custom_emoji_id')
-
-                    if custom_emoji_id:
-                        # نستخدم Premium Emoji بدل 📦 العادي
-                        product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>'
-                    else:
-                        product_name_log = f'📦 <b>{product_name_clean}</b>'
-
-                    # النص الافتراضي
-                    pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
-
-                    # شيك على النص المخصص من CMS
-                    custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
-                    if custom_pub and custom_pub.get('value'):
-                        try:
-                            pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
-                        except:
-                            pass
-
-                    bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-                except Exception as log_err: 
-                    logger.debug(f"Log channel error: {log_err}")
-
-            # 🎁 منح مكافأة الإحالة للشخص اللي دعا هذا المشتري (لو موجود)
-            # تشتغل في كل عملية شراء (ليست مرة واحدة)
+        # لوق القناة
+        if log_ch and log_ch != "Not Set":
             try:
-                product_display = clean_name(p.get('name_ar') or p.get('name_en') or 'منتج')
-                award_purchase_referral_reward(uid, product_display, total_price)
-            except Exception as ref_err:
-                logger.error(f"Error awarding referral on purchase: {ref_err}")
+                obs_user = obscure_text(u.get('username') or str(uid))
+                product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
+                custom_emoji_id = p.get('custom_emoji_id')
+                product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+            except Exception as log_err:
+                logger.debug(f"Log channel error: {log_err}")
 
-        finally:
-            # 🛡 تحرير قفل الشراء دائماً (حتى لو حصل خطأ)
-            _release_purchase_lock(uid)
+        # مكافأة الإحالة
+        try:
+            award_purchase_referral_reward(uid, clean_name(p.get('name_ar') or p.get('name_en') or ''), total_price)
+        except Exception as ref_err:
+            logger.error(f"Error awarding referral: {ref_err}")
+
+    finally:
+        _release_purchase_lock(uid)
 
 
 def _release_reservation(reservation_id):
