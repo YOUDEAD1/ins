@@ -12,6 +12,7 @@ import io
 import random
 import json
 import urllib.parse
+import base64
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -230,12 +231,34 @@ def _get_api_gateway():
         if s and s.get('value'):
             return s['value']
     except: pass
-    # أول مرة: نولّد مسار سري ونحفظه
     secret = secrets.token_hex(16)
     try:
         db.settings.update_one({'key': 'api_secret_path'}, {'$set': {'value': secret}}, upsert=True)
     except: pass
     return secret
+
+
+def _get_server_url():
+    """يكشف رابط السيرفر تلقائي من متغيرات المنصة"""
+    for var in ['RENDER_EXTERNAL_URL', 'RAILWAY_PUBLIC_DOMAIN', 'KOYEB_PUBLIC_DOMAIN', 'HEROKU_APP_NAME', 'FLY_APP_NAME', 'APP_URL', 'BASE_URL']:
+        val = os.getenv(var, '')
+        if val:
+            if not val.startswith('http'):
+                val = f"https://{val}"
+            return val.rstrip('/')
+    return None
+
+
+def _generate_connection_code(api_key):
+    """يولّد كود اتصال مشفّر فيه كل المعلومات"""
+    server_url = _get_server_url()
+    gw = _get_api_gateway()
+    if not server_url:
+        return None
+    full_url = f"{server_url}/{gw}"
+    data = json.dumps({"k": api_key, "u": full_url}, separators=(',', ':'))
+    encoded = base64.b64encode(data.encode()).decode()
+    return f"conn_{encoded}"
 
 
 def _generate_api_key():
@@ -295,6 +318,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
         if route == '/products':
             prods = list(db.products.find({'is_hidden': {'$ne': True}}))
+            # جلب المنتجات المخفية لهذا المطوّر
+            hidden_pids = set()
+            for h in db.api_hidden.find({'api_user_id': uid}):
+                hidden_pids.add(h['product_id'])
             # جلب أسعار المطوّر المخصصة
             custom_prices = {}
             for cp in db.api_pricing.find({'api_user_id': uid}):
@@ -302,6 +329,8 @@ class APIHandler(BaseHTTPRequestHandler):
             result = []
             for pr in prods:
                 pid = str(pr.get('id', str(pr.get('_id', ''))))
+                if pid in hidden_pids:
+                    continue
                 manual = pr.get('is_manual', False)
                 base_price = float(pr.get('price', 0))
                 cp = custom_prices.get(pid, {})
@@ -440,7 +469,31 @@ class APIHandler(BaseHTTPRequestHandler):
                 if not updated: return _json_resp(self, 402, {'error': 'Insufficient balance'})
                 db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': [], 'buyer_info': buyer_info, 'status': 'pending_manual'})
                 db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': f"API: {order_id}", 'qty': qty, 'total_price': total, 'via_api': True})
-                notify_admins(f"🔗 <b>طلب API يدوي</b>\n👤 <code>{uid}</code>\n📦 {clean_name(pr.get('name_ar',''))}\n🔢 x{qty}\n💰 ${total:.2f}\n🆔 <code>{order_id}</code>\n👤 buyer: {buyer_info}")
+                # 📢 لوق القناة
+                try:
+                    log_ch = get_setting('log_channel')
+                    if log_ch and log_ch != 'Not Set':
+                        product_name_clean = clean_name(pr.get('name_en', pr.get('name_ar', '')))
+                        custom_emoji_id = pr.get('custom_emoji_id')
+                        product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
+                        pub_msg = f"🤖 <b>Auto Buy API (Manual)</b>\n\n"
+                        pub_msg += LANG['en']['log_purchase'].format('API User', product_name_log, qty)
+                        bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+                except: pass
+                # 🔐 تفاصيل للأونر فقط
+                try:
+                    bot.send_message(OWNER_ID,
+                        f"🔐 <b>Auto Buy API - Manual</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"👤 API User: <code>{uid}</code>\n"
+                        f"📦 Product: <b>{clean_name(pr.get('name_en', pr.get('name_ar','')))}</b>\n"
+                        f"🔢 Qty: <b>{qty}</b>\n"
+                        f"💰 Total: <b>${total:.2f}</b>\n"
+                        f"👤 Buyer: {buyer_info or 'N/A'}\n"
+                        f"🆔 Order: <code>{order_id}</code>\n"
+                        f"⚠️ <i>Manual delivery required</i>",
+                        parse_mode="HTML")
+                except: pass
                 return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'pending_manual', 'total_price': total, 'new_balance': round(updated.get('balance', 0), 2)})
 
             # تلقائي — حجز أكواد
@@ -472,10 +525,40 @@ class APIHandler(BaseHTTPRequestHandler):
 
             db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': codes, 'buyer_info': buyer_info, 'status': 'completed'})
 
+            # 📢 لوق القناة — نفس شكل الشراء العادي + "Auto Buy API"
             try:
                 log_ch = get_setting('log_channel')
                 if log_ch and log_ch != 'Not Set':
-                    bot.send_message(log_ch, f"🔗 <b>شراء API</b>\n👤 <code>{uid}</code> | 📦 {clean_name(pr.get('name_ar',''))} x{qty} | 💰 ${total:.2f}", parse_mode="HTML")
+                    product_name_clean = clean_name(pr.get('name_en', pr.get('name_ar', '')))
+                    custom_emoji_id = pr.get('custom_emoji_id')
+                    product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
+                    
+                    pub_msg = f"🤖 <b>Auto Buy API</b>\n\n"
+                    pub_msg += LANG['en']['log_purchase'].format('API User', product_name_log, qty)
+                    
+                    custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                    if custom_pub and custom_pub.get('value'):
+                        try: pub_msg = f"🤖 <b>Auto Buy API</b>\n\n" + custom_pub['value'].format('API User', product_name_log, qty)
+                        except: pass
+                    
+                    bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+            except: pass
+            
+            # 🔐 إشعار خاص للأونر فقط — التفاصيل الحساسة
+            try:
+                api_user = db.api_keys.find_one({'user_id': uid, 'is_active': True})
+                api_username = api_user.get('username', '') if api_user else ''
+                bot.send_message(OWNER_ID,
+                    f"🔐 <b>Auto Buy API (Details)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 API User: <code>{uid}</code> @{api_username}\n"
+                    f"📦 Product: <b>{clean_name(pr.get('name_en', pr.get('name_ar','')))}</b>\n"
+                    f"🔢 Qty: <b>{qty}</b>\n"
+                    f"💰 Total: <b>${total:.2f}</b>\n"
+                    f"👤 Buyer: {buyer_info or 'N/A'}\n"
+                    f"🆔 Order: <code>{order_id}</code>\n"
+                    f"💳 Balance: <b>${round(updated.get('balance', 0), 2)}</b>",
+                    parse_mode="HTML")
             except: pass
 
             return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'completed', 'qty': qty, 'total_price': total, 'codes': codes, 'new_balance': round(updated.get('balance', 0), 2)})
@@ -1770,7 +1853,7 @@ DEFAULT_BUTTONS = {
         'btn_back': '🔙 رجوع',
         'btn_buy_now': '✅ شراء الآن',
         'btn_check_sub': '🔄 تحقق من الاشتراك',
-        'btn_api': '🔗 API'
+        'btn_api': '🤖 لوحة تحكم API'
     },
     'en': {
         'btn_products': '🔵 Products',
@@ -1798,7 +1881,7 @@ DEFAULT_BUTTONS = {
         'btn_back': '🔙 Back',
         'btn_buy_now': '✅ Buy Now',
         'btn_check_sub': '🔄 Verify Sub',
-        'btn_api': '🔗 API'
+        'btn_api': '🤖 API Control Panel'
     }
 }
 
@@ -2490,6 +2573,11 @@ def start_handler(message):
     
     # 🆕 زر شروط الاستخدام
     markup.add(create_btn(uid, 'btn_terms', callback_data="open_terms"))
+    
+    # 🔗 زر API يظهر فقط للأدمن
+    u_data = get_user_data_full(uid)
+    if u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID):
+        markup.add(create_btn(uid, 'btn_api', callback_data="open_api"))
     
     if user.get('is_admin') == 1 or uid == OWNER_ID:
         markup.add(create_btn(uid, 'btn_admin', callback_data="admin_panel_main"))
@@ -3357,6 +3445,7 @@ def shop_list_ui(call):
         name_key = 'name_en' if l == 'en' else 'name_ar'
         catalogs.sort(key=lambda c: (c.get(name_key) or c.get('name_ar', '')).lower())
         
+        cat_buttons = []
         for cat in catalogs:
             cat_id = str(cat.get('_id', ''))
             emoji = cat.get('emoji', '📁')
@@ -3374,7 +3463,14 @@ def shop_list_ui(call):
             btn_kwargs = {'text': btn_text, 'callback_data': f"cat_{cat_id}", 'style': 'primary'}
             if emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = emoji_id
-            markup.add(CustomInlineButton(**btn_kwargs))
+            cat_buttons.append(CustomInlineButton(**btn_kwargs))
+        
+        # نضيف أزرار الكتالوجات 2 جنب بعض
+        for i in range(0, len(cat_buttons), 2):
+            if i + 1 < len(cat_buttons):
+                markup.add(cat_buttons[i], cat_buttons[i + 1])
+            else:
+                markup.add(cat_buttons[i])
         
         # المنتجات بدون كتالوج
         all_catalog_pids = set()
@@ -10429,75 +10525,199 @@ def open_api(call):
     gw = _get_api_gateway()
 
     if existing:
-        if l == 'ar':
-            txt = f"🔗 <b>بيانات API الخاصة بك</b>\n\n"
-            txt += f"🔑 المفتاح:\n<code>{existing['api_key']}</code>\n\n"
-            txt += f"🛤 مسار API السري:\n<code>/{gw}</code>\n\n"
-            txt += "📖 <b>الـ Endpoints:</b>\n"
-            txt += f"• <code>GET /{gw}/products</code> — المنتجات\n"
-            txt += f"• <code>GET /{gw}/balance</code> — رصيدك\n"
-            txt += f"• <code>POST /{gw}/purchase</code> — شراء\n"
-            txt += f"• <code>POST /{gw}/set_price</code> — تعديل السعر\n"
-            txt += f"• <code>POST /{gw}/set_product</code> — تعديل الاسم/الوصف\n"
-            txt += f"• <code>GET /{gw}/my_prices</code> — أسعارك\n"
-            txt += f"• <code>GET /{gw}/orders</code> — طلباتك\n\n"
-            txt += "🔐 Header:\n<code>Authorization: Bearer مفتاحك</code>\n\n"
-            txt += "📌 <i>الرابط الأساسي يُرسل لك من الأدمن بشكل خاص.</i>"
-        else:
-            txt = f"🔗 <b>Your API credentials</b>\n\n"
-            txt += f"🔑 Key:\n<code>{existing['api_key']}</code>\n\n"
-            txt += f"🛤 Secret API path:\n<code>/{gw}</code>\n\n"
-            txt += "📖 <b>Endpoints:</b>\n"
-            txt += f"• <code>GET /{gw}/products</code>\n"
-            txt += f"• <code>GET /{gw}/balance</code>\n"
-            txt += f"• <code>POST /{gw}/purchase</code>\n"
-            txt += f"• <code>GET /{gw}/orders</code>\n\n"
-            txt += "🔐 Header:\n<code>Authorization: Bearer your_key</code>\n\n"
-            txt += "📌 <i>Base URL will be sent to you privately by admin.</i>"
+        # حساب الإحصائيات
+        total_orders = db.api_orders.count_documents({'api_user_id': uid})
+        total_spent = 0
+        for o in db.api_orders.find({'api_user_id': uid}, {'total_price': 1}):
+            total_spent += o.get('total_price', 0)
+        user = get_user_data_full(uid)
+        balance = user.get('balance', 0) if user else 0
+        
+        # عدد المنتجات المخفية
+        hidden_count = db.api_hidden.count_documents({'api_user_id': uid})
+        total_prods = db.products.count_documents({'is_hidden': {'$ne': True}})
+        active_count = total_prods - hidden_count
 
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("🔄 توليد جديد" if l == 'ar' else "🔄 Regenerate", callback_data="api_regen"),
-            InlineKeyboardButton("❌ تعطيل" if l == 'ar' else "❌ Disable", callback_data="api_disable")
-        )
+        conn_code = _generate_connection_code(existing['api_key'])
+        
+        txt = f"🤖 <b>API Control Panel</b>\n"
+        txt += f"━━━━━━━━━━━━━━━━━━━\n"
+        txt += f"🟢 Status: <b>Connected</b>\n"
+        txt += f"💰 Balance: <b>${balance:.2f}</b>\n"
+        txt += f"📦 Products: <b>{active_count}/{total_prods}</b>\n"
+        txt += f"📊 Orders: <b>{total_orders}</b> | Spent: <b>${total_spent:.2f}</b>\n"
+        txt += f"━━━━━━━━━━━━━━━━━━━\n"
+        if conn_code:
+            txt += f"🔗 <code>{conn_code}</code>"
+        else:
+            txt += f"🔑 <code>{existing['api_key']}</code>"
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
+        markup.add(InlineKeyboardButton("📖 API Docs", callback_data="api_docs"))
+        markup.add(InlineKeyboardButton("📜 Recent Orders", callback_data="api_orders"))
+        markup.add(InlineKeyboardButton("🔄 Regenerate Key", callback_data="api_regen"))
+        markup.add(InlineKeyboardButton("❌ Disable API", callback_data="api_disable"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     else:
-        if l == 'ar':
-            txt = "🔗 <b>API للمتجر</b>\n\nأنشئ مفتاح API عشان تعرض منتجات متجرنا في بوتك أو موقعك.\nالشراء يُخصم من رصيدك عندنا."
-        else:
-            txt = "🔗 <b>Store API</b>\n\nGenerate an API key to display our products in your bot or website.\nPurchases are deducted from your balance here."
+        txt = "🔗 <b>Store API</b>\n\n"
+        txt += "Connect your bot or website to our store.\n"
+        txt += "Display products, check balance, and auto-purchase.\n\n"
+        txt += "💡 <i>Purchases are deducted from your balance here.</i>"
         markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🔑 إنشاء مفتاح" if l == 'ar' else "🔑 Generate Key", callback_data="api_gen"))
+        markup.add(InlineKeyboardButton("🔑 Generate API Key", callback_data="api_gen"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
 
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
 
+# ═══ إنشاء مفتاح ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_gen")
 def api_gen(call):
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
     if db.api_keys.find_one({'user_id': uid, 'is_active': True}):
-        bot.answer_callback_query(call.id, "⚠️ عندك مفتاح بالفعل!", show_alert=True); return
+        bot.answer_callback_query(call.id, "⚠️ You already have a key!", show_alert=True); return
 
     key = _generate_api_key()
     db.api_keys.insert_one({'user_id': uid, 'api_key': key, 'is_active': True, 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'username': call.from_user.username or ''})
 
     gw = _get_api_gateway()
-    l = get_lang(uid)
-
-    if l == 'ar':
-        txt = f"✅ <b>تم إنشاء المفتاح!</b>\n\n🔑 المفتاح:\n<code>{key}</code>\n\n🛤 المسار السري:\n<code>/{gw}</code>\n\n📌 <i>تواصل مع الأدمن للحصول على الرابط الأساسي.</i>"
+    conn_code = _generate_connection_code(key)
+    
+    txt = f"✅ <b>API Created Successfully!</b>\n\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━\n"
+    if conn_code:
+        txt += f"🔗 <b>Connection Code:</b>\n<code>{conn_code}</code>\n\n"
+        txt += f"📌 <i>Copy this code and paste it in your second bot to connect.</i>\n"
     else:
-        txt = f"✅ <b>Key Generated!</b>\n\n🔑 Key:\n<code>{key}</code>\n\n🛤 Secret path:\n<code>/{gw}</code>\n\n📌 <i>Contact admin for the base URL.</i>"
+        txt += f"🔑 <code>{key}</code>\n"
+        txt += f"🛤 <code>/{gw}</code>\n\n"
+        txt += f"⚠️ <i>Server URL not detected. Add RENDER_EXTERNAL_URL or APP_URL to your env variables.</i>\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━\n"
+    txt += f"⚠️ <b>Keep this private!</b>"
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔙", callback_data="open_api"))
+    markup.add(InlineKeyboardButton("🤖 Open Control Panel", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
 
+# ═══ توثيق API ═══
+@bot.callback_query_handler(func=lambda call: call.data == "api_docs")
+def api_docs(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    gw = _get_api_gateway()
+    
+    txt = f"📖 <b>API Documentation</b>\n\n"
+    txt += f"🔗 <b>Connection Code:</b>\n"
+    txt += f"Copy the code from your API panel and paste it in your second bot.\n\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━\n\n"
+    txt += f"<b>Available Endpoints:</b>\n\n"
+    txt += f"📦 <code>/products</code> — All products\n"
+    txt += f"📦 <code>/product/ID</code> — Product details\n"
+    txt += f"💰 <code>/balance</code> — Your balance\n"
+    txt += f"🛒 <code>/purchase</code> — Buy product\n"
+    txt += f"📜 <code>/orders</code> — Your orders\n\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━\n\n"
+    txt += f"<b>Responses:</b>\n"
+    txt += f"✅ 200 = Success\n"
+    txt += f"❌ 401 = Invalid key\n"
+    txt += f"❌ 402 = Not enough balance\n"
+    txt += f"❌ 409 = Out of stock"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
+
+# ═══ آخر الطلبات ═══
+@bot.callback_query_handler(func=lambda call: call.data == "api_orders")
+def api_orders_view(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    
+    orders = list(db.api_orders.find({'api_user_id': uid}).sort('_id', -1).limit(10))
+    txt = "📜 <b>Recent API Orders</b>\n\n"
+    if not orders:
+        txt += "📭 No orders yet."
+    for o in orders:
+        date_str = o['_id'].generation_time.strftime('%m-%d %H:%M') if hasattr(o.get('_id'), 'generation_time') else ''
+        status = "✅" if o.get('status') == 'completed' else "⏳"
+        txt += f"{status} {o.get('product_name', '?')[:20]} x{o.get('qty', 1)} | ${o.get('total_price', 0):.2f} | {date_str}\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
+
+# ═══ إدارة المنتجات — إخفاء/إظهار ═══
+@bot.callback_query_handler(func=lambda call: call.data == "api_products")
+def api_products_manage(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    
+    # جلب المنتجات المخفية لهذا المطوّر
+    hidden_pids = set()
+    for h in db.api_hidden.find({'api_user_id': uid}):
+        hidden_pids.add(h['product_id'])
+    
+    prods = list(db.products.find({'is_hidden': {'$ne': True}}))
+    prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
+    
+    txt = "📦 <b>Manage Products</b>\n\n"
+    txt += "🟢 = Visible in your bot\n🔴 = Hidden from your bot\n\n"
+    txt += "<i>Tap to toggle:</i>"
+    
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in prods:
+        pid = str(p.get('id', str(p.get('_id', ''))))
+        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:28]
+        is_hidden = pid in hidden_pids
+        emoji_id = p.get('custom_emoji_id')
+        
+        icon = "🔴" if is_hidden else "🟢"
+        btn_kwargs = {
+            'text': f"{icon} {name}",
+            'callback_data': f"api_toggle_{pid}",
+            'style': 'danger' if is_hidden else 'success'
+        }
+        if emoji_id:
+            btn_kwargs['icon_custom_emoji_id'] = emoji_id
+        markup.add(CustomInlineButton(**btn_kwargs))
+    
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
+
+# ═══ تبديل إخفاء/إظهار منتج ═══
+@bot.callback_query_handler(func=lambda call: call.data.startswith("api_toggle_"))
+def api_toggle_product(call):
+    uid = call.from_user.id
+    pid = call.data.replace("api_toggle_", "")
+    
+    existing = db.api_hidden.find_one({'api_user_id': uid, 'product_id': pid})
+    if existing:
+        db.api_hidden.delete_one({'_id': existing['_id']})
+        bot.answer_callback_query(call.id, "🟢 Visible!", show_alert=False)
+    else:
+        db.api_hidden.insert_one({'api_user_id': uid, 'product_id': pid})
+        bot.answer_callback_query(call.id, "🔴 Hidden!", show_alert=False)
+    
+    # تحديث القائمة
+    call.data = "api_products"
+    api_products_manage(call)
+
+
+# ═══ إعادة توليد ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_regen")
 def api_regen(call):
     try: bot.answer_callback_query(call.id)
@@ -10507,24 +10727,25 @@ def api_regen(call):
     key = _generate_api_key()
     db.api_keys.insert_one({'user_id': uid, 'api_key': key, 'is_active': True, 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'username': call.from_user.username or ''})
     gw = _get_api_gateway()
-    l = get_lang(uid)
-    if l == 'ar':
-        txt = f"✅ <b>مفتاح جديد!</b>\n\n🔑\n<code>{key}</code>\n\n🛤 المسار:\n<code>/{gw}</code>"
+    conn_code = _generate_connection_code(key)
+    if conn_code:
+        txt = f"✅ <b>New Key Generated!</b>\n\n🔗 <code>{conn_code}</code>\n\n⚠️ Old key is now disabled."
     else:
-        txt = f"✅ <b>New Key!</b>\n\n🔑\n<code>{key}</code>\n\n🛤 Path:\n<code>/{gw}</code>"
+        txt = f"✅ <b>New Key!</b>\n\n🔑 <code>{key}</code>\n🛤 <code>/{gw}</code>\n\n⚠️ Old key disabled."
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔙", callback_data="open_api"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
 
+# ═══ تعطيل ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_disable")
 def api_disable(call):
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
     db.api_keys.update_many({'user_id': uid, 'is_active': True}, {'$set': {'is_active': False}})
-    bot.answer_callback_query(call.id, bil(uid, "✅ تم التعطيل", "✅ Disabled"), show_alert=True)
+    bot.answer_callback_query(call.id, "✅ API Disabled", show_alert=True)
     open_api(call)
 
 
