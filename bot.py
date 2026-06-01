@@ -1613,15 +1613,16 @@ def background_referral_checker_v2():
     - يفحص بالأولوية: pending أولاً، ثم active (للتحقق من المغادرة)
     - يتجاهل left (محسوم - ما يرجعون)
     """
-    BATCH_SIZE = 10          # عدد الإحالات في كل دفعة
-    DELAY_BETWEEN_CHECKS = 0.1   # 100ms بين كل فحص (آمن جداً)
-    DELAY_BETWEEN_CYCLES = 30    # 30 ثانية بين الدورات الكاملة
+    BATCH_SIZE = 10
+    DELAY_BETWEEN_CHECKS = 0.1
+    DELAY_BETWEEN_CYCLES = 30
+    
+    # ⏳ انتظار 60 ثانية بعد تشغيل البوت عشان الاتصال يستقر
+    time.sleep(60)
+    logger.info("🔄 Background referral checker started.")
     
     while True:
         try:
-            # 🛡 نفحص فقط pending و active (نتجاهل left - حسموا)
-            # pending: نريد ترقيتهم لـ active لو اشتركوا
-            # active: نريد تنزيلهم لـ left لو غادروا
             cursor = db.referrals_v2.find({
                 'status': {'$in': ['pending', 'active']}
             })
@@ -1637,28 +1638,28 @@ def background_referral_checker_v2():
                 try:
                     is_subbed = check_forced_sub(int(inv_uid))
                 except Exception:
-                    # خطأ في الفحص - نتركه للدورة التالية
                     time.sleep(DELAY_BETWEEN_CHECKS)
                     continue
                 
-                # تحديد الحالة الجديدة
+                # None = خطأ اتصال — نتجاهل ونحافظ على الحالة الحالية
+                if is_subbed is None:
+                    time.sleep(DELAY_BETWEEN_CHECKS)
+                    continue
+                
                 if is_subbed:
                     new_status = 'active'
                 else:
                     new_status = 'left' if current_status == 'active' else 'pending'
                 
-                # تحديث فقط لو تغيرت الحالة
                 if new_status != current_status:
                     mark_referral_status(inv_uid, new_status)
                 
-                # فاصل صغير بين الفحوصات (يحمي من Rate Limit)
                 time.sleep(DELAY_BETWEEN_CHECKS)
                 
                 batch_count += 1
-                # كل 10 إحالات، نعمل وقفة أطول
                 if batch_count >= BATCH_SIZE:
                     batch_count = 0
-                    time.sleep(1)  # ثانية وقفة بعد كل 10
+                    time.sleep(1)
         except Exception as e:
             logger.error(f"Background ref checker error: {e}")
         
@@ -2454,7 +2455,8 @@ def check_forced_sub(uid):
         try:
             status = bot.get_chat_member(c['channel_id'], uid).status
             if status in ['left', 'kicked']: return False
-        except: return False
+        except Exception:
+            return None  # None = خطأ اتصال (مو متأكدين)
     return True
 
 def notify_admins(message_text):
@@ -3275,6 +3277,7 @@ def invite_ui(call):
     remaining_to_milestone = threshold - current_in_batch if current_in_batch > 0 else 0
 
     markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
     markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     
@@ -3418,6 +3421,70 @@ def invite_ui(call):
             except: pass
 
 # ============================================================
+# ═══ قائمة الإحالات بصفحات ═══
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ref_list_"))
+def referral_list_page(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    l = get_lang(uid)
+    page = int(call.data.replace("ref_list_", ""))
+    PER_PAGE = 10
+    
+    # جلب كل الإحالات مرتبة: active أول، ثم pending، ثم left
+    refs = list(db.referrals_v2.find({'referrer_id': uid}).sort('status', 1))
+    
+    total = len(refs)
+    total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+    page = min(page, total_pages - 1)
+    start = page * PER_PAGE
+    end = start + PER_PAGE
+    page_refs = refs[start:end]
+    
+    txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
+    
+    if not refs:
+        txt += "📭 No referrals yet." if l == 'en' else "📭 لا يوجد إحالات بعد."
+    else:
+        for r in page_refs:
+            inv_id = r.get('invited_id', '?')
+            status = r.get('status', 'pending')
+            
+            if status == 'active':
+                icon = "🟢"
+                status_txt = "Active" if l == 'en' else "نشط"
+            elif status == 'pending':
+                icon = "🟡"
+                status_txt = "Pending" if l == 'en' else "معلّق"
+            else:
+                icon = "🔴"
+                status_txt = "Left" if l == 'en' else "غادر"
+            
+            # جلب اسم المستخدم
+            inv_user = get_user_data_full(inv_id)
+            if inv_user:
+                name = inv_user.get('name', '')[:15]
+                uname = f"@{inv_user.get('username', '')}" if inv_user.get('username') else ''
+                txt += f"{icon} <code>{inv_id}</code> | {name} {uname} | {status_txt}\n"
+            else:
+                txt += f"{icon} <code>{inv_id}</code> | {status_txt}\n"
+    
+    # أزرار التنقل
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("◀️", callback_data=f"ref_list_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("▶️", callback_data=f"ref_list_{page+1}"))
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_invite"))
+    
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
+
 # 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
