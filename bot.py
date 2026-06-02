@@ -476,8 +476,20 @@ class APIHandler(BaseHTTPRequestHandler):
                         product_name_clean = clean_name(pr.get('name_en', pr.get('name_ar', '')))
                         custom_emoji_id = pr.get('custom_emoji_id')
                         product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
-                        pub_msg = f"🤖 <b>Auto Buy API (Manual)</b>\n\n"
-                        pub_msg += LANG['en']['log_purchase'].format('API User', product_name_log, qty)
+                        
+                        inner_msg = LANG['en']['log_purchase'].format('API User', product_name_log, qty)
+                        custom_inner = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                        if custom_inner and custom_inner.get('value'):
+                            try: inner_msg = custom_inner['value'].format('API User', product_name_log, qty)
+                            except: pass
+                        
+                        cms_api_log = db.custom_texts.find_one({'lang': 'en', 'key': 'api_log'})
+                        if cms_api_log and cms_api_log.get('value'):
+                            try: pub_msg = cms_api_log['value'].format(inner_msg)
+                            except: pub_msg = LANG['en']['api_log'].format(inner_msg)
+                        else:
+                            pub_msg = LANG['en']['api_log'].format(inner_msg)
+                        
                         bot.send_message(log_ch, pub_msg, parse_mode="HTML")
                 except: pass
                 # 🔐 تفاصيل للأونر فقط
@@ -525,7 +537,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
             db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': codes, 'buyer_info': buyer_info, 'status': 'completed'})
 
-            # 📢 لوق القناة — نفس شكل الشراء العادي + "Auto Buy API"
+            # 📢 لوق القناة — نفس شكل الشراء العادي + CMS
             try:
                 log_ch = get_setting('log_channel')
                 if log_ch and log_ch != 'Not Set':
@@ -533,13 +545,19 @@ class APIHandler(BaseHTTPRequestHandler):
                     custom_emoji_id = pr.get('custom_emoji_id')
                     product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
                     
-                    pub_msg = f"🤖 <b>Auto Buy API</b>\n\n"
-                    pub_msg += LANG['en']['log_purchase'].format('API User', product_name_log, qty)
-                    
-                    custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
-                    if custom_pub and custom_pub.get('value'):
-                        try: pub_msg = f"🤖 <b>Auto Buy API</b>\n\n" + custom_pub['value'].format('API User', product_name_log, qty)
+                    inner_msg = LANG['en']['log_purchase'].format('API User', product_name_log, qty)
+                    custom_inner = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                    if custom_inner and custom_inner.get('value'):
+                        try: inner_msg = custom_inner['value'].format('API User', product_name_log, qty)
                         except: pass
+                    
+                    # غلاف API
+                    cms_api_log = db.custom_texts.find_one({'lang': 'en', 'key': 'api_log'})
+                    if cms_api_log and cms_api_log.get('value'):
+                        try: pub_msg = cms_api_log['value'].format(inner_msg)
+                        except: pub_msg = LANG['en']['api_log'].format(inner_msg)
+                    else:
+                        pub_msg = LANG['en']['api_log'].format(inner_msg)
                     
                     bot.send_message(log_ch, pub_msg, parse_mode="HTML")
             except: pass
@@ -1988,6 +2006,10 @@ LANG = {
         'no_hist': "📭 لا توجد سجلات حتى الآن.",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
         'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى الشحن أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b>",
+        'api_welcome': "🔗 <b>Store API</b>\n\nConnect your bot or website to our store.\nDisplay products, check balance, and auto-purchase.\n\n💡 <i>Purchases are deducted from your balance here.</i>",
+        'api_created': "✅ <b>API Created Successfully!</b>\n\n━━━━━━━━━━━━━━━━━━━\n🔗 <b>Connection Code:</b>\n<code>{}</code>\n\n📌 <i>Copy this code and paste it in your second bot to connect.</i>\n━━━━━━━━━━━━━━━━━━━\n⚠️ <b>Keep this private!</b>",
+        'api_howto': "📖 <b>How to connect your bot</b>\n\n━━━━━━━━━━━━━━━━━━━\n\n1️⃣ Copy your connection code from the panel\n\n2️⃣ Go to your second bot\n\n3️⃣ Paste the code — it connects automatically\n\n━━━━━━━━━━━━━━━━━━━\n\n⚠️ <i>Don't share this code with anyone.</i>",
+        'api_log': "🤖 <b>Auto Buy API</b>\n\n{}",
         'must_join': "🔒 <b>يجب عليك الاشتراك في قنواتنا أولاً:</b>",
         'qty_prompt': "🔢 <b>أرسل الكمية (أرقام فقط):</b>",
         'qty_invalid': "❌ <b>رقم غير صحيح!</b>",
@@ -2048,6 +2070,10 @@ LANG = {
         'no_hist': "📭 No records yet.",
         'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}\n",
         'no_balance': "❌ <b>Low balance!</b> Please deposit.", 'out_stock': "❌ <b>Out of stock!</b>",
+        'api_welcome': "🔗 <b>Store API</b>\n\nConnect your bot or website to our store.\nDisplay products, check balance, and auto-purchase.\n\n💡 <i>Purchases are deducted from your balance here.</i>",
+        'api_created': "✅ <b>API Created Successfully!</b>\n\n━━━━━━━━━━━━━━━━━━━\n🔗 <b>Connection Code:</b>\n<code>{}</code>\n\n📌 <i>Copy this code and paste it in your second bot to connect.</i>\n━━━━━━━━━━━━━━━━━━━\n⚠️ <b>Keep this private!</b>",
+        'api_howto': "📖 <b>How to connect your bot</b>\n\n━━━━━━━━━━━━━━━━━━━\n\n1️⃣ Copy your connection code from the panel\n\n2️⃣ Go to your second bot\n\n3️⃣ Paste the code — it connects automatically\n\n━━━━━━━━━━━━━━━━━━━\n\n⚠️ <i>Don't share this code with anyone.</i>",
+        'api_log': "🤖 <b>Auto Buy API</b>\n\n{}",
         'must_join': "🔒 <b>You must join our channels first:</b>",
         'qty_prompt': "🔢 <b>Enter quantity:</b>",
         'qty_invalid': "❌ <b>Invalid number!</b>",
@@ -2643,11 +2669,7 @@ def start_handler(message):
     
     # 🆕 زر شروط الاستخدام
     markup.add(create_btn(uid, 'btn_terms', callback_data="open_terms"))
-    
-    # 🔗 زر API يظهر فقط للأدمن
-    u_data = get_user_data_full(uid)
-    if u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID):
-        markup.add(create_btn(uid, 'btn_api', callback_data="open_api"))
+    markup.add(create_btn(uid, 'btn_api', callback_data="open_api"))
     
     if user.get('is_admin') == 1 or uid == OWNER_ID:
         markup.add(create_btn(uid, 'btn_admin', callback_data="admin_panel_main"))
@@ -4564,43 +4586,28 @@ def ask_binance_deposit_amount(message):
 
     if l == 'ar':
         msg_text = (
-            f"🟡 <b>تعليمات الإيداع - Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>المبلغ المطلوب تحويله:</b>\n"
-            f"<code>${unique_amount:.4f}</code>\n"
-            f"☝️ <b>بالضبط هذا الرقم!</b>\n\n"
-            f"📬 <b>المحفظة:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>تنبيهات:</b>\n"
-            f"✅ حوّل بالضبط: <code>${unique_amount:.4f}</code>\n"
-            f"❌ لا تحوّل ${base_amount:.2f} (المبلغ الأساسي)\n"
-            f"❌ لا تغيّر الرقم\n\n"
-            f"⏰ <b>صلاحية الطلب:</b> 30 دقيقة\n\n"
-            f"✨ <b>سيُضاف الرصيد تلقائياً بمجرد استلام التحويل.</b>\n"
-            f"<i>لا حاجة لأي إجراء آخر.</i>"
+            f"🟡 <b>Binance Pay</b>\n\n"
+            f"💰 <b>المبلغ:</b>\n<code>${unique_amount:.4f}</code>\n\n"
+            f"📬 <b>الآيدي:</b>\n<code>{wallet}</code>\n\n"
+            f"⏰ صلاحية: <b>30 دقيقة</b>\n"
+            f"✨ <i>الرصيد يُضاف تلقائياً</i>"
         )
     else:
         msg_text = (
-            f"🟡 <b>Deposit Instructions - Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>Amount to send:</b>\n"
-            f"<code>${unique_amount:.4f}</code>\n"
-            f"☝️ <b>EXACTLY this amount!</b>\n\n"
-            f"📬 <b>Wallet:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>Important:</b>\n"
-            f"✅ Send exactly: <code>${unique_amount:.4f}</code>\n"
-            f"❌ Don't send ${base_amount:.2f} (base amount)\n"
-            f"❌ Don't change the number\n\n"
-            f"⏰ <b>Valid for:</b> 30 minutes\n\n"
-            f"✨ <b>Balance added automatically once received.</b>\n"
-            f"<i>No further action needed.</i>"
+            f"🟡 <b>Binance Pay</b>\n\n"
+            f"💰 <b>Amount:</b>\n<code>${unique_amount:.4f}</code>\n\n"
+            f"📬 <b>Pay ID:</b>\n<code>{wallet}</code>\n\n"
+            f"⏰ Valid: <b>30 minutes</b>\n"
+            f"✨ <i>Balance added automatically</i>"
         )
 
-    # زر الإلغاء
-    cancel_markup = InlineKeyboardMarkup()
+    cancel_markup = InlineKeyboardMarkup(row_width=1)
     cancel_markup.add(InlineKeyboardButton(
-        "❌ إلغاء العملية" if l == 'ar' else "❌ Cancel Deposit",
+        "🔍 فحص الدفع" if l == 'ar' else "🔍 Check Payment",
+        callback_data=f"binance_check_{uid}"
+    ))
+    cancel_markup.add(InlineKeyboardButton(
+        "❌ إلغاء" if l == 'ar' else "❌ Cancel",
         callback_data="cancel_deposit"
     ))
     
@@ -5702,51 +5709,20 @@ def ask_deposit_amount(message, coin):
     except Exception: pass
     
     # رسالة التعليمات
-    if l == 'ar':
-        msg_text = (
-            f"💵 <b>تعليمات الإيداع</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>المبلغ المطلوب تحويله:</b>\n"
-            f"<code>${unique_amount:.6f}</code>\n"
-            f"☝️ <b>بالضبط هذا الرقم!</b>"
-            f"{crypto_amount_text}\n\n"
-            f"📬 <b>العنوان:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>تنبيهات هامة:</b>\n\n"
-            f"✅ حوّل بالضبط: <code>${unique_amount:.6f}</code>\n"
-            f"❌ <b>لا</b> تحوّل ${base_amount:.2f}\n"
-            f"❌ <b>لا</b> تقرّب الرقم\n"
-            f"❌ <b>لا</b> تنقص ولا تزيد ولا حتى $0.0001\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⏰ <b>صلاحية الطلب:</b> 30 دقيقة\n\n"
-            f"✨ <b>بعد التحويل بالمبلغ الصحيح، البوت سيضيف الرصيد تلقائياً خلال 1-3 دقائق.</b>\n\n"
-            f"💡 <i>لا حاجة لإرسال أي شيء - فقط حوّل وانتظر.</i>"
-        )
-    else:
-        msg_text = (
-            f"💵 <b>Deposit Instructions</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>Amount to send:</b>\n"
-            f"<code>${unique_amount:.6f}</code>\n"
-            f"☝️ <b>EXACTLY this amount!</b>"
-            f"{crypto_amount_text}\n\n"
-            f"📬 <b>Address:</b>\n<code>{wallet}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⚠️ <b>Important:</b>\n\n"
-            f"✅ Send EXACTLY: <code>${unique_amount:.6f}</code>\n"
-            f"❌ <b>DON'T</b> send ${base_amount:.2f}\n"
-            f"❌ <b>DON'T</b> round the number\n"
-            f"❌ <b>DON'T</b> change even by $0.0001\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"⏰ <b>Valid for:</b> 30 minutes\n\n"
-            f"✨ <b>After sending the EXACT amount, balance will be added AUTOMATICALLY within 1-3 minutes.</b>\n\n"
-            f"💡 <i>No need to send anything - just transfer and wait.</i>"
-        )
+    coin_emoji = {'USDT': '🟢', 'USDT_BEP20': '🟡', 'TON': '💎', 'LTC': '🔵'}.get(coin, '💰')
     
-    # رسالة الإيداع مع زر الإلغاء
-    cancel_markup = InlineKeyboardMarkup()
+    msg_text = (
+        f"{coin_emoji} <b>{coin_name}</b>\n\n"
+        f"💰 <b>Amount:</b>\n<code>${unique_amount:.6f}</code>"
+        f"{crypto_amount_text}\n\n"
+        f"📬 <b>Address:</b>\n<code>{wallet}</code>\n\n"
+        f"⏰ Valid: <b>30 minutes</b>\n"
+        f"✨ <i>Balance added automatically</i>"
+    )
+    
+    cancel_markup = InlineKeyboardMarkup(row_width=1)
     cancel_markup.add(InlineKeyboardButton(
-        "❌ إلغاء العملية" if l == 'ar' else "❌ Cancel Deposit",
+        "❌ إلغاء" if l == 'ar' else "❌ Cancel",
         callback_data="cancel_deposit"
     ))
     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
@@ -5776,15 +5752,23 @@ def dep_crypto_ui(call):
     wallet = get_setting(db_key)
     
     if coin == "USDT": 
-        msg_txt = get_text(uid, 'dep_usdt', wallet)
+        msg_txt = f"🟢 <b>USDT (TRC-20)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
     elif coin == "USDT_BEP20":
-        msg_txt = f"🟡 <b>شحن عبر USDT (BEP-20)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{wallet}</code>\n\n⚠️ <b>الشبكة المقبولة: BEP-20 (BSC) فقط.</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>" if l=='ar' else f"🟡 <b>USDT (BEP-20) Deposit</b>\n\nSend to address:\n<code>{wallet}</code>\n\n⚠️ <b>Network: BEP-20 ONLY.</b>\n⚠️ Send <b>TxID (Hash)</b> here as text."
+        msg_txt = f"🟡 <b>USDT (BEP-20)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>\n\n⚠️ <b>Network: BEP-20 ONLY</b>"
     elif coin == "TON":
-        msg_txt = f"💎 <b>شحن عبر Toncoin (TON)</b>\n\nأرسل المبلغ إلى المحفظة:\n<code>{wallet}</code>\n\n⚠️ <b>تأكد من وضع الـ Memo إذا كان مطلوباً!</b>\n⚠️ بعد التحويل، <b>أرسل الهاش (TxID) كنص هنا.</b>" if l=='ar' else f"💎 <b>TON Deposit</b>\n\nSend to address:\n<code>{wallet}</code>\n\n⚠️ <b>Don't forget the Memo if required!</b>\n⚠️ Send <b>TxID (Hash)</b> here as text."
+        msg_txt = f"💎 <b>Toncoin (TON)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
     else:
-        msg_txt = get_text(uid, 'dep_ltc', wallet)
-        
-    msg = bot.send_message(uid, msg_txt, parse_mode="HTML")
+        msg_txt = f"🔵 <b>Litecoin (LTC)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
+    
+    msg_txt += "\n\n⚠️ <i>Send TxID after transfer</i>"
+    
+    dep_markup = InlineKeyboardMarkup(row_width=1)
+    dep_markup.add(InlineKeyboardButton(
+        "❌ Cancel" if l == 'en' else "❌ إلغاء",
+        callback_data="cancel_deposit"
+    ))
+    
+    msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=dep_markup)
     
     if coin == "LTC": bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
     elif coin == "TON": bot.register_next_step_handler(msg, verify_crypto_tx, l, "TON")
@@ -8261,6 +8245,11 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
     markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
     markup.add(InlineKeyboardButton("📜 محتوى شروط الاستخدام", callback_data="edit_txt_terms_content"))
+    # 🔗 API
+    markup.add(InlineKeyboardButton("🤖 رسالة API (بدون مفتاح)", callback_data="edit_txt_api_welcome"))
+    markup.add(InlineKeyboardButton("✅ رسالة إنشاء API ناجح", callback_data="edit_txt_api_created"))
+    markup.add(InlineKeyboardButton("📖 رسالة كيف تتصل (API)", callback_data="edit_txt_api_howto"))
+    markup.add(InlineKeyboardButton("🤖 لوق: Auto Buy API", callback_data="edit_txt_api_log"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -8431,6 +8420,26 @@ def ad_edit_txt_prompt(call):
             "<code>{}</code> 2 = اسم المستخدم\n"
             "<code>{}</code> 3 = عدد مستخدمي البوت\n"
             "<code>{}</code> 4 = رصيد المستخدم"
+        ),
+        'api_welcome': (
+            "💡 <b>رسالة API لما ما عنده مفتاح</b>\n\n"
+            "بدون متغيرات — اكتب بحرية\n\n"
+            "💡 <i>تظهر لما يفتح صفحة API وما عنده مفتاح بعد</i>"
+        ),
+        'api_created': (
+            "💡 <b>رسالة إنشاء API بنجاح — متغير واحد:</b>\n"
+            "<code>{}</code> 1 = كود الاتصال المشفّر\n\n"
+            "💡 <i>تظهر بعد ما يولّد المفتاح</i>"
+        ),
+        'api_howto': (
+            "💡 <b>رسالة كيف تتصل</b>\n\n"
+            "بدون متغيرات — اكتب خطوات بحرية\n\n"
+            "💡 <i>تظهر لما يضغط 'How to Connect'</i>"
+        ),
+        'api_log': (
+            "💡 <b>رسالة لوق Auto Buy API — متغير واحد:</b>\n"
+            "<code>{}</code> 1 = رسالة الشراء الأصلية\n\n"
+            "💡 <i>تظهر في قناة اللوق لما يشتري أحد عبر API</i>"
         ),
     }
     
@@ -10715,16 +10724,13 @@ def open_api(call):
 
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
-        markup.add(InlineKeyboardButton("📖 API Docs", callback_data="api_docs"))
+        markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
         markup.add(InlineKeyboardButton("📜 Recent Orders", callback_data="api_orders"))
         markup.add(InlineKeyboardButton("🔄 Regenerate Key", callback_data="api_regen"))
         markup.add(InlineKeyboardButton("❌ Disable API", callback_data="api_disable"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     else:
-        txt = "🔗 <b>Store API</b>\n\n"
-        txt += "Connect your bot or website to our store.\n"
-        txt += "Display products, check balance, and auto-purchase.\n\n"
-        txt += "💡 <i>Purchases are deducted from your balance here.</i>"
+        txt = get_text(uid, 'api_welcome')
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("🔑 Generate API Key", callback_data="api_gen"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
@@ -10748,17 +10754,16 @@ def api_gen(call):
     gw = _get_api_gateway()
     conn_code = _generate_connection_code(key)
     
-    txt = f"✅ <b>API Created Successfully!</b>\n\n"
-    txt += f"━━━━━━━━━━━━━━━━━━━\n"
     if conn_code:
-        txt += f"🔗 <b>Connection Code:</b>\n<code>{conn_code}</code>\n\n"
-        txt += f"📌 <i>Copy this code and paste it in your second bot to connect.</i>\n"
+        # نجرب CMS أولاً
+        cms = db.custom_texts.find_one({'lang': get_lang(uid), 'key': 'api_created'})
+        if cms and cms.get('value'):
+            try: txt = cms['value'].format(conn_code)
+            except: txt = LANG['en']['api_created'].format(conn_code)
+        else:
+            txt = get_text(uid, 'api_created', conn_code)
     else:
-        txt += f"🔑 <code>{key}</code>\n"
-        txt += f"🛤 <code>/{gw}</code>\n\n"
-        txt += f"⚠️ <i>Server URL not detected. Add RENDER_EXTERNAL_URL or APP_URL to your env variables.</i>\n"
-    txt += f"━━━━━━━━━━━━━━━━━━━\n"
-    txt += f"⚠️ <b>Keep this private!</b>"
+        txt = f"✅ <b>API Key Generated!</b>\n\n🔑 <code>{key}</code>\n🛤 <code>/{gw}</code>\n\n⚠️ <i>Server URL not detected.</i>"
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🤖 Open Control Panel", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -10771,24 +10776,14 @@ def api_docs(call):
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
-    gw = _get_api_gateway()
     
-    txt = f"📖 <b>API Documentation</b>\n\n"
-    txt += f"🔗 <b>Connection Code:</b>\n"
-    txt += f"Copy the code from your API panel and paste it in your second bot.\n\n"
-    txt += f"━━━━━━━━━━━━━━━━━━━\n\n"
-    txt += f"<b>Available Endpoints:</b>\n\n"
-    txt += f"📦 <code>/products</code> — All products\n"
-    txt += f"📦 <code>/product/ID</code> — Product details\n"
-    txt += f"💰 <code>/balance</code> — Your balance\n"
-    txt += f"🛒 <code>/purchase</code> — Buy product\n"
-    txt += f"📜 <code>/orders</code> — Your orders\n\n"
-    txt += f"━━━━━━━━━━━━━━━━━━━\n\n"
-    txt += f"<b>Responses:</b>\n"
-    txt += f"✅ 200 = Success\n"
-    txt += f"❌ 401 = Invalid key\n"
-    txt += f"❌ 402 = Not enough balance\n"
-    txt += f"❌ 409 = Out of stock"
+    existing = db.api_keys.find_one({'user_id': uid, 'is_active': True})
+    conn_code = _generate_connection_code(existing['api_key']) if existing else None
+    
+    # نجرب CMS
+    txt = get_text(uid, 'api_howto')
+    if conn_code:
+        txt += f"\n\n🔗 <b>Your code:</b>\n<code>{conn_code}</code>"
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
