@@ -2006,9 +2006,9 @@ LANG = {
         'no_hist': "📭 لا توجد سجلات حتى الآن.",
         'buy_success': "✅ <b>تم الشراء بنجاح!</b>\n\nأكوادك جاهزة:\n{}\n\n<i>شكراً لاختيارك متجرنا 🛡️</i>",
         'no_balance': "❌ <b>رصيدك غير كافٍ!</b> يرجى الشحن أولاً.", 'out_stock': "❌ <b>نفد المخزون!</b>",
-        'api_welcome': "🔗 <b>Store API</b>\n\nConnect your bot or website to our store.\nDisplay products, check balance, and auto-purchase.\n\n💡 <i>Purchases are deducted from your balance here.</i>",
-        'api_created': "✅ <b>API Created Successfully!</b>\n\n━━━━━━━━━━━━━━━━━━━\n🔗 <b>Connection Code:</b>\n<code>{}</code>\n\n📌 <i>Copy this code and paste it in your second bot to connect.</i>\n━━━━━━━━━━━━━━━━━━━\n⚠️ <b>Keep this private!</b>",
-        'api_howto': "📖 <b>How to connect your bot</b>\n\n━━━━━━━━━━━━━━━━━━━\n\n1️⃣ Copy your connection code from the panel\n\n2️⃣ Go to your second bot\n\n3️⃣ Paste the code — it connects automatically\n\n━━━━━━━━━━━━━━━━━━━\n\n⚠️ <i>Don't share this code with anyone.</i>",
+        'api_welcome': "🔗 <b>Store API</b>\n\n🤖 اربط متجرنا ببوتك أو موقعك!\n\n📌 <b>كيف يشتغل؟</b>\n1️⃣ أنشئ كود اتصال من هنا\n2️⃣ أرسل الكود لأي ذكاء اصطناعي واطلب منه يسوي لك بوت أو موقع\n3️⃣ عملائك يشترون من بوتك ← المنتجات تجي تلقائي\n\n💰 <i>كل شراء يُخصم من رصيدك عندنا</i>",
+        'api_created': "✅ <b>تم إنشاء API!</b>\n\n🔗 <b>كود الاتصال:</b>\n<code>{}</code>\n\n━━━━━━━━━━━━━━━━━━━\n\n📌 <b>كيف تستخدمه؟</b>\n\n🤖 <b>الأسهل:</b> انسخ الكود وأرسله لأي ذكاء اصطناعي وقول:\n<i>سوّلي بوت تيليجرام متجر يستخدم هذا الكود</i>\n\n💻 <b>مبرمج:</b> أعطه الكود — فيه كل شيء مشفّر\n\n⚠️ <b>لا تشارك الكود!</b>",
+        'api_howto': "📖 <b>كيف تربط بوتك</b>\n\n1️⃣ انسخ كود الاتصال\n2️⃣ أرسله لذكاء اصطناعي وقول:\n<i>سوّلي بوت متجر يستخدم هذا الكود</i>\n3️⃣ شغّل البوت الجاهز\n\n💡 أو أعطي الكود لمبرمج يربطه بموقعك\n\n⚠️ <i>لا تشارك الكود!</i>",
         'api_log': "🤖 <b>Auto Buy API</b>\n\n{}",
         'must_join': "🔒 <b>يجب عليك الاشتراك في قنواتنا أولاً:</b>",
         'qty_prompt': "🔢 <b>أرسل الكمية (أرقام فقط):</b>",
@@ -2070,9 +2070,9 @@ LANG = {
         'no_hist': "📭 No records yet.",
         'buy_success': "✅ <b>Purchase Successful!</b>\n\nYour codes:\n{}\n",
         'no_balance': "❌ <b>Low balance!</b> Please deposit.", 'out_stock': "❌ <b>Out of stock!</b>",
-        'api_welcome': "🔗 <b>Store API</b>\n\nConnect your bot or website to our store.\nDisplay products, check balance, and auto-purchase.\n\n💡 <i>Purchases are deducted from your balance here.</i>",
-        'api_created': "✅ <b>API Created Successfully!</b>\n\n━━━━━━━━━━━━━━━━━━━\n🔗 <b>Connection Code:</b>\n<code>{}</code>\n\n📌 <i>Copy this code and paste it in your second bot to connect.</i>\n━━━━━━━━━━━━━━━━━━━\n⚠️ <b>Keep this private!</b>",
-        'api_howto': "📖 <b>How to connect your bot</b>\n\n━━━━━━━━━━━━━━━━━━━\n\n1️⃣ Copy your connection code from the panel\n\n2️⃣ Go to your second bot\n\n3️⃣ Paste the code — it connects automatically\n\n━━━━━━━━━━━━━━━━━━━\n\n⚠️ <i>Don't share this code with anyone.</i>",
+        'api_welcome': "🔗 <b>Store API</b>\n\n🤖 Connect your store to your bot or website!\n\n📌 <b>How it works:</b>\n1️⃣ Create a connection code here\n2️⃣ Send the code to any AI (ChatGPT/Claude) and ask it to build a bot or website\n3️⃣ Your customers buy from your bot ← products come automatically\n\n💰 <i>Every purchase is deducted from your balance here</i>",
+        'api_created': "✅ <b>API Created!</b>\n\n🔗 <b>Connection Code:</b>\n<code>{}</code>\n\n━━━━━━━━━━━━━━━━━━━\n\n📌 <b>How to use:</b>\n\n🤖 <b>Easiest way:</b> Copy the code and send it to any AI and say:\n<i>Build me a Telegram store bot using this connection code</i>\n\n💻 <b>Developer:</b> Give them the code — everything is encoded inside\n\n⚠️ <b>Don't share this code!</b>",
+        'api_howto': "📖 <b>How to connect your bot</b>\n\n1️⃣ Copy your connection code\n2️⃣ Send it to any AI and say:\n<i>Build me a store bot using this code</i>\n3️⃣ Run the bot\n\n💡 Or give the code to a developer for your website\n\n⚠️ <i>Don't share the code!</i>",
         'api_log': "🤖 <b>Auto Buy API</b>\n\n{}",
         'must_join': "🔒 <b>You must join our channels first:</b>",
         'qty_prompt': "🔢 <b>Enter quantity:</b>",
@@ -10724,6 +10724,7 @@ def open_api(call):
 
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
+        markup.add(InlineKeyboardButton("📋 رسالة للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "📋 Message for AI", callback_data="api_ai_prompt"))
         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
         markup.add(InlineKeyboardButton("📜 Recent Orders", callback_data="api_orders"))
         markup.add(InlineKeyboardButton("🔄 Regenerate Key", callback_data="api_regen"))
@@ -10764,7 +10765,8 @@ def api_gen(call):
             txt = get_text(uid, 'api_created', conn_code)
     else:
         txt = f"✅ <b>API Key Generated!</b>\n\n🔑 <code>{key}</code>\n🛤 <code>/{gw}</code>\n\n⚠️ <i>Server URL not detected.</i>"
-    markup = InlineKeyboardMarkup()
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("📋 رسالة جاهزة للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "📋 Ready message for AI", callback_data="api_ai_prompt"))
     markup.add(InlineKeyboardButton("🤖 Open Control Panel", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
@@ -10789,6 +10791,121 @@ def api_docs(call):
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+
+# ═══ رسالة جاهزة للذكاء الاصطناعي ═══
+@bot.callback_query_handler(func=lambda call: call.data == "api_ai_prompt")
+def api_ai_prompt(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    
+    existing = db.api_keys.find_one({'user_id': uid, 'is_active': True})
+    if not existing:
+        bot.answer_callback_query(call.id, "❌", show_alert=True); return
+    
+    conn_code = _generate_connection_code(existing['api_key'])
+    if not conn_code:
+        bot.send_message(uid, "❌ Server URL not detected."); return
+    
+    l = get_lang(uid)
+    
+    if l == 'ar':
+        bot.send_message(uid,
+            "📋 <b>انسخ الرسالة التالية كاملة وأرسلها لأي ذكاء اصطناعي:</b>",
+            parse_mode="HTML"
+        )
+        
+        prompt = f"""أبي تسوي لي بوت تيليجرام بايثون (pyTelegramBotAPI + MongoDB) يشتغل كمتجر.
+
+البوت يتصل بمتجر خارجي عبر كود اتصال مشفّر. الكود فيه كل المعلومات (الرابط + المفتاح).
+
+كود الاتصال:
+{conn_code}
+
+كيف تفك الكود:
+import base64, json
+data = json.loads(base64.b64decode(code.replace("conn_", "")))
+API_KEY = data["k"]
+API_URL = data["u"]
+
+كل الطلبات تكون:
+GET/POST {{API_URL}}/endpoint
+مع Header: Authorization: Bearer {{API_KEY}}
+
+الـ Endpoints:
+
+GET /products → قائمة المنتجات
+{{"success": true, "products": [{{"id":"1","name_en":"Netflix","your_price":3.5,"stock":45,"is_manual":false}}]}}
+
+GET /balance → الرصيد
+{{"success": true, "balance": 25.00}}
+
+POST /purchase → شراء
+Body: {{"product_id":"1","qty":1,"buyer_info":"@customer"}}
+نجاح: {{"success":true,"codes":["the_code"],"total_price":3.5,"new_balance":21.5}}
+فشل: {{"error":"Insufficient balance"}} أو {{"error":"Not enough stock"}}
+
+GET /orders → الطلبات السابقة
+
+المطلوب في البوت:
+- /start → زر المنتجات + زر الرصيد
+- المنتجات تجي من API وتظهر كأزرار (اسم + سعر + ستوك)
+- شراء → POST /purchase → الأكواد ترسل للعميل
+- لو الرصيد قليل → رسالة خطأ
+- لو خلص الستوك → رسالة خطأ
+- التخزين في MongoDB (كود الاتصال يتحفظ)
+- لا متغيرات في الكود — كل شيء من MongoDB
+- أمر /api للأدمن يلصق فيه كود الاتصال"""
+    else:
+        bot.send_message(uid,
+            "📋 <b>Copy the following message and send it to any AI:</b>",
+            parse_mode="HTML"
+        )
+        
+        prompt = f"""Build me a Python Telegram bot (pyTelegramBotAPI + MongoDB) that works as a store.
+
+The bot connects to an external store via an encrypted connection code. The code contains all info (URL + API key).
+
+Connection code:
+{conn_code}
+
+How to decode:
+import base64, json
+data = json.loads(base64.b64decode(code.replace("conn_", "")))
+API_KEY = data["k"]
+API_URL = data["u"]
+
+All requests:
+GET/POST {{API_URL}}/endpoint
+Header: Authorization: Bearer {{API_KEY}}
+
+Endpoints:
+
+GET /products → Product list
+{{"success": true, "products": [{{"id":"1","name_en":"Netflix","your_price":3.5,"stock":45,"is_manual":false}}]}}
+
+GET /balance → Balance
+{{"success": true, "balance": 25.00}}
+
+POST /purchase → Buy product
+Body: {{"product_id":"1","qty":1,"buyer_info":"@customer"}}
+Success: {{"success":true,"codes":["the_code"],"total_price":3.5,"new_balance":21.5}}
+Error: {{"error":"Insufficient balance"}} or {{"error":"Not enough stock"}}
+
+GET /orders → Order history
+
+Requirements:
+- /start → Products button + Balance button
+- Products fetched from API, shown as buttons (name + price + stock)
+- Buy → POST /purchase → send codes to customer
+- Low balance → error message
+- Out of stock → error message
+- Store connection in MongoDB
+- No hardcoded variables — everything from MongoDB
+- /api command for admin to paste connection code"""
+
+    bot.send_message(uid, prompt)
 
 
 # ═══ آخر الطلبات ═══
