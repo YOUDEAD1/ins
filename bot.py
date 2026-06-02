@@ -1413,17 +1413,19 @@ def update_referrer_balance(referrer_id):
                 except Exception as dm_err:
                     logger.debug(f"Milestone DM failed for {rid}: {dm_err}")
 
-                # 2) إشعار قناة اللوق (بالإنجليزي دائماً)
+                # 2) إشعار قناة اللوق (يستخدم CMS)
                 try:
                     log_ch = get_setting('log_channel')
                     if log_ch and log_ch != "Not Set":
-                        log_text = (
-                            f"🏆 <b>Referral Milestone!</b>\n\n"
-                            f"👤 User: <b>**</b>\n"
-                            f"✅ Active Referrals: <b>{active_count}</b>\n"
-                            f"💰 Reward Earned: <b>+${diff:.2f}</b>\n"
-                            f"📊 Total from Referrals: <b>${expected:.2f}</b>"
-                        )
+                        # نجرب CMS أولاً
+                        cms_log = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_milestone'})
+                        if cms_log and cms_log.get('value'):
+                            try:
+                                log_text = cms_log['value'].format(f"**", active_count, f"{diff:.2f}")
+                            except:
+                                log_text = LANG['en']['log_ref_milestone'].format(f"**", active_count, f"{diff:.2f}")
+                        else:
+                            log_text = LANG['en']['log_ref_milestone'].format(f"**", active_count, f"{diff:.2f}")
                         bot.send_message(log_ch, log_text, parse_mode="HTML")
                 except Exception as log_err:
                     logger.debug(f"Milestone log failed: {log_err}")
@@ -3520,6 +3522,10 @@ def referral_list_page(call):
     
     txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
     
+    # هل المستخدم أدمن؟
+    u_data = get_user_data_full(uid)
+    is_admin = (u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID))
+    
     if not all_refs:
         txt += "📭 No referrals yet." if l == 'en' else "📭 لا يوجد إحالات بعد."
     else:
@@ -3529,21 +3535,23 @@ def referral_list_page(call):
             
             if status == 'active':
                 icon = "🟢"
-                status_txt = "Active" if l == 'en' else "نشط"
             elif status == 'pending':
                 icon = "🟡"
-                status_txt = "Pending" if l == 'en' else "معلّق"
             else:
                 icon = "🔴"
-                status_txt = "Left ✓" if l == 'en' else "غادر ✓"
             
-            inv_user = get_user_data_full(inv_id)
-            if inv_user:
-                name = inv_user.get('name', '')[:15]
-                uname = f"@{inv_user.get('username', '')}" if inv_user.get('username') else ''
-                txt += f"{icon} <code>{inv_id}</code> | {name} {uname} | {status_txt}\n"
+            if is_admin:
+                # الأدمن يشوف كل شيء
+                inv_user = get_user_data_full(inv_id)
+                if inv_user:
+                    name = inv_user.get('name', '')[:15]
+                    uname = f"@{inv_user.get('username', '')}" if inv_user.get('username') else ''
+                    txt += f"{icon} <code>{inv_id}</code> {name} {uname}\n"
+                else:
+                    txt += f"{icon} <code>{inv_id}</code>\n"
             else:
-                txt += f"{icon} <code>{inv_id}</code> | {status_txt}\n"
+                # المستخدم العادي يشوف الآيدي فقط
+                txt += f"{icon} <code>{inv_id}</code>\n"
     
     # أزرار التنقل
     markup = InlineKeyboardMarkup(row_width=2)
@@ -8432,15 +8440,25 @@ def ad_edit_txt_prompt(call):
     # 🛡 نعرض النص الحالي كنص بمعالجة شاملة لـ HTML
     # المشكلة: لو النص يحتوي على <u> أو tag غير متوازن، Telegram يرفضه
     # الحل: نرسله كرسالة plain text (بدون parse_mode أصلاً)
+    # 1) المعاينة بالتنسيق
+    try:
+        bot.send_message(
+            call.message.chat.id,
+            f"👁 <b>Preview:</b>\n\n{current_text}",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+    
+    # 2) النص الخام للنسخ
     try:
         bot.send_message(
             call.message.chat.id, 
-            f"📝 النص الحالي (انسخه وعدّل عليه):\n\n{current_text}"
-            # ⚠️ بدون parse_mode! النص يظهر خام بدون تفسير HTML
+            f"📋 انسخ وعدّل:\n\n{current_text}"
         )
     except Exception as send_err:
         logger.error(f"Failed to send current text: {send_err}")
-        bot.send_message(call.message.chat.id, "📝 النص الحالي غير قابل للعرض. عدّله بإرسال نص جديد.")
+        bot.send_message(call.message.chat.id, "📝 النص الحالي غير قابل للعرض.")
     
     # ثانياً: رسالة التعليمات (هذي آمنة لأن الـ HTML تحت سيطرتنا)
     msg_text = (
