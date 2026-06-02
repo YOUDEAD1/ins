@@ -964,6 +964,8 @@ def initialize_referrals_v2():
             db.referrals_v2.create_index('referrer_id')
             db.referrals_v2.create_index('invited_id', unique=True)
             db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
+            db.referrals_archived.create_index('referrer_id')
+            db.referrals_archived.create_index('invited_id')
         except Exception as e:
             logger.error(f"Error creating indexes: {e}")
 
@@ -1595,7 +1597,8 @@ def get_ref_counts(referrer_id):
         rid = int(referrer_id)
         pending = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'pending'})
         active = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
-        left = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'left'})
+        # left من الأرشيف فقط (المؤكد مغادرتهم)
+        left = db.referrals_archived.count_documents({'referrer_id': rid})
         total = pending + active + left
         return pending, active, left, total
     except Exception:
@@ -1606,23 +1609,40 @@ def background_referral_checker_v2():
     """
     فاحص خلفي ذكي - يتجنب Telegram Rate Limit
     
-    🛡 الاستراتيجية الجديدة:
-    - يفحص الإحالات على دفعات صغيرة (10 إحالات كل دورة)
-    - فاصل 100ms بين كل فحص (آمن من Rate Limit)
-    - دورة كاملة كل ~30 ثانية بدلاً من ثانية واحدة
-    - يفحص بالأولوية: pending أولاً، ثم active (للتحقق من المغادرة)
-    - يتجاهل left (محسوم - ما يرجعون)
+    🛡 الاستراتيجية:
+    - يفحص pending و active فقط
+    - لو شخص مو مشترك → يزيد عداد left_checks
+    - لازم 3 فحوصات متتالية تأكد المغادرة
+    - بعد التأكيد → ينقل للأرشيف (referrals_archived)
+    - خطأ اتصال = يتجاهل ويصفّر العداد
     """
-    BATCH_SIZE = 10
-    DELAY_BETWEEN_CHECKS = 0.1
-    DELAY_BETWEEN_CYCLES = 30
     
-    # ⏳ انتظار 60 ثانية بعد تشغيل البوت عشان الاتصال يستقر
-    time.sleep(60)
+    # ═══ إصلاح لمرة واحدة: رجّع الإحالات اللي صارت 'left' بالغلط ═══
+    try:
+        fix_key = db.settings.find_one({'key': 'ref_left_fix_v1'})
+        if not fix_key:
+            wrong_left = db.referrals_v2.count_documents({'status': 'left'})
+            if wrong_left > 0:
+                db.referrals_v2.update_many(
+                    {'status': 'left'},
+                    {'$set': {'status': 'active', 'left_checks': 0}}
+                )
+                logger.info(f"🔧 Fixed {wrong_left} wrongly-marked 'left' referrals → reset to 'active' for re-verification")
+            db.settings.insert_one({'key': 'ref_left_fix_v1', 'value': True})
+    except Exception as e:
+        logger.error(f"Error in referral fix: {e}")
+    BATCH_SIZE = 10
+    DELAY_BETWEEN_CHECKS = 0.15
+    DELAY_BETWEEN_CYCLES = 60
+    LEFT_CONFIRM_NEEDED = 3  # لازم 3 فحوصات متتالية تأكد إنه غادر
+    
+    # ⏳ انتظار 90 ثانية بعد تشغيل البوت عشان الاتصال يستقر
+    time.sleep(90)
     logger.info("🔄 Background referral checker started.")
     
     while True:
         try:
+            # نفحص pending و active فقط (left محفوظة في referrals_archived)
             cursor = db.referrals_v2.find({
                 'status': {'$in': ['pending', 'active']}
             })
@@ -1641,25 +1661,57 @@ def background_referral_checker_v2():
                     time.sleep(DELAY_BETWEEN_CHECKS)
                     continue
                 
-                # None = خطأ اتصال — نتجاهل ونحافظ على الحالة الحالية
+                # None = خطأ اتصال — نحافظ على الحالة + نصفّر العداد
                 if is_subbed is None:
+                    db.referrals_v2.update_one(
+                        {'invited_id': inv_uid},
+                        {'$set': {'left_checks': 0}}
+                    )
                     time.sleep(DELAY_BETWEEN_CHECKS)
                     continue
                 
                 if is_subbed:
-                    new_status = 'active'
+                    # مشترك ✅
+                    if current_status != 'active':
+                        mark_referral_status(inv_uid, 'active')
+                    # نصفّر عداد المغادرة
+                    db.referrals_v2.update_one(
+                        {'invited_id': inv_uid},
+                        {'$set': {'left_checks': 0}}
+                    )
                 else:
-                    new_status = 'left' if current_status == 'active' else 'pending'
-                
-                if new_status != current_status:
-                    mark_referral_status(inv_uid, new_status)
+                    # مو مشترك — نزيد العداد
+                    if current_status == 'active':
+                        left_checks = r.get('left_checks', 0) + 1
+                        if left_checks >= LEFT_CONFIRM_NEEDED:
+                            # ✅ مؤكد غادر — ننقله للأرشيف
+                            referrer_id = r.get('referrer_id')
+                            db.referrals_archived.insert_one({
+                                'invited_id': inv_uid,
+                                'referrer_id': referrer_id,
+                                'status': 'left',
+                                'original_status': current_status,
+                                'archived_at': int(time.time())
+                            })
+                            # نحذفه من الأساسي
+                            db.referrals_v2.delete_one({'invited_id': inv_uid})
+                            # نحدّث رصيد المُحيل
+                            try: update_referrer_balance(referrer_id)
+                            except: pass
+                            logger.info(f"📤 Referral {inv_uid} archived as LEFT (confirmed {LEFT_CONFIRM_NEEDED}x)")
+                        else:
+                            db.referrals_v2.update_one(
+                                {'invited_id': inv_uid},
+                                {'$set': {'left_checks': left_checks}}
+                            )
+                    # pending ما يصير left — يبقى pending
                 
                 time.sleep(DELAY_BETWEEN_CHECKS)
                 
                 batch_count += 1
                 if batch_count >= BATCH_SIZE:
                     batch_count = 0
-                    time.sleep(1)
+                    time.sleep(2)
         except Exception as e:
             logger.error(f"Background ref checker error: {e}")
         
@@ -2446,17 +2498,31 @@ def is_user_banned(uid):
     return True if u and u.get('is_banned') == 1 else False
 
 def check_forced_sub(uid):
+    """
+    يفحص اشتراك المستخدم في كل القنوات الإجبارية.
+    لازم يكون مشترك في كل القنوات — لو طلع من واحدة = غير مشترك.
+    يرجع True (مشترك بالكل) / False (طلع من واحدة على الأقل) / None (خطأ اتصال)
+    """
     if uid == OWNER_ID: return True
     user_db = get_user_data_full(uid)
     if user_db and user_db.get('is_admin') == 1: return True
     chans = list(db.required_channels.find())
     if not chans: return True
+    
+    had_error = False
     for c in chans:
         try:
-            status = bot.get_chat_member(c['channel_id'], uid).status
-            if status in ['left', 'kicked']: return False
+            member = bot.get_chat_member(c['channel_id'], uid)
+            if member.status in ['left', 'kicked']:
+                return False  # طلع من قناة واحدة = مو مشترك أكيد
         except Exception:
-            return None  # None = خطأ اتصال (مو متأكدين)
+            had_error = True
+            continue  # نكمّل فحص باقي القنوات
+    
+    # لو كل القنوات نجحت بدون خطأ = مشترك بالكل
+    # لو في خطأ بس ما لقينا أي "left" = مو متأكدين
+    if had_error:
+        return None
     return True
 
 def notify_admins(message_text):
@@ -3431,24 +3497,35 @@ def referral_list_page(call):
     page = int(call.data.replace("ref_list_", ""))
     PER_PAGE = 10
     
-    # جلب كل الإحالات مرتبة: active أول، ثم pending، ثم left
-    refs = list(db.referrals_v2.find({'referrer_id': uid}).sort('status', 1))
+    # جلب الإحالات النشطة والمعلقة
+    refs_active = list(db.referrals_v2.find({'referrer_id': uid}))
+    # جلب المغادرين المؤكدين من الأرشيف
+    refs_left = list(db.referrals_archived.find({'referrer_id': uid}))
     
-    total = len(refs)
+    # دمج وترتيب: active أول، pending، ثم left
+    status_order = {'active': 0, 'pending': 1, 'left': 2}
+    all_refs = []
+    for r in refs_active:
+        all_refs.append({'id': r.get('invited_id'), 'status': r.get('status', 'pending'), 'source': 'v2'})
+    for r in refs_left:
+        all_refs.append({'id': r.get('invited_id'), 'status': 'left', 'source': 'archived'})
+    all_refs.sort(key=lambda x: status_order.get(x['status'], 9))
+    
+    total = len(all_refs)
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     page = min(page, total_pages - 1)
     start = page * PER_PAGE
     end = start + PER_PAGE
-    page_refs = refs[start:end]
+    page_refs = all_refs[start:end]
     
     txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
     
-    if not refs:
+    if not all_refs:
         txt += "📭 No referrals yet." if l == 'en' else "📭 لا يوجد إحالات بعد."
     else:
         for r in page_refs:
-            inv_id = r.get('invited_id', '?')
-            status = r.get('status', 'pending')
+            inv_id = r['id']
+            status = r['status']
             
             if status == 'active':
                 icon = "🟢"
@@ -3458,9 +3535,8 @@ def referral_list_page(call):
                 status_txt = "Pending" if l == 'en' else "معلّق"
             else:
                 icon = "🔴"
-                status_txt = "Left" if l == 'en' else "غادر"
+                status_txt = "Left ✓" if l == 'en' else "غادر ✓"
             
-            # جلب اسم المستخدم
             inv_user = get_user_data_full(inv_id)
             if inv_user:
                 name = inv_user.get('name', '')[:15]
