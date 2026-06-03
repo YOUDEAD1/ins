@@ -334,17 +334,26 @@ class APIHandler(BaseHTTPRequestHandler):
                 manual = pr.get('is_manual', False)
                 base_price = float(pr.get('price', 0))
                 cp = custom_prices.get(pid, {})
+                # 🌟 دعم Premium Emoji
+                custom_emoji_id = pr.get('custom_emoji_id')
+                p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
+                p_name_en = cp.get('name_en') or pr.get('name_en', '')
                 item = {
                     'id': pid,
-                    'name_ar': cp.get('name_ar') or pr.get('name_ar', ''),
-                    'name_en': cp.get('name_en') or pr.get('name_en', ''),
+                    'name_ar': p_name_ar,
+                    'name_en': p_name_en,
                     'desc_ar': cp.get('desc_ar') or pr.get('desc_ar', ''),
                     'desc_en': cp.get('desc_en') or pr.get('desc_en', ''),
                     'base_price': base_price,
                     'your_price': cp.get('sell_price', base_price),
                     'stock': 'unlimited' if manual else get_product_stock_count(pid),
                     'is_manual': manual,
-                    'discount_tiers': pr.get('discount_tiers', [])
+                    'discount_tiers': pr.get('discount_tiers', []),
+                    # 🌟 حقول الإيموجي المميز (Premium Emoji)
+                    'custom_emoji_id': custom_emoji_id,
+                    'has_premium_emoji': bool(custom_emoji_id),
+                    'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
+                    'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
                 }
                 result.append(item)
             return _json_resp(self, 200, {'success': True, 'products': result})
@@ -358,16 +367,25 @@ class APIHandler(BaseHTTPRequestHandler):
             manual = pr.get('is_manual', False)
             base_price = float(pr.get('price', 0))
             cp = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
+            # 🌟 دعم Premium Emoji
+            custom_emoji_id = pr.get('custom_emoji_id')
+            p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
+            p_name_en = cp.get('name_en') or pr.get('name_en', '')
             return _json_resp(self, 200, {'success': True, 'product': {
                 'id': pid,
-                'name_ar': cp.get('name_ar') or pr.get('name_ar', ''),
-                'name_en': cp.get('name_en') or pr.get('name_en', ''),
+                'name_ar': p_name_ar,
+                'name_en': p_name_en,
                 'desc_ar': cp.get('desc_ar') or pr.get('desc_ar', ''),
                 'desc_en': cp.get('desc_en') or pr.get('desc_en', ''),
                 'base_price': base_price,
                 'your_price': cp.get('sell_price', base_price),
                 'stock': 'unlimited' if manual else get_product_stock_count(pid),
-                'is_manual': manual, 'discount_tiers': pr.get('discount_tiers', [])
+                'is_manual': manual, 'discount_tiers': pr.get('discount_tiers', []),
+                # 🌟 حقول الإيموجي المميز (Premium Emoji)
+                'custom_emoji_id': custom_emoji_id,
+                'has_premium_emoji': bool(custom_emoji_id),
+                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
+                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
             }})
 
         if route == '/balance':
@@ -577,6 +595,26 @@ class APIHandler(BaseHTTPRequestHandler):
                     f"🆔 Order: <code>{order_id}</code>\n"
                     f"💳 Balance: <b>${round(updated.get('balance', 0), 2)}</b>",
                     parse_mode="HTML")
+            except: pass
+
+            # 🔔 تنبيه الستوك بعد البيع عبر API (يصل للأونر عشان يعيد التعبئة)
+            try:
+                remaining = get_product_stock_count(pid)
+                pname = clean_name(pr.get('name_ar', pr.get('name_en', '')))
+                if remaining == 0:
+                    bot.send_message(OWNER_ID,
+                        f"🚨 <b>تنبيه: ستوك انتهى! (بيع عبر API)</b>\n\n"
+                        f"📦 المنتج: <b>{pname}</b>\n"
+                        f"📊 المتبقي: <b>0</b>\n\n"
+                        f"⚠️ أعد إضافة ستوك لهذا المنتج الآن!",
+                        parse_mode="HTML")
+                elif remaining <= 2:
+                    bot.send_message(OWNER_ID,
+                        f"⚠️ <b>تنبيه: ستوك قارب على الانتهاء! (بيع عبر API)</b>\n\n"
+                        f"📦 المنتج: <b>{pname}</b>\n"
+                        f"📊 المتبقي: <b>{remaining}</b>\n\n"
+                        f"⚠️ يُفضّل إضافة ستوك جديد قريباً!",
+                        parse_mode="HTML")
             except: pass
 
             return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'completed', 'qty': qty, 'total_price': total, 'codes': codes, 'new_balance': round(updated.get('balance', 0), 2)})
@@ -2562,6 +2600,98 @@ def notify_admins(message_text):
         if admin['user_id'] != OWNER_ID:
             try: bot.send_message(admin['user_id'], message_text, parse_mode="HTML")
             except: pass
+
+
+def notify_balance_gift(target_uid, amount, by_admin=True):
+    """
+    🎁 يُشعر المستخدم في الخاص + يرسل في قناة اللوق عند إضافة/خصم رصيد من الأدمن.
+    - amount موجب = إضافة | سالب = خصم
+    """
+    try:
+        amount = round(float(amount), 2)
+    except (ValueError, TypeError):
+        return
+    if amount == 0:
+        return
+
+    # 1) إشعار المستخدم في الخاص (بلغته)
+    try:
+        u = get_user_data_full(target_uid)
+        new_balance = round(float(u.get('balance', 0)), 2) if u else 0.0
+        l = u.get('lang', 'ar') if u else 'ar'
+
+        if amount > 0:
+            if l == 'ar':
+                user_msg = (
+                    f"🎁 <b>تم إضافة رصيد لحسابك!</b>\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 المبلغ المضاف: <b>+${amount:.2f}</b>\n"
+                    f"💼 رصيدك الحالي: <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"<i>تمت الإضافة من قبل الإدارة. 🛡️</i>"
+                )
+            else:
+                user_msg = (
+                    f"🎁 <b>Balance Added to Your Account!</b>\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 Amount Added: <b>+${amount:.2f}</b>\n"
+                    f"💼 Your Balance: <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"<i>Added by the administration. 🛡️</i>"
+                )
+        else:
+            if l == 'ar':
+                user_msg = (
+                    f"⚠️ <b>تم خصم رصيد من حسابك</b>\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 المبلغ المخصوم: <b>${abs(amount):.2f}</b>\n"
+                    f"💼 رصيدك الحالي: <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"<i>تم التعديل من قبل الإدارة.</i>"
+                )
+            else:
+                user_msg = (
+                    f"⚠️ <b>Balance Deducted</b>\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 Amount: <b>${abs(amount):.2f}</b>\n"
+                    f"💼 Your Balance: <b>${new_balance:.2f}</b>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"<i>Adjusted by the administration.</i>"
+                )
+        bot.send_message(target_uid, user_msg, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"notify_balance_gift user DM failed: {e}")
+
+    # 2) قناة اللوق (عشان الأدمن يشوف العملية أيضاً)
+    try:
+        log_ch = get_setting('log_channel')
+        if log_ch and log_ch != "Not Set":
+            u = get_user_data_full(target_uid)
+            obs_user = obscure_text(u.get('username') or str(target_uid)) if u else "**"
+            if amount > 0:
+                log_msg = (
+                    f"🎁 <b>Admin Balance Gift!</b> 💰\n\n"
+                    f"👤 <b>User:</b> {obs_user}\n"
+                    f"💵 <b>Added:</b> <code>+${amount:.2f}</code>\n"
+                    f"🛡 <b>By:</b> Admin\n\n"
+                    f"<i>Manual top-up by administration ⚡</i>"
+                )
+                # نص قابل للتعديل من CMS (متغيرين: المستخدم، المبلغ)
+                custom = db.custom_texts.find_one({'lang': 'en', 'key': 'log_admin_gift'})
+                if custom and custom.get('value'):
+                    try: log_msg = custom['value'].format(obs_user, f"{amount:.2f}")
+                    except: pass
+            else:
+                log_msg = (
+                    f"⚠️ <b>Admin Balance Adjustment</b>\n\n"
+                    f"👤 <b>User:</b> {obs_user}\n"
+                    f"💵 <b>Deducted:</b> <code>${abs(amount):.2f}</code>\n"
+                    f"🛡 <b>By:</b> Admin"
+                )
+            bot.send_message(log_ch, log_msg, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"notify_balance_gift log failed: {e}")
+
 
 # ============================================================
 # 🏠 8. معالج البداية 
@@ -9685,11 +9815,93 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     )
     markup.add(InlineKeyboardButton("📥 تحميل السجل الكامل", callback_data=f"ad_full_hist_{target_uid}"))
     markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
+    markup.add(InlineKeyboardButton("👥 إحالاته", callback_data=f"ad_uref_{target_uid}_0"))
     markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
     try:
         if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
         else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uref_"))
+@admin_required
+def admin_user_referrals_page(call):
+    """👥 عرض إحالات مستخدم معيّن للأدمن (بصفحات وأسهم)"""
+    bot.answer_callback_query(call.id)
+    rest = call.data.replace("ad_uref_", "")
+    parts = rest.rsplit("_", 1)
+    try:
+        target_uid = int(parts[0])
+        page = int(parts[1])
+    except Exception:
+        return
+    PER_PAGE = 10
+
+    refs_active = list(db.referrals_v2.find({'referrer_id': target_uid}))
+    refs_left = list(db.referrals_archived.find({'referrer_id': target_uid}))
+
+    status_order = {'active': 0, 'pending': 1, 'left': 2}
+    all_refs = []
+    for r in refs_active:
+        all_refs.append({'id': r.get('invited_id'), 'status': r.get('status', 'pending')})
+    for r in refs_left:
+        all_refs.append({'id': r.get('invited_id'), 'status': 'left'})
+    all_refs.sort(key=lambda x: status_order.get(x['status'], 9))
+
+    total = len(all_refs)
+    active_n = sum(1 for r in all_refs if r['status'] == 'active')
+    pending_n = sum(1 for r in all_refs if r['status'] == 'pending')
+    left_n = sum(1 for r in all_refs if r['status'] == 'left')
+
+    total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * PER_PAGE
+    page_refs = all_refs[start:start + PER_PAGE]
+
+    # معلومات صاحب الإحالات + أرباحه
+    target_user = get_user_data_full(target_uid)
+    t_uname = f"@{target_user.get('username')}" if target_user and target_user.get('username') else ''
+    earn_ref = round(float(target_user.get('ref_v2_earned', 0.0)), 2) if target_user else 0.0
+    earn_buy = round(float(target_user.get('ref_v2_purchase_earned', 0.0)), 2) if target_user else 0.0
+
+    txt = (
+        f"👥 <b>إحالات المستخدم</b>\n"
+        f"🆔 <code>{target_uid}</code> {t_uname}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🟢 نشط: <b>{active_n}</b> | 🟡 معلق: <b>{pending_n}</b> | 🔴 غادر: <b>{left_n}</b>\n"
+        f"💰 أرباح الإحالات: <b>${earn_ref:.2f}</b> | 🛍 المشتريات: <b>${earn_buy:.2f}</b>\n"
+        f"📊 الإجمالي: <b>{total}</b>  (صفحة {page+1}/{total_pages})\n"
+        f"━━━━━━━━━━━━━━\n\n"
+    )
+
+    if not all_refs:
+        txt += "📭 لا يوجد إحالات لهذا المستخدم."
+    else:
+        for r in page_refs:
+            inv_id = r['id']
+            status = r['status']
+            icon = "🟢" if status == 'active' else ("🟡" if status == 'pending' else "🔴")
+            inv_user = get_user_data_full(inv_id)
+            if inv_user:
+                name = clean_name(inv_user.get('name', ''))[:15]
+                uname = f"@{inv_user.get('username')}" if inv_user.get('username') else ''
+                txt += f"{icon} <code>{inv_id}</code> {name} {uname}\n"
+            else:
+                txt += f"{icon} <code>{inv_id}</code>\n"
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ السابق", callback_data=f"ad_uref_{target_uid}_{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("التالي ▶️", callback_data=f"ad_uref_{target_uid}_{page+1}"))
+    if nav:
+        markup.add(*nav)
+    markup.add(InlineKeyboardButton("🔙 رجوع لملف العميل", callback_data=f"ad_u_det_{target_uid}"))
+
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except: pass
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_dep_"))
 def ad_uh_dep_handler(call):
@@ -10173,6 +10385,9 @@ def ad_ugift_exec(message, target_uid):
         val = float(message.text)
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
         bot.send_message(message.chat.id, "✅ تم تعديل الرصيد بنجاح.")
+        # 🎁 إشعار المستخدم + قناة اللوق بإضافة/خصم الرصيد
+        try: notify_balance_gift(target_uid, val)
+        except Exception as _e: logger.debug(f"gift notify err: {_e}")
         show_user_admin_profile(message.chat.id, target_uid)
     except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
 
@@ -10255,6 +10470,9 @@ def ad_gift_finish(message, tid):
         val = float(message.text)
         db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
         bot.send_message(message.from_user.id, "✅ Done.")
+        # 🎁 إشعار المستخدم + قناة اللوق بإضافة/خصم الرصيد
+        try: notify_balance_gift(tid, val)
+        except Exception as _e: logger.debug(f"gift notify err: {_e}")
     except: bot.send_message(message.from_user.id, "❌ Error.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
@@ -10833,10 +11051,37 @@ API_URL = data["u"]
 GET/POST {{API_URL}}/endpoint
 مع Header: Authorization: Bearer {{API_KEY}}
 
+⚠️ مهم: لما ترسل أي رسالة فيها أسماء منتجات، استخدم parse_mode="HTML" عشان الإيموجي المميز (Premium Emoji) يبان.
+
 الـ Endpoints:
 
 GET /products → قائمة المنتجات
-{{"success": true, "products": [{{"id":"1","name_en":"Netflix","your_price":3.5,"stock":45,"is_manual":false}}]}}
+{{"success": true, "products": [{{
+  "id": "1",
+  "name_ar": "نتفلكس",
+  "name_en": "Netflix",
+  "name_ar_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> نتفلكس",
+  "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
+  "custom_emoji_id": "5123",
+  "has_premium_emoji": true,
+  "your_price": 3.5,
+  "stock": 45,
+  "is_manual": false
+}}]}}
+
+🌟 كيف تعرض المنتج مع الإيموجي المميز:
+- في الرسائل: استخدم name_ar_html أو name_en_html (جاهز فيه وسم tg-emoji) مع parse_mode="HTML"
+- في الأزرار (InlineKeyboardButton): استخدم الاسم العادي name_ar، ولو تبي الإيموجي يبان داخل الزر أضف icon_custom_emoji_id = custom_emoji_id
+- لو has_premium_emoji = false استخدم الاسم العادي بدون HTML
+
+مثال للأزرار مع الإيموجي:
+btn = InlineKeyboardButton(text=p["name_ar"], callback_data=f"buy_{{p['id']}}")
+if p.get("custom_emoji_id"):
+    btn.icon_custom_emoji_id = p["custom_emoji_id"]
+
+مثال للرسائل:
+text = f"{{p['name_ar_html']}}\\n💰 السعر: ${{p['your_price']}}"
+bot.send_message(chat_id, text, parse_mode="HTML")
 
 GET /balance → الرصيد
 {{"success": true, "balance": 25.00}}
@@ -10850,7 +11095,8 @@ GET /orders → الطلبات السابقة
 
 المطلوب في البوت:
 - /start → زر المنتجات + زر الرصيد
-- المنتجات تجي من API وتظهر كأزرار (اسم + سعر + ستوك)
+- المنتجات تجي من API وتظهر كأزرار مع الإيموجي المميز (استخدم icon_custom_emoji_id)
+- في رسالة تفاصيل المنتج استخدم name_ar_html مع parse_mode="HTML"
 - شراء → POST /purchase → الأكواد ترسل للعميل
 - لو الرصيد قليل → رسالة خطأ
 - لو خلص الستوك → رسالة خطأ
@@ -10880,10 +11126,37 @@ All requests:
 GET/POST {{API_URL}}/endpoint
 Header: Authorization: Bearer {{API_KEY}}
 
+⚠️ IMPORTANT: When sending messages with product names, use parse_mode="HTML" so premium emojis render.
+
 Endpoints:
 
 GET /products → Product list
-{{"success": true, "products": [{{"id":"1","name_en":"Netflix","your_price":3.5,"stock":45,"is_manual":false}}]}}
+{{"success": true, "products": [{{
+  "id": "1",
+  "name_ar": "نتفلكس",
+  "name_en": "Netflix",
+  "name_ar_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> نتفلكس",
+  "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
+  "custom_emoji_id": "5123",
+  "has_premium_emoji": true,
+  "your_price": 3.5,
+  "stock": 45,
+  "is_manual": false
+}}]}}
+
+🌟 How to display products with premium emojis:
+- In messages: use name_en_html or name_ar_html (already has the tg-emoji tag) with parse_mode="HTML"
+- In buttons (InlineKeyboardButton): use the plain name_en, and to show the emoji inside the button add icon_custom_emoji_id = custom_emoji_id
+- If has_premium_emoji = false, use the plain name without HTML
+
+Button example with emoji:
+btn = InlineKeyboardButton(text=p["name_en"], callback_data=f"buy_{{p['id']}}")
+if p.get("custom_emoji_id"):
+    btn.icon_custom_emoji_id = p["custom_emoji_id"]
+
+Message example:
+text = f"{{p['name_en_html']}}\\n💰 Price: ${{p['your_price']}}"
+bot.send_message(chat_id, text, parse_mode="HTML")
 
 GET /balance → Balance
 {{"success": true, "balance": 25.00}}
@@ -10897,7 +11170,8 @@ GET /orders → Order history
 
 Requirements:
 - /start → Products button + Balance button
-- Products fetched from API, shown as buttons (name + price + stock)
+- Products fetched from API, shown as buttons WITH premium emojis (use icon_custom_emoji_id)
+- In product detail messages use name_en_html with parse_mode="HTML"
 - Buy → POST /purchase → send codes to customer
 - Low balance → error message
 - Out of stock → error message
