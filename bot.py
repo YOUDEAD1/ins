@@ -280,6 +280,40 @@ def _json_resp(h, code, data):
     h.end_headers()
     h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
+
+def _extract_emoji_ids_from_text(text):
+    """🌟 يستخرج كل معرّفات الإيموجي المميز من نص يحتوي على وسوم <tg-emoji emoji-id="...">"""
+    if not text:
+        return []
+    try:
+        return re.findall(r'<tg-emoji\s+emoji-id="([^"]+)"', str(text))
+    except Exception:
+        return []
+
+
+def _build_emoji_fields(pr, name_custom_emoji_id, desc_ar, desc_en):
+    """
+    🌟 يبني كل حقول الإيموجي المميز لمنتج (للاسم والوصف معاً).
+    يرجّع dict جاهز يُدمج في رد الـ API.
+    """
+    desc_ar_ids = _extract_emoji_ids_from_text(desc_ar)
+    desc_en_ids = _extract_emoji_ids_from_text(desc_en)
+    # نجمع معرّفات الوصف (عربي + إنجليزي) بدون تكرار
+    desc_ids = list(dict.fromkeys(desc_ar_ids + desc_en_ids))
+    # كل إيموجيات المنتج (أيقونة الاسم + إيموجيات الوصف)
+    all_ids = []
+    if name_custom_emoji_id:
+        all_ids.append(str(name_custom_emoji_id))
+    all_ids = list(dict.fromkeys(all_ids + desc_ids))
+    return {
+        # الوصف أصلاً يحتوي على وسوم <tg-emoji> جاهزة — تُعرض بـ parse_mode="HTML"
+        'desc_has_premium_emoji': bool(desc_ids),
+        'desc_emoji_ids': desc_ids,
+        # كل معرّفات الإيموجي المميز في المنتج (الاسم + الوصف) — مفيدة للمواقع
+        'all_emoji_ids': all_ids
+    }
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -338,23 +372,27 @@ class APIHandler(BaseHTTPRequestHandler):
                 custom_emoji_id = pr.get('custom_emoji_id')
                 p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
                 p_name_en = cp.get('name_en') or pr.get('name_en', '')
+                p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
+                p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
                 item = {
                     'id': pid,
                     'name_ar': p_name_ar,
                     'name_en': p_name_en,
-                    'desc_ar': cp.get('desc_ar') or pr.get('desc_ar', ''),
-                    'desc_en': cp.get('desc_en') or pr.get('desc_en', ''),
+                    'desc_ar': p_desc_ar,
+                    'desc_en': p_desc_en,
                     'base_price': base_price,
                     'your_price': cp.get('sell_price', base_price),
                     'stock': 'unlimited' if manual else get_product_stock_count(pid),
                     'is_manual': manual,
                     'discount_tiers': pr.get('discount_tiers', []),
-                    # 🌟 حقول الإيموجي المميز (Premium Emoji)
+                    # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                     'custom_emoji_id': custom_emoji_id,
                     'has_premium_emoji': bool(custom_emoji_id),
                     'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
                     'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
                 }
+                # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
+                item.update(_build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en))
                 result.append(item)
             return _json_resp(self, 200, {'success': True, 'products': result})
 
@@ -371,22 +409,27 @@ class APIHandler(BaseHTTPRequestHandler):
             custom_emoji_id = pr.get('custom_emoji_id')
             p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
             p_name_en = cp.get('name_en') or pr.get('name_en', '')
-            return _json_resp(self, 200, {'success': True, 'product': {
+            p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
+            p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
+            product_obj = {
                 'id': pid,
                 'name_ar': p_name_ar,
                 'name_en': p_name_en,
-                'desc_ar': cp.get('desc_ar') or pr.get('desc_ar', ''),
-                'desc_en': cp.get('desc_en') or pr.get('desc_en', ''),
+                'desc_ar': p_desc_ar,
+                'desc_en': p_desc_en,
                 'base_price': base_price,
                 'your_price': cp.get('sell_price', base_price),
                 'stock': 'unlimited' if manual else get_product_stock_count(pid),
                 'is_manual': manual, 'discount_tiers': pr.get('discount_tiers', []),
-                # 🌟 حقول الإيموجي المميز (Premium Emoji)
+                # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                 'custom_emoji_id': custom_emoji_id,
                 'has_premium_emoji': bool(custom_emoji_id),
                 'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
                 'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
-            }})
+            }
+            # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
+            product_obj.update(_build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en))
+            return _json_resp(self, 200, {'success': True, 'product': product_obj})
 
         if route == '/balance':
             u = get_user_data_full(uid)
@@ -597,25 +640,26 @@ class APIHandler(BaseHTTPRequestHandler):
                     parse_mode="HTML")
             except: pass
 
-            # 🔔 تنبيه الستوك بعد البيع عبر API (يصل للأونر عشان يعيد التعبئة)
+            # 🔔 تنبيه الستوك بعد البيع عبر API (يصل لكل الأدمن عشان يعيد التعبئة)
             try:
                 remaining = get_product_stock_count(pid)
                 pname = clean_name(pr.get('name_ar', pr.get('name_en', '')))
                 if remaining == 0:
-                    bot.send_message(OWNER_ID,
+                    notify_admins(
                         f"🚨 <b>تنبيه: ستوك انتهى! (بيع عبر API)</b>\n\n"
                         f"📦 المنتج: <b>{pname}</b>\n"
                         f"📊 المتبقي: <b>0</b>\n\n"
-                        f"⚠️ أعد إضافة ستوك لهذا المنتج الآن!",
-                        parse_mode="HTML")
+                        f"⚠️ أعد إضافة ستوك لهذا المنتج الآن!"
+                    )
                 elif remaining <= 2:
-                    bot.send_message(OWNER_ID,
+                    notify_admins(
                         f"⚠️ <b>تنبيه: ستوك قارب على الانتهاء! (بيع عبر API)</b>\n\n"
                         f"📦 المنتج: <b>{pname}</b>\n"
                         f"📊 المتبقي: <b>{remaining}</b>\n\n"
-                        f"⚠️ يُفضّل إضافة ستوك جديد قريباً!",
-                        parse_mode="HTML")
-            except: pass
+                        f"⚠️ يُفضّل إضافة ستوك جديد قريباً!"
+                    )
+            except Exception as _stk_e:
+                logger.debug(f"API stock alert error: {_stk_e}")
 
             return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'completed', 'qty': qty, 'total_price': total, 'codes': codes, 'new_balance': round(updated.get('balance', 0), 2)})
 
@@ -1218,6 +1262,14 @@ def ensure_critical_indexes():
 # نُفّذها فوراً عند بدء البوت
 initialize_referrals_v2()
 ensure_critical_indexes()
+
+# 🛡 ضمان أن الأونر مسجّل كأدمن (عشان يستقبل تنبيهات الستوك وكل إشعارات الأدمن بثبات)
+try:
+    if OWNER_ID:
+        db.users.update_one({'user_id': OWNER_ID}, {'$set': {'is_admin': 1}})
+        logger.info(f"✅ تم التأكد أن OWNER_ID ({OWNER_ID}) مسجّل كأدمن.")
+except Exception as _owner_e:
+    logger.debug(f"Owner promote skipped: {_owner_e}")
 
 
 def register_new_referral(invited_id, referrer_id):
@@ -2691,6 +2743,91 @@ def notify_balance_gift(target_uid, amount, by_admin=True):
             bot.send_message(log_ch, log_msg, parse_mode="HTML")
     except Exception as e:
         logger.debug(f"notify_balance_gift log failed: {e}")
+
+
+@bot.message_handler(commands=['diag'])
+def diag_alerts_cmd(message):
+    """🔧 تشخيص إشعارات الأدمن/الستوك — للأونر والأدمن فقط"""
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+
+    admins = list(db.users.find({'is_admin': 1}))
+    admin_ids = [a.get('user_id') for a in admins]
+    my_rec = db.users.find_one({'user_id': uid}) or {}
+    owner_rec = db.users.find_one({'user_id': OWNER_ID}) if OWNER_ID else None
+
+    # المستهدفون فعلياً (نفس منطق notify_admins)
+    targets = set()
+    if OWNER_ID:
+        targets.add(OWNER_ID)
+    for a in admin_ids:
+        if a:
+            targets.add(a)
+
+    report = (
+        f"🔧 <b>تشخيص الإشعارات</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🆔 OWNER_ID في .env: <code>{OWNER_ID}</code>\n"
+        f"🆔 آيديك: <code>{uid}</code>\n"
+        f"{'✅' if uid == OWNER_ID else '❗'} OWNER_ID = آيديك؟ <b>{'نعم' if uid == OWNER_ID else 'لا'}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👑 عدد الأدمن (is_admin=1): <b>{len(admin_ids)}</b>\n"
+        f"📋 آيديهم: <code>{admin_ids or 'لا يوجد'}</code>\n"
+        f"🛡 سجلك is_admin = <b>{my_rec.get('is_admin')}</b>\n"
+        f"🛡 سجل OWNER_ID is_admin = <b>{owner_rec.get('is_admin') if owner_rec else 'غير موجود'}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎯 من يستقبل تنبيه الستوك: <b>{len(targets)}</b>\n"
+        f"📋 <code>{list(targets) or 'لا أحد ❗'}</code>"
+    )
+    try:
+        bot.send_message(message.chat.id, report, parse_mode="HTML")
+    except Exception:
+        bot.send_message(message.chat.id, report)
+
+    # تجربة إرسال فعلية لكل مستهدف
+    test_msg = "🔔 <b>تنبيه تجريبي للستوك</b>\n\nإذا وصلتك هذي الرسالة، فإشعارات الستوك تشتغل صح ✅"
+    ok, fail = [], []
+    for t in targets:
+        try:
+            bot.send_message(t, test_msg, parse_mode="HTML")
+            ok.append(t)
+        except Exception as e:
+            fail.append(f"{t}: {str(e)[:40]}")
+
+    # الخلاصة + التشخيص التلقائي
+    if not targets:
+        verdict = (
+            "🚨 <b>المشكلة لقيتها:</b> ما فيه أي مستهدف للإشعارات!\n\n"
+            "OWNER_ID = <code>0</code> أو غلط، وما فيه أدمن مسجّل.\n\n"
+            "✅ <b>الحل:</b> حط OWNER_ID الصحيح في ملف <code>.env</code> وأعد تشغيل البوت."
+        )
+    elif uid not in targets:
+        verdict = (
+            "⚠️ <b>المشكلة لقيتها:</b> آيديك مو ضمن من يستقبل التنبيهات.\n\n"
+            "✅ <b>الحل:</b> صحّح <code>OWNER_ID</code> في .env ليطابق آيديك "
+            f"(<code>{uid}</code>) وأعد تشغيل البوت."
+        )
+    elif uid in ok:
+        verdict = (
+            "✅ <b>الإشعارات تشتغل تماماً!</b>\n\n"
+            "لو ما جاك تنبيه ستوك حقيقي، السبب واحد من:\n"
+            "1️⃣ ما رفعت آخر نسخة من <code>bot.py</code> للسيرفر\n"
+            "2️⃣ ما أعدت تشغيل البوت بعد الرفع\n"
+            "3️⃣ المنتج يدوي (التنبيه للمنتجات التلقائية فقط)\n"
+            "4️⃣ تجرّب الشراء من حساب ثاني — التنبيه يروح لحساب الأدمن مو حساب المشتري"
+        )
+    else:
+        verdict = (
+            "❌ <b>البوت ما قدر يرسل لك!</b>\n"
+            f"السبب: <code>{fail}</code>\n\n"
+            "غالباً ما بدأت محادثة مع البوت من حسابك. أرسل /start للبوت ثم جرّب /diag مرة ثانية."
+        )
+
+    try:
+        bot.send_message(message.chat.id, verdict, parse_mode="HTML")
+    except Exception:
+        bot.send_message(message.chat.id, verdict)
 
 
 # ============================================================
@@ -4360,28 +4497,27 @@ def _do_purchase(uid, pid, qty, lang):
         except Exception as ref_err:
             logger.error(f"Error awarding referral: {ref_err}")
 
-        # 🔔 تنبيه الستوك
+        # 🔔 تنبيه الستوك (يصل لكل الأدمن، مو OWNER_ID فقط)
         if not is_manual:
             try:
                 remaining = get_product_stock_count(pid)
                 pname = clean_name(p.get('name_ar', ''))
                 if remaining == 0:
-                    try: bot.send_message(OWNER_ID,
+                    notify_admins(
                         f"🚨 <b>تنبيه: ستوك انتهى!</b>\n\n"
                         f"📦 المنتج: <b>{pname}</b>\n"
                         f"📊 المتبقي: <b>0</b>\n\n"
-                        f"⚠️ أضف ستوك جديد الآن!",
-                        parse_mode="HTML")
-                    except: pass
+                        f"⚠️ أضف ستوك جديد الآن!"
+                    )
                 elif remaining <= 2:
-                    try: bot.send_message(OWNER_ID,
+                    notify_admins(
                         f"⚠️ <b>تنبيه: ستوك قارب على الانتهاء!</b>\n\n"
                         f"📦 المنتج: <b>{pname}</b>\n"
                         f"📊 المتبقي: <b>{remaining}</b>\n\n"
-                        f"⚠️ أضف ستوك جديد!",
-                        parse_mode="HTML")
-                    except: pass
-            except: pass
+                        f"⚠️ أضف ستوك جديد!"
+                    )
+            except Exception as _stk_e:
+                logger.debug(f"Stock alert error: {_stk_e}")
 
     finally:
         _release_purchase_lock(uid)
@@ -4903,44 +5039,39 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     - $5 → $5.003521
     """
     base = float(base_amount_usd)
-    
-    # نحاول 200 مرة لإيجاد مبلغ فريد
-    for attempt in range(200):
-        # 🎲 6 خانات عشرية عشوائية = مليون احتمال!
-        # نطاق: 0.000100 إلى 0.009999 (لا يزال أقل من سنت!)
-        random_micro = random.randint(100, 9999)
-        extra = random_micro / 1000000.0
-        unique_amount = round(base + extra, 6)
-        
-        # 🛡 نفحص ما في pending مشابه
-        existing = db.pending_deposits.find_one({
-            'unique_amount_usd': unique_amount,
-            'coin': coin,
-            'status': 'pending',
-            'expires_at': {'$gt': int(time.time())}
-        })
-        
-        if not existing:
-            # ✅ مبلغ فريد!
+    # 🛡 مسافة أمان: لازم تكون أكبر من نطاق المطابقة (±0.0001) عشان ما يتقارب إيداعان أبداً
+    MIN_SPACING = 0.0002
+
+    def _is_free(amount):
+        """يتأكد ما فيه إيداع معلّق قريب من هذا المبلغ (داخل مسافة الأمان)."""
+        try:
+            clash = db.pending_deposits.find_one({
+                'coin': coin,
+                'status': 'pending',
+                'expires_at': {'$gt': int(time.time())},
+                'unique_amount_usd': {
+                    '$gte': amount - MIN_SPACING,
+                    '$lte': amount + MIN_SPACING
+                }
+            })
+            return clash is None
+        except Exception:
+            return True
+
+    # المحاولة 1: مدى السنت (0.000100 - 0.009999) مع مسافة أمان
+    for _ in range(400):
+        unique_amount = round(base + random.randint(100, 9999) / 1000000.0, 6)
+        if _is_free(unique_amount):
             return unique_amount
-    
-    # احتياط: نضيف 7 خانات (10 مليون احتمال)
-    for attempt in range(200):
-        random_nano = random.randint(1000, 99999)
-        extra = random_nano / 10000000.0
-        unique_amount = round(base + extra, 7)
-        
-        existing = db.pending_deposits.find_one({
-            'unique_amount_usd': unique_amount,
-            'coin': coin,
-            'status': 'pending'
-        })
-        
-        if not existing:
+
+    # المحاولة 2: مدى أوسع شوي (لين ~0.03) لو ازدحمت الإيداعات بنفس المبلغ
+    for _ in range(400):
+        unique_amount = round(base + random.randint(100, 29999) / 1000000.0, 6)
+        if _is_free(unique_amount):
             return unique_amount
-    
-    # احتياط أخير
-    return round(base + random.uniform(0.000001, 0.009999), 6)
+
+    # احتياط أخير (نادر جداً): نرجّع مبلغ حتى لو ما لقينا مسافة مثالية
+    return round(base + random.randint(100, 99999) / 1000000.0, 6)
 
 
 def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
@@ -5013,13 +5144,39 @@ def is_deposit_locked(uid):
         return False
 
 
+_ambiguous_alert_cache = {}
+
+def _alert_ambiguous_deposit(coin, amount_usd, records):
+    """🚨 يبلّغ الأدمن عن إيداع غامض (مرة كل ساعة لنفس المبلغ لتفادي التكرار)."""
+    try:
+        key = f"{coin}:{round(float(amount_usd), 5)}"
+        now = int(time.time())
+        if now - _ambiguous_alert_cache.get(key, 0) < 3600:
+            return
+        _ambiguous_alert_cache[key] = now
+        ids = ", ".join(
+            f"{r.get('user_id')}=${float(r.get('unique_amount_usd', 0)):.6f}" for r in records[:5]
+        )
+        notify_admins(
+            f"⚠️ <b>إيداع غامض — مراجعة يدوية مطلوبة!</b>\n\n"
+            f"💳 العملة: <b>{coin}</b>\n"
+            f"💰 المبلغ المُستلَم: <b>${float(amount_usd):.6f}</b>\n"
+            f"🔀 يطابق أكثر من إيداع معلّق بنفس القرب:\n<code>{ids}</code>\n\n"
+            f"🛡 <b>لم يُضَف الرصيد لأحد تلقائياً</b> حمايةً من إعطاء الشخص الخطأ.\n"
+            f"راجع وأضف الرصيد يدوياً للشخص الصحيح من «👥 إدارة العملاء ← تعديل رصيده»."
+        )
+    except Exception:
+        pass
+
+
 def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
     """
-    🛡 يبحث عن إيداع معلق مطابق للمبلغ (مع تسامح صغير).
-    
-    يستخدم تسامح صغير جداً (0.0001$) للتعامل مع تذبذب أسعار العملات.
-    
-    يرجع المستخدم الذي سجل الإيداع.
+    🛡 يبحث عن إيداع معلّق مطابق للمبلغ المُستلَم.
+
+    الإصلاح المهم:
+    - يطابق على الإيداع **الأقرب** لقيمة المبلغ المُستلَم بالضبط (مو الأقدم!).
+    - لو فيه إيداعان بنفس القرب تماماً (غموض) → ما يرجّع أحد + يبلّغ الأدمن
+      (أأمن من إعطاء الشخص الخطأ).
     """
     try:
         amount_usd = float(amount_usd)
@@ -5031,10 +5188,29 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
                 '$lte': amount_usd + tolerance
             },
             'expires_at': {'$gt': int(time.time())}
-        }).sort('created_at', 1))
-        
-        # نأخذ الأقدم (أول من سجل)
-        return records[0] if records else None
+        }))
+
+        if not records:
+            return None
+        if len(records) == 1:
+            return records[0]
+
+        # 🛡 أكثر من إيداع داخل النطاق — نرتّب بالأقرب للمبلغ بالضبط (مو الأقدم)
+        records.sort(key=lambda r: (
+            abs(float(r.get('unique_amount_usd', 0)) - amount_usd),
+            r.get('created_at', 0)
+        ))
+        closest, second = records[0], records[1]
+        d1 = abs(float(closest.get('unique_amount_usd', 0)) - amount_usd)
+        d2 = abs(float(second.get('unique_amount_usd', 0)) - amount_usd)
+
+        # لو الأقرب أوضح من الثاني بفارق كافٍ → هو الصحيح (آمن نعطيه)
+        if (d2 - d1) >= 0.00005:
+            return closest
+
+        # 🚨 غموض حقيقي: إيداعان متساويان في القرب — نوقف ونبلّغ الأدمن، ما نخاطر
+        _alert_ambiguous_deposit(coin, amount_usd, records)
+        return None
     except Exception as e:
         logger.error(f"Error finding pending deposit: {e}")
         return None
@@ -11064,15 +11240,22 @@ GET /products → قائمة المنتجات
   "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
   "custom_emoji_id": "5123",
   "has_premium_emoji": true,
+  "desc_ar": "وصف فيه إيموجي مميز جاهز داخل النص نفسه",
+  "desc_en": "description with premium emoji ready inside the text",
+  "desc_has_premium_emoji": true,
+  "desc_emoji_ids": ["6677"],
+  "all_emoji_ids": ["5123", "6677"],
   "your_price": 3.5,
   "stock": 45,
   "is_manual": false
 }}]}}
 
-🌟 كيف تعرض المنتج مع الإيموجي المميز:
-- في الرسائل: استخدم name_ar_html أو name_en_html (جاهز فيه وسم tg-emoji) مع parse_mode="HTML"
-- في الأزرار (InlineKeyboardButton): استخدم الاسم العادي name_ar، ولو تبي الإيموجي يبان داخل الزر أضف icon_custom_emoji_id = custom_emoji_id
+🌟 كيف تعرض المنتج (الاسم + الوصف) مع الإيموجي المميز:
+- الاسم في الرسائل: استخدم name_ar_html أو name_en_html (فيه وسم tg-emoji جاهز) مع parse_mode="HTML"
+- الاسم في الأزرار (InlineKeyboardButton): استخدم name_ar العادي، ولو تبي الإيموجي داخل الزر أضف icon_custom_emoji_id = custom_emoji_id
+- 📝 الوصف مهم: حقول desc_ar و desc_en تحتوي أصلاً على وسوم <tg-emoji> جاهزة داخل النص! اعرضهم مباشرة مع parse_mode="HTML" والإيموجي المميز بيبان داخل الوصف تلقائياً
 - لو has_premium_emoji = false استخدم الاسم العادي بدون HTML
+- 🌐 لو تبني موقع (مو بوت تيليجرام): استخدم all_emoji_ids (كل معرّفات الإيموجي في المنتج: الاسم + الوصف) لجلب صور الإيموجي من تيليجرام
 
 مثال للأزرار مع الإيموجي:
 btn = InlineKeyboardButton(text=p["name_ar"], callback_data=f"buy_{{p['id']}}")
@@ -11139,15 +11322,22 @@ GET /products → Product list
   "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
   "custom_emoji_id": "5123",
   "has_premium_emoji": true,
+  "desc_ar": "وصف فيه إيموجي مميز جاهز داخل النص نفسه",
+  "desc_en": "description with premium emoji ready inside the text",
+  "desc_has_premium_emoji": true,
+  "desc_emoji_ids": ["6677"],
+  "all_emoji_ids": ["5123", "6677"],
   "your_price": 3.5,
   "stock": 45,
   "is_manual": false
 }}]}}
 
-🌟 How to display products with premium emojis:
-- In messages: use name_en_html or name_ar_html (already has the tg-emoji tag) with parse_mode="HTML"
-- In buttons (InlineKeyboardButton): use the plain name_en, and to show the emoji inside the button add icon_custom_emoji_id = custom_emoji_id
+🌟 How to display products (name + description) with premium emojis:
+- Name in messages: use name_en_html or name_ar_html (already has the tg-emoji tag) with parse_mode="HTML"
+- Name in buttons (InlineKeyboardButton): use the plain name_en, and to show the emoji inside the button add icon_custom_emoji_id = custom_emoji_id
+- 📝 IMPORTANT description: desc_ar and desc_en ALREADY contain ready <tg-emoji> tags inside the text! Show them directly with parse_mode="HTML" and the premium emoji renders inside the description automatically
 - If has_premium_emoji = false, use the plain name without HTML
+- 🌐 If building a website (not a Telegram bot): use all_emoji_ids (all premium emoji IDs in the product: name + description) to fetch the emoji images from Telegram
 
 Button example with emoji:
 btn = InlineKeyboardButton(text=p["name_en"], callback_data=f"buy_{{p['id']}}")
