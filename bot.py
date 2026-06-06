@@ -314,6 +314,56 @@ def _build_emoji_fields(pr, name_custom_emoji_id, desc_ar, desc_en):
     }
 
 
+def _build_api_owner_profile(uid):
+    """
+    🔍 يبني نص بيانات صاحب الـ API للإشعار (الأونر فقط):
+    - الاسم الكامل + لينك البروفايل (قابل للنقر)
+    - اليوزرنيم (لو موجود)
+    - الأيدي + الرصيد الحالي
+    """
+    try:
+        u = db.users.find_one({'user_id': uid}) or {}
+        api_doc = db.api_keys.find_one({'user_id': uid, 'is_active': True}) or {}
+
+        name = u.get('name', '') or api_doc.get('username', str(uid))
+        username = u.get('username', '') or api_doc.get('username', '')
+        balance = round(float(u.get('balance', 0)), 2) if u else 0.0
+
+        # 🆙 محاولة جلب الاسم الحالي من تيليجرام (أحدث من DB)
+        try:
+            chat = bot.get_chat(uid)
+            full_name = chat.first_name or ''
+            if chat.last_name:
+                full_name += f' {chat.last_name}'
+            if full_name.strip():
+                name = full_name.strip()
+            if chat.username:
+                username = chat.username.lower()
+        except Exception:
+            pass
+
+        safe_name = html.escape(name or str(uid))
+
+        # لينك بروفايل قابل للنقر (يشتغل حتى بدون يوزرنيم)
+        profile_link = f'<a href="tg://user?id={uid}">{safe_name}</a>'
+
+        lines = [
+            f"👤 <b>صاحب الـ API:</b>",
+            f"   🔗 {profile_link}",
+            f"   🆔 <code>{uid}</code>",
+        ]
+        if username:
+            lines.append(
+                f'   📛 <a href="https://t.me/{username}">@{username}</a>'
+            )
+        lines.append(f"   💰 رصيده الحالي: <b>${balance:.2f}</b>")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"_build_api_owner_profile error: {e}")
+        return f"👤 API User: <code>{uid}</code>"
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -555,16 +605,18 @@ class APIHandler(BaseHTTPRequestHandler):
                 except: pass
                 # 🔐 تفاصيل للأونر فقط
                 try:
+                    api_profile = _build_api_owner_profile(uid)
                     bot.send_message(OWNER_ID,
-                        f"🔐 <b>Auto Buy API - Manual</b>\n"
+                        f"🔐 <b>Auto Buy API — Manual</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"👤 API User: <code>{uid}</code>\n"
-                        f"📦 Product: <b>{clean_name(pr.get('name_en', pr.get('name_ar','')))}</b>\n"
-                        f"🔢 Qty: <b>{qty}</b>\n"
-                        f"💰 Total: <b>${total:.2f}</b>\n"
-                        f"👤 Buyer: {buyer_info or 'N/A'}\n"
-                        f"🆔 Order: <code>{order_id}</code>\n"
-                        f"⚠️ <i>Manual delivery required</i>",
+                        f"{api_profile}\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"📦 <b>المنتج:</b> {clean_name(pr.get('name_en', pr.get('name_ar','')))}\n"
+                        f"🔢 <b>الكمية:</b> {qty}\n"
+                        f"💰 <b>الإجمالي:</b> ${total:.2f}\n"
+                        f"👤 <b>بيانات المشتري:</b> {buyer_info or 'N/A'}\n"
+                        f"🆔 <b>رقم الطلب:</b> <code>{order_id}</code>\n"
+                        f"⚠️ <i>يدوي — التسليم مطلوب</i>",
                         parse_mode="HTML")
                 except: pass
                 return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'pending_manual', 'total_price': total, 'new_balance': round(updated.get('balance', 0), 2)})
@@ -625,18 +677,17 @@ class APIHandler(BaseHTTPRequestHandler):
             
             # 🔐 إشعار خاص للأونر فقط — التفاصيل الحساسة
             try:
-                api_user = db.api_keys.find_one({'user_id': uid, 'is_active': True})
-                api_username = api_user.get('username', '') if api_user else ''
+                api_profile = _build_api_owner_profile(uid)
                 bot.send_message(OWNER_ID,
-                    f"🔐 <b>Auto Buy API (Details)</b>\n"
+                    f"🔐 <b>Auto Buy API</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 API User: <code>{uid}</code> @{api_username}\n"
-                    f"📦 Product: <b>{clean_name(pr.get('name_en', pr.get('name_ar','')))}</b>\n"
-                    f"🔢 Qty: <b>{qty}</b>\n"
-                    f"💰 Total: <b>${total:.2f}</b>\n"
-                    f"👤 Buyer: {buyer_info or 'N/A'}\n"
-                    f"🆔 Order: <code>{order_id}</code>\n"
-                    f"💳 Balance: <b>${round(updated.get('balance', 0), 2)}</b>",
+                    f"{api_profile}\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"📦 <b>المنتج:</b> {clean_name(pr.get('name_en', pr.get('name_ar','')))}\n"
+                    f"🔢 <b>الكمية:</b> {qty}\n"
+                    f"💰 <b>الإجمالي:</b> ${total:.2f}\n"
+                    f"👤 <b>بيانات المشتري:</b> {buyer_info or 'N/A'}\n"
+                    f"🆔 <b>رقم الطلب:</b> <code>{order_id}</code>",
                     parse_mode="HTML")
             except: pass
 
