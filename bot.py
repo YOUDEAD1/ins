@@ -804,6 +804,24 @@ threading.Thread(target=keep_alive, daemon=True).start()
 
 bot = telebot.TeleBot(TOKEN, use_class_middlewares=False)
 
+# 🛡 حماية من خطأ "query is too old" — يصير لما المستخدم يضغط زر قديم
+# بعد إعادة تشغيل البوت أو بعد 10 ثواني من ظهور الزر.
+# هذا الحل يغطي كل أماكن answer_callback_query في البوت مرة واحدة.
+_orig_answer_cbq = bot.answer_callback_query
+def _safe_answer_cbq(callback_query_id, text='', show_alert=False, url=None, cache_time=None, **kwargs):
+    try:
+        return _orig_answer_cbq(
+            callback_query_id,
+            text=text,
+            show_alert=show_alert,
+            url=url,
+            cache_time=cache_time,
+            **kwargs
+        )
+    except Exception:
+        pass  # query منتهي الصلاحية أو invalid — نتجاهل بهدوء
+bot.answer_callback_query = _safe_answer_cbq
+
 
 # 🛡 دالة فحص صلاحية الأدمن (تُستخدم بكل دوال الأدمن)
 def _is_admin_check(uid):
