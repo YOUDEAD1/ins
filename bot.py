@@ -2958,17 +2958,13 @@ def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='m
             u = get_user_data_full(target_uid)
             obs_user = obscure_text(u.get('username') or str(target_uid)) if u else "**"
             if amount > 0:
-                type_label_log = "🔄 تعويض / Compensation" if gift_type == 'compensation' else "💰 إضافة عادية / Manual Add"
                 log_msg = (
                     f"🎁 <b>Admin Balance Gift!</b> 💰\n\n"
                     f"👤 <b>User:</b> {obs_user}\n"
-                    f"📌 <b>Type:</b> {type_label_log}\n"
                     f"💵 <b>Added:</b> <code>+${amount:.2f}</code>\n"
-                    f"🛡 <b>By:</b> Admin\n"
+                    f"🛡 <b>By:</b> Admin\n\n"
+                    f"<i>Manual top-up by administration ⚡</i>"
                 )
-                if note:
-                    log_msg += f"📝 <b>Note:</b> <code>{note}</code>\n"
-                log_msg += f"\n<i>Manual top-up by administration ⚡</i>"
                 custom = db.custom_texts.find_one({'lang': 'en', 'key': 'log_admin_gift'})
                 if custom and custom.get('value'):
                     try: log_msg = custom['value'].format(obs_user, f"{amount:.2f}")
@@ -2978,10 +2974,8 @@ def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='m
                     f"⚠️ <b>Admin Balance Adjustment</b>\n\n"
                     f"👤 <b>User:</b> {obs_user}\n"
                     f"💵 <b>Deducted:</b> <code>${abs(amount):.2f}</code>\n"
-                    f"🛡 <b>By:</b> Admin\n"
+                    f"🛡 <b>By:</b> Admin"
                 )
-                if note:
-                    log_msg += f"📝 <b>Note:</b> <code>{note}</code>"
             bot.send_message(log_ch, log_msg, parse_mode="HTML")
     except Exception as e:
         logger.debug(f"notify_balance_gift log failed: {e}")
