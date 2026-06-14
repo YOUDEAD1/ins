@@ -4506,7 +4506,8 @@ def shop_list_ui(call):
             else:
                 st_text = "FW" if is_manual else str(st)
                 btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{pid}", 'style': btn_style}
+            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
@@ -4548,7 +4549,8 @@ def shop_list_ui(call):
             else:
                 st_text = "FW" if is_manual else str(st)
                 btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{pid}", 'style': btn_style}
+            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
@@ -4628,7 +4630,8 @@ def catalog_view(call):
         else:
             st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-        btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{actual_pid}_c_{cat_id}", 'style': btn_style}
+        callback_pid = actual_pid.replace("cgpt_main_", "") if actual_pid.startswith("cgpt_main_") else actual_pid
+        btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}_c_{cat_id}", 'style': btn_style}
         custom_emoji_id = p.get('custom_emoji_id')
         if custom_emoji_id:
             btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
@@ -4657,6 +4660,7 @@ def shop_detail_ui(call):
     p = find_product(pid)
     if not p:
         bot.send_message(uid, bil(uid, "❌ عذراً، المنتج غير متوفر.", "❌ Sorry, product is unavailable."), parse_mode="HTML"); return
+    pid = p['_id']
 
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
@@ -4715,7 +4719,8 @@ def shop_detail_ui(call):
 
         markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
         if is_admin:
-            edit_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
+            short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
         try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -4762,13 +4767,14 @@ def shop_detail_ui(call):
 
     back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
     markup = InlineKeyboardMarkup()
+    short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
     if is_manual or st > 0:
-        qty_cb = f"buy_qty_{pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{pid}"
+        qty_cb = f"buy_qty_{short_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{short_pid}"
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
     markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
 
     if _is_admin_check(uid):
-        edit_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
+        edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
         markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
