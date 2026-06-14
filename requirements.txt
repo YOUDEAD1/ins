@@ -8,3 +8,4 @@ telethon
 cryptg
 pillow
 cryptography
+curl_cffi
