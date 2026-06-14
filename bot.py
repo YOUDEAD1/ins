@@ -280,6 +280,48 @@ def _json_resp(h, code, data):
     h.end_headers()
     h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
 
+def _read_body(h):
+    """قراءة body آمنة تدعم Content-Length و chunked encoding"""
+    try:
+        cl = h.headers.get('Content-Length')
+        if cl:
+            return h.rfile.read(int(cl)).decode('utf-8')
+        # chunked أو بدون Content-Length
+        te = h.headers.get('Transfer-Encoding', '').lower()
+        if 'chunked' in te:
+            chunks = []
+            while True:
+                line = h.rfile.readline().decode('utf-8').strip()
+                size = int(line, 16)
+                if size == 0:
+                    break
+                chunks.append(h.rfile.read(size).decode('utf-8'))
+                h.rfile.readline()
+            return ''.join(chunks)
+        return ''
+    except Exception:
+        return ''
+
+# Rate limiter بسيط: max 30 طلب/دقيقة لكل API key
+_api_rate = {}
+_api_rate_lock = __import__('threading').Lock()
+
+def _check_rate_limit(api_key):
+    """True = مسموح، False = محظور مؤقتاً"""
+    import time as _t
+    now = _t.time()
+    window = 60  # ثانية
+    max_req = 30
+    with _api_rate_lock:
+        if api_key not in _api_rate:
+            _api_rate[api_key] = []
+        # نحذف الطلبات القديمة
+        _api_rate[api_key] = [ts for ts in _api_rate[api_key] if now - ts < window]
+        if len(_api_rate[api_key]) >= max_req:
+            return False
+        _api_rate[api_key].append(now)
+        return True
+
 
 def _extract_emoji_ids_from_text(text):
     """🌟 يستخرج كل معرّفات الإيموجي المميز من نص يحتوي على وسوم <tg-emoji emoji-id="...">"""
@@ -295,21 +337,24 @@ def _build_emoji_fields(pr, name_custom_emoji_id, desc_ar, desc_en):
     """
     🌟 يبني كل حقول الإيموجي المميز لمنتج (للاسم والوصف معاً).
     يرجّع dict جاهز يُدمج في رد الـ API.
+    - desc_ar_html / desc_en_html: الوصف كامل جاهز للعرض مع parse_mode=HTML
+    - desc_ar / desc_en: الوصف بدون تعديل (نص خام)
     """
     desc_ar_ids = _extract_emoji_ids_from_text(desc_ar)
     desc_en_ids = _extract_emoji_ids_from_text(desc_en)
-    # نجمع معرّفات الوصف (عربي + إنجليزي) بدون تكرار
     desc_ids = list(dict.fromkeys(desc_ar_ids + desc_en_ids))
-    # كل إيموجيات المنتج (أيقونة الاسم + إيموجيات الوصف)
     all_ids = []
     if name_custom_emoji_id:
         all_ids.append(str(name_custom_emoji_id))
     all_ids = list(dict.fromkeys(all_ids + desc_ids))
+
+    # الوصف يحتوي أصلاً على وسوم <tg-emoji> — نُرجعه كما هو جاهزاً للعرض
+    # لو ما فيه إيموجي يُرجع نص عادي أيضاً، لا فرق
     return {
-        # الوصف أصلاً يحتوي على وسوم <tg-emoji> جاهزة — تُعرض بـ parse_mode="HTML"
+        'desc_ar_html': desc_ar or '',       # جاهز للعرض المباشر في تيليغرام بـ parse_mode=HTML
+        'desc_en_html': desc_en or '',       # جاهز للعرض المباشر في تيليغرام بـ parse_mode=HTML
         'desc_has_premium_emoji': bool(desc_ids),
         'desc_emoji_ids': desc_ids,
-        # كل معرّفات الإيموجي المميز في المنتج (الاسم + الوصف) — مفيدة للمواقع
         'all_emoji_ids': all_ids
     }
 
@@ -364,6 +409,40 @@ def _build_api_owner_profile(uid):
         return f"👤 API User: <code>{uid}</code>"
 
 
+def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=False):
+    """
+    يُرسل إشعار شراء API لكل الأدمن والأونر.
+    uid = صاحب الـ API key
+    pr  = المنتج
+    """
+    try:
+        api_profile = _build_api_owner_profile(uid)
+        product_name = clean_name(pr.get('name_ar') or pr.get('name_en', ''))
+        custom_emoji_id = pr.get('custom_emoji_id', '')
+        product_display = (
+            f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name}</b>'
+            if custom_emoji_id else f'📦 <b>{product_name}</b>'
+        )
+        status_line = "⚠️ <i>يدوي — التسليم مطلوب</i>" if is_manual else "⚡ <i>تلقائي — تم التسليم فوراً</i>"
+        type_label = "🔄 <b>API — يدوي</b>" if is_manual else "🤖 <b>API — تلقائي</b>"
+
+        msg = (
+            f"\U0001f6d2 {type_label}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"{api_profile}\n"
+            f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            f"\U0001f4e6 <b>\u0627\u0644\u0645\u0646\u062a\u062c:</b> {product_display}\n"
+            f"\U0001f522 <b>\u0627\u0644\u0643\u0645\u064a\u0629:</b> <b>{qty}</b>\n"
+            f"\U0001f4b0 <b>\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a:</b> <b>${total:.2f}</b>\n"
+            f"\U0001f464 <b>\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u0634\u062a\u0631\u064a:</b> {buyer_info or 'N/A'}\n"
+            f"\U0001f194 <b>\u0631\u0642\u0645 \u0627\u0644\u0637\u0644\u0628:</b> <code>{order_id}</code>\n"
+            f"{status_line}"
+        )
+        notify_admins(msg)
+    except Exception as _ne:
+        logger.debug(f"_notify_all_admins_api_purchase error: {_ne}")
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -400,9 +479,13 @@ class APIHandler(BaseHTTPRequestHandler):
             return _json_resp(self, 401, {'error': 'Invalid API key'})
         uid = doc['user_id']
 
+        if not _check_rate_limit(doc['api_key']):
+            return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
+
         if route == '/products':
+            # is_hidden=True من الأدمن = محجوب من الجميع بلا استثناء
             prods = list(db.products.find({'is_hidden': {'$ne': True}}))
-            # جلب المنتجات المخفية لهذا المطوّر
+            # api_hidden = المطور أخفى المنتج من متجره هو فقط
             hidden_pids = set()
             for h in db.api_hidden.find({'api_user_id': uid}):
                 hidden_pids.add(h['product_id'])
@@ -424,14 +507,17 @@ class APIHandler(BaseHTTPRequestHandler):
                 p_name_en = cp.get('name_en') or pr.get('name_en', '')
                 p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
                 p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
+                # your_price: من sell_price المقفول، أو null لو لم يُضبط بعد
+                your_price = cp.get('sell_price')
                 item = {
                     'id': pid,
                     'name_ar': p_name_ar,
                     'name_en': p_name_en,
                     'desc_ar': p_desc_ar,
                     'desc_en': p_desc_en,
-                    'base_price': base_price,
-                    'your_price': cp.get('sell_price', base_price),
+                    'store_price': base_price,         # سعر المتجر الحالي (يتغير)
+                    'your_price': your_price,          # سعرك المقفول (لا يتغير بتغيير المتجر)
+                    'price_locked': your_price is not None,
                     'stock': 'unlimited' if manual else get_product_stock_count(pid),
                     'is_manual': manual,
                     'discount_tiers': pr.get('discount_tiers', []),
@@ -442,7 +528,17 @@ class APIHandler(BaseHTTPRequestHandler):
                     'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
                 }
                 # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
-                item.update(_build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en))
+                emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
+                item.update(emoji_fields)
+                # دليل الاستخدام الكامل للمطورين
+                item['emoji_guide'] = {
+                    'parse_mode': 'HTML',
+                    'name_ar_html': item.get('name_ar_html', p_name_ar),
+                    'name_en_html': item.get('name_en_html', p_name_en),
+                    'desc_ar_html': item.get('desc_ar_html', p_desc_ar),
+                    'desc_en_html': item.get('desc_en_html', p_desc_en),
+                    'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
+                }
                 result.append(item)
             return _json_resp(self, 200, {'success': True, 'products': result})
 
@@ -461,14 +557,16 @@ class APIHandler(BaseHTTPRequestHandler):
             p_name_en = cp.get('name_en') or pr.get('name_en', '')
             p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
             p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
+            your_price_s = cp.get('sell_price') if cp else None
             product_obj = {
                 'id': pid,
                 'name_ar': p_name_ar,
                 'name_en': p_name_en,
                 'desc_ar': p_desc_ar,
                 'desc_en': p_desc_en,
-                'base_price': base_price,
-                'your_price': cp.get('sell_price', base_price),
+                'store_price': base_price,
+                'your_price': your_price_s,
+                'price_locked': your_price_s is not None,
                 'stock': 'unlimited' if manual else get_product_stock_count(pid),
                 'is_manual': manual, 'discount_tiers': pr.get('discount_tiers', []),
                 # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
@@ -478,7 +576,16 @@ class APIHandler(BaseHTTPRequestHandler):
                 'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
             }
             # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
-            product_obj.update(_build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en))
+            emoji_fields_s = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
+            product_obj.update(emoji_fields_s)
+            product_obj['emoji_guide'] = {
+                'parse_mode': 'HTML',
+                'name_ar_html': product_obj.get('name_ar_html', p_name_ar),
+                'name_en_html': product_obj.get('name_en_html', p_name_en),
+                'desc_ar_html': product_obj.get('desc_ar_html', p_desc_ar),
+                'desc_en_html': product_obj.get('desc_en_html', p_desc_en),
+                'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
+            }
             return _json_resp(self, 200, {'success': True, 'product': product_obj})
 
         if route == '/balance':
@@ -490,15 +597,22 @@ class APIHandler(BaseHTTPRequestHandler):
             orders = list(db.api_orders.find({'api_user_id': uid}).sort('_id', -1).limit(limit))
             result = []
             for o in orders:
+                try:
+                    order_date = o['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    order_date = o.get('date', '')
                 result.append({
                     'order_id': o.get('order_id', ''),
                     'product_id': o.get('product_id', ''),
                     'product_name': o.get('product_name', ''),
                     'qty': o.get('qty', 1),
+                    'unit_price': round(o.get('total_price', 0) / max(o.get('qty', 1), 1), 2),
                     'total_price': o.get('total_price', 0),
                     'codes': o.get('codes', []),
+                    'codes_count': len(o.get('codes', [])),
                     'status': o.get('status', 'completed'),
-                    'date': o['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S') if hasattr(o.get('_id'), 'generation_time') else ''
+                    'buyer_info': o.get('buyer_info', ''),
+                    'date': order_date
                 })
             return _json_resp(self, 200, {'success': True, 'orders': result})
 
@@ -511,17 +625,64 @@ class APIHandler(BaseHTTPRequestHandler):
                 if not pr: continue
                 base = float(pr.get('price', 0))
                 sell = cp.get('sell_price', base)
+                snap = cp.get('base_price_snapshot', base)
                 item = {
                     'product_id': cp['product_id'],
                     'original_name': pr.get('name_ar', ''),
                     'your_name_ar': cp.get('name_ar', ''),
                     'your_name_en': cp.get('name_en', ''),
-                    'base_price': base,
-                    'your_price': sell,
-                    'profit_per_unit': round(sell - base, 2)
+                    'store_price_now': base,           # سعر المتجر الحالي
+                    'store_price_when_set': snap,      # سعر المتجر وقت ما ضبطت سعرك
+                    'your_price': sell,                # سعرك المقفول
+                    'profit_per_unit': round(sell - base, 2),  # الربح بناءً على سعر المتجر الحالي
+                    'price_locked': True,
+                    'price_set_at': cp.get('updated_at', '')
                 }
                 result.append(item)
             return _json_resp(self, 200, {'success': True, 'custom_products': result})
+
+        # GET /order/{id} — جلب تفاصيل طلب واحد
+        if route.startswith('/order/'):
+            order_id = route.split('/order/')[1]
+            o = db.api_orders.find_one({'order_id': order_id, 'api_user_id': uid})
+            if not o:
+                return _json_resp(self, 404, {'error': 'Order not found'})
+            try:
+                order_date = o['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                order_date = o.get('date', '')
+            return _json_resp(self, 200, {
+                'success': True,
+                'order': {
+                    'order_id': o.get('order_id', ''),
+                    'product_id': o.get('product_id', ''),
+                    'product_name': o.get('product_name', ''),
+                    'qty': o.get('qty', 1),
+                    'unit_price': round(o.get('total_price', 0) / max(o.get('qty', 1), 1), 2),
+                    'total_price': o.get('total_price', 0),
+                    'codes': o.get('codes', []),
+                    'codes_count': len(o.get('codes', [])),
+                    'status': o.get('status', 'completed'),
+                    'buyer_info': o.get('buyer_info', ''),
+                    'date': order_date
+                }
+            })
+
+        # GET /stats — إحصائيات المطور
+        if route == '/stats':
+            total_orders = db.api_orders.count_documents({'api_user_id': uid})
+            completed = db.api_orders.count_documents({'api_user_id': uid, 'status': 'completed'})
+            pending = db.api_orders.count_documents({'api_user_id': uid, 'status': 'pending_manual'})
+            revenue = sum(o.get('total_price', 0) for o in db.api_orders.find({'api_user_id': uid, 'status': 'completed'}, {'total_price': 1}))
+            u_data = get_user_data_full(uid)
+            return _json_resp(self, 200, {
+                'success': True,
+                'balance': round(u_data.get('balance', 0), 2),
+                'total_orders': total_orders,
+                'completed_orders': completed,
+                'pending_orders': pending,
+                'total_revenue': round(revenue, 2)
+            })
 
         return _json_resp(self, 404, {'error': 'Not found'})
 
@@ -538,9 +699,12 @@ class APIHandler(BaseHTTPRequestHandler):
             return _json_resp(self, 401, {'error': 'Invalid API key'})
         uid = doc['user_id']
 
+        if not _check_rate_limit(doc['api_key']):
+            return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
+
         if route == '/purchase':
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))).decode())
+                body = json.loads(_read_body(self))
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -563,21 +727,30 @@ class APIHandler(BaseHTTPRequestHandler):
             if not is_manual and get_product_stock_count(pid) < qty:
                 return _json_resp(self, 409, {'error': 'Not enough stock', 'available': get_product_stock_count(pid)})
 
-            # سعر + خصومات
-            unit = float(pr.get('price', 0))
+            # سعر الشراء الفعلي من المتجر (base) — يُستخدم للخصم من رصيد المطور
+            cp_doc = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
+            store_price = float(pr.get('price', 0))
+            # الكمية → تطبيق خصومات المتجر على store_price
+            purchase_unit = store_price
             for t in sorted(pr.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0), reverse=True):
-                if qty >= t.get('min_qty', 0): unit = float(t.get('price', unit)); break
-            total = round(unit * qty, 2)
-
-            # فحص الرصيد
-            if get_user_data_full(uid).get('balance', 0) < total:
-                return _json_resp(self, 402, {'error': 'Insufficient balance', 'balance': round(get_user_data_full(uid).get('balance', 0), 2), 'required': total})
+                if qty >= t.get('min_qty', 0):
+                    purchase_unit = float(t.get('price', store_price))
+                    break
+            total = round(purchase_unit * qty, 2)
+            # sell_price المقفول للـ response فقط (ما يؤثر على الخصم من رصيده)
+            unit = float(cp_doc.get('sell_price', store_price))
 
             order_id = f"API_{int(time.time())}_{uid}"
 
             if is_manual:
-                updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}}, {'$inc': {'balance': -total}}, return_document=True)
-                if not updated: return _json_resp(self, 402, {'error': 'Insufficient balance'})
+                # atomic: فحص الرصيد والخصم في عملية واحدة
+                updated = db.users.find_one_and_update(
+                    {'user_id': uid, 'balance': {'$gte': total}},
+                    {'$inc': {'balance': -total}},
+                    return_document=True
+                )
+                if not updated:
+                    return _json_resp(self, 402, {'error': 'Insufficient balance', 'required': total})
                 db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': [], 'buyer_info': buyer_info, 'status': 'pending_manual'})
                 db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': f"API: {order_id}", 'qty': qty, 'total_price': total, 'via_api': True})
                 # 📢 لوق القناة
@@ -603,23 +776,20 @@ class APIHandler(BaseHTTPRequestHandler):
                         
                         bot.send_message(log_ch, pub_msg, parse_mode="HTML")
                 except: pass
-                # 🔐 تفاصيل للأونر فقط
-                try:
-                    api_profile = _build_api_owner_profile(uid)
-                    bot.send_message(OWNER_ID,
-                        f"🔐 <b>Auto Buy API — Manual</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"{api_profile}\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"📦 <b>المنتج:</b> {clean_name(pr.get('name_en', pr.get('name_ar','')))}\n"
-                        f"🔢 <b>الكمية:</b> {qty}\n"
-                        f"💰 <b>الإجمالي:</b> ${total:.2f}\n"
-                        f"👤 <b>بيانات المشتري:</b> {buyer_info or 'N/A'}\n"
-                        f"🆔 <b>رقم الطلب:</b> <code>{order_id}</code>\n"
-                        f"⚠️ <i>يدوي — التسليم مطلوب</i>",
-                        parse_mode="HTML")
+                # 🔔 إشعار لكل الأدمن
+                try: _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=True)
                 except: pass
-                return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'pending_manual', 'total_price': total, 'new_balance': round(updated.get('balance', 0), 2)})
+                return _json_resp(self, 200, {
+                    'success': True,
+                    'order_id': order_id,
+                    'status': 'pending_manual',
+                    'product_id': pid,
+                    'qty': qty,
+                    'unit_price': unit,
+                    'total_price': total,
+                    'new_balance': round(updated.get('balance', 0), 2),
+                    'note': 'Manual product — admin will deliver soon'
+                })
 
             # تلقائي — حجز أكواد
             pid_str = str(pid)
@@ -675,20 +845,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     bot.send_message(log_ch, pub_msg, parse_mode="HTML")
             except: pass
             
-            # 🔐 إشعار خاص للأونر فقط — التفاصيل الحساسة
-            try:
-                api_profile = _build_api_owner_profile(uid)
-                bot.send_message(OWNER_ID,
-                    f"🔐 <b>Auto Buy API</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"{api_profile}\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"📦 <b>المنتج:</b> {clean_name(pr.get('name_en', pr.get('name_ar','')))}\n"
-                    f"🔢 <b>الكمية:</b> {qty}\n"
-                    f"💰 <b>الإجمالي:</b> ${total:.2f}\n"
-                    f"👤 <b>بيانات المشتري:</b> {buyer_info or 'N/A'}\n"
-                    f"🆔 <b>رقم الطلب:</b> <code>{order_id}</code>",
-                    parse_mode="HTML")
+            # 🔔 إشعار لكل الأدمن
+            try: _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=False)
             except: pass
 
             # 🔔 تنبيه الستوك بعد البيع عبر API (يصل لكل الأدمن عشان يعيد التعبئة)
@@ -712,12 +870,23 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as _stk_e:
                 logger.debug(f"API stock alert error: {_stk_e}")
 
-            return _json_resp(self, 200, {'success': True, 'order_id': order_id, 'status': 'completed', 'qty': qty, 'total_price': total, 'codes': codes, 'new_balance': round(updated.get('balance', 0), 2)})
+            return _json_resp(self, 200, {
+                'success': True,
+                'order_id': order_id,
+                'status': 'completed',
+                'product_id': pid,
+                'qty': qty,
+                'unit_price': unit,
+                'total_price': total,
+                'codes': codes,
+                'codes_count': len(codes),
+                'new_balance': round(updated.get('balance', 0), 2)
+            })
 
         # POST /set_price — المطوّر يحدد سعر البيع لعملائه
         if route == '/set_price':
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))).decode())
+                body = json.loads(_read_body(self))
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -741,9 +910,14 @@ class APIHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return _json_resp(self, 400, {'error': 'price must be a number'})
 
+            import datetime as _dt2
             db.api_pricing.update_one(
                 {'api_user_id': uid, 'product_id': pid},
-                {'$set': {'sell_price': sell_price}},
+                {'$set': {
+                    'sell_price': sell_price,
+                    'base_price_snapshot': base_price,  # snapshot وقت الضبط
+                    'updated_at': _dt2.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+                }},
                 upsert=True
             )
             profit = round(sell_price - base_price, 2)
@@ -752,13 +926,14 @@ class APIHandler(BaseHTTPRequestHandler):
                 'product_id': pid,
                 'base_price': base_price,
                 'your_price': sell_price,
-                'profit_per_unit': profit
+                'profit_per_unit': profit,
+                'note': 'Your price is locked. Store price changes will NOT affect it.'
             })
 
         # POST /set_product — المطوّر يعدّل اسم/وصف المنتج لعملائه
         if route == '/set_product':
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))).decode())
+                body = json.loads(_read_body(self))
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -2381,99 +2556,86 @@ def safe_translate_for_cms(text, target_lang='en'):
 
 def _translate_single_line(line, target_lang='en'):
     """
-    يترجم سطر واحد مع حماية HTML والـ Premium Emojis والـ Placeholders.
+    يترجم سطر واحد مع حفظ كامل لـ:
+    - Premium Emojis <tg-emoji> (بالترقيم الموضعي الآمن)
+    - HTML tags <b><i><code> إلخ
+    - Placeholders {}
+    - URLs
+    - إيموجي عادية
     
-    🆕 الطريقة الذكية الجديدة:
-    - بدل ما نحمي <b> و </b> منفصلين (فيحط بينهم PROTECT يكسر الجملة)
-    - نحمي الـ HTML attributes فقط، ونخلي الكلمات داخلها تترجم
-    - مثلاً: <b>الزيارات</b> → <b>Clicks</b> (تترجم الكلمة وتبقي الـ tag)
+    الاستراتيجية: نفصل كل عنصر محمي ونضعه في قاموس بـ UUID ثابت لا يتغير بالترجمة.
     """
     try:
-        protected_items = []
+        import uuid as _uuid
         
-        def protect(match):
-            protected_items.append(match.group(0))
-            idx = len(protected_items) - 1
-            # نستخدم marker قصير وبسيط ما يكسر السياق
-            return f"@@{idx}@@"
+        # نستخدم UUIDs ثابتة بدل @@N@@ لأن Google لا يلمسها
+        vault = {}  # uuid → original
         
-        temp_line = line
+        def protect_item(text_to_protect):
+            key = f"XPROTX{_uuid.uuid4().hex[:8].upper()}XPROTX"
+            vault[key] = text_to_protect
+            return f" {key} "
         
-        # 🛡 ترتيب الحماية (الأخص أولاً):
-        # 1. Premium Emojis (كتلة كاملة)
-        temp_line = re.sub(r'<tg-emoji\s+emoji-id="[^"]*">.*?</tg-emoji>', protect, temp_line)
-        # 2. Code/Pre blocks (محتواها ما يترجم)
-        temp_line = re.sub(r'<code>.*?</code>', protect, temp_line, flags=re.DOTALL)
-        temp_line = re.sub(r'<pre>.*?</pre>', protect, temp_line, flags=re.DOTALL)
+        temp = line
+        
+        # 1. Premium Emojis — أعلى أولوية (قبل أي شيء)
+        temp = re.sub(
+            r'<tg-emoji[^>]*>.*?</tg-emoji>',
+            lambda m: protect_item(m.group(0)),
+            temp,
+            flags=re.DOTALL
+        )
+        
+        # 2. Code/Pre blocks
+        temp = re.sub(r'<code>.*?</code>', lambda m: protect_item(m.group(0)), temp, flags=re.DOTALL)
+        temp = re.sub(r'<pre>.*?</pre>', lambda m: protect_item(m.group(0)), temp, flags=re.DOTALL)
+        
         # 3. URLs
-        temp_line = re.sub(r'https?://[^\s<>]+', protect, temp_line)
-        # 4. Placeholders {} و {name} و {:.2f}
-        temp_line = re.sub(r'\{[^}]*\}', protect, temp_line)
-        # 5. الفواصل البصرية
-        temp_line = re.sub(r'[━─═]{2,}', protect, temp_line)
+        temp = re.sub(r'https?://[^\s<>"]+', lambda m: protect_item(m.group(0)), temp)
         
-        # 6. ⭐ HTML tags بدون محتوى (نحميها كـ tokens ولكن نخلي محتواها قابل للترجمة)
-        # مثلاً: <b>الزيارات:</b> → @@5@@الزيارات:@@6@@
-        # هكذا الترجمة تشوف "الزيارات:" بشكل واضح وتترجمها لـ "Clicks:"
-        temp_line = re.sub(r'</?[a-zA-Z][^>]*>', protect, temp_line)
+        # 4. Placeholders
+        temp = re.sub(r'\{[^}]*\}', lambda m: protect_item(m.group(0)), temp)
         
-        # 7. حماية الإيموجي العادي
-        emoji_pattern = re.compile(
-            "["
-            "\U0001F600-\U0001F64F"
-            "\U0001F300-\U0001F5FF"
-            "\U0001F680-\U0001F6FF"
-            "\U0001F1E0-\U0001F1FF"
-            "\U00002500-\U00002BEF"
-            "\U00002702-\U000027B0"
-            "\U000024C2-\U0001F251"
-            "\U0001f926-\U0001f937"
-            "\u2640-\u2642"
-            "\u2600-\u2B55"
-            "\u200d"
-            "\u23cf"
-            "\u23e9"
-            "\u231a"
-            "\ufe0f"
-            "\u3030"
-            "]+",
+        # 5. فواصل بصرية
+        temp = re.sub(r'[━─═]{2,}', lambda m: protect_item(m.group(0)), temp)
+        
+        # 6. HTML tags (نحمي فقط الـ tags، محتواها يُترجم)
+        temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0)), temp)
+        
+        # 7. إيموجي عادية
+        emoji_pat = re.compile(
+            "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
+            "\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF"
+            "\U00002702-\U000027B0\U0001f926-\U0001f937"
+            "\u2640-\u2642\u2600-\u2B55\u200d\ufe0f]+",
             flags=re.UNICODE
         )
-        temp_line = emoji_pattern.sub(protect, temp_line)
+        temp = emoji_pat.sub(lambda m: protect_item(m.group(0)), temp)
         
-        # تحقق: لو ما بقي نص حقيقي للترجمة، نرجع السطر كما هو
-        clean_check = re.sub(r'@@\d+@@', ' ', temp_line).strip()
+        # تحقق: لو ما بقي نص حقيقي
+        clean_check = re.sub(r'XPROTX[A-F0-9]{8}XPROTX', '', temp).strip()
         if not clean_check or len(clean_check) < 2:
             return line
         
-        # 🌐 الترجمة - بهذا الشكل، Google يشوف النص العربي واضح مع تكنات بسيطة
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp_line)
-        
+        # 🌐 الترجمة
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
         if not translated:
             return line
         
-        # ترميم markers اللي تغيرت في الترجمة
-        # 1. ترميم المسافات في الـ markers (مثل @@ 5 @@)
-        translated = re.sub(r'@\s*@\s*(\d+)\s*@\s*@', r'@@\1@@', translated)
-        # 2. ترميم الأرقام العربية (لو ترجمت الأرقام)
-        arabic_to_eng = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
-        def fix_marker_digits(match):
-            return match.group(0).translate(arabic_to_eng)
-        translated = re.sub(r'@@[\d٠-٩]+@@', fix_marker_digits, translated)
+        # 🔁 استرجاع العناصر المحمية — UUIDs ثابتة، Google لا يكسرها
+        for key, original in vault.items():
+            translated = translated.replace(key, original)
         
-        # 🔁 استرجاع العناصر المحمية (من الآخر للأول لتجنب تداخل الأرقام)
-        for i in range(len(protected_items) - 1, -1, -1):
-            original = protected_items[i]
-            # نسوي replace مرن: يقبل أي مسافات حول الأرقام
-            translated = re.sub(
-                r'@@\s*' + str(i) + r'\s*@@',
-                lambda m: original,
-                translated
-            )
+        # 🛡 فحص: لو بقي أي UUID لم يُسترجع → رجوع للأصل
+        if re.search(r'XPROTX[A-F0-9]{8}XPROTX', translated):
+            logger.warning("UUID leak in translation - returning original line")
+            return line
         
-        # 🛡 لو بقي markers ما اتفك تشفيرها، نرجع السطر الأصلي
-        if re.search(r'@@\d*@@', translated):
-            logger.warning(f"Marker leak in translation - returning original line")
+        # 🛡 فحص نهائي: عدد tg-emoji لازم يكون نفسه
+        orig_tg = len(re.findall(r'<tg-emoji', line))
+        result_tg = len(re.findall(r'<tg-emoji', translated))
+        if orig_tg != result_tg:
+            logger.warning(f"tg-emoji count mismatch after translation ({orig_tg} vs {result_tg}) - returning original")
             return line
         
         return translated.strip()
@@ -2723,7 +2885,7 @@ def notify_admins(message_text):
             except: pass
 
 
-def notify_balance_gift(target_uid, amount, by_admin=True):
+def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='manual'):
     """
     🎁 يُشعر المستخدم في الخاص + يرسل في قناة اللوق عند إضافة/خصم رصيد من الأدمن.
     - amount موجب = إضافة | سالب = خصم
@@ -2742,24 +2904,30 @@ def notify_balance_gift(target_uid, amount, by_admin=True):
         l = u.get('lang', 'ar') if u else 'ar'
 
         if amount > 0:
+            type_label_ar = "🔄 تعويض" if gift_type == 'compensation' else "💰 إضافة رصيد"
+            type_label_en = "🔄 Compensation" if gift_type == 'compensation' else "💰 Balance Added"
             if l == 'ar':
                 user_msg = (
                     f"🎁 <b>تم إضافة رصيد لحسابك!</b>\n\n"
                     f"━━━━━━━━━━━━━━\n"
+                    f"📌 النوع: <b>{type_label_ar}</b>\n"
                     f"💰 المبلغ المضاف: <b>+${amount:.2f}</b>\n"
                     f"💼 رصيدك الحالي: <b>${new_balance:.2f}</b>\n"
-                    f"━━━━━━━━━━━━━━\n\n"
-                    f"<i>تمت الإضافة من قبل الإدارة. 🛡️</i>"
                 )
+                if note:
+                    user_msg += f"📝 الملاحظة: <code>{note}</code>\n"
+                user_msg += f"━━━━━━━━━━━━━━\n\n<i>تمت الإضافة من قبل الإدارة. 🛡️</i>"
             else:
                 user_msg = (
                     f"🎁 <b>Balance Added to Your Account!</b>\n\n"
                     f"━━━━━━━━━━━━━━\n"
+                    f"📌 Type: <b>{type_label_en}</b>\n"
                     f"💰 Amount Added: <b>+${amount:.2f}</b>\n"
                     f"💼 Your Balance: <b>${new_balance:.2f}</b>\n"
-                    f"━━━━━━━━━━━━━━\n\n"
-                    f"<i>Added by the administration. 🛡️</i>"
                 )
+                if note:
+                    user_msg += f"📝 Note: <code>{note}</code>\n"
+                user_msg += f"━━━━━━━━━━━━━━\n\n<i>Added by the administration. 🛡️</i>"
         else:
             if l == 'ar':
                 user_msg = (
@@ -2790,14 +2958,17 @@ def notify_balance_gift(target_uid, amount, by_admin=True):
             u = get_user_data_full(target_uid)
             obs_user = obscure_text(u.get('username') or str(target_uid)) if u else "**"
             if amount > 0:
+                type_label_log = "🔄 تعويض / Compensation" if gift_type == 'compensation' else "💰 إضافة عادية / Manual Add"
                 log_msg = (
                     f"🎁 <b>Admin Balance Gift!</b> 💰\n\n"
                     f"👤 <b>User:</b> {obs_user}\n"
+                    f"📌 <b>Type:</b> {type_label_log}\n"
                     f"💵 <b>Added:</b> <code>+${amount:.2f}</code>\n"
-                    f"🛡 <b>By:</b> Admin\n\n"
-                    f"<i>Manual top-up by administration ⚡</i>"
+                    f"🛡 <b>By:</b> Admin\n"
                 )
-                # نص قابل للتعديل من CMS (متغيرين: المستخدم، المبلغ)
+                if note:
+                    log_msg += f"📝 <b>Note:</b> <code>{note}</code>\n"
+                log_msg += f"\n<i>Manual top-up by administration ⚡</i>"
                 custom = db.custom_texts.find_one({'lang': 'en', 'key': 'log_admin_gift'})
                 if custom and custom.get('value'):
                     try: log_msg = custom['value'].format(obs_user, f"{amount:.2f}")
@@ -2807,8 +2978,10 @@ def notify_balance_gift(target_uid, amount, by_admin=True):
                     f"⚠️ <b>Admin Balance Adjustment</b>\n\n"
                     f"👤 <b>User:</b> {obs_user}\n"
                     f"💵 <b>Deducted:</b> <code>${abs(amount):.2f}</code>\n"
-                    f"🛡 <b>By:</b> Admin"
+                    f"🛡 <b>By:</b> Admin\n"
                 )
+                if note:
+                    log_msg += f"📝 <b>Note:</b> <code>{note}</code>"
             bot.send_message(log_ch, log_msg, parse_mode="HTML")
     except Exception as e:
         logger.debug(f"notify_balance_gift log failed: {e}")
@@ -2992,9 +3165,6 @@ def start_handler(message):
 
     users_total = db.users.count_documents({})
     markup = InlineKeyboardMarkup(row_width=2)
-    
-    markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
-    markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
     
     markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
@@ -3410,6 +3580,11 @@ def profile_ui(call):
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(create_btn(uid, 'btn_buy_hist', callback_data="history_menu_callback"))
+    # زر سجل التعويضات والتعديلات المالية
+    bal_logs_count = db.balance_logs.count_documents({'user_id': uid})
+    if bal_logs_count > 0:
+        bal_btn_label = "📋 سجل التعويضات" if l == 'ar' else "📋 Balance Adjustments"
+        markup.add(InlineKeyboardButton(bal_btn_label, callback_data="my_ballogs_0"))
     markup.add(create_btn(uid, 'btn_deposit', callback_data="open_deposit"),
                create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     try: bot.edit_message_text(profile_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -4116,7 +4291,7 @@ def catalog_view(call):
         short_n = n[:25] + ".." if len(n) > 25 else n
         st_text = "FW" if is_manual else str(st)
         btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-        btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{actual_pid}", 'style': btn_style}
+        btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{actual_pid}_c_{cat_id}", 'style': btn_style}
         custom_emoji_id = p.get('custom_emoji_id')
         if custom_emoji_id:
             btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
@@ -4134,7 +4309,13 @@ def shop_detail_ui(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
-    pid = call.data.replace('vi_p_', '')
+    raw = call.data.replace('vi_p_', '')
+    # دعم vi_p_{pid}_c_{cat_id}
+    if '_c_' in raw:
+        pid, cat_id_back = raw.split('_c_', 1)
+    else:
+        pid = raw
+        cat_id_back = None
     
     p = find_product(pid)
     if not p: 
@@ -4182,14 +4363,18 @@ def shop_detail_ui(call):
     else:
         text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
     
+    back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
     markup = InlineKeyboardMarkup()
-    if is_manual or st > 0: 
-        markup.add(create_btn(uid, 'btn_buy_now', callback_data=f"buy_qty_{pid}"))
-    markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
+    if is_manual or st > 0:
+        # نمرر cat_id للـ buy_qty حتى يرجع للكتالوج
+        qty_cb = f"buy_qty_{pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{pid}"
+        markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
+    markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
     
     # 🛡 زر التعديل للأدمن فقط
     if _is_admin_check(uid):
-        markup.add(InlineKeyboardButton("⚙️ ...", callback_data=f"edit_p_{pid}"))
+        edit_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
+        markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
     
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
@@ -4200,7 +4385,12 @@ def prompt_quantity(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
-    pid = call.data.replace('buy_qty_', '')
+    raw_bq = call.data.replace('buy_qty_', '')
+    if '_c_' in raw_bq:
+        pid, cat_id_back = raw_bq.split('_c_', 1)
+    else:
+        pid = raw_bq
+        cat_id_back = None
     
     p = find_product(pid)
     if not p: return
@@ -9363,20 +9553,30 @@ def admin_edit_list(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_p_"))
 def admin_edit_opts(call):
     bot.answer_callback_query(call.id)
-    pid = call.data.replace("edit_p_", "")
+    raw_ep = call.data.replace("edit_p_", "")
+    if '_c_' in raw_ep:
+        pid, cat_id_back = raw_ep.split('_c_', 1)
+    else:
+        pid = raw_ep
+        cat_id_back = None
     p = find_product(pid)
     if not p: return
     
+    # suffix لتمرير cat_id في كل الأزرار
+    c_sfx = f"_c_{cat_id_back}" if cat_id_back else ""
+    
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{pid}"))
-    markup.add(InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{pid}"),
-               InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}"))
-    markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}"),
-               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}"))
-    markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}"))
+    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{pid}{c_sfx}"),
+               InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}{c_sfx}"),
+               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}{c_sfx}"))
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
-    markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="ad_p_edit"))
+    markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}{c_sfx}"))
+    # زر رجوع: للمنتج نفسه وليس لقائمة الأدمن
+    back_cb = f"vi_p_{pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{pid}"
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data=back_cb))
     
     try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     except: pass
@@ -9472,20 +9672,40 @@ def _save_discount_tier(message, pid):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("toggle_hide_"))
 def admin_toggle_hide(call):
     bot.answer_callback_query(call.id)
-    pid = call.data.replace("toggle_hide_", "")
+    raw_th = call.data.replace("toggle_hide_", "")
+    if '_c_' in raw_th:
+        pid, cat_id_back = raw_th.split('_c_', 1)
+    else:
+        pid = raw_th
+        cat_id_back = None
     p = find_product(pid)
     if p:
         new_status = not p.get('is_hidden', False)
         db.products.update_one({'_id': p['_id']}, {'$set': {'is_hidden': new_status}})
         bot.answer_callback_query(call.id, "✅ Visibility updated!", show_alert=True)
-        call.data = f"edit_p_{pid}"
+        call.data = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
         admin_edit_opts(call)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ep_"))
 def admin_edit_prompt(call):
     bot.answer_callback_query(call.id)
-    parts = call.data.split('_', 2)
-    field = parts[1]; pid = parts[2]
+    raw_ep2 = call.data[len("ep_"):]  # بعد ep_
+    # تحديد الـ field (price/dar/den/nar/nen)
+    for _f in ['price', 'dar', 'den', 'nar', 'nen']:
+        if raw_ep2.startswith(_f + '_'):
+            field = _f
+            rest_ep2 = raw_ep2[len(_f)+1:]
+            break
+    else:
+        parts = call.data.split('_', 2)
+        field = parts[1]
+        rest_ep2 = parts[2]
+    # استخراج pid و cat_id
+    if '_c_' in rest_ep2:
+        pid, cat_id_back = rest_ep2.split('_c_', 1)
+    else:
+        pid = rest_ep2
+        cat_id_back = None
     
     # جلب المنتج لعرض القيمة القديمة
     p = find_product(pid)
@@ -9571,15 +9791,20 @@ def admin_edit_prompt(call):
         prompt_msg = "👇 أرسل القيمة الجديدة:"
     
     msg = bot.send_message(call.message.chat.id, prompt_msg, parse_mode="HTML")
-    bot.register_next_step_handler(msg, admin_save_edit, field, pid)
+    bot.register_next_step_handler(msg, admin_save_edit, field, pid, cat_id_back)
 
 # ----------- حفظ تعديل المنتج + إشعار تخفيض السعر -----------
-def admin_save_edit(message, field, pid):
+def admin_save_edit(message, field, pid, cat_id_back=None):
     val = message.text or ""
+    
+    # زر رجوع: يرجع للمنتج وليس للقائمة
+    back_cb = f"vi_p_{pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{pid}"
     
     # دعم الإلغاء
     if val.strip().lower() in ['الغاء', 'cancel', '/cancel']:
-        bot.send_message(message.chat.id, "❌ تم إلغاء التعديل.")
+        markup_cancel = InlineKeyboardMarkup()
+        markup_cancel.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+        bot.send_message(message.chat.id, "❌ تم إلغاء التعديل.", reply_markup=markup_cancel)
         return
     
     keys = {"price": "price", "dar": "desc_ar", "den": "desc_en", "nar": "name_ar", "nen": "name_en"}
@@ -9608,7 +9833,9 @@ def admin_save_edit(message, field, pid):
                 change_emoji = "✅"
                 change_txt = f"السعر بقي نفسه: <b>${new_price:.2f}</b>"
             
-            bot.send_message(message.chat.id, f"{change_emoji} <b>تم التحديث!</b>\n{change_txt}", parse_mode="HTML")
+            back_markup = InlineKeyboardMarkup()
+            back_markup.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+            bot.send_message(message.chat.id, f"{change_emoji} <b>تم التحديث!</b>\n{change_txt}", parse_mode="HTML", reply_markup=back_markup)
             
             # برودكاست فقط لو السعر نزل
             if new_price < old_price:
@@ -9647,14 +9874,20 @@ def admin_save_edit(message, field, pid):
             translated = safe_translate_for_cms(final_text, 'en')
             if field == 'nar':
                 db.products.update_one({'_id': p['_id']}, {'$set': {'name_ar': final_text, 'name_en': translated}})
-                bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML")
+                back_markup2 = InlineKeyboardMarkup()
+                back_markup2.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+                bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML", reply_markup=back_markup2)
             else:
                 db.products.update_one({'_id': p['_id']}, {'$set': {'desc_ar': final_text, 'desc_en': translated}})
-                bot.send_message(message.chat.id, "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>", parse_mode="HTML")
+                back_markup3 = InlineKeyboardMarkup()
+                back_markup3.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+                bot.send_message(message.chat.id, "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>", parse_mode="HTML", reply_markup=back_markup3)
         else:
             # إنجليزي فقط
             db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: final_text}})
-            bot.send_message(message.chat.id, "✅ <b>تم التحديث بنجاح.</b>", parse_mode="HTML")
+            back_markup4 = InlineKeyboardMarkup()
+            back_markup4.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+            bot.send_message(message.chat.id, "✅ <b>تم التحديث بنجاح.</b>", parse_mode="HTML", reply_markup=back_markup4)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_del")
 @admin_required
@@ -10060,6 +10293,7 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     )
     markup.add(InlineKeyboardButton("📥 تحميل السجل الكامل", callback_data=f"ad_full_hist_{target_uid}"))
     markup.add(InlineKeyboardButton("💰 تعديل رصيده", callback_data=f"ad_ugift_{target_uid}"))
+    markup.add(InlineKeyboardButton("📋 سجل التعديلات المالية", callback_data=f"ad_view_ballogs_{target_uid}_0"))
     markup.add(InlineKeyboardButton("👥 إحالاته", callback_data=f"ad_uref_{target_uid}_0"))
     markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
     try:
@@ -10622,19 +10856,182 @@ def show_admin_hist_detail(call):
 def ad_ugift_prompt(call):
     bot.answer_callback_query(call.id)
     target_uid = int(call.data.replace("ad_ugift_", ""))
-    msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل المبلغ المراد إضافته (أو خصمه باستخدام سالب -):</b>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, ad_ugift_exec, target_uid)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🔄 تعويض (بدون نوت)", callback_data=f"ad_gift_comp_{target_uid}"),
+        InlineKeyboardButton("💰 إضافة عادية (مع نوت)", callback_data=f"ad_gift_note_{target_uid}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data=f"ad_u_det_{target_uid}")
+    )
+    bot.send_message(call.message.chat.id,
+        "💰 <b>اختر نوع تعديل الرصيد:</b>\n\n"
+        "🔄 <b>تعويض</b> — يُضاف مباشرة بدون ملاحظة\n"
+        "💰 <b>إضافة عادية</b> — تكتب نوت (مثل: hash أو order ID)",
+        parse_mode="HTML", reply_markup=markup)
 
-def ad_ugift_exec(message, target_uid):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_gift_comp_"))
+@admin_required
+def ad_gift_comp_amount(call):
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace("ad_gift_comp_", ""))
+    msg = bot.send_message(call.message.chat.id,
+        "🔄 <b>تعويض — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_gift_comp_exec, target_uid)
+
+def ad_gift_comp_exec(message, target_uid):
     try:
-        val = float(message.text)
+        val = float(message.text.strip())
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
-        bot.send_message(message.chat.id, "✅ تم تعديل الرصيد بنجاح.")
-        # 🎁 إشعار المستخدم + قناة اللوق بإضافة/خصم الرصيد
-        try: notify_balance_gift(target_uid, val)
+        u = get_user_data_full(target_uid)
+        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
+        # حفظ السجل في قاعدة البيانات
+        import datetime as _dt
+        db.balance_logs.insert_one({
+            'user_id': target_uid,
+            'type': 'compensation',
+            'amount': val,
+            'note': '',
+            'new_balance': new_bal,
+            'by_admin': message.from_user.id,
+            'date': _dt.datetime.utcnow()
+        })
+        bot.send_message(message.chat.id, f"✅ تم إضافة تعويض <b>${val:.2f}</b> بنجاح.", parse_mode="HTML")
+        try: notify_balance_gift(target_uid, val, note='', gift_type='compensation')
         except Exception as _e: logger.debug(f"gift notify err: {_e}")
         show_user_admin_profile(message.chat.id, target_uid)
-    except: bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_gift_note_"))
+@admin_required
+def ad_gift_note_amount(call):
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace("ad_gift_note_", ""))
+    msg = bot.send_message(call.message.chat.id,
+        "💰 <b>إضافة عادية — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_gift_note_step2, target_uid)
+
+def ad_gift_note_step2(message, target_uid):
+    try:
+        val = float(message.text.strip())
+        msg = bot.send_message(message.chat.id,
+            "📝 <b>أرسل الملاحظة (نوت):</b>\n<i>مثال: hash أو order ID أو أي سبب</i>",
+            parse_mode="HTML")
+        bot.register_next_step_handler(msg, ad_gift_note_exec, target_uid, val)
+    except:
+        bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
+
+def ad_gift_note_exec(message, target_uid, val):
+    try:
+        note = message.text.strip()
+        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
+        u = get_user_data_full(target_uid)
+        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
+        import datetime as _dt
+        db.balance_logs.insert_one({
+            'user_id': target_uid,
+            'type': 'manual',
+            'amount': val,
+            'note': note,
+            'new_balance': new_bal,
+            'by_admin': message.from_user.id,
+            'date': _dt.datetime.utcnow()
+        })
+        bot.send_message(message.chat.id,
+            f"✅ تم تعديل الرصيد <b>${val:.2f}</b>\n📝 النوت: <code>{note}</code>",
+            parse_mode="HTML")
+        try: notify_balance_gift(target_uid, val, note=note, gift_type='manual')
+        except Exception as _e: logger.debug(f"gift notify err: {_e}")
+        show_user_admin_profile(message.chat.id, target_uid)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_view_ballogs_"))
+@admin_required
+def ad_view_balance_logs(call):
+    """عرض سجل التعديلات المالية لمستخدم معين (للأدمن)"""
+    bot.answer_callback_query(call.id)
+    parts = call.data.replace("ad_view_ballogs_", "").rsplit("_", 1)
+    target_uid = int(parts[0])
+    page = int(parts[1]) if len(parts) > 1 else 0
+    per_page = 5
+    logs = list(db.balance_logs.find({'user_id': target_uid}).sort('_id', -1).skip(page * per_page).limit(per_page))
+    total = db.balance_logs.count_documents({'user_id': target_uid})
+    if not logs:
+        bot.answer_callback_query(call.id, "لا يوجد سجل بعد.", show_alert=True)
+        return
+    import datetime as _dt
+    txt = f"📋 <b>سجل التعديلات المالية للمستخدم</b> <code>{target_uid}</code>\n\n"
+    for log in logs:
+        t = log.get('type', 'manual')
+        amt = log.get('amount', 0)
+        note = log.get('note', '')
+        date = log.get('date', '')
+        sign = "+" if amt >= 0 else ""
+        type_label = "🔄 تعويض" if t == 'compensation' else "💰 إضافة عادية"
+        date_str = date.strftime("%Y-%m-%d %H:%M") if hasattr(date, 'strftime') else str(date)[:16]
+        txt += f"{type_label}\n💵 <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+        if note:
+            txt += f"📝 النوت: <code>{note}</code>\n"
+        txt += "──────────\n"
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"ad_view_ballogs_{target_uid}_{page-1}"))
+    if (page + 1) * per_page < total:
+        nav.append(InlineKeyboardButton("➡️ التالي", callback_data=f"ad_view_ballogs_{target_uid}_{page+1}"))
+    if nav: markup.add(*nav)
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(call.message.chat.id, txt, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("my_ballogs_"))
+def user_view_balance_logs(call):
+    """الزبون يشوف سجل التعديلات على رصيده"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    page = int(call.data.replace("my_ballogs_", ""))
+    per_page = 5
+    logs = list(db.balance_logs.find({'user_id': uid}).sort('_id', -1).skip(page * per_page).limit(per_page))
+    total = db.balance_logs.count_documents({'user_id': uid})
+    l = get_lang(uid)
+    if not logs:
+        bot.answer_callback_query(call.id, "لا يوجد سجل بعد." if l == 'ar' else "No records yet.", show_alert=True)
+        return
+    txt = "📋 <b>سجل تعديلات رصيدك</b>\n\n" if l == 'ar' else "📋 <b>Your Balance Adjustment History</b>\n\n"
+    for log in logs:
+        t = log.get('type', 'manual')
+        amt = log.get('amount', 0)
+        note = log.get('note', '')
+        date = log.get('date', '')
+        sign = "+" if amt >= 0 else ""
+        date_str = date.strftime("%Y-%m-%d %H:%M") if hasattr(date, 'strftime') else str(date)[:16]
+        if l == 'ar':
+            type_label = "🔄 تعويض" if t == 'compensation' else "💰 إضافة"
+            txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+            if note: txt += f"📝 <code>{note}</code>\n"
+        else:
+            type_label = "🔄 Compensation" if t == 'compensation' else "💰 Manual Add"
+            txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+            if note: txt += f"📝 <code>{note}</code>\n"
+        txt += "──────────\n"
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️" , callback_data=f"my_ballogs_{page-1}"))
+    if (page + 1) * per_page < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"my_ballogs_{page+1}"))
+    if nav: markup.add(*nav)
+    back_label = "🔙 رجوع" if l == 'ar' else "🔙 Back"
+    markup.add(InlineKeyboardButton(back_label, callback_data="open_profile"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(call.message.chat.id, txt, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_list")
 @admin_required
@@ -10697,7 +11094,7 @@ def admin_add_admin_save(message):
 @admin_required
 def ad_gift_start(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "👤 <b>Send User ID or @username:</b>")
+    msg = bot.send_message(call.from_user.id, "👤 <b>Send User ID or @username:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_gift_val)
 
 def ad_gift_val(message):
@@ -10706,8 +11103,14 @@ def ad_gift_val(message):
         u = db.users.find_one({'username': target.replace('@', '').lower()})
     else: u = get_user_data_full(int(target))
     if u:
-        msg = bot.send_message(message.from_user.id, f"💰 Amount for {u.get('name')}:")
-        bot.register_next_step_handler(msg, ad_gift_finish, u['user_id'])
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🔄 تعويض (بدون نوت)", callback_data=f"ad_gift_comp_{u['user_id']}"),
+            InlineKeyboardButton("💰 إضافة عادية (مع نوت)", callback_data=f"ad_gift_note_{u['user_id']}")
+        )
+        bot.send_message(message.from_user.id,
+            f"💰 <b>اختر نوع التعديل للمستخدم {u.get('name','')}</b>",
+            parse_mode="HTML", reply_markup=markup)
     else: bot.send_message(message.chat.id, "❌ Not found.")
 
 def ad_gift_finish(message, tid):
@@ -10715,7 +11118,6 @@ def ad_gift_finish(message, tid):
         val = float(message.text)
         db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
         bot.send_message(message.from_user.id, "✅ Done.")
-        # 🎁 إشعار المستخدم + قناة اللوق بإضافة/خصم الرصيد
         try: notify_balance_gift(tid, val)
         except Exception as _e: logger.debug(f"gift notify err: {_e}")
     except: bot.send_message(message.from_user.id, "❌ Error.")
