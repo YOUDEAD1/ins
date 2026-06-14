@@ -10904,7 +10904,8 @@ def admin_edit_opts(call):
                InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}{c_sfx}"))
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}{c_sfx}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}{c_sfx}"))
-    markup.add(InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("📁 Change Folder", callback_data=f"ep_setcat_{pid}{c_sfx}"),
+               InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{pid}{c_sfx}"))
     markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}{c_sfx}"))
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}{c_sfx}"))
@@ -10920,6 +10921,96 @@ def admin_edit_opts(call):
     
     try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     except: pass
+
+
+# ═══ تعيين مجلد للمنتج من صفحة خيارات التعديل ═══
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_setcat_"))
+@admin_required
+def ep_setcat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    try:
+        raw = call.data.replace("ep_setcat_", "")
+        if '_c_' in raw:
+            pid, cat_id_back = raw.split('_c_', 1)
+        else:
+            pid = raw
+            cat_id_back = None
+            
+        p = find_product(pid)
+        if not p: return
+        
+        c_sfx = f"_c_{cat_id_back}" if cat_id_back else ""
+        
+        cats = list(db.catalogs.find().sort('order', 1))
+        markup = InlineKeyboardMarkup(row_width=1)
+        for cat in cats:
+            cat_id = str(cat['_id'])
+            cat_name = cat.get('name_ar', cat.get('name', ''))
+            markup.add(InlineKeyboardButton(
+                f"📁 {cat_name}",
+                callback_data=f"ep_dosetcat_{pid}_{cat_id}{c_sfx}"
+            ))
+        markup.add(InlineKeyboardButton("❌ Without Catalog (بدون مجلد)", callback_data=f"ep_dosetcat_{pid}_none{c_sfx}"))
+        markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"edit_p_{pid}{c_sfx}"))
+        
+        txt = f"📁 <b>Choose a folder for product:</b>\n{clean_name(p.get('name_ar', p.get('name_en', '')))}"
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Error in ep_setcat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_dosetcat_"))
+@admin_required
+def ep_dosetcat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    try:
+        raw = call.data.replace("ep_dosetcat_", "")
+        if '_c_' in raw:
+            parts_raw, cat_id_back = raw.split('_c_', 1)
+        else:
+            parts_raw = raw
+            cat_id_back = None
+            
+        parts = parts_raw.rsplit("_", 1)
+        pid = parts[0]
+        cat_id = parts[1] if len(parts) > 1 else "none"
+        
+        p = find_product(pid)
+        if not p: return
+        
+        # Remove from all old catalogs
+        for c in db.catalogs.find():
+            if pid in (c.get('product_ids') or []):
+                db.catalogs.update_one(
+                    {'_id': c['_id']},
+                    {'$pull': {'product_ids': pid}}
+                )
+        
+        # Add to new catalog if not none
+        if cat_id != "none":
+            from bson import ObjectId
+            db.catalogs.update_one(
+                {'_id': ObjectId(cat_id)},
+                {'$push': {'product_ids': {'$each': [pid], '$position': 0}}}
+            )
+            db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': str(cat_id)}})
+        else:
+            db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': None}})
+            
+        bot.answer_callback_query(call.id, "✅ Folder updated successfully!", show_alert=True)
+        
+        # Go back to edit options
+        c_sfx = f"_c_{cat_id_back}" if cat_id_back else ""
+        call.data = f"edit_p_{pid}{c_sfx}"
+        admin_edit_opts(call)
+    except Exception as e:
+        logger.exception("Error in ep_dosetcat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ep_disc_"))
 @admin_required
