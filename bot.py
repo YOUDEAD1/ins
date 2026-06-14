@@ -4449,7 +4449,7 @@ def shop_list_ui(call):
             emoji = cat.get('emoji', '📁')
             emoji_id = cat.get('emoji_id')
             name = cat.get('name_en', cat.get('name_ar', '')) if l == 'en' else cat.get('name_ar', cat.get('name_en', ''))
-            prod_ids = cat.get('product_ids', [])
+            prod_ids = cat.get('product_ids') or []
             count = 0
             for pid in prod_ids:
                 p = find_product(pid)
@@ -4473,7 +4473,7 @@ def shop_list_ui(call):
         # المنتجات بدون كتالوج
         all_catalog_pids = set()
         for cat in catalogs:
-            all_catalog_pids.update([str(x) for x in cat.get('product_ids', [])])
+            all_catalog_pids.update([str(x) for x in (cat.get('product_ids') or [])])
         
         prods_no_cat = []
         for p in db.products.find():
@@ -4590,7 +4590,7 @@ def catalog_view(call):
     name = cat.get('name_en', cat.get('name_ar', '')) if l == 'en' else cat.get('name_ar', cat.get('name_en', ''))
     
     markup = InlineKeyboardMarkup(row_width=1)
-    prod_ids = cat.get('product_ids', [])
+    prod_ids = cat.get('product_ids') or []
     
     # نجمع المنتجات ونرتبها: المتوفر أول، الخالص آخر
     items = []
@@ -10510,7 +10510,7 @@ def cgpt_setcat(call):
 
     # نزيله من أي مجلد قديم
     for c in db.catalogs.find():
-        if main_pid in c.get('product_ids', []):
+        if main_pid in (c.get('product_ids') or []):
             db.catalogs.update_one(
                 {'_id': c['_id']},
                 {'$pull': {'product_ids': main_pid}}
@@ -12713,7 +12713,7 @@ def ad_catalog_list(call):
             emoji = cat.get('emoji', '📁')
             emoji_id = cat.get('emoji_id')
             name = cat.get('name_ar', '')
-            count = len(cat.get('product_ids', []))
+            count = len(cat.get('product_ids') or [])
             if emoji_id:
                 txt += f'{i}. <tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji> <b>{name}</b> — {count} منتج\n'
             else:
@@ -12815,7 +12815,7 @@ def ad_cat_edit(call):
     emoji_id = cat.get('emoji_id')
     name_ar = cat.get('name_ar', '')
     name_en = cat.get('name_en', '')
-    prod_ids = cat.get('product_ids', [])
+    prod_ids = cat.get('product_ids') or []
     
     display_emoji = f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji>' if emoji_id else emoji
     txt = f"✏️ <b>Edit Catalog:</b> {display_emoji} {name_en or name_ar}\n"
@@ -12881,38 +12881,42 @@ def p_set_first(call):
 def ad_cat_addp(call):
     try: bot.answer_callback_query(call.id)
     except: pass
-    cat_id = call.data.replace("ad_cat_addp_", "")
-    from bson import ObjectId
-    cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
-    if not cat: return
-    
-    # نجمع كل المنتجات الموجودة في أي كتالوج
-    all_catalog_pids = set()
-    for c in db.catalogs.find():
-        all_catalog_pids.update([str(x) for x in c.get('product_ids', [])])
-    
-    prods = list(db.products.find())
-    prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
-    
-    markup = InlineKeyboardMarkup(row_width=1)
-    found = False
-    for p in prods:
-        pid = str(p.get('id', str(p.get('_id', ''))))
-        if pid in all_catalog_pids:
-            continue
-        found = True
-        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
-        emoji_id = p.get('custom_emoji_id')
-        btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{pid}"}
-        if emoji_id:
-            btn_kwargs['icon_custom_emoji_id'] = emoji_id
-        markup.add(CustomInlineButton(**btn_kwargs))
-    
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
-    
-    txt = "➕ <b>Choose a product to add:</b>" if found else "✅ <b>All products are already in catalogs.</b>"
-    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    try:
+        cat_id = call.data.replace("ad_cat_addp_", "")
+        from bson import ObjectId
+        cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
+        if not cat: return
+        
+        # نجمع كل المنتجات الموجودة في أي كتالوج
+        all_catalog_pids = set()
+        for c in db.catalogs.find():
+            all_catalog_pids.update([str(x) for x in (c.get('product_ids') or [])])
+        
+        prods = list(db.products.find())
+        prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        found = False
+        for p in prods:
+            pid = str(p.get('id', str(p.get('_id', ''))))
+            if pid in all_catalog_pids:
+                continue
+            found = True
+            name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
+            emoji_id = p.get('custom_emoji_id')
+            btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{pid}"}
+            if emoji_id:
+                btn_kwargs['icon_custom_emoji_id'] = emoji_id
+            markup.add(CustomInlineButton(**btn_kwargs))
+        
+        markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
+        
+        txt = "➕ <b>Choose a product to add:</b>" if found else "✅ <b>All products are already in catalogs.</b>"
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Error in ad_cat_addp:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error loading products: {e}")
+        except: pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_doadd_"))
@@ -12948,32 +12952,36 @@ def ad_cat_doadd(call):
 def ad_cat_remp(call):
     try: bot.answer_callback_query(call.id)
     except: pass
-    cat_id = call.data.replace("ad_cat_remp_", "")
-    from bson import ObjectId
-    cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
-    if not cat: return
-    
-    prod_ids = cat.get('product_ids', [])
-    # نجيب بيانات المنتجات ونرتبها أبجدياً
-    items = []
-    for pid in prod_ids:
-        p = find_product(str(pid))
-        if p:
-            items.append((pid, p))
-    items.sort(key=lambda x: clean_name(x[1].get('name_en', x[1].get('name_ar', ''))).lower())
-    
-    markup = InlineKeyboardMarkup(row_width=1)
-    for pid, p in items:
-        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
-        emoji_id = p.get('custom_emoji_id')
-        btn_kwargs = {'text': f"↩️ {name}", 'callback_data': f"ad_cat_dorem_{cat_id}_{pid}"}
-        if emoji_id:
-            btn_kwargs['icon_custom_emoji_id'] = emoji_id
-        markup.add(CustomInlineButton(**btn_kwargs))
-    
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
-    try: bot.edit_message_text("↩️ <b>Choose a product to move back to regular:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    try:
+        cat_id = call.data.replace("ad_cat_remp_", "")
+        from bson import ObjectId
+        cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
+        if not cat: return
+        
+        prod_ids = cat.get('product_ids') or []
+        # نجيب بيانات المنتجات ونرتبها أبجدياً
+        items = []
+        for pid in prod_ids:
+            p = find_product(str(pid))
+            if p:
+                items.append((pid, p))
+        items.sort(key=lambda x: clean_name(x[1].get('name_en', x[1].get('name_ar', ''))).lower())
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        for pid, p in items:
+            name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
+            emoji_id = p.get('custom_emoji_id')
+            btn_kwargs = {'text': f"↩️ {name}", 'callback_data': f"ad_cat_dorem_{cat_id}_{pid}"}
+            if emoji_id:
+                btn_kwargs['icon_custom_emoji_id'] = emoji_id
+            markup.add(CustomInlineButton(**btn_kwargs))
+        
+        markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
+        bot.edit_message_text("↩️ <b>Choose a product to move back to regular:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Error in ad_cat_remp:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error loading products to remove: {e}")
+        except: pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_dorem_"))
