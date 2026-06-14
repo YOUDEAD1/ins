@@ -466,7 +466,8 @@ class ChatGPTSeatManager:
     _instance = None
 
     def __init__(self):
-        self.token_file = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        _raw_path = get_setting('cgpt_token_path')
+        self.token_file = _raw_path if _raw_path and _raw_path != 'Not Set' else 'pasted_content.txt'
         self.data_file  = get_setting('cgpt_data_file') or 'cookie_seat_invites.json'
         self.access_token  = None
         self.session_token = None
@@ -524,7 +525,8 @@ class ChatGPTSeatManager:
 
     def reload_token(self):
         """إعادة تحميل الـ token من الملف"""
-        path = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        _rp = get_setting('cgpt_token_path')
+        path = _rp if _rp and _rp != 'Not Set' else 'pasted_content.txt'
         self.token_file = path
         self._load_tokens()
         return self._loaded
@@ -10269,7 +10271,8 @@ def cgpt_paste_json(call):
 def cgpt_save_json_cookies(message):
     try:
         data = json.loads(message.text.strip())
-        token_path = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        _tp = get_setting('cgpt_token_path')
+        token_path = _tp if _tp and _tp != 'Not Set' else 'pasted_content.txt'
         with open(token_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         global _cgpt_manager_instance
