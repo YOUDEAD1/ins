@@ -4620,19 +4620,19 @@ def shop_detail_ui(call):
     if p.get('is_hidden', False) and not is_admin:
         bot.send_message(uid, bil(uid, "❌ عذراً، هذا المنتج غير متوفر حالياً.", "❌ Sorry, this product is currently unavailable."), parse_mode="HTML"); return
 
-    # ── ChatGPT Seat: صفحة موحدة بكل المدد ──
-    if p.get('product_type') == 'chatgpt_seat' and p.get('cgpt_product_id'):
+    # ── ChatGPT Main: صفحة موحدة بكل المدد ──
+    if p.get('product_type') == 'cgpt_main' and p.get('cgpt_product_id'):
         cgpt_parent_id = p['cgpt_product_id']
-        # نجيب كل المدد المرتبطة بنفس المنتج الأب
-        all_durations = list(db.products.find({
-            'cgpt_product_id': cgpt_parent_id,
-            'is_hidden': {'$ne': True}
-        }).sort('price', 1))
+        try:
+            from bson import ObjectId as _ObjId
+            parent = db.cgpt_products.find_one({'_id': _ObjId(cgpt_parent_id)})
+        except:
+            parent = None
 
-        # بيانات الوصف من المنتج الأب
-        parent = db.cgpt_products.find_one({'_id': __import__('bson').ObjectId(cgpt_parent_id)}) if cgpt_parent_id else None
         p_name = (parent.get('name', '') if parent else '') or clean_name(p.get('name_ar') or p.get('name_en', ''))
         p_desc = (parent.get('desc', '') if parent else '') or clean_name(p.get('desc_ar') or p.get('desc_en', ''))
+        durations = (parent.get('durations', []) if parent else [])
+        durations_sorted = sorted(durations, key=lambda x: x.get('price', 0))
         custom_emoji_id = p.get('custom_emoji_id')
         icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
 
@@ -4641,7 +4641,7 @@ def shop_detail_ui(call):
                 f"{icon_html} <b>{p_name}</b>\n\n"
                 f"📝 {p_desc}\n\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"⚡ <b>التسليم:</b> تلقائي (فوري)\n"
+                f"⚡ <b>التسليم:</b> تلقائي فوري\n"
                 f"📦 <b>المخزون:</b> غير محدود\n"
                 f"━━━━━━━━━━━━━━\n\n"
                 f"🗓 <b>اختر المدة:</b>"
@@ -4651,7 +4651,7 @@ def shop_detail_ui(call):
                 f"{icon_html} <b>{p_name}</b>\n\n"
                 f"📝 {p_desc}\n\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"⚡ <b>Delivery:</b> Instant (Auto)\n"
+                f"⚡ <b>Delivery:</b> Instant\n"
                 f"📦 <b>Stock:</b> Unlimited\n"
                 f"━━━━━━━━━━━━━━\n\n"
                 f"🗓 <b>Choose duration:</b>"
@@ -4660,17 +4660,13 @@ def shop_detail_ui(call):
         back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
         markup = InlineKeyboardMarkup(row_width=1)
 
-        for dur_p in all_durations:
-            dur_pid   = str(dur_p.get('_id', ''))
-            dur_label = clean_name(dur_p.get('name_ar') or dur_p.get('name_en', ''))
-            # نستخرج المدة فقط بدون اسم المنتج
-            if ' - ' in dur_label:
-                dur_label = dur_label.split(' - ', 1)[1]
-            dur_price = float(dur_p.get('price', 0))
-            qty_cb = f"buy_qty_{dur_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{dur_pid}"
+        for dur in durations_sorted:
+            dur_id    = dur.get('dur_id', '')
+            dur_label = dur.get('label', '')
+            dur_price = float(dur.get('price', 0))
             markup.add(CustomInlineButton(
                 text=f"{dur_label} — ${dur_price:.2f}",
-                callback_data=qty_cb,
+                callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
                 style="success"
             ))
 
@@ -4935,6 +4931,191 @@ def confirm_buy_handler(call):
 
 # قاموس مؤقت لبيانات شراء ChatGPT
 _cgpt_pending = {}
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_buy_"))
+def cgpt_buy_duration(call):
+    """الزبون يضغط على مدة محددة → نطلب الإيميل"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+
+    raw = call.data.replace("cgpt_buy_", "")
+    parts = raw.split("_", 1)
+    if len(parts) != 2:
+        return
+    cgpt_pid, dur_id = parts[0], parts[1]
+
+    try:
+        from bson import ObjectId as _ObjId2
+        parent = db.cgpt_products.find_one({'_id': _ObjId2(cgpt_pid)})
+    except:
+        parent = None
+
+    if not parent:
+        bot.send_message(uid, "❌ المنتج غير موجود." if l == 'ar' else "❌ Product not found.")
+        return
+
+    dur = next((d for d in parent.get('durations', []) if d.get('dur_id') == dur_id), None)
+    if not dur:
+        bot.send_message(uid, "❌ المدة غير موجودة." if l == 'ar' else "❌ Duration not found.")
+        return
+
+    price = float(dur.get('price', 0))
+    label = dur.get('label', '')
+    minutes = int(dur.get('minutes', 10080))
+    u = get_user_data_full(uid)
+    balance = round(float(u.get('balance', 0)), 2) if u else 0.0
+
+    if balance < price:
+        send_no_balance(uid)
+        return
+
+    # نحفظ بيانات الشراء
+    order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
+    _cgpt_pending[uid] = {
+        'cgpt_pid': cgpt_pid,
+        'dur_id': dur_id,
+        'label': label,
+        'price': price,
+        'minutes': minutes,
+        'order_id': order_id,
+        'p_name': parent.get('name', ''),
+    }
+
+    if l == 'ar':
+        msg_txt = (
+            f"✅ <b>المدة المختارة: {label} — ${price:.2f}</b>\n\n"
+            f"📧 <b>أرسل إيميل حساب ChatGPT الخاص بك:</b>"
+        )
+    else:
+        msg_txt = (
+            f"✅ <b>Selected: {label} — ${price:.2f}</b>\n\n"
+            f"📧 <b>Send your ChatGPT account email:</b>"
+        )
+    msg = bot.send_message(uid, msg_txt, parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l)
+
+def cgpt_confirm_email_step(message, buyer_uid, lang):
+    """الخطوة 1: يرسل الإيميل → نطلب تأكيده"""
+    import re as _re3
+    email = (message.text or "").strip().lower()
+    if not _re3.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        bot.send_message(buyer_uid,
+            "❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>" if lang == 'ar' else
+            "❌ <b>Invalid email, please send again.</b>",
+            parse_mode="HTML")
+        pending = _cgpt_pending.get(buyer_uid)
+        if pending:
+            msg = bot.send_message(buyer_uid,
+                "📧 <b>أرسل إيميل حساب ChatGPT:</b>" if lang == 'ar' else
+                "📧 <b>Send your ChatGPT email:</b>",
+                parse_mode="HTML")
+            bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
+        return
+
+    # نطلب التأكيد
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ نعم، صحيح" if lang == 'ar' else "✅ Yes, correct",
+            callback_data=f"cgpt_email_ok_{buyer_uid}"),
+        InlineKeyboardButton("✏️ تغييره" if lang == 'ar' else "✏️ Change it",
+            callback_data=f"cgpt_email_change_{buyer_uid}")
+    )
+    _cgpt_pending[buyer_uid]['email'] = email
+    bot.send_message(buyer_uid,
+        f"📧 <b>الإيميل:</b> <code>{email}</code>\n\n"
+        f"{'هل هذا الإيميل صحيح؟' if lang == 'ar' else 'Is this email correct?'}",
+        parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_change_"))
+def cgpt_email_change(call):
+    bot.answer_callback_query(call.id)
+    buyer_uid = int(call.data.replace("cgpt_email_change_", ""))
+    lang = get_lang(buyer_uid)
+    msg = bot.send_message(call.message.chat.id,
+        "📧 <b>أرسل الإيميل الصحيح:</b>" if lang == 'ar' else "📧 <b>Send the correct email:</b>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_ok_"))
+def cgpt_email_confirmed(call):
+    """تأكيد الإيميل → تنفيذ الشراء"""
+    bot.answer_callback_query(call.id)
+    buyer_uid = int(call.data.replace("cgpt_email_ok_", ""))
+    lang = get_lang(buyer_uid)
+    pending = _cgpt_pending.pop(buyer_uid, None)
+    if not pending or 'email' not in pending:
+        bot.send_message(call.message.chat.id,
+            "❌ انتهت الجلسة." if lang == 'ar' else "❌ Session expired.")
+        return
+
+    email   = pending['email']
+    price   = pending['price']
+    minutes = pending['minutes']
+    label   = pending['label']
+    order_id = pending['order_id']
+    p_name  = pending['p_name']
+
+    # خصم الرصيد أتوميك
+    updated = db.users.find_one_and_update(
+        {'user_id': buyer_uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}},
+        return_document=True
+    )
+    if not updated:
+        send_no_balance(buyer_uid)
+        return
+
+    bot.send_message(buyer_uid,
+        "⏳ <b>جاري إرسال الدعوة...</b>" if lang == 'ar' else "⏳ <b>Sending invite...</b>",
+        parse_mode="HTML")
+
+    mgr = get_cgpt_manager()
+    mgr._last_buyer_uid = buyer_uid
+    result = mgr.invite_user(email, minutes)
+    days = round(minutes / 1440, 1)
+
+    if result['ok']:
+        expires_iso = result['expires_at']
+        db.orders.insert_one({
+            'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
+            'code_delivered': f"chatgpt_seat:{email}",
+            'qty': 1, 'total_price': price, 'order_id': order_id,
+            'cgpt_email': email, 'cgpt_expires_at': expires_iso, 'cgpt_minutes': minutes
+        })
+        u_data = get_user_data_full(buyer_uid)
+        buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
+        if lang == 'ar':
+            success = (
+                f"✅ <b>تم إرسال الدعوة بنجاح!</b>\n\n"
+                f"📧 <b>الإيميل:</b> <code>{email}</code>\n"
+                f"⏱ <b>المدة:</b> {label}\n"
+                f"📅 <b>ينتهي في:</b> {expires_iso[:10]}\n\n"
+                f"<i>تفقد بريدك الإلكتروني وقبل الدعوة 🎉</i>"
+            )
+        else:
+            success = (
+                f"✅ <b>Invite sent!</b>\n\n"
+                f"📧 <b>Email:</b> <code>{email}</code>\n"
+                f"⏱ <b>Duration:</b> {label}\n"
+                f"📅 <b>Expires:</b> {expires_iso[:10]}\n\n"
+                f"<i>Check your inbox and accept the invite 🎉</i>"
+            )
+        bot.send_message(buyer_uid, success, parse_mode="HTML")
+        notify_admins(
+            f"🤖 <b>ChatGPT — شراء</b>\n"
+            f"👤 {buyer_m} (<code>{buyer_uid}</code>)\n"
+            f"📧 <code>{email}</code>\n"
+            f"⏱ {label}\n💰 ${price:.2f}\n🆔 <code>{order_id}</code>"
+        )
+    else:
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
+        bot.send_message(buyer_uid,
+            f"❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{result.get('error','')}</code>"
+            if lang == 'ar' else
+            f"❌ <b>Invite failed. Balance refunded.</b>\n<code>{result.get('error','')}</code>",
+            parse_mode="HTML")
 
 def _cgpt_handle_email(message, buyer_uid, lang):
     pending = _cgpt_pending.pop(buyer_uid, None)
@@ -10081,27 +10262,22 @@ def cgpt_save_duration(message, pid):
         p_name = p.get('name', '') if p else ''
         p_desc = p.get('desc', '') if p else ''
 
-        # نحفظ المنتج مباشرة في products (بدون مجلد — يضيفه الأدمن من إدارة المنتجات)
-        shop_product_id      = f"cgpt_{pid}_{dur_id}"
-        shop_product_name_ar = f"{p_name} - {label}"
-        shop_product_name_en = f"{p_name} - {label}"
-
+        # نضمن وجود منتج رئيسي واحد في db.products (الزر الأزرق في المجلد)
+        main_pid = f"cgpt_main_{pid}"
         db.products.update_one(
-            {'_id': shop_product_id},
+            {'_id': main_pid},
             {'$set': {
-                '_id':             shop_product_id,
-                'name_ar':         shop_product_name_ar,
-                'name_en':         shop_product_name_en,
-                'desc_ar':         p_desc,
-                'desc_en':         p_desc,
-                'price':           price,
-                'is_manual':       False,
-                'product_type':    'chatgpt_seat',
-                'cgpt_minutes':    minutes,
+                '_id':           main_pid,
+                'name_ar':       p_name,
+                'name_en':       p_name,
+                'desc_ar':       p_desc,
+                'desc_en':       p_desc,
+                'price':         0,
+                'is_manual':     False,
+                'product_type':  'cgpt_main',
                 'cgpt_product_id': pid,
-                'cgpt_dur_id':     dur_id,
-                'is_hidden':       False,
-                'btn_style':       'success',
+                'is_hidden':     False,
+                'btn_style':     'primary',
             }},
             upsert=True
         )
@@ -10109,16 +10285,14 @@ def cgpt_save_duration(message, pid):
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u062f\u0629 \u0623\u062e\u0631\u0649", callback_data=f"cgpt_add_dur_{pid}"),
-            InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{shop_product_id}"),
+            InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{main_pid}"),
             InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0643\u0644 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
             InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
         )
         bot.send_message(message.chat.id,
-            f"\u2705 <b>\u062a\u0645 \u0646\u0634\u0631 \u0627\u0644\u0645\u0646\u062a\u062c!</b>\n\n"
-            f"\U0001f4cc <b>{shop_product_name_ar}</b>\n"
+            f"\u2705 <b>\u062a\u0645\u062a \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0645\u062f\u0629!</b>\n\n"
             f"\U0001f5d3 <b>{label}</b> | \U0001f4b0 <b>${price:.2f}</b>\n\n"
-            f"\U0001f7e2 \u0632\u0631 \u0623\u062e\u0636\u0631 \u062c\u0627\u0647\u0632\n"
-            f"\u2699\ufe0f \u0627\u0636\u063a\u0637 \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c \u0644\u062a\u0636\u064a\u0641 \u0627\u0644\u0625\u064a\u0645\u0648\u062c\u064a \u0648\u0627\u0644\u0645\u062c\u0644\u062f",
+            f"\u2699\ufe0f \u0627\u0636\u063a\u0637 \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c \u0644\u062a\u0636\u064a\u0641 \u0627\u0644\u0625\u064a\u0645\u0648\u062c\u064a \u0648\u062a\u062d\u062f\u064a\u062f \u0627\u0644\u0645\u062c\u0644\u062f",
             parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         bot.send_message(message.chat.id, f"\u274c \u0635\u064a\u063a\u0629 \u062e\u0627\u0637\u0626\u0629. \u0627\u0633\u062a\u062e\u062f\u0645: <code>7 \u0623\u064a\u0627\u0645_5</code>\n<i>{e}</i>", parse_mode="HTML")
@@ -10236,8 +10410,9 @@ def cgpt_del_confirm(call):
     pid = call.data.replace("cgpt_del_confirm_", "")
     from bson import ObjectId
     from bson import ObjectId as _ObjId2
-    # نحذف كل منتجات المتجر المرتبطة بهذا المنتج
+    # نحذف المنتج الرئيسي والمنتجات الفرعية من المتجر
     db.products.delete_many({'cgpt_product_id': pid})
+    db.products.delete_one({'_id': f"cgpt_main_{pid}"})
     db.cgpt_products.delete_one({'_id': _ObjId2(pid)})
     bot.answer_callback_query(call.id, "\u2705 \u062a\u0645 \u0627\u0644\u062d\u0630\u0641!", show_alert=True)
     _cgpt_show_products_list(call.message.chat.id, call.message.message_id)
