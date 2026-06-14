@@ -12700,7 +12700,8 @@ def admin_save_setting(message, mode):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_catalog_list")
 @admin_required
 def ad_catalog_list(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     catalogs = list(db.catalogs.find().sort('order', 1))
     
     txt = "📂 <b>إدارة الكتالوجات</b>\n\n"
@@ -12740,7 +12741,8 @@ def ad_catalog_list(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cat_create")
 @admin_required
 def ad_cat_create(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     msg = bot.send_message(call.message.chat.id,
         "📂 <b>Create new catalog</b>\n\n"
         "Send the catalog name:",
@@ -12798,7 +12800,8 @@ def ad_cat_create_step3(message, name):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_edit_"))
 @admin_required
 def ad_cat_edit(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     cat_id = call.data.replace("ad_cat_edit_", "")
     from bson import ObjectId
     try:
@@ -12849,7 +12852,8 @@ def ad_cat_edit(call):
 @admin_required
 def p_set_first(call):
     """يجعل المنتج أول شيء في مجلده"""
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     raw = call.data.replace("p_set_first_", "")
     parts = raw.rsplit("_", 1)
     pid = parts[0]
@@ -12875,7 +12879,8 @@ def p_set_first(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_addp_"))
 @admin_required
 def ad_cat_addp(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     cat_id = call.data.replace("ad_cat_addp_", "")
     from bson import ObjectId
     cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
@@ -12941,7 +12946,8 @@ def ad_cat_doadd(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_remp_"))
 @admin_required
 def ad_cat_remp(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     cat_id = call.data.replace("ad_cat_remp_", "")
     from bson import ObjectId
     cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
@@ -12996,7 +13002,8 @@ def ad_cat_dorem(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_rename_"))
 @admin_required
 def ad_cat_rename(call):
-    bot.answer_callback_query(call.id)
+    try: bot.answer_callback_query(call.id)
+    except: pass
     cat_id = call.data.replace("ad_cat_rename_", "")
     msg = bot.send_message(call.message.chat.id,
         "✏️ <b>Send the new name:</b>",
