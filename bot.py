@@ -2080,10 +2080,16 @@ def update_referrer_balance(referrer_id):
 
                 # 3) إشعار للأدمن
                 try:
+                    ref_user = get_user_data_full(rid)
+                    ref_username = ref_user.get('username') if ref_user else None
+                    ref_name     = ref_user.get('name', '') if ref_user else ''
+                    user_display = f"@{ref_username}" if ref_username else f"<code>{rid}</code>"
                     admin_notif = (
                         f"💎 <b>Referral Milestone!</b>\n\n"
-                        f"👤 ID: <code>{rid}</code>\n"
-                        f"✅ Active: <b>{active_count}</b>\n"
+                        f"👤 {user_display}"
+                        + (f" ({ref_name[:20]})" if ref_name else "") +
+                        f"\n🆔 <code>{rid}</code>\n"
+                        f"✅ Active Refs: <b>{active_count}</b>\n"
                         f"💰 Reward: <b>+${diff:.2f}</b>\n"
                         f"💼 New Balance: <b>${new_balance:.2f}</b>"
                     )
@@ -4412,9 +4418,6 @@ def shop_list_ui(call):
         # ═══ عرض الكتالوجات أولاً (مرتبة أبجدياً) ثم المنتجات العادية ═══
         markup = InlineKeyboardMarkup(row_width=2)
         
-        markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
-        markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
-        
         # ترتيب الكتالوجات أبجدياً
         name_key = 'name_en' if l == 'en' else 'name_ar'
         catalogs.sort(key=lambda c: (c.get(name_key) or c.get('name_ar', '')).lower())
@@ -4497,9 +4500,6 @@ def shop_list_ui(call):
         
         markup = InlineKeyboardMarkup(row_width=1)
         
-        markup.add(create_btn(uid, 'btn_gh', callback_data="github_pack_info"))
-        markup.add(create_btn(uid, 'btn_gemini', callback_data="gemini_pack_info"))
-        
         for p in prods:
             is_hidden = p.get('is_hidden', False)
             if is_hidden and not is_admin:
@@ -4575,7 +4575,9 @@ def catalog_view(call):
     items.sort(key=lambda x: (not x[4], clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
     
     for p, actual_pid, st, is_manual, in_stock in items:
-        btn_style = "success" if in_stock else "danger"
+        # لو المنتج عنده btn_style محدد (مثل ChatGPT الأخضر) نستخدمه، وإلا نحدده بالمخزون
+        db_style = p.get('btn_style')
+        btn_style = db_style if db_style and in_stock else ("success" if in_stock else "danger")
         hidden_icon = " 👻" if p.get('is_hidden', False) else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n
@@ -4608,31 +4610,93 @@ def shop_detail_ui(call):
         cat_id_back = None
     
     p = find_product(pid)
-    if not p: 
+    if not p:
         bot.send_message(uid, bil(uid, "❌ عذراً، المنتج غير متوفر.", "❌ Sorry, product is unavailable."), parse_mode="HTML"); return
-    
+
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
     if p.get('is_hidden', False) and not is_admin:
         bot.send_message(uid, bil(uid, "❌ عذراً، هذا المنتج غير متوفر حالياً.", "❌ Sorry, this product is currently unavailable."), parse_mode="HTML"); return
 
+    # ── ChatGPT Seat: صفحة موحدة بكل المدد ──
+    if p.get('product_type') == 'chatgpt_seat' and p.get('cgpt_product_id'):
+        cgpt_parent_id = p['cgpt_product_id']
+        # نجيب كل المدد المرتبطة بنفس المنتج الأب
+        all_durations = list(db.products.find({
+            'cgpt_product_id': cgpt_parent_id,
+            'is_hidden': {'$ne': True}
+        }).sort('price', 1))
+
+        # بيانات الوصف من المنتج الأب
+        parent = db.cgpt_products.find_one({'_id': __import__('bson').ObjectId(cgpt_parent_id)}) if cgpt_parent_id else None
+        p_name = (parent.get('name', '') if parent else '') or clean_name(p.get('name_ar') or p.get('name_en', ''))
+        p_desc = (parent.get('desc', '') if parent else '') or clean_name(p.get('desc_ar') or p.get('desc_en', ''))
+        custom_emoji_id = p.get('custom_emoji_id')
+        icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
+
+        if l == 'ar':
+            text = (
+                f"{icon_html} <b>{p_name}</b>\n\n"
+                f"📝 {p_desc}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"⚡ <b>التسليم:</b> تلقائي (فوري)\n"
+                f"📦 <b>المخزون:</b> غير محدود\n"
+                f"━━━━━━━━━━━━━━\n\n"
+                f"🗓 <b>اختر المدة:</b>"
+            )
+        else:
+            text = (
+                f"{icon_html} <b>{p_name}</b>\n\n"
+                f"📝 {p_desc}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"⚡ <b>Delivery:</b> Instant (Auto)\n"
+                f"📦 <b>Stock:</b> Unlimited\n"
+                f"━━━━━━━━━━━━━━\n\n"
+                f"🗓 <b>Choose duration:</b>"
+            )
+
+        back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
+        markup = InlineKeyboardMarkup(row_width=1)
+
+        for dur_p in all_durations:
+            dur_pid   = str(dur_p.get('_id', ''))
+            dur_label = clean_name(dur_p.get('name_ar') or dur_p.get('name_en', ''))
+            # نستخرج المدة فقط بدون اسم المنتج
+            if ' - ' in dur_label:
+                dur_label = dur_label.split(' - ', 1)[1]
+            dur_price = float(dur_p.get('price', 0))
+            qty_cb = f"buy_qty_{dur_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{dur_pid}"
+            markup.add(CustomInlineButton(
+                text=f"{dur_label} — ${dur_price:.2f}",
+                callback_data=qty_cb,
+                style="success"
+            ))
+
+        markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
+        if is_admin:
+            edit_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
+            markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
+
+        try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+        return
+
+    # ── منتج عادي ──
     is_manual = p.get('is_manual', False)
     st = get_product_stock_count(pid)
-    
+
     if l == 'ar':
         delivery_type = "يدوي 🤝 (تواصل مع الإدارة بعد الدفع)" if is_manual else "تلقائي ⚡ (تسليم فوري)"
         st_text = "غير محدود" if is_manual else f"{st} قطعة"
     else:
         delivery_type = "Manual 🤝 (Contact admin after payment)" if is_manual else "Auto ⚡ (Instant delivery)"
         st_text = "Unlimited" if is_manual else f"{st} pcs"
-        
+
     n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
     d = clean_name(p.get('desc_en') if l == 'en' else p.get('desc_ar'))
-    
     custom_emoji_id = p.get('custom_emoji_id')
     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '📦'
-    
-    # 🏷 عرض الخصومات
+
     discount_tiers = p.get('discount_tiers', [])
     discount_text = ""
     if discount_tiers:
@@ -4647,25 +4711,23 @@ def shop_detail_ui(call):
             for t in sorted_tiers:
                 t_price = float(t.get('price', 0))
                 discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
-    
+
     if l == 'en':
         text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
     else:
         text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
-    
+
     back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
     markup = InlineKeyboardMarkup()
     if is_manual or st > 0:
-        # نمرر cat_id للـ buy_qty حتى يرجع للكتالوج
         qty_cb = f"buy_qty_{pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{pid}"
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
     markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
-    
-    # 🛡 زر التعديل للأدمن فقط
+
     if _is_admin_check(uid):
         edit_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
         markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
-    
+
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
@@ -8984,6 +9046,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 API Settings", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
@@ -8998,6 +9061,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
@@ -9810,198 +9874,470 @@ def admin_set_price(call):
             
     bot.register_next_step_handler(msg, save_price)
 
+# ================================================================
+# 🤖 لوحة ChatGPT Business — مستقلة كاملة
+# ================================================================
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_panel")
 @admin_required
 def ad_cgpt_panel(call):
     bot.answer_callback_query(call.id)
     mgr = get_cgpt_manager()
     stats = mgr.get_stats()
+    loaded_icon = "\u2705" if mgr._loaded else "\u274c"
+    products_count = db.cgpt_products.count_documents({})
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("👥 المدعوون النشطون", callback_data="ad_cgpt_list"),
-        InlineKeyboardButton("➕ دعوة يدوية", callback_data="ad_cgpt_invite"),
-        InlineKeyboardButton("🔄 فحص وتنظيف الآن", callback_data="ad_cgpt_cleanup"),
-        InlineKeyboardButton("🔑 تحديث الـ Token", callback_data="ad_cgpt_reload_token"),
-        InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")
+        InlineKeyboardButton("\U0001f465 \u0627\u0644\u0639\u0645\u0644\u0627\u0621", callback_data="cgpt_customers"),
+        InlineKeyboardButton(f"\U0001f4e6 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a ({products_count})", callback_data="cgpt_products_list"),
+        InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u0646\u062a\u062c \u062c\u062f\u064a\u062f", callback_data="cgpt_add_product"),
+        InlineKeyboardButton("\U0001f36a \u0625\u0636\u0627\u0641\u0629 / \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0643\u0648\u0643\u064a\u0632", callback_data="cgpt_set_cookies"),
+        InlineKeyboardButton("\U0001f504 \u0641\u062d\u0635 \u0648\u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0622\u0646", callback_data="ad_cgpt_cleanup"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel")
     )
-    loaded_icon = "✅" if mgr._loaded else "❌"
+    txt = (
+        "\U0001f916 <b>ChatGPT Business</b>\n\n"
+        f"\U0001f36a \u0627\u0644\u0643\u0648\u0643\u064a\u0632: {loaded_icon}\n"
+        f"\U0001f4e6 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a: <b>{products_count}</b>\n"
+        f"\U0001f465 \u0646\u0634\u0637: <b>{stats['active']}</b> | \u0645\u0646\u062a\u0647\u064a: <b>{stats['expired']}</b>"
+    )
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_customers")
+@admin_required
+def cgpt_customers(call):
+    bot.answer_callback_query(call.id)
+    mgr = get_cgpt_manager()
+    stats = mgr.get_stats()
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\U0001f7e2 \u0627\u0644\u0646\u0634\u0637\u0648\u0646", callback_data="cgpt_cust_active"),
+        InlineKeyboardButton("\U0001f534 \u0627\u0644\u0645\u0646\u062a\u0647\u0648\u0646", callback_data="cgpt_cust_expired"),
+        InlineKeyboardButton("\u26d4\ufe0f \u0627\u0644\u0645\u062e\u0627\u0644\u0641\u0648\u0646", callback_data="cgpt_cust_violated"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
+    )
+    txt = (
+        "\U0001f465 <b>\u0627\u0644\u0639\u0645\u0644\u0627\u0621</b>\n\n"
+        f"\U0001f7e2 \u0646\u0634\u0637: <b>{stats['active']}</b>\n"
+        f"\U0001f534 \u0645\u0646\u062a\u0647\u064a: <b>{stats['expired']}</b>"
+    )
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["cgpt_cust_active", "cgpt_cust_expired", "cgpt_cust_violated"])
+@admin_required
+def cgpt_cust_view(call):
+    bot.answer_callback_query(call.id)
+    mgr = get_cgpt_manager()
+    mode = call.data.replace("cgpt_cust_", "")
+    invites = mgr.invites_data.get('invites', {})
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="cgpt_customers"))
+    titles = {"active": "\U0001f7e2 \u0627\u0644\u0646\u0634\u0637\u0648\u0646", "expired": "\U0001f534 \u0627\u0644\u0645\u0646\u062a\u0647\u0648\u0646", "violated": "\u26d4\ufe0f \u0627\u0644\u0645\u062e\u0627\u0644\u0641\u0648\u0646"}
+    status_map = {"active": "active", "expired": "expired", "violated": "violated"}
+    title = titles.get(mode, "")
+    items = [(e, i) for e, i in invites.items() if i.get('status') == status_map[mode]]
+    if not items:
+        txt = title + "\n\n\u0644\u0627 \u064a\u0648\u062c\u062f."
+    else:
+        txt = title + "\n\n"
+        for idx, (email, info) in enumerate(items[:20], 1):
+            exp = info.get('expires_at', '')[:10]
+            uid_tg = info.get('telegram_uid', '')
+            txt += f"{idx}. <code>{email}</code>\n"
+            if uid_tg:
+                try:
+                    u_data = db.users.find_one({'user_id': int(uid_tg)}, {'username': 1, 'name': 1})
+                    uname = u_data.get('username') if u_data else None
+                    uname_str = f"@{uname} | " if uname else ""
+                    udisp = f"   \U0001f464 {uname_str}<code>{uid_tg}</code>\n"
+                except:
+                    udisp = f"   \U0001f464 <code>{uid_tg}</code>\n"
+                txt += udisp
+            if exp:
+                try:
+                    exp_dt = _dt_mod.datetime.fromisoformat(info.get('expires_at', ''))
+                    rem = exp_dt - _dt_mod.datetime.now()
+                    d = max(0, rem.days)
+                    h = max(0, int(rem.total_seconds() // 3600) % 24)
+                    txt += f"   \U0001f4c5 {exp} | \u0645\u062a\u0628\u0642\u064a: {d}\u064a {h}\u0633\n"
+                except:
+                    txt += f"   \U0001f4c5 {exp}\n"
+            txt += "\n"
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+def _cgpt_show_products_list(chat_id, msg_id=None):
+    products = list(db.cgpt_products.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel"))
+    if not products:
+        txt = "\U0001f4e6 <b>\u0644\u0627 \u064a\u0648\u062c\u062f \u0645\u0646\u062a\u062c\u0627\u062a \u0628\u0639\u062f.</b>"
+    else:
+        txt = "\U0001f4e6 <b>\u0645\u0646\u062a\u062c\u0627\u062a ChatGPT Business:</b>\n\n"
+        for p in products:
+            pid = str(p['_id'])
+            name = p.get('name', '')
+            desc = p.get('desc', '')
+            durations = p.get('durations', [])
+            txt += f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\U0001f4cc <b>{name}</b>\n"
+            if desc:
+                txt += f"\U0001f4dd {desc[:60]}{'...' if len(desc) > 60 else ''}\n"
+            if durations:
+                txt += "\U0001f5d3 \u0627\u0644\u0645\u062f\u062f:\n"
+                for d in durations:
+                    txt += f"  \u2022 {d['label']} \u2014 <b>${d['price']:.2f}</b>\n"
+            markup.add(InlineKeyboardButton(f"\u2795 \u0645\u062f\u0629 \u0644\u0640 {name[:20]}", callback_data=f"cgpt_add_dur_{pid}"))
+            markup.add(InlineKeyboardButton(f"\U0001f5d1 \u062d\u0630\u0641 {name[:20]}", callback_data=f"cgpt_del_prod_{pid}"))
+    if msg_id:
+        try:
+            bot.edit_message_text(txt, chat_id, msg_id, parse_mode="HTML", reply_markup=markup)
+            return
+        except:
+            pass
+    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_products_list")
+@admin_required
+def cgpt_products_list(call):
+    bot.answer_callback_query(call.id)
+    _cgpt_show_products_list(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_add_product")
+@admin_required
+def cgpt_add_product(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id, "\U0001f4dd <b>\u0623\u0631\u0633\u0644 \u0627\u0633\u0645 \u0627\u0644\u0645\u0646\u062a\u062c:</b>\n<i>\u0645\u062b\u0627\u0644: ChatGPT Business</i>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_add_product_name)
+
+def cgpt_add_product_name(message):
+    name = (message.text or "").strip()
+    if not name:
+        bot.send_message(message.chat.id, "\u274c \u0623\u0631\u0633\u0644 \u0627\u0633\u0645\u0627\u064b \u0635\u062d\u064a\u062d\u0627\u064b."); return
+    msg = bot.send_message(message.chat.id, f"\u2705 \u0627\u0644\u0627\u0633\u0645: <b>{name}</b>\n\n\U0001f4c4 <b>\u0623\u0631\u0633\u0644 \u0648\u0635\u0641 \u0627\u0644\u0645\u0646\u062a\u062c:</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_add_product_desc, name)
+
+def cgpt_add_product_desc(message, name):
+    desc = (message.text or "").strip()
+    result = db.cgpt_products.insert_one({'name': name, 'desc': desc, 'durations': [], 'created_at': _dt_mod.datetime.now().isoformat()})
+    pid = str(result.inserted_id)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u062f\u0629 \u0648\u0633\u0639\u0631", callback_data=f"cgpt_add_dur_{pid}"),
+        InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0643\u0644 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
+    )
+    bot.send_message(message.chat.id,
+        f"\u2705 <b>\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0645\u0646\u062a\u062c!</b>\n\n\U0001f4cc <b>{name}</b>\n\U0001f4dd {desc or '\u0628\u062f\u0648\u0646 \u0648\u0635\u0641'}\n\n\u0627\u0644\u0622\u0646 \u0623\u0636\u0641 \u0627\u0644\u0645\u062f\u062f \u0648\u0627\u0644\u0623\u0633\u0639\u0627\u0631:",
+        parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_add_dur_"))
+@admin_required
+def cgpt_add_duration(call):
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("cgpt_add_dur_", "")
+    msg = bot.send_message(call.from_user.id,
+        "\u23f1 <b>\u0623\u0631\u0633\u0644 \u0627\u0644\u0645\u062f\u0629 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u0627\u0644\u0635\u064a\u063a\u0629:</b>\n<code>\u0627\u0644\u0645\u062f\u0629_\u0627\u0644\u0633\u0639\u0631</code>\n\n\u0623\u0645\u062b\u0644\u0629:\n\u2022 <code>7 \u0623\u064a\u0627\u0645_5</code>\n\u2022 <code>15 \u064a\u0648\u0645_8</code>\n\u2022 <code>25 \u064a\u0648\u0645_12</code>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_save_duration, pid)
+
+def cgpt_save_duration(message, pid):
+    try:
+        text = (message.text or "").strip()
+        if "_" not in text:
+            raise ValueError("no underscore")
+        parts = text.rsplit("_", 1)
+        label = parts[0].strip()
+        price = float(parts[1].strip())
+        if price <= 0:
+            raise ValueError("price must be positive")
+        days_map = {'7': 10080, '15': 21600, '25': 36000, '30': 43200, '60': 86400, '90': 129600}
+        minutes = 10080
+        for d, m in days_map.items():
+            if d in label:
+                minutes = m; break
+        from bson import ObjectId
+        dur_id = str(int(time.time()))
+        db.cgpt_products.update_one(
+            {'_id': ObjectId(pid)},
+            {'$push': {'durations': {'label': label, 'price': price, 'minutes': minutes, 'dur_id': dur_id}}}
+        )
+        p = db.cgpt_products.find_one({'_id': ObjectId(pid)})
+        p_name = p.get('name', '') if p else ''
+        p_desc = p.get('desc', '') if p else ''
+
+        # نحفظ المنتج مباشرة في products (بدون مجلد — يضيفه الأدمن من إدارة المنتجات)
+        shop_product_id      = f"cgpt_{pid}_{dur_id}"
+        shop_product_name_ar = f"{p_name} - {label}"
+        shop_product_name_en = f"{p_name} - {label}"
+
+        db.products.update_one(
+            {'_id': shop_product_id},
+            {'$set': {
+                '_id':             shop_product_id,
+                'name_ar':         shop_product_name_ar,
+                'name_en':         shop_product_name_en,
+                'desc_ar':         p_desc,
+                'desc_en':         p_desc,
+                'price':           price,
+                'is_manual':       False,
+                'product_type':    'chatgpt_seat',
+                'cgpt_minutes':    minutes,
+                'cgpt_product_id': pid,
+                'cgpt_dur_id':     dur_id,
+                'is_hidden':       False,
+                'btn_style':       'success',
+            }},
+            upsert=True
+        )
+
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u062f\u0629 \u0623\u062e\u0631\u0649", callback_data=f"cgpt_add_dur_{pid}"),
+            InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{shop_product_id}"),
+            InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0643\u0644 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
+            InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
+        )
+        bot.send_message(message.chat.id,
+            f"\u2705 <b>\u062a\u0645 \u0646\u0634\u0631 \u0627\u0644\u0645\u0646\u062a\u062c!</b>\n\n"
+            f"\U0001f4cc <b>{shop_product_name_ar}</b>\n"
+            f"\U0001f5d3 <b>{label}</b> | \U0001f4b0 <b>${price:.2f}</b>\n\n"
+            f"\U0001f7e2 \u0632\u0631 \u0623\u062e\u0636\u0631 \u062c\u0627\u0647\u0632\n"
+            f"\u2699\ufe0f \u0627\u0636\u063a\u0637 \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c \u0644\u062a\u0636\u064a\u0641 \u0627\u0644\u0625\u064a\u0645\u0648\u062c\u064a \u0648\u0627\u0644\u0645\u062c\u0644\u062f",
+            parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(message.chat.id, f"\u274c \u0635\u064a\u063a\u0629 \u062e\u0627\u0637\u0626\u0629. \u0627\u0633\u062a\u062e\u062f\u0645: <code>7 \u0623\u064a\u0627\u0645_5</code>\n<i>{e}</i>", parse_mode="HTML")
+
+
+# قاموس مؤقت لبيانات المدة قيد الانتظار
+_cgpt_dur_pending = {}
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_dur_cat_"))
+@admin_required
+def cgpt_dur_cat_selected(call):
+    """يحفظ المنتج في المجلد المختار — أخضر وفي أول الترتيب"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    pending = _cgpt_dur_pending.pop(uid, None)
+    if not pending:
+        bot.answer_callback_query(call.id, "\u274c \u0627\u0646\u062a\u0647\u062a \u0627\u0644\u062c\u0644\u0633\u0629.", show_alert=True)
+        return
+
+    cat_raw = call.data.replace("cgpt_dur_cat_", "")
+    cat_id = None if cat_raw == "none" else cat_raw
+
+    pid       = pending['pid']
+    label     = pending['label']
+    price     = pending['price']
+    minutes   = pending['minutes']
+    dur_id    = pending['dur_id']
+    p_name    = pending['p_name']
+    p_desc    = pending['p_desc']
+
+    shop_product_id      = f"cgpt_{pid}_{dur_id}"
+    shop_product_name_ar = f"{p_name} - {label}"
+    shop_product_name_en = f"{p_name} - {label}"
+
+    # نجد أقل order موجود في المجلد عشان يكون أول شيء
+    if cat_id:
+        first_order_doc = db.products.find_one(
+            {'catalog_id': cat_id},
+            sort=[('order', 1)]
+        )
+        new_order = (first_order_doc.get('order', 0) - 1) if first_order_doc else 0
+    else:
+        new_order = 0
+
+    db.products.update_one(
+        {'_id': shop_product_id},
+        {'$set': {
+            '_id':             shop_product_id,
+            'name_ar':         shop_product_name_ar,
+            'name_en':         shop_product_name_en,
+            'desc_ar':         p_desc,
+            'desc_en':         p_desc,
+            'price':           price,
+            'is_manual':       False,
+            'product_type':    'chatgpt_seat',
+            'cgpt_minutes':    minutes,
+            'cgpt_product_id': pid,
+            'cgpt_dur_id':     dur_id,
+            'is_hidden':       False,
+            'catalog_id':      cat_id,
+            'order':           new_order,
+            'btn_style':       'success',   # أخضر
+        }},
+        upsert=True
+    )
+
+    # لو في مجلد نضيفه لقائمة product_ids
+    if cat_id:
+        db.catalogs.update_one(
+            {'_id': __import__('bson').ObjectId(cat_id)},
+            {'$addToSet': {'product_ids': shop_product_id}}
+        )
+
+    cat_name = ""
+    if cat_id:
+        cat_doc = db.catalogs.find_one({'_id': __import__('bson').ObjectId(cat_id)})
+        cat_name = cat_doc.get('name_ar', '') if cat_doc else cat_id
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u062f\u0629 \u0623\u062e\u0631\u0649", callback_data=f"cgpt_add_dur_{pid}"),
+        InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
+    )
     bot.edit_message_text(
-        f"🤖 <b>إدارة ChatGPT Business Seats</b>\n\n"
-        f"حالة الـ Token: {loaded_icon}\n"
-        f"إجمالي الدعوات: <b>{stats['total']}</b>\n"
-        f"نشط الآن: <b>{stats['active']}</b>\n"
-        f"منتهي: <b>{stats['expired']}</b>",
+        f"\u2705 <b>\u062a\u0645 \u0646\u0634\u0631 \u0627\u0644\u0645\u0646\u062a\u062c \u0628\u0646\u062c\u0627\u062d!</b>\n\n"
+        f"\U0001f4cc <b>{shop_product_name_ar}</b>\n"
+        f"\U0001f5d3 <b>{label}</b> | \U0001f4b0 <b>${price:.2f}</b>\n"
+        f"\U0001f4c1 \u0627\u0644\u0645\u062c\u0644\u062f: <b>{cat_name or '\u0628\u062f\u0648\u0646 \u0645\u062c\u0644\u062f'}</b>\n"
+        f"\U0001f7e2 \u0627\u0644\u0632\u0631: \u0623\u062e\u0636\u0631 | \U0001f3c6 \u0623\u0648\u0644 \u0627\u0644\u0642\u0627\u0626\u0645\u0629",
         call.message.chat.id, call.message.message_id,
         parse_mode="HTML", reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_list")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_del_prod_"))
 @admin_required
-def ad_cgpt_list(call):
+def cgpt_del_product(call):
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("cgpt_del_prod_", "")
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("\u2705 \u0646\u0639\u0645\u060c \u0627\u062d\u0630\u0641", callback_data=f"cgpt_del_confirm_{pid}"),
+        InlineKeyboardButton("\u274c \u0625\u0644\u063a\u0627\u0621", callback_data="cgpt_products_list")
+    )
+    try:
+        bot.edit_message_text("\U0001f5d1 <b>\u0647\u0644 \u062a\u0631\u064a\u062f \u062d\u0630\u0641 \u0647\u0630\u0627 \u0627\u0644\u0645\u0646\u062a\u062c \u0648\u0643\u0644 \u0645\u062f\u062f\u0647\u061f</b>",
+            call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, "\U0001f5d1 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u0630\u0641\u061f", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_del_confirm_"))
+@admin_required
+def cgpt_del_confirm(call):
+    pid = call.data.replace("cgpt_del_confirm_", "")
+    from bson import ObjectId
+    from bson import ObjectId as _ObjId2
+    # نحذف كل منتجات المتجر المرتبطة بهذا المنتج
+    db.products.delete_many({'cgpt_product_id': pid})
+    db.cgpt_products.delete_one({'_id': _ObjId2(pid)})
+    bot.answer_callback_query(call.id, "\u2705 \u062a\u0645 \u0627\u0644\u062d\u0630\u0641!", show_alert=True)
+    _cgpt_show_products_list(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_set_cookies")
+@admin_required
+def cgpt_set_cookies(call):
     bot.answer_callback_query(call.id)
     mgr = get_cgpt_manager()
-    actives = mgr.list_active()
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
-    if not actives:
-        try:
-            bot.edit_message_text("👥 <b>لا يوجد مدعوون نشطون حالياً.</b>",
-                call.message.chat.id, call.message.message_id,
-                parse_mode="HTML", reply_markup=markup)
-        except: pass
-        return
-    txt = "👥 <b>المدعوون النشطون:</b>\n\n"
-    for i, a in enumerate(actives, 1):
-        txt += (f"{i}. <code>{a['email']}</code>\n"
-                f"   ⏱ متبقي: <b>{a['remaining_days']} يوم ({a['remaining_hours']} ساعة)</b>\n"
-                f"   📅 ينتهي: {a['expires_at'][:10]}\n\n")
+    loaded_icon = "\u2705" if mgr._loaded else "\u274c"
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\U0001f4c2 \u0645\u0633\u0627\u0631 \u0627\u0644\u0645\u0644\u0641", callback_data="ad_cgpt_reload_token"),
+        InlineKeyboardButton("\U0001f4cb \u0644\u0635\u0642 JSON \u0645\u0628\u0627\u0634\u0631\u0629", callback_data="cgpt_paste_json"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
+    )
+    txt = f"\U0001f36a <b>\u0625\u0639\u062f\u0627\u062f \u0627\u0644\u0643\u0648\u0643\u064a\u0632</b>\n\n\u0627\u0644\u062d\u0627\u0644\u0629: {loaded_icon}\n\u0627\u062e\u062a\u0631 \u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0625\u0636\u0627\u0641\u0629:"
     try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
-            parse_mode="HTML", reply_markup=markup)
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
     except:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_paste_json")
+@admin_required
+def cgpt_paste_json(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id, "\U0001f4cb <b>\u0627\u0644\u0635\u0642 \u0645\u062d\u062a\u0648\u0649 \u0645\u0644\u0641 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON \u0643\u0627\u0645\u0644):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_save_json_cookies)
+
+def cgpt_save_json_cookies(message):
+    try:
+        data = json.loads(message.text.strip())
+        token_path = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        with open(token_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        global _cgpt_manager_instance
+        with _cgpt_lock:
+            _cgpt_manager_instance = None
+        ok = get_cgpt_manager()._loaded
+        icon = "\u2705" if ok else "\u274c"
+        bot.send_message(message.chat.id,
+            f"{icon} <b>{'\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0648\u062a\u062d\u0645\u064a\u0644\u0647\u0627 \u0628\u0646\u062c\u0627\u062d!' if ok else '\u062a\u0645 \u0627\u0644\u062d\u0641\u0638 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>",
+            parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"\u274c <b>JSON \u063a\u064a\u0631 \u0635\u062d\u064a\u062d!</b>\n<code>{e}</code>", parse_mode="HTML")
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_cleanup")
 @admin_required
 def ad_cgpt_cleanup_now(call):
-    bot.answer_callback_query(call.id, "⏳ جاري الفحص...", show_alert=False)
+    bot.answer_callback_query(call.id, "\u23f3 \u062c\u0627\u0631\u064a \u0627\u0644\u0641\u062d\u0635...", show_alert=False)
     try:
-        mgr = get_cgpt_manager()
-        mgr.check_and_cleanup()
-        bot.answer_callback_query(call.id, "✅ تم الفحص والتنظيف!", show_alert=True)
+        get_cgpt_manager().check_and_cleanup()
+        bot.answer_callback_query(call.id, "\u2705 \u062a\u0645 \u0627\u0644\u0641\u062d\u0635 \u0648\u0627\u0644\u062a\u0646\u0638\u064a\u0641!", show_alert=True)
     except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ خطأ: {e}", show_alert=True)
+        bot.answer_callback_query(call.id, f"\u274c \u062e\u0637\u0623: {e}", show_alert=True)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_reload_token")
 @admin_required
 def ad_cgpt_reload_token(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id,
-        "📂 <b>أرسل المسار الكامل لملف الـ Token:</b>\n"
-        "<i>مثال: /home/ubuntu/pasted_content.txt</i>",
-        parse_mode="HTML")
+    msg = bot.send_message(call.from_user.id, "\U0001f4c2 <b>\u0623\u0631\u0633\u0644 \u0627\u0644\u0645\u0633\u0627\u0631 \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0645\u0644\u0641 \u0627\u0644\u0643\u0648\u0643\u064a\u0632:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, _cgpt_save_token_path)
 
 def _cgpt_save_token_path(message):
     path = message.text.strip()
     if not os.path.exists(path):
-        bot.send_message(message.chat.id, f"❌ الملف غير موجود: <code>{path}</code>", parse_mode="HTML")
-        return
+        bot.send_message(message.chat.id, f"\u274c \u0627\u0644\u0645\u0644\u0641 \u063a\u064a\u0631 \u0645\u0648\u062c\u0648\u062f: <code>{path}</code>", parse_mode="HTML"); return
     db.settings.update_one({'key': 'cgpt_token_path'}, {'$set': {'value': path}}, upsert=True)
     global _cgpt_manager_instance
     with _cgpt_lock:
-        _cgpt_manager_instance = None  # reset singleton
+        _cgpt_manager_instance = None
     ok = get_cgpt_manager()._loaded
-    icon = "✅" if ok else "❌"
-    bot.send_message(message.chat.id,
-        f"{icon} <b>{'تم تحميل الـ Token بنجاح!' if ok else 'فشل تحميل الـ Token!'}</b>\n"
-        f"المسار: <code>{path}</code>",
-        parse_mode="HTML")
+    icon = "\u2705" if ok else "\u274c"
+    bot.send_message(message.chat.id, f"{icon} <b>{'\u062a\u0645 \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0628\u0646\u062c\u0627\u062d!' if ok else '\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>\n\u0627\u0644\u0645\u0633\u0627\u0631: <code>{path}</code>", parse_mode="HTML")
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_invite")
 @admin_required
 def ad_cgpt_manual_invite(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id,
-        "📧 <b>أرسل الإيميل والمدة بالصيغة:</b>\n"
-        "<code>email@example.com 10080</code>\n"
-        "<i>(إيميل ثم مسافة ثم الدقائق)</i>",
-        parse_mode="HTML")
+    msg = bot.send_message(call.from_user.id, "\U0001f4e7 <b>\u0623\u0631\u0633\u0644 \u0627\u0644\u0625\u064a\u0645\u064a\u0644 \u0648\u0627\u0644\u0645\u062f\u0629:</b>\n<code>email@example.com 10080</code>", parse_mode="HTML")
     bot.register_next_step_handler(msg, _cgpt_manual_invite_exec)
 
 def _cgpt_manual_invite_exec(message):
     parts = message.text.strip().split()
     if len(parts) != 2:
-        bot.send_message(message.chat.id, "❌ صيغة خاطئة. مثال: <code>user@example.com 10080</code>", parse_mode="HTML")
-        return
+        bot.send_message(message.chat.id, "\u274c \u0635\u064a\u063a\u0629 \u062e\u0627\u0637\u0626\u0629.", parse_mode="HTML"); return
     email, mins_str = parts
     try:
         mins = int(mins_str)
     except:
-        bot.send_message(message.chat.id, "❌ المدة يجب أن تكون رقماً.")
-        return
-    mgr = get_cgpt_manager()
-    result = mgr.invite_user(email, mins)
+        bot.send_message(message.chat.id, "\u274c \u0627\u0644\u0645\u062f\u0629 \u064a\u062c\u0628 \u0623\u0646 \u062a\u0643\u0648\u0646 \u0631\u0642\u0645\u0627\u064b."); return
+    result = get_cgpt_manager().invite_user(email, mins)
     days = round(mins / 1440, 1)
     if result['ok']:
-        bot.send_message(message.chat.id,
-            f"✅ <b>تمت الدعوة!</b>\n📧 <code>{email}</code>\n⏱ {days} يوم\n📅 ينتهي: {result['expires_at'][:10]}",
-            parse_mode="HTML")
+        bot.send_message(message.chat.id, f"\u2705 <b>\u062a\u0645\u062a \u0627\u0644\u062f\u0639\u0648\u0629!</b>\n\U0001f4e7 <code>{email}</code>\n\u23f1 {days} \u064a\u0648\u0645\n\U0001f4c5 \u064a\u0646\u062a\u0647\u064a: {result['expires_at'][:10]}", parse_mode="HTML")
     else:
-        bot.send_message(message.chat.id,
-            f"❌ <b>فشلت الدعوة!</b>\n<code>{result.get('error')}</code>",
-            parse_mode="HTML")
+        bot.send_message(message.chat.id, f"\u274c <b>\u0641\u0634\u0644\u062a \u0627\u0644\u062f\u0639\u0648\u0629!</b>\n<code>{result.get('error')}</code>", parse_mode="HTML")
 
-
-@bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
-@admin_required
-def ad_p_step1(call):
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "📦 أرسل اسم المنتج (بالعربية فقط):")
-    bot.register_next_step_handler(msg, ad_p_step2)
-
-def ad_p_step2(message):
-    uid = message.from_user.id
-    # 🆕 نستخرج الـ Premium Emojis ونحولها لـ HTML
-    n_ar = extract_custom_emojis_to_html(message)
-    
-    # 🆕 نستخدم safe_translate_for_cms اللي يحمي التنسيقات والإيموجيات
-    n_en = safe_translate_for_cms(n_ar, 'en')
-    
-    temp_product[uid] = {'n_ar': n_ar, 'n_en': n_en}
-    # نعرض المعاينة بدون escape عشان يبان الإيموجي
-    bot.send_message(uid, f"✅ تم حفظ الاسم!\n\n🇸🇦 العربي: {n_ar}\n🇺🇸 الإنجليزي: {n_en}", parse_mode="HTML")
-    msg = bot.send_message(uid, "📝 أرسل وصف المنتج (بالعربية):\n💡 <i>يمكنك استخدام Premium Emojis، تنسيقات (Bold، Italic)، وأي رموز تعبيرية</i>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, ad_p_step3)
-
-def ad_p_step3(message):
-    uid = message.from_user.id
-    # 🆕 نستخرج الـ Premium Emojis ونحولها لـ HTML
-    d_ar = extract_custom_emojis_to_html(message)
-    
-    # 🆕 نستخدم safe_translate_for_cms للحفاظ على التنسيقات
-    d_en = safe_translate_for_cms(d_ar, 'en')
-    
-    # تحقق إن الترجمة نجحت فعلاً (مو نفس النص العربي)
-    is_translated = (d_en != d_ar)
-    
-    temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
-    
-    # 🆕 عرض معاينة كاملة بالنسختين
-    preview_msg = (
-        f"✅ <b>تم حفظ الوصف!</b>\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🇸🇦 <b>العربي:</b>\n{d_ar}\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🇺🇸 <b>الإنجليزي:</b>\n{d_en}\n"
-        f"━━━━━━━━━━━━━━"
-    )
-    
-    if not is_translated:
-        preview_msg += "\n\n⚠️ <i>ملاحظة: الترجمة فشلت في الحفاظ على بعض التنسيقات. تم حفظ النسخة العربية في الإنجليزي.</i>"
-    
-    try:
-        bot.send_message(uid, preview_msg, parse_mode="HTML")
-    except Exception as preview_err:
-        # لو الـ HTML معطّل بسبب الترجمة، نرسل بدون parse_mode
-        logger.warning(f"Preview HTML error: {preview_err}")
-        bot.send_message(uid, "✅ تم حفظ الوصف (المعاينة تعذرت بسبب HTML).")
-    
-    msg = bot.send_message(uid, "💰 أرسل السعر بالدولار ($):")
-    bot.register_next_step_handler(msg, ad_p_price)
-
-def ad_p_price(message):
-    uid = message.from_user.id
-    try:
-        price = float(message.text)
-        temp_product[uid]['price'] = price
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("⚡ تسليم تلقائي (أكواد وبطاقات)", callback_data="ad_ptype_auto"))
-        markup.add(InlineKeyboardButton("🤝 تسليم يدوي (يتواصل العميل معك)", callback_data="ad_ptype_manual"))
-        markup.add(InlineKeyboardButton("🤖 مقعد ChatGPT Business (بالإيميل)", callback_data="ad_ptype_cgpt"))
-        bot.send_message(uid, "⚙️ <b>اختر نوع تسليم هذا المنتج:</b>", reply_markup=markup, parse_mode="HTML")
-    except Exception as e:
-        bot.send_message(uid, "❌ خطأ في السعر. الرجاء المحاولة مرة أخرى من القائمة.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ptype_cgpt")
 @admin_required
@@ -10166,6 +10502,12 @@ def admin_edit_opts(call):
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}{c_sfx}"))
     # زر رجوع: للمنتج نفسه وليس لقائمة الأدمن
     back_cb = f"vi_p_{pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{pid}"
+    # زر جعله أول في مجلده
+    p_doc = find_product(pid)
+    if p_doc:
+        p_cat = p_doc.get('catalog_id') or (cat_id_back if cat_id_back else None)
+        if p_cat:
+            markup.add(InlineKeyboardButton("⬆️ جعله أول في المجلد", callback_data=f"p_set_first_{pid}_{p_cat}"))
     markup.add(InlineKeyboardButton("🔙 Back", callback_data=back_cb))
     
     try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
@@ -12027,6 +12369,33 @@ def ad_cat_edit(call):
 
 
 # ═══ إضافة منتجات للكتالوج ═══
+@bot.callback_query_handler(func=lambda call: call.data.startswith("p_set_first_"))
+@admin_required
+def p_set_first(call):
+    """يجعل المنتج أول شيء في مجلده"""
+    bot.answer_callback_query(call.id)
+    raw = call.data.replace("p_set_first_", "")
+    parts = raw.rsplit("_", 1)
+    pid = parts[0]
+    cat_id = parts[1] if len(parts) > 1 else None
+    if not cat_id:
+        bot.answer_callback_query(call.id, "❌ لا يوجد مجلد محدد.", show_alert=True)
+        return
+    from bson import ObjectId
+    try:
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$pull': {'product_ids': pid}}
+        )
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$push': {'product_ids': {'$each': [pid], '$position': 0}}}
+        )
+        bot.answer_callback_query(call.id, "✅ أصبح أول المنتجات في المجلد!", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ {e}", show_alert=True)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_addp_"))
 @admin_required
 def ad_cat_addp(call):
@@ -12073,12 +12442,16 @@ def ad_cat_doadd(call):
     pid = parts[1] if len(parts) > 1 else ""
     from bson import ObjectId
     
+    # نضيف في البداية: نحذف لو موجود ثم نضيف في أول القائمة
     db.catalogs.update_one(
         {'_id': ObjectId(cat_id)},
-        {'$addToSet': {'product_ids': pid}}
+        {'$pull': {'product_ids': pid}}
     )
-    bot.answer_callback_query(call.id, "✅ Added!", show_alert=True)
-    # رجوع لصفحة إضافة المزيد
+    db.catalogs.update_one(
+        {'_id': ObjectId(cat_id)},
+        {'$push': {'product_ids': {'$each': [pid], '$position': 0}}}
+    )
+    bot.answer_callback_query(call.id, "✅ Added as first!", show_alert=True)
     call.data = f"ad_cat_addp_{cat_id}"
     ad_cat_addp(call)
 
