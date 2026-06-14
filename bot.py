@@ -2919,10 +2919,7 @@ def _translate_single_line(line, target_lang='en'):
         
         # 7. إيموجي عادية
         emoji_pat = re.compile(
-            "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
-            "\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF"
-            "\U00002702-\U000027B0\U0001f926-\U0001f937"
-            "\u2640-\u2642\u2600-\u2B55\u200d\ufe0f]+",
+            r"[\u2600-\u27BF\U0001F000-\U0001F9FF\U0001FA00-\U0001FAFF\u200d\ufe0f]+",
             flags=re.UNICODE
         )
         temp = emoji_pat.sub(lambda m: protect_item(m.group(0)), temp)
@@ -2937,12 +2934,18 @@ def _translate_single_line(line, target_lang='en'):
         if not translated:
             return line
         
-        # 🔁 استرجاع العناصر المحمية — UUIDs ثابتة، Google لا يكسرها
+        # 🔁 معالجة أي مشاكل في المسافات أو حالة الأحرف قد يكون المترجم أدخلها على المفاتيح الخاصة بنا
+        def normalize_key(match):
+            hex_part = re.sub(r'\s+', '', match.group(1)).upper()
+            return f"XPROTX{hex_part}XPROTX"
+        translated = re.sub(r'(?i)x\s*p\s*r\s*o\s*t\s*x\s*([a-f0-9\s]{8,20})\s*x\s*p\s*r\s*o\s*t\s*x', normalize_key, translated)
+        
+        # 🔁 استرجاع العناصر المحمية — UUIDs ثابتة، مع دعم عدم حساسية حالة الأحرف كأمان إضافي
         for key, original in vault.items():
-            translated = translated.replace(key, original)
+            translated = re.sub(re.escape(key), lambda m: original, translated, flags=re.IGNORECASE)
         
         # 🛡 فحص: لو بقي أي UUID لم يُسترجع → رجوع للأصل
-        if re.search(r'XPROTX[A-F0-9]{8}XPROTX', translated):
+        if re.search(r'(?i)XPROTX[A-F0-9]{8}XPROTX', translated):
             logger.warning("UUID leak in translation - returning original line")
             return line
         
@@ -4496,8 +4499,11 @@ def shop_list_ui(call):
             hidden_icon = " 👻" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
-            st_text = "FW" if is_manual else str(st)
-            btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+            if is_cgpt:
+                btn_text = f"{short_n} | 📦 FW{hidden_icon}"
+            else:
+                st_text = "FW" if is_manual else str(st)
+                btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
@@ -4535,8 +4541,11 @@ def shop_list_ui(call):
             hidden_icon = " 👻(مخفي)" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n 
-            st_text = "FW" if is_manual else str(st)
-            btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+            if is_cgpt:
+                btn_text = f"{short_n} | 📦 FW{hidden_icon}"
+            else:
+                st_text = "FW" if is_manual else str(st)
+                btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
@@ -4596,8 +4605,12 @@ def catalog_view(call):
         in_stock = is_manual or st > 0 or is_cgpt
         items.append((p, actual_pid, st, is_manual, in_stock))
     
-    # المتوفر أول (True=1 > False=0 reversed)، ثم أبجدي
-    items.sort(key=lambda x: (not x[4], clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
+    # cgpt_pinned أول دائماً، ثم المتوفر، ثم أبجدي
+    items.sort(key=lambda x: (
+        not x[0].get('cgpt_pinned', False),
+        not x[4],
+        clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()
+    ))
     
     for p, actual_pid, st, is_manual, in_stock in items:
         # لو المنتج عنده btn_style محدد (مثل ChatGPT الأخضر) نستخدمه، وإلا نحدده بالمخزون
@@ -4718,8 +4731,10 @@ def shop_detail_ui(call):
         delivery_type = "Manual 🤝 (Contact admin after payment)" if is_manual else "Auto ⚡ (Instant delivery)"
         st_text = "Unlimited" if is_manual else f"{st} pcs"
 
-    n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-    d = clean_name(p.get('desc_en') if l == 'en' else p.get('desc_ar'))
+    n = p.get('name_en') if l == 'en' else p.get('name_ar')
+    if not n: n = "بدون اسم"
+    d = p.get('desc_en') if l == 'en' else p.get('desc_ar')
+    if not d: d = ""
     custom_emoji_id = p.get('custom_emoji_id')
     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '📦'
 
@@ -10234,15 +10249,50 @@ def cgpt_add_product(call):
     bot.register_next_step_handler(msg, cgpt_add_product_name)
 
 def cgpt_add_product_name(message):
-    name = (message.text or "").strip()
-    if not name:
+    raw = (message.text or "").strip()
+    if not raw:
         bot.send_message(message.chat.id, "\u274c \u0623\u0631\u0633\u0644 \u0627\u0633\u0645\u0627\u064b \u0635\u062d\u064a\u062d\u0627\u064b."); return
-    msg = bot.send_message(message.chat.id, f"\u2705 \u0627\u0644\u0627\u0633\u0645: <b>{name}</b>\n\n\U0001f4c4 <b>\u0623\u0631\u0633\u0644 \u0648\u0635\u0641 \u0627\u0644\u0645\u0646\u062a\u062c:</b>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, cgpt_add_product_desc, name)
+    
+    # 🆕 التقاط الإيموجي المميز إن وجد في الاسم
+    emoji_id = None
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == 'custom_emoji':
+                emoji_id = ent.custom_emoji_id
+                break
+                
+    # نستخرج الإيموجي المميز
+    name_ar = extract_custom_emojis_to_html(message)
+    # نترجم للإنجليزي مع حفظ كل التنسيقات والإيموجي
+    name_en = safe_translate_for_cms(name_ar, 'en')
+    try:
+        preview = (
+            f"\u2705 <b>\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0627\u0633\u0645!</b>\n\n"
+            f"\U0001f1f8\U0001f1e6 {name_ar}\n"
+            f"\U0001f1ec\U0001f1e7 {name_en}"
+        )
+        bot.send_message(message.chat.id, preview, parse_mode="HTML")
+    except:
+        bot.send_message(message.chat.id, "\u2705 \u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0627\u0633\u0645!")
+    msg = bot.send_message(message.chat.id,
+        "\U0001f4c4 <b>\u0623\u0631\u0633\u0644 \u0648\u0635\u0641 \u0627\u0644\u0645\u0646\u062a\u062c:</b>\n"
+        "<i>\u064a\u062f\u0639\u0645 Premium Emojis \u0648\u0627\u0644\u062a\u0646\u0633\u064a\u0642\u0627\u062a</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_add_product_desc, name_ar, name_en, emoji_id)
 
-def cgpt_add_product_desc(message, name):
-    desc = (message.text or "").strip()
-    result = db.cgpt_products.insert_one({'name': name, 'desc': desc, 'durations': [], 'created_at': _dt_mod.datetime.now().isoformat()})
+def cgpt_add_product_desc(message, name_ar, name_en, emoji_id):
+    raw = (message.text or "").strip()
+    desc_ar = extract_custom_emojis_to_html(message) if raw else ''
+    desc_en = safe_translate_for_cms(desc_ar, 'en') if desc_ar else ''
+    result = db.cgpt_products.insert_one({
+        'name': name_ar,
+        'name_en': name_en,
+        'desc': desc_ar,
+        'desc_en': desc_en,
+        'durations': [],
+        'custom_emoji_id': emoji_id,
+        'created_at': _dt_mod.datetime.now().isoformat()
+    })
     pid = str(result.inserted_id)
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -10250,9 +10300,17 @@ def cgpt_add_product_desc(message, name):
         InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0643\u0644 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
     )
-    bot.send_message(message.chat.id,
-        f"\u2705 <b>\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0645\u0646\u062a\u062c!</b>\n\n\U0001f4cc <b>{name}</b>\n\U0001f4dd {desc or '\u0628\u062f\u0648\u0646 \u0648\u0635\u0641'}\n\n\u0627\u0644\u0622\u0646 \u0623\u0636\u0641 \u0627\u0644\u0645\u062f\u062f \u0648\u0627\u0644\u0623\u0633\u0639\u0627\u0631:",
-        parse_mode="HTML", reply_markup=markup)
+    try:
+        bot.send_message(message.chat.id,
+            f"\u2705 <b>\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0645\u0646\u062a\u062c!</b>\n\n"
+            f"\U0001f4cc <b>{name_ar}</b>\n"
+            f"\U0001f1ec\U0001f1e7 {name_en}\n\n"
+            f"\U0001f4dd <b>\u0627\u0644\u0648\u0635\u0641 \u0639\u0631\u0628\u064a:</b>\n{desc_ar or '\u0628\u062f\u0648\u0646'}\n\n"
+            f"\U0001f4dd <b>\u0627\u0644\u0648\u0635\u0641 \u0625\u0646\u062c\u0644\u064a\u0632\u064a:</b>\n{desc_en or '\u0628\u062f\u0648\u0646'}\n\n"
+            f"\u0627\u0644\u0622\u0646 \u0623\u0636\u0641 \u0627\u0644\u0645\u062f\u062f \u0648\u0627\u0644\u0623\u0633\u0639\u0627\u0631:",
+            parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(message.chat.id, "\u2705 \u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0645\u0646\u062a\u062c!", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_add_dur_"))
@@ -10287,8 +10345,11 @@ def cgpt_save_duration(message, pid):
             {'$push': {'durations': {'label': label, 'price': price, 'minutes': minutes, 'dur_id': dur_id}}}
         )
         p = db.cgpt_products.find_one({'_id': ObjectId(pid)})
-        p_name = p.get('name', '') if p else ''
-        p_desc = p.get('desc', '') if p else ''
+        p_name_ar = p.get('name', '') if p else ''
+        p_name_en = p.get('name_en') if p else p_name_ar
+        p_desc_ar = p.get('desc', '') if p else ''
+        p_desc_en = p.get('desc_en') if p else p_desc_ar
+        p_emoji_id = p.get('custom_emoji_id') if p else None
 
         # نضمن وجود منتج رئيسي واحد في db.products (الزر الأزرق في المجلد)
         main_pid = f"cgpt_main_{pid}"
@@ -10296,16 +10357,18 @@ def cgpt_save_duration(message, pid):
             {'_id': main_pid},
             {'$set': {
                 '_id':           main_pid,
-                'name_ar':       p_name,
-                'name_en':       p_name,
-                'desc_ar':       p_desc,
-                'desc_en':       p_desc,
+                'name_ar':       p_name_ar,
+                'name_en':       p_name_en or p_name_ar,
+                'desc_ar':       p_desc_ar,
+                'desc_en':       p_desc_en or p_desc_ar,
                 'price':         0,
                 'is_manual':     False,
                 'product_type':  'cgpt_main',
                 'cgpt_product_id': pid,
                 'is_hidden':     False,
                 'btn_style':     'primary',
+                'cgpt_pinned':   True,
+                'custom_emoji_id': p_emoji_id,
             }},
             upsert=True
         )
@@ -10374,6 +10437,14 @@ def cgpt_dur_cat_selected(call):
     else:
         new_order = 0
 
+    p_emoji_id = None
+    try:
+        from bson import ObjectId
+        parent_cgpt = db.cgpt_products.find_one({'_id': ObjectId(pid)})
+        if parent_cgpt:
+            p_emoji_id = parent_cgpt.get('custom_emoji_id')
+    except: pass
+
     db.products.update_one(
         {'_id': shop_product_id},
         {'$set': {
@@ -10392,6 +10463,7 @@ def cgpt_dur_cat_selected(call):
             'catalog_id':      cat_id,
             'order':           new_order,
             'btn_style':       'success',   # أخضر
+            'custom_emoji_id': p_emoji_id,
         }},
         upsert=True
     )
@@ -10446,14 +10518,16 @@ def cgpt_setcat(call):
 
     if cat_id == "none":
         # بدون مجلد
+        db.products.update_one({'_id': main_pid}, {'$set': {'catalog_id': None}})
         bot.send_message(call.from_user.id,
-            "\u2705 <b>\u062a\u0645 \u062a\u0639\u064a\u064a\u0646 \u0627\u0644\u0645\u0646\u062a\u062c \u0628\u062f\u0648\u0646 \u0645\u062c\u0644\u062f.</b>",
+            "✅ <b>تم تعيين المنتج بدون مجلد.</b>",
             parse_mode="HTML")
         return
 
     from bson import ObjectId as _ObjId3
     # نضيفه في أول القائمة في المجلد
     try:
+        db.products.update_one({'_id': main_pid}, {'$set': {'catalog_id': str(cat_id)}})
         db.catalogs.update_one(
             {'_id': _ObjId3(cat_id)},
             {'$push': {'product_ids': {'$each': [main_pid], '$position': 0}}}
@@ -10462,11 +10536,11 @@ def cgpt_setcat(call):
         cat_name = cat.get('name_ar', cat.get('name', '')) if cat else cat_id
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
-            InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{main_pid}"),
-            InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
+            InlineKeyboardButton("⚙️ إدارة المنتج", callback_data=f"edit_p_{main_pid}"),
+            InlineKeyboardButton("🔙 رجوع للوحة", callback_data="ad_cgpt_panel")
         )
         bot.send_message(call.from_user.id,
-            f"\u2705 <b>\u062a\u0645 \u0648\u0636\u0639 \u0627\u0644\u0645\u0646\u062a\u062c \u0641\u064a \u0627\u0644\u0645\u062c\u0644\u062f:</b>\n\U0001f4c1 <b>{cat_name}</b> (\u0623\u0648\u0644 \u0627\u0644\u0642\u0627\u0626\u0645\u0629)",
+            f"✅ <b>تم وضع المنتج في المجلد:</b>\n📁 <b>{cat_name}</b> (أول القائمة)",
             parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         bot.send_message(call.from_user.id, f"\u274c \u062e\u0637\u0623: {e}")
@@ -10733,6 +10807,15 @@ def ad_p_cgpt_cat_selected(call):
         'created_at':   _dt_mod.datetime.now().isoformat()
     }
     db.products.insert_one(doc)
+    
+    # 🆕 ربط المنتج بمصفوفة product_ids الخاصة بالمجلد
+    if cat_id:
+        from bson import ObjectId
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$addToSet': {'product_ids': pid}}
+        )
+        
     days = round(doc['cgpt_minutes'] / 1440, 1)
     bot.edit_message_text(
         f"✅ <b>تم إنشاء منتج ChatGPT Business!</b>\n\n"
@@ -10821,6 +10904,7 @@ def admin_edit_opts(call):
                InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}{c_sfx}"))
     markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}{c_sfx}"),
                InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{pid}{c_sfx}"))
     markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}{c_sfx}"))
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}{c_sfx}"))
@@ -10946,8 +11030,8 @@ def admin_toggle_hide(call):
 def admin_edit_prompt(call):
     bot.answer_callback_query(call.id)
     raw_ep2 = call.data[len("ep_"):]  # بعد ep_
-    # تحديد الـ field (price/dar/den/nar/nen)
-    for _f in ['price', 'dar', 'den', 'nar', 'nen']:
+    # تحديد الـ field (price/dar/den/nar/nen/emoji)
+    for _f in ['price', 'dar', 'den', 'nar', 'nen', 'emoji']:
         if raw_ep2.startswith(_f + '_'):
             field = _f
             rest_ep2 = raw_ep2[len(_f)+1:]
@@ -10992,7 +11076,7 @@ def admin_edit_prompt(call):
             f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
         )
     elif field == "dar":
-        old_desc = clean_name(p.get('desc_ar', '-'))
+        old_desc = p.get('desc_ar', '-')
         prompt_msg = (
             f"━━━━━━━━━━━━━━━\n"
             f"📝 <b>تعديل الوصف العربي</b>\n"
@@ -11005,7 +11089,7 @@ def admin_edit_prompt(call):
             f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
         )
     elif field == "den":
-        old_desc = clean_name(p.get('desc_en', '-'))
+        old_desc = p.get('desc_en', '-')
         prompt_msg = (
             f"━━━━━━━━━━━━━━━\n"
             f"📝 <b>Edit English Description</b>\n"
@@ -11018,7 +11102,7 @@ def admin_edit_prompt(call):
             f"💡 <i>Send <b>cancel</b> to abort.</i>"
         )
     elif field == "nar":
-        old_name = clean_name(p.get('name_ar', '-'))
+        old_name = p.get('name_ar', '-')
         prompt_msg = (
             f"━━━━━━━━━━━━━━━\n"
             f"✏️ <b>تعديل الاسم العربي</b>\n"
@@ -11031,7 +11115,7 @@ def admin_edit_prompt(call):
             f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
         )
     elif field == "nen":
-        old_name = clean_name(p.get('name_en', '-'))
+        old_name = p.get('name_en', '-')
         prompt_msg = (
             f"━━━━━━━━━━━━━━━\n"
             f"✏️ <b>Edit English Name</b>\n"
@@ -11042,6 +11126,16 @@ def admin_edit_prompt(call):
             f"👇 <b>Send new name:</b>\n"
             f"<i>(Supports Premium Emojis)</i>\n\n"
             f"💡 <i>Send <b>cancel</b> to abort.</i>"
+        )
+    elif field == "emoji":
+        prompt_msg = (
+            f"━━━━━━━━━━━━━━━\n"
+            f"⭐ <b>تعديل الرمز التعبيري المميز</b>\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"{p_display_name}\n\n"
+            f"👇 <b>أرسل الآن الإيموجي المخصص (Premium Emoji) الجديد للمنتج:</b>\n"
+            f"<i>(أرسله كرسالة عادية وسأقوم بالتقاطه)</i>\n\n"
+            f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
         )
     else:
         prompt_msg = "👇 أرسل القيمة الجديدة:"
@@ -11067,6 +11161,33 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
     p = find_product(pid)
     if not p: 
         bot.send_message(message.chat.id, "❌ المنتج لم يعد موجوداً.")
+        return
+
+    if field == "emoji":
+        emoji_id = None
+        if message.entities:
+            for ent in message.entities:
+                if ent.type == 'custom_emoji':
+                    emoji_id = ent.custom_emoji_id
+                    break
+        if not emoji_id:
+            bot.send_message(message.chat.id, "❌ لم يتم العثور على رمز Premium. أعد المحاولة من قائمة تعديل المنتج.")
+            return
+        
+        # Save it
+        db.products.update_one({'_id': p['_id']}, {'$set': {'custom_emoji_id': emoji_id}})
+        
+        # Also sync to db.cgpt_products if it's a ChatGPT product
+        cgpt_id = p.get('cgpt_product_id')
+        if cgpt_id:
+            try:
+                from bson import ObjectId
+                db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'custom_emoji_id': emoji_id}})
+            except: pass
+            
+        back_markup = InlineKeyboardMarkup()
+        back_markup.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+        bot.send_message(message.chat.id, f"✅ <b>تم تحديث الأيقونة المميزة للمنتج بنجاح!</b>", parse_mode="HTML", reply_markup=back_markup)
         return
 
     if field == "price":
@@ -11130,17 +11251,48 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
             translated = safe_translate_for_cms(final_text, 'en')
             if field == 'nar':
                 db.products.update_one({'_id': p['_id']}, {'$set': {'name_ar': final_text, 'name_en': translated}})
+                
+                # 🆕 مزامنة مع db.cgpt_products
+                cgpt_id = p.get('cgpt_product_id')
+                if cgpt_id:
+                    try:
+                        from bson import ObjectId
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'name': final_text, 'name_en': translated}})
+                    except: pass
+                    
                 back_markup2 = InlineKeyboardMarkup()
                 back_markup2.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
                 bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML", reply_markup=back_markup2)
             else:
                 db.products.update_one({'_id': p['_id']}, {'$set': {'desc_ar': final_text, 'desc_en': translated}})
+                
+                # 🆕 مزامنة مع db.cgpt_products
+                cgpt_id = p.get('cgpt_product_id')
+                if cgpt_id:
+                    try:
+                        from bson import ObjectId
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'desc': final_text, 'desc_en': translated}})
+                    except: pass
+                    
                 back_markup3 = InlineKeyboardMarkup()
                 back_markup3.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
                 bot.send_message(message.chat.id, "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>", parse_mode="HTML", reply_markup=back_markup3)
         else:
             # إنجليزي فقط
             db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: final_text}})
+            
+            # 🆕 مزامنة مع db.cgpt_products
+            cgpt_id = p.get('cgpt_product_id')
+            if cgpt_id:
+                try:
+                    from bson import ObjectId
+                    field_name = keys[field]
+                    if field_name == 'name_en':
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'name_en': final_text}})
+                    elif field_name == 'desc_en':
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'desc_en': final_text}})
+                except: pass
+                
             back_markup4 = InlineKeyboardMarkup()
             back_markup4.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
             bot.send_message(message.chat.id, "✅ <b>تم التحديث بنجاح.</b>", parse_mode="HTML", reply_markup=back_markup4)
@@ -12766,6 +12918,11 @@ def ad_cat_doadd(call):
     pid = parts[1] if len(parts) > 1 else ""
     from bson import ObjectId
     
+    # 🆕 Sync catalog_id to product
+    p = find_product(pid)
+    if p:
+        db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': str(cat_id)}})
+        
     # نضيف في البداية: نحذف لو موجود ثم نضيف في أول القائمة
     db.catalogs.update_one(
         {'_id': ObjectId(cat_id)},
@@ -12821,6 +12978,11 @@ def ad_cat_dorem(call):
     pid = parts[1] if len(parts) > 1 else ""
     from bson import ObjectId
     
+    # 🆕 Sync catalog_id to product (set to None)
+    p = find_product(pid)
+    if p:
+        db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': None}})
+        
     db.catalogs.update_one(
         {'_id': ObjectId(cat_id)},
         {'$pull': {'product_ids': pid}}
