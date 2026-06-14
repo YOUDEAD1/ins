@@ -36,6 +36,17 @@ except ImportError:
 
 from binance.client import Client as BinanceClient
 from deep_translator import GoogleTranslator
+
+# ===== ChatGPT Business Seat Manager =====
+try:
+    from curl_cffi import requests as cffi_requests
+    CFFI_AVAILABLE = True
+except ImportError:
+    CFFI_AVAILABLE = False
+    logger_placeholder = None  # سيُعيَّن لاحقاً
+
+import uuid as _uuid_mod
+import datetime as _dt_mod
 from pymongo import MongoClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -441,6 +452,285 @@ def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, i
         notify_admins(msg)
     except Exception as _ne:
         logger.debug(f"_notify_all_admins_api_purchase error: {_ne}")
+
+
+# ================================================================
+# ChatGPT Business Seat Manager — مدمج مع البوت
+# ================================================================
+
+class ChatGPTSeatManager:
+    """
+    مدير مقاعد ChatGPT Business.
+    يعمل كـ singleton — استخدم get_cgpt_manager().
+    """
+    _instance = None
+
+    def __init__(self):
+        self.token_file = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        self.data_file  = get_setting('cgpt_data_file') or 'cookie_seat_invites.json'
+        self.access_token  = None
+        self.session_token = None
+        self.org_id        = None
+        self.account_id    = None
+        self.owner_email   = None
+        self._loaded       = False
+        self._load_tokens()
+        self.invites_data  = self._load_data()
+        self.allowed_emails = set(self.invites_data.get('allowed_emails', []))
+
+    # ---------- token / data ----------
+    def _load_tokens(self):
+        try:
+            path = self.token_file
+            if not os.path.exists(path):
+                path = os.path.join(os.path.dirname(__file__), self.token_file)
+            with open(path, 'r', encoding='utf-8') as f:
+                c = json.load(f)
+            self.access_token  = c.get('accessToken')
+            self.session_token = c.get('sessionToken')
+            acct = c.get('account', {})
+            self.org_id     = acct.get('organizationId')
+            self.account_id = acct.get('id')
+            user = c.get('user', {})
+            self.owner_email = user.get('email')
+            self._loaded = True
+        except Exception as e:
+            logger.warning(f"[CGPT] token load failed: {e}")
+            self._loaded = False
+
+    def _headers(self):
+        return {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type':  'application/json',
+            'Cookie':        f'__Secure-next-auth.session-token={self.session_token}',
+            'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept':        'application/json',
+            'Origin':        'https://chatgpt.com',
+            'Referer':       'https://chatgpt.com/'
+        }
+
+    def _load_data(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except: pass
+        return {'invites': {}, 'allowed_emails': [self.owner_email] if self.owner_email else []}
+
+    def _save_data(self):
+        self.invites_data['allowed_emails'] = list(self.allowed_emails)
+        with open(self.data_file, 'w', encoding='utf-8') as f:
+            json.dump(self.invites_data, f, indent=2, ensure_ascii=False)
+
+    def reload_token(self):
+        """إعادة تحميل الـ token من الملف"""
+        path = get_setting('cgpt_token_path') or 'pasted_content.txt'
+        self.token_file = path
+        self._load_tokens()
+        return self._loaded
+
+    # ---------- core API ----------
+    def _get_org_users(self):
+        if not CFFI_AVAILABLE or not self._loaded: return []
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+            r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
+            if r.status_code == 200:
+                return r.json().get('items', [])
+            logger.warning(f"[CGPT] get_org_users {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.error(f"[CGPT] get_org_users error: {e}")
+        return []
+
+    def invite_user(self, email: str, minutes_valid: int) -> dict:
+        """
+        يدعو مستخدم ويرجع dict:
+        {'ok': True/False, 'expires_at': '...', 'error': '...'}
+        """
+        if not CFFI_AVAILABLE:
+            return {'ok': False, 'error': 'curl_cffi غير مثبتة'}
+        if not self._loaded:
+            return {'ok': False, 'error': 'لم يتم تحميل الـ token'}
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+            payload = {'email_addresses': [email], 'role': 'standard-user'}
+            r = cffi_requests.post(url, headers=self._headers(), json=payload,
+                                   impersonate='chrome110', timeout=15)
+            if r.status_code in [200, 201]:
+                expires_at = (_dt_mod.datetime.now() +
+                              _dt_mod.timedelta(minutes=minutes_valid)).isoformat()
+                self.invites_data['invites'][email] = {
+                    'invited_at': _dt_mod.datetime.now().isoformat(),
+                    'expires_at': expires_at,
+                    'status': 'active',
+                    'minutes': minutes_valid,
+                    'telegram_uid': getattr(self, '_last_buyer_uid', None)
+                }
+                self.allowed_emails.add(email)
+                self._save_data()
+                return {'ok': True, 'expires_at': expires_at}
+            else:
+                err = r.text[:300]
+                logger.error(f"[CGPT] invite failed {r.status_code}: {err}")
+                return {'ok': False, 'error': f'{r.status_code}: {err}'}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def remove_user_by_email(self, email: str) -> bool:
+        """يحذف مستخدم بالإيميل"""
+        users = self._get_org_users()
+        for u in users:
+            if u.get('email') == email:
+                return self._remove_user(u.get('id'), email)
+        return False
+
+    def _remove_user(self, user_id, email) -> bool:
+        if email == self.owner_email: return False
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users/{user_id}'
+            r = cffi_requests.delete(url, headers=self._headers(), impersonate='chrome110', timeout=15)
+            return r.status_code in [200, 204]
+        except Exception as e:
+            logger.error(f"[CGPT] remove error: {e}")
+            return False
+
+    def check_and_cleanup(self):
+        """فحص المنتهين والمخالفين وحذفهم"""
+        now = _dt_mod.datetime.now()
+        emails_to_remove = []
+
+        # منتهو الصلاحية
+        for email, info in self.invites_data['invites'].items():
+            if info.get('status') != 'active': continue
+            try:
+                exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+                if now > exp:
+                    emails_to_remove.append(email)
+                    self.allowed_emails.discard(email)
+            except: pass
+
+        current_users = self._get_org_users()
+
+        # مخالفون (دُعوا خارج البوت)
+        unauthorized = [u.get('email') for u in current_users
+                        if u.get('email') != self.owner_email
+                        and u.get('email') not in self.allowed_emails
+                        and u.get('email') not in emails_to_remove]
+
+        if unauthorized:
+            logger.warning(f"[CGPT] {len(unauthorized)} unauthorized users — punishing all active")
+
+            # بناء تقرير كامل: إيميل المخالف + إيميل العميل المسبب
+            violation_lines = []
+            for unauth_email in unauthorized:
+                violation_lines.append(f"  🔴 مضاف خارج البوت: <code>{unauth_email}</code>")
+
+            # نعاقب كل النشطين، نرسل لهم رسالة، ونسجلهم
+            punished_lines = []
+            for email, info in self.invites_data['invites'].items():
+                if info.get('status') == 'active':
+                    emails_to_remove.append(email)
+                    self.allowed_emails.discard(email)
+                    punished_lines.append(f"  👤 عميل مُعاقب: <code>{email}</code>")
+                    # إرسال رسالة مباشرة للعميل المخالف في تيليغرام
+                    tg_uid = info.get('telegram_uid')
+                    if tg_uid:
+                        try:
+                            violation_msg = (
+                                "🚫 <b>تم إلغاء وصولك إلى ChatGPT Business</b>\n\n"
+                                "❌ <b>السبب: مخالفة شروط الاستخدام</b>\n\n"
+                                f"تم رصد إضافة مستخدم غير مصرح به من حسابك:\n"
+                                + "\n".join([f"📧 <code>{ue}</code>" for ue in unauthorized]) +
+                                "\n\n"
+                                "⛔️ <b>قرار نهائي:</b>\n"
+                                "• تم حذف وصولك فوراً\n"
+                                "• <b>لن يتم تعويضك أو استرجاع أموالك</b>\n"
+                                "• لا يحق لك المطالبة بأي تعويض\n\n"
+                                "📜 لأنك خالفت القوانين المنصوص عليها عند الشراء، "
+                                "فقدت حق الحماية والضمان."
+                            )
+                            bot.send_message(tg_uid, violation_msg, parse_mode="HTML")
+                        except Exception as _nm:
+                            logger.debug(f"[CGPT] notify violated user {tg_uid} failed: {_nm}")
+
+            report = (
+                f"⚠️ <b>ChatGPT — مخالفة اكتُشفت!</b>\n\n"
+                f"<b>المستخدمون المضافون خارج البوت ({len(unauthorized)}):</b>\n"
+                + "\n".join(violation_lines) +
+                f"\n\n<b>العملاء الذين تم إلغاء صلاحيتهم ({len(punished_lines)}):</b>\n"
+                + ("\n".join(punished_lines) if punished_lines else "  لا يوجد") +
+                f"\n\n<i>تم حذف جميع المضافين وإلغاء كل الصلاحيات النشطة.</i>"
+            )
+            notify_admins(report)
+
+        # تنفيذ الحذف
+        for u in current_users:
+            uid_org, email = u.get('id'), u.get('email')
+            if email == self.owner_email: continue
+            if email in emails_to_remove or email in unauthorized:
+                ok = self._remove_user(uid_org, email)
+                if ok and email in self.invites_data['invites']:
+                    self.invites_data['invites'][email]['status'] = 'expired'
+                    self.invites_data['invites'][email]['removed_at'] = now.isoformat()
+
+        self._save_data()
+
+    def list_active(self):
+        """يرجع قائمة المدعوين النشطين"""
+        now = _dt_mod.datetime.now()
+        result = []
+        for email, info in self.invites_data['invites'].items():
+            if info.get('status') != 'active': continue
+            try:
+                exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+                remaining = exp - now
+                result.append({
+                    'email': email,
+                    'expires_at': info['expires_at'],
+                    'remaining_hours': max(0, int(remaining.total_seconds() // 3600)),
+                    'remaining_days':  max(0, remaining.days)
+                })
+            except: pass
+        return result
+
+    def get_stats(self):
+        invites = self.invites_data.get('invites', {})
+        total   = len(invites)
+        active  = sum(1 for i in invites.values() if i.get('status') == 'active')
+        expired = total - active
+        return {'total': total, 'active': active, 'expired': expired}
+
+
+# Singleton accessor
+_cgpt_manager_instance = None
+_cgpt_lock = __import__('threading').Lock()
+
+def get_cgpt_manager() -> ChatGPTSeatManager:
+    global _cgpt_manager_instance
+    with _cgpt_lock:
+        if _cgpt_manager_instance is None:
+            _cgpt_manager_instance = ChatGPTSeatManager()
+        return _cgpt_manager_instance
+
+
+def _cgpt_daemon_loop():
+    """Daemon thread يعمل كل 5 دقائق"""
+    import time as _t
+    logger.info("[CGPT] Daemon started")
+    while True:
+        try:
+            interval = int(get_setting('cgpt_check_interval') or 300)
+            _t.sleep(interval)
+            mgr = get_cgpt_manager()
+            mgr.check_and_cleanup()
+        except Exception as e:
+            logger.error(f"[CGPT] daemon error: {e}")
+
+# تشغيل الـ daemon في thread خلفية عند استيراد البوت
+_cgpt_daemon_thread = __import__('threading').Thread(
+    target=_cgpt_daemon_loop, daemon=True, name="cgpt_seat_daemon"
+)
+_cgpt_daemon_thread.start()
 
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -4573,6 +4863,70 @@ def confirm_buy_handler(call):
     _do_purchase(uid, pid, qty, lang)
 
 
+# قاموس مؤقت لبيانات شراء ChatGPT
+_cgpt_pending = {}
+
+def _cgpt_handle_email(message, buyer_uid, lang):
+    pending = _cgpt_pending.pop(buyer_uid, None)
+    if not pending:
+        bot.send_message(buyer_uid, "\u274c \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u0629 \u0627\u0644\u0637\u0644\u0628. \u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645.", parse_mode="HTML")
+        return
+    import re as _re_email
+    email = (message.text or "").strip().lower()
+    if not _re_email.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
+        bot.send_message(buyer_uid,
+            f"\u274c <b>\u0625\u064a\u0645\u064a\u0644 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d. \u062a\u0645 \u0625\u0631\u062c\u0627\u0639 \u0631\u0635\u064a\u062f\u0643.</b>\n"
+            f"\u0627\u0644\u0631\u0635\u064a\u062f \u0627\u0644\u0645\u064f\u0631\u062c\u0639: <b>${pending['total_price']:.2f}</b>",
+            parse_mode="HTML")
+        return
+    bot.send_message(buyer_uid, "\u23f3 <b>\u062c\u0627\u0631\u064a \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629...</b>", parse_mode="HTML")
+    mgr = get_cgpt_manager()
+    mgr._last_buyer_uid = buyer_uid
+    result = mgr.invite_user(email, pending['minutes'])
+    days = round(pending['minutes'] / 1440, 1)
+    if result['ok']:
+        expires_iso = result['expires_at']
+        db.orders.insert_one({
+            'user_id': buyer_uid, 'product_id': pending['pid'],
+            'code_delivered': f"chatgpt_seat:{email}",
+            'qty': 1, 'total_price': pending['total_price'],
+            'order_id': pending['order_id'],
+            'cgpt_email': email, 'cgpt_expires_at': expires_iso,
+            'cgpt_minutes': pending['minutes']
+        })
+        u_data = get_user_data_full(buyer_uid)
+        buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
+        if lang == 'ar':
+            success = (f"\u2705 <b>\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629 \u0628\u0646\u062c\u0627\u062d!</b>\n\n"
+                f"\U0001f4e7 <b>\u0627\u0644\u0625\u064a\u0645\u064a\u0644:</b> <code>{email}</code>\n"
+                f"\u23f1 <b>\u0645\u062f\u0629 \u0627\u0644\u0648\u0635\u0648\u0644:</b> {days} \u064a\u0648\u0645\n"
+                f"\U0001f4c5 <b>\u064a\u0646\u062a\u0647\u064a \u0641\u064a:</b> {expires_iso[:10]}\n\n"
+                f"<i>\u062a\u0641\u0642\u062f \u0628\u0631\u064a\u062f\u0643 \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0648\u0642\u0628\u0644 \u0627\u0644\u062f\u0639\u0648\u0629 \U0001f389</i>")
+        else:
+            success = (f"\u2705 <b>Invite sent successfully!</b>\n\n"
+                f"\U0001f4e7 <b>Email:</b> <code>{email}</code>\n"
+                f"\u23f1 <b>Duration:</b> {days} days\n"
+                f"\U0001f4c5 <b>Expires:</b> {expires_iso[:10]}\n\n"
+                f"<i>Check your inbox and accept the invite \U0001f389</i>")
+        bot.send_message(buyer_uid, success, parse_mode="HTML")
+        notify_admins(
+            f"\U0001f916 <b>ChatGPT Seat \u2014 \u0634\u0631\u0627\u0621</b>\n"
+            f"\U0001f464 {buyer_m} (<code>{buyer_uid}</code>)\n"
+            f"\U0001f4e7 <code>{email}</code>\n"
+            f"\u23f1 {days} \u064a\u0648\u0645\n"
+            f"\U0001f4b0 ${pending['total_price']:.2f}\n"
+            f"\U0001f194 <code>{pending['order_id']}</code>"
+        )
+    else:
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
+        bot.send_message(buyer_uid,
+            f"\u274c <b>\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629. \u062a\u0645 \u0625\u0631\u062c\u0627\u0639 \u0631\u0635\u064a\u062f\u0643.</b>\n"
+            f"\u0627\u0644\u0633\u0628\u0628: <code>{result.get('error', 'unknown')}</code>",
+            parse_mode="HTML")
+        notify_admins(f"\U0001f6a8 ChatGPT Seat \u2014 \u0641\u0634\u0644 \u062f\u0639\u0648\u0629\n<code>{buyer_uid}</code> / <code>{email}</code>\n{result.get('error', '')}")
+
+
 def _do_purchase(uid, pid, qty, lang):
     """المنطق الفعلي للشراء"""
     # 🛡 Rate Limiting
@@ -4604,6 +4958,7 @@ def _do_purchase(uid, pid, qty, lang):
             bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
             return
 
+        product_type = p.get('product_type', 'standard')
         is_manual = p.get('is_manual', False)
         unit_price = float(p.get('price', 0))
 
@@ -4660,7 +5015,36 @@ def _do_purchase(uid, pid, qty, lang):
         buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
         log_ch = get_setting('log_channel')
 
-        if is_manual:
+        if product_type == 'chatgpt_seat':
+            # ── ChatGPT Business Seat ──
+            # نطلب الإيميل أولاً ثم ندعوه
+            cgpt_minutes = int(p.get('cgpt_minutes', 10080))
+            _release_purchase_lock(uid)  # نفك الـ lock ريثما يكتب الإيميل
+            order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
+            # نحفظ بيانات الشراء مؤقتاً
+            _cgpt_pending[uid] = {
+                'pid': str(pid), 'qty': qty, 'total_price': total_price,
+                'order_id': order_id, 'minutes': cgpt_minutes,
+                'p_name_ar': clean_name(p.get('name_ar', '')),
+                'p_name_en': clean_name(p.get('name_en', p.get('name_ar', '')))
+            }
+            if lang == 'ar':
+                msg_txt = (
+                    f"✅ <b>تم خصم ${total_price:.2f} من رصيدك!</b>\n\n"
+                    f"📧 <b>أرسل إيميل حساب ChatGPT الخاص بك:</b>\n"
+                    f"<i>(يجب أن يكون مسجلاً على chatgpt.com)</i>"
+                )
+            else:
+                msg_txt = (
+                    f"✅ <b>${total_price:.2f} deducted!</b>\n\n"
+                    f"📧 <b>Send your ChatGPT account email:</b>\n"
+                    f"<i>(Must be registered on chatgpt.com)</i>"
+                )
+            msg = bot.send_message(uid, msg_txt, parse_mode="HTML")
+            bot.register_next_step_handler(msg, _cgpt_handle_email, uid, lang)
+            return  # نرجع — الباقي سيتم في _cgpt_handle_email
+
+        elif is_manual:
             order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
             try:
                 db.orders.insert_one({
@@ -9420,6 +9804,129 @@ def admin_set_price(call):
             
     bot.register_next_step_handler(msg, save_price)
 
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_panel")
+@admin_required
+def ad_cgpt_panel(call):
+    bot.answer_callback_query(call.id)
+    mgr = get_cgpt_manager()
+    stats = mgr.get_stats()
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("👥 المدعوون النشطون", callback_data="ad_cgpt_list"),
+        InlineKeyboardButton("➕ دعوة يدوية", callback_data="ad_cgpt_invite"),
+        InlineKeyboardButton("🔄 فحص وتنظيف الآن", callback_data="ad_cgpt_cleanup"),
+        InlineKeyboardButton("🔑 تحديث الـ Token", callback_data="ad_cgpt_reload_token"),
+        InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")
+    )
+    loaded_icon = "✅" if mgr._loaded else "❌"
+    bot.edit_message_text(
+        f"🤖 <b>إدارة ChatGPT Business Seats</b>\n\n"
+        f"حالة الـ Token: {loaded_icon}\n"
+        f"إجمالي الدعوات: <b>{stats['total']}</b>\n"
+        f"نشط الآن: <b>{stats['active']}</b>\n"
+        f"منتهي: <b>{stats['expired']}</b>",
+        call.message.chat.id, call.message.message_id,
+        parse_mode="HTML", reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_list")
+@admin_required
+def ad_cgpt_list(call):
+    bot.answer_callback_query(call.id)
+    mgr = get_cgpt_manager()
+    actives = mgr.list_active()
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    if not actives:
+        try:
+            bot.edit_message_text("👥 <b>لا يوجد مدعوون نشطون حالياً.</b>",
+                call.message.chat.id, call.message.message_id,
+                parse_mode="HTML", reply_markup=markup)
+        except: pass
+        return
+    txt = "👥 <b>المدعوون النشطون:</b>\n\n"
+    for i, a in enumerate(actives, 1):
+        txt += (f"{i}. <code>{a['email']}</code>\n"
+                f"   ⏱ متبقي: <b>{a['remaining_days']} يوم ({a['remaining_hours']} ساعة)</b>\n"
+                f"   📅 ينتهي: {a['expires_at'][:10]}\n\n")
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+            parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_cleanup")
+@admin_required
+def ad_cgpt_cleanup_now(call):
+    bot.answer_callback_query(call.id, "⏳ جاري الفحص...", show_alert=False)
+    try:
+        mgr = get_cgpt_manager()
+        mgr.check_and_cleanup()
+        bot.answer_callback_query(call.id, "✅ تم الفحص والتنظيف!", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ خطأ: {e}", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_reload_token")
+@admin_required
+def ad_cgpt_reload_token(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id,
+        "📂 <b>أرسل المسار الكامل لملف الـ Token:</b>\n"
+        "<i>مثال: /home/ubuntu/pasted_content.txt</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_token_path)
+
+def _cgpt_save_token_path(message):
+    path = message.text.strip()
+    if not os.path.exists(path):
+        bot.send_message(message.chat.id, f"❌ الملف غير موجود: <code>{path}</code>", parse_mode="HTML")
+        return
+    db.settings.update_one({'key': 'cgpt_token_path'}, {'$set': {'value': path}}, upsert=True)
+    global _cgpt_manager_instance
+    with _cgpt_lock:
+        _cgpt_manager_instance = None  # reset singleton
+    ok = get_cgpt_manager()._loaded
+    icon = "✅" if ok else "❌"
+    bot.send_message(message.chat.id,
+        f"{icon} <b>{'تم تحميل الـ Token بنجاح!' if ok else 'فشل تحميل الـ Token!'}</b>\n"
+        f"المسار: <code>{path}</code>",
+        parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_invite")
+@admin_required
+def ad_cgpt_manual_invite(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id,
+        "📧 <b>أرسل الإيميل والمدة بالصيغة:</b>\n"
+        "<code>email@example.com 10080</code>\n"
+        "<i>(إيميل ثم مسافة ثم الدقائق)</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_manual_invite_exec)
+
+def _cgpt_manual_invite_exec(message):
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        bot.send_message(message.chat.id, "❌ صيغة خاطئة. مثال: <code>user@example.com 10080</code>", parse_mode="HTML")
+        return
+    email, mins_str = parts
+    try:
+        mins = int(mins_str)
+    except:
+        bot.send_message(message.chat.id, "❌ المدة يجب أن تكون رقماً.")
+        return
+    mgr = get_cgpt_manager()
+    result = mgr.invite_user(email, mins)
+    days = round(mins / 1440, 1)
+    if result['ok']:
+        bot.send_message(message.chat.id,
+            f"✅ <b>تمت الدعوة!</b>\n📧 <code>{email}</code>\n⏱ {days} يوم\n📅 ينتهي: {result['expires_at'][:10]}",
+            parse_mode="HTML")
+    else:
+        bot.send_message(message.chat.id,
+            f"❌ <b>فشلت الدعوة!</b>\n<code>{result.get('error')}</code>",
+            parse_mode="HTML")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
 @admin_required
 def ad_p_step1(call):
@@ -9485,9 +9992,92 @@ def ad_p_price(message):
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("⚡ تسليم تلقائي (أكواد وبطاقات)", callback_data="ad_ptype_auto"))
         markup.add(InlineKeyboardButton("🤝 تسليم يدوي (يتواصل العميل معك)", callback_data="ad_ptype_manual"))
+        markup.add(InlineKeyboardButton("🤖 مقعد ChatGPT Business (بالإيميل)", callback_data="ad_ptype_cgpt"))
         bot.send_message(uid, "⚙️ <b>اختر نوع تسليم هذا المنتج:</b>", reply_markup=markup, parse_mode="HTML")
     except Exception as e:
         bot.send_message(uid, "❌ خطأ في السعر. الرجاء المحاولة مرة أخرى من القائمة.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_ptype_cgpt")
+@admin_required
+def ad_ptype_cgpt_handler(call):
+    """يطلب مدة الوصول بالدقائق ثم يحفظ المنتج كـ chatgpt_seat"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    msg = bot.send_message(uid,
+        "⏱ <b>كم دقيقة يكون الوصول صالحاً؟</b>\n\n"
+        "أمثلة:\n"
+        "• 7 أيام  → <code>10080</code>\n"
+        "• 15 يوم → <code>21600</code>\n"
+        "• 25 يوم → <code>36000</code>\n"
+        "• 30 يوم → <code>43200</code>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_ptype_cgpt_save_minutes)
+
+def ad_ptype_cgpt_save_minutes(message):
+    uid = message.from_user.id
+    try:
+        minutes = int(message.text.strip())
+        if minutes <= 0: raise ValueError
+    except:
+        bot.send_message(uid, "❌ أرسل رقم صحيح موجب.")
+        return
+    p = temp_product.get(uid)
+    if not p: return
+    p['cgpt_minutes'] = minutes
+    p['product_type'] = 'chatgpt_seat'
+    p['is_manual'] = False
+    days = round(minutes / 1440, 1)
+    pid = str(int(time.time()))
+    cats = list(db.catalogs.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    if cats:
+        for cat in cats:
+            markup.add(InlineKeyboardButton(
+                f"📁 {cat.get('name_ar', cat.get('name', '?'))}",
+                callback_data=f"ad_p_cgpt_cat_{pid}_{cat['_id']}"
+            ))
+    markup.add(InlineKeyboardButton("➕ بدون مجلد", callback_data=f"ad_p_cgpt_cat_{pid}_none"))
+    temp_product[uid]['_pid'] = pid
+    bot.send_message(uid,
+        f"✅ المدة: <b>{days} يوم ({minutes} دقيقة)</b>\n\n📁 اختر المجلد:",
+        parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_p_cgpt_cat_"))
+@admin_required
+def ad_p_cgpt_cat_selected(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    parts = call.data.replace("ad_p_cgpt_cat_", "").split("_", 1)
+    pid   = parts[0]
+    cat_id = None if parts[1] == "none" else parts[1]
+    p = temp_product.get(uid)
+    if not p: return
+    doc = {
+        '_id': pid,
+        'name_ar':      p.get('n_ar', ''),
+        'name_en':      p.get('n_en', ''),
+        'desc_ar':      p.get('d_ar', ''),
+        'desc_en':      p.get('d_en', ''),
+        'price':        float(p.get('price', 0)),
+        'is_manual':    False,
+        'product_type': 'chatgpt_seat',
+        'cgpt_minutes': int(p.get('cgpt_minutes', 10080)),
+        'catalog_id':   str(cat_id) if cat_id else None,
+        'is_hidden':    False,
+        'created_at':   _dt_mod.datetime.now().isoformat()
+    }
+    db.products.insert_one(doc)
+    days = round(doc['cgpt_minutes'] / 1440, 1)
+    bot.edit_message_text(
+        f"✅ <b>تم إنشاء منتج ChatGPT Business!</b>\n\n"
+        f"📦 <b>{doc['name_ar']}</b>\n"
+        f"💰 <b>${doc['price']:.2f}</b>\n"
+        f"⏱ <b>{days} يوم ({doc['cgpt_minutes']} دقيقة)</b>\n"
+        f"📁 <b>المجلد:</b> {cat_id or 'بدون مجلد'}",
+        call.message.chat.id, call.message.message_id, parse_mode="HTML"
+    )
+    temp_product.pop(uid, None)
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_ptype_"))
 def ad_p_final(call):
@@ -11132,16 +11722,118 @@ def admin_all_logs(call):
 @admin_required
 def admin_bc_init(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "📢 Send Broadcast Message:")
-    bot.register_next_step_handler(msg, admin_bc_exe)
+    msg = bot.send_message(call.from_user.id,
+        "📢 <b>أرسل رسالة البرودكاست:</b>\n"
+        "<i>تدعم: نص، صور، فيديو، ملفات، إيموجي مميز، تنسيقات HTML</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, admin_bc_pick_product)
 
-def admin_bc_exe(message):
-    users = list(db.users.find())
-    for u in users:
-        try: bot.copy_message(u['user_id'], message.chat.id, message.message_id); time.sleep(0.05)
-        except: continue
-    bot.send_message(message.chat.id, "✅ Broadcast Sent.")
+def admin_bc_pick_product(message):
+    """الخطوة 2: اختيار منتج أو إرسال للكل"""
+    uid = message.from_user.id
+    _bc_pending[uid] = {
+        'msg_id': message.message_id,
+        'chat_id': message.chat.id,
+        'product_id': None  # None = للكل
+    }
+    products = list(db.products.find({'is_hidden': {'$ne': True}}, {'_id': 1, 'name_ar': 1, 'name_en': 1}))
+    total = db.users.count_documents({})
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in products[:20]:
+        pid = str(p['_id'])
+        name = clean_name(p.get('name_ar') or p.get('name_en', ''))[:30]
+        markup.add(InlineKeyboardButton(f"📦 {name}", callback_data=f"bc_pick_{pid}"))
+    markup.add(InlineKeyboardButton(f"✅ إرسال للكل ({total})", callback_data="bc_pick_all"))
+    markup.add(InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel_main"))
+    bot.send_message(uid,
+        "📦 <b>اختر منتجاً للإرسال لمشتريه فقط، أو اضغط إرسال للكل:</b>",
+        parse_mode="HTML", reply_markup=markup)
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("bc_pick_"))
+@admin_required
+def admin_bc_confirm(call):
+    """الخطوة 3: تأكيد"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    pending = _bc_pending.get(uid)
+    if not pending:
+        bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
+
+    target = call.data.replace("bc_pick_", "")
+    if target == "all":
+        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
+        label = f"👥 الكل ({len(target_ids)})"
+        pending['product_id'] = None
+    else:
+        # نبحث بكل أشكال الـ product_id (string / int / float)
+        pid_variants = [target]
+        if target.isdigit():
+            pid_variants.append(int(target))
+            pid_variants.append(float(target))
+        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': pid_variants}}))
+        p = find_product(target)
+        p_name = clean_name(p.get('name_ar') or p.get('name_en', '')) if p else target
+        label = f"📦 مشتري {p_name} ({len(target_ids)})"
+        pending['product_id'] = target
+
+    pending['target_ids'] = target_ids
+    pending['label'] = label
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ موافق", callback_data="bc_go"),
+        InlineKeyboardButton("❌ لا", callback_data="admin_panel_main")
+    )
+    bot.send_message(uid,
+        f"📋 سيُرسل البرودكاست لـ <b>{label}</b>\n\nموافق؟",
+        parse_mode="HTML", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "bc_go")
+@admin_required
+def admin_bc_exe(call):
+    """تنفيذ البرودكاست في thread خلفية"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    pending = _bc_pending.pop(uid, None)
+    if not pending:
+        bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
+
+    src_msg_id = pending['msg_id']
+    src_chat_id = pending['chat_id']
+    target_ids  = pending.get('target_ids', [])
+    label       = pending.get('label', '?')
+
+    bot.send_message(uid,
+        f"📢 <b>بدأ البرودكاست!</b> ({label})\n"
+        f"⏳ البوت يعمل بشكل طبيعي. سيصلك تقرير عند الانتهاء.",
+        parse_mode="HTML")
+
+    def _bc_thread():
+        sent = failed = blocked = 0
+        for tuid in target_ids:
+            try:
+                bot.copy_message(tuid, src_chat_id, src_msg_id)
+                sent += 1
+            except Exception as e:
+                err = str(e).lower()
+                if any(w in err for w in ['blocked', 'deactivated', 'not found', 'kicked']):
+                    blocked += 1
+                else:
+                    failed += 1
+            time.sleep(0.035)
+        try:
+            bot.send_message(uid,
+                f"✅ <b>اكتمل البرودكاست!</b>\n\n"
+                f"🎯 {label}\n"
+                f"📤 أُرسل: <b>{sent}</b>\n"
+                f"🚫 محظور: <b>{blocked}</b>\n"
+                f"❌ فشل: <b>{failed}</b>",
+                parse_mode="HTML")
+        except: pass
+
+    threading.Thread(target=_bc_thread, daemon=True, name="bc_thread").start()
+
+_bc_pending = {}
 @bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
 @admin_required
 def admin_shop_settings(call):
