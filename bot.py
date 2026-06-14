@@ -10339,6 +10339,74 @@ def _cgpt_manual_invite_exec(message):
         bot.send_message(message.chat.id, f"\u274c <b>\u0641\u0634\u0644\u062a \u0627\u0644\u062f\u0639\u0648\u0629!</b>\n<code>{result.get('error')}</code>", parse_mode="HTML")
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "ad_p_add")
+@admin_required
+def ad_p_step1(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    temp_product[uid] = {}
+    msg = bot.send_message(uid,
+        "📦 <b>أرسل اسم المنتج (بالعربية):</b>\n"
+        "<i>يمكنك استخدام Premium Emojis والتنسيقات</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_p_step2)
+
+def ad_p_step2(message):
+    uid = message.from_user.id
+    # نستخرج Premium Emojis ونحولها لـ HTML
+    n_ar = extract_custom_emojis_to_html(message)
+    # نترجم مع الحفاظ على التنسيق والإيموجي
+    n_en = safe_translate_for_cms(n_ar, 'en')
+    temp_product[uid] = {'n_ar': n_ar, 'n_en': n_en}
+    try:
+        bot.send_message(uid,
+            f"✅ <b>تم حفظ الاسم!</b>\n\n"
+            f"🇸🇦 العربي: {n_ar}\n"
+            f"🇬🇧 الإنجليزي: {n_en}",
+            parse_mode="HTML")
+    except:
+        bot.send_message(uid, "✅ تم حفظ الاسم!")
+    msg = bot.send_message(uid,
+        "📝 <b>أرسل وصف المنتج (بالعربية):</b>\n"
+        "<i>يمكنك استخدام Premium Emojis، Bold، Italic</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_p_step3)
+
+def ad_p_step3(message):
+    uid = message.from_user.id
+    # نستخرج Premium Emojis ونحولها لـ HTML
+    d_ar = extract_custom_emojis_to_html(message)
+    # نترجم مع الحفاظ على كل التنسيقات والإيموجي
+    d_en = safe_translate_for_cms(d_ar, 'en')
+    temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
+    try:
+        bot.send_message(uid,
+            f"✅ <b>تم حفظ الوصف!</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🇸🇦 <b>العربي:</b>\n{d_ar}\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🇬🇧 <b>الإنجليزي:</b>\n{d_en}\n"
+            f"━━━━━━━━━━━━━━",
+            parse_mode="HTML")
+    except:
+        bot.send_message(uid, "✅ تم حفظ الوصف!")
+    msg = bot.send_message(uid, "💰 <b>أرسل السعر بالدولار ($):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, ad_p_price)
+
+def ad_p_price(message):
+    uid = message.from_user.id
+    try:
+        price = float(message.text.strip())
+        temp_product[uid]['price'] = price
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("⚡ تسليم تلقائي (أكواد وبطاقات)", callback_data="ad_ptype_auto"))
+        markup.add(InlineKeyboardButton("🤝 تسليم يدوي (يتواصل العميل معك)", callback_data="ad_ptype_manual"))
+        markup.add(InlineKeyboardButton("🤖 مقعد ChatGPT Business (بالإيميل)", callback_data="ad_ptype_cgpt"))
+        bot.send_message(uid, "⚙️ <b>اختر نوع تسليم هذا المنتج:</b>", reply_markup=markup, parse_mode="HTML")
+    except:
+        bot.send_message(uid, "❌ خطأ في السعر. أرسل رقماً فقط مثل: <code>5.99</code>", parse_mode="HTML")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_ptype_cgpt")
 @admin_required
 def ad_ptype_cgpt_handler(call):
