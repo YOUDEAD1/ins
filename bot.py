@@ -3096,9 +3096,11 @@ def find_product(pid):
         # بحث بـ _id كـ string (لمنتجات مثل cgpt_main_xxx)
         p = db.products.find_one({'_id': pid_str})
         if p: return p
-        # بحث بـ _id كـ ObjectId
+        # بحث بـ _id كـ ObjectId أو كـ cgpt_main_xxx
         if len(pid_str) == 24:
             try:
+                p = db.products.find_one({'_id': f"cgpt_main_{pid_str}"})
+                if p: return p
                 p = db.products.find_one({'_id': ObjectId(pid_str)})
                 if p: return p
             except: pass
@@ -10898,25 +10900,28 @@ def admin_edit_opts(call):
     # suffix لتمرير cat_id في كل الأزرار
     c_sfx = f"_c_{cat_id_back}" if cat_id_back else ""
     
+    # Shorten pid for callback_data
+    short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+    
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{pid}{c_sfx}"))
-    markup.add(InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{pid}{c_sfx}"),
-               InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{pid}{c_sfx}"))
-    markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{pid}{c_sfx}"),
-               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{pid}{c_sfx}"))
-    markup.add(InlineKeyboardButton("📁 Change Folder", callback_data=f"ep_setcat_{pid}{c_sfx}"),
-               InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{pid}{c_sfx}"))
-    markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{short_pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("📝 Desc (AR)", callback_data=f"ep_dar_{short_pid}{c_sfx}"),
+               InlineKeyboardButton("📝 Desc (EN)", callback_data=f"ep_den_{short_pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("✏️ Name (AR)", callback_data=f"ep_nar_{short_pid}{c_sfx}"),
+               InlineKeyboardButton("✏️ Name (EN)", callback_data=f"ep_nen_{short_pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("📁 Change Folder", callback_data=f"ep_setcat_{short_pid}{c_sfx}"),
+               InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{short_pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{short_pid}{c_sfx}"))
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
-    markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{pid}{c_sfx}"))
+    markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{short_pid}{c_sfx}"))
     # زر رجوع: للمنتج نفسه وليس لقائمة الأدمن
-    back_cb = f"vi_p_{pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{pid}"
+    back_cb = f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}"
     # زر جعله أول في مجلده
     p_doc = find_product(pid)
     if p_doc:
         p_cat = p_doc.get('catalog_id') or (cat_id_back if cat_id_back else None)
         if p_cat:
-            markup.add(InlineKeyboardButton("⬆️ جعله أول في المجلد", callback_data=f"p_set_first_{pid}_{p_cat}"))
+            markup.add(InlineKeyboardButton("⬆️ جعله أول في المجلد", callback_data=f"p_set_first_{short_pid}_{p_cat}"))
     markup.add(InlineKeyboardButton("🔙 Back", callback_data=back_cb))
     
     try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
@@ -12954,13 +12959,17 @@ def p_set_first(call):
         return
     from bson import ObjectId
     try:
+        p = find_product(pid)
+        if not p: return
+        actual_pid = p['_id']
+        
         db.catalogs.update_one(
             {'_id': ObjectId(cat_id)},
-            {'$pull': {'product_ids': pid}}
+            {'$pull': {'product_ids': actual_pid}}
         )
         db.catalogs.update_one(
             {'_id': ObjectId(cat_id)},
-            {'$push': {'product_ids': {'$each': [pid], '$position': 0}}}
+            {'$push': {'product_ids': {'$each': [actual_pid], '$position': 0}}}
         )
         bot.answer_callback_query(call.id, "✅ أصبح أول المنتجات في المجلد!", show_alert=True)
     except Exception as e:
@@ -12995,7 +13004,10 @@ def ad_cat_addp(call):
             found = True
             name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
             emoji_id = p.get('custom_emoji_id')
-            btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{pid}"}
+            
+            # Shorten pid for callback_data
+            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{callback_pid}"}
             if emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
@@ -13013,25 +13025,25 @@ def ad_cat_addp(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_doadd_"))
 @admin_required
 def ad_cat_doadd(call):
-    parts = call.data.replace("ad_cat_doadd_", "").split("_", 1)
+    parts = call.data.replace("ad_cat_doadd_", "").rsplit("_", 1)
     cat_id = parts[0]
     pid = parts[1] if len(parts) > 1 else ""
     from bson import ObjectId
     
-    # 🆕 Sync catalog_id to product
     p = find_product(pid)
     if p:
+        actual_pid = p['_id']
         db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': str(cat_id)}})
         
-    # نضيف في البداية: نحذف لو موجود ثم نضيف في أول القائمة
-    db.catalogs.update_one(
-        {'_id': ObjectId(cat_id)},
-        {'$pull': {'product_ids': pid}}
-    )
-    db.catalogs.update_one(
-        {'_id': ObjectId(cat_id)},
-        {'$push': {'product_ids': {'$each': [pid], '$position': 0}}}
-    )
+        # نضيف في البداية: نحذف لو موجود ثم نضيف في أول القائمة
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$pull': {'product_ids': actual_pid}}
+        )
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$push': {'product_ids': {'$each': [actual_pid], '$position': 0}}}
+        )
     bot.answer_callback_query(call.id, "✅ Added as first!", show_alert=True)
     call.data = f"ad_cat_addp_{cat_id}"
     ad_cat_addp(call)
@@ -13062,7 +13074,10 @@ def ad_cat_remp(call):
         for pid, p in items:
             name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
             emoji_id = p.get('custom_emoji_id')
-            btn_kwargs = {'text': f"↩️ {name}", 'callback_data': f"ad_cat_dorem_{cat_id}_{pid}"}
+            
+            # Shorten pid for callback_data
+            callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
+            btn_kwargs = {'text': f"↩️ {name}", 'callback_data': f"ad_cat_dorem_{cat_id}_{callback_pid}"}
             if emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
@@ -13078,20 +13093,20 @@ def ad_cat_remp(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_dorem_"))
 @admin_required
 def ad_cat_dorem(call):
-    parts = call.data.replace("ad_cat_dorem_", "").split("_", 1)
+    parts = call.data.replace("ad_cat_dorem_", "").rsplit("_", 1)
     cat_id = parts[0]
     pid = parts[1] if len(parts) > 1 else ""
     from bson import ObjectId
     
-    # 🆕 Sync catalog_id to product (set to None)
     p = find_product(pid)
     if p:
+        actual_pid = p['_id']
         db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': None}})
         
-    db.catalogs.update_one(
-        {'_id': ObjectId(cat_id)},
-        {'$pull': {'product_ids': pid}}
-    )
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$pull': {'product_ids': actual_pid}}
+        )
     bot.answer_callback_query(call.id, "✅ Moved to regular!", show_alert=True)
     call.data = f"ad_cat_remp_{cat_id}"
     ad_cat_remp(call)
