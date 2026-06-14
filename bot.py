@@ -481,23 +481,28 @@ class ChatGPTSeatManager:
 
     # ---------- token / data ----------
     def _load_tokens(self):
+        # 1) نحاول من قاعدة البيانات أولاً (دائم على Render)
         try:
-            path = self.token_file
-            if not os.path.exists(path):
-                path = os.path.join(os.path.dirname(__file__), self.token_file)
-            with open(path, 'r', encoding='utf-8') as f:
-                c = json.load(f)
-            self.access_token  = c.get('accessToken')
-            self.session_token = c.get('sessionToken')
-            acct = c.get('account', {})
-            self.org_id     = acct.get('organizationId')
-            self.account_id = acct.get('id')
-            user = c.get('user', {})
-            self.owner_email = user.get('email')
-            self._loaded = True
-        except Exception as e:
-            logger.warning(f"[CGPT] token load failed: {e}")
-            self._loaded = False
+            db_doc = db.cgpt_cookies.find_one({'_id': 'main'})
+            if db_doc and db_doc.get('data'):
+                c = db_doc['data']
+                self.access_token  = c.get('accessToken')
+                self.session_token = c.get('sessionToken')
+                acct = c.get('account', {})
+                self.org_id     = acct.get('organizationId')
+                self.account_id = acct.get('id')
+                user = c.get('user', {})
+                self.owner_email = user.get('email')
+                self._loaded = bool(self.access_token and self.session_token)
+                if self._loaded:
+                    logger.info("[CGPT] Loaded tokens from DB")
+                    return
+        except Exception as db_err:
+            logger.debug(f"[CGPT] DB load failed: {db_err}")
+
+        # لا توجد كوكيز في DB
+        logger.info("[CGPT] No cookies in DB yet — admin must add them")
+        self._loaded = False
 
     def _headers(self):
         return {
@@ -511,23 +516,29 @@ class ChatGPTSeatManager:
         }
 
     def _load_data(self):
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except: pass
+        """تحميل بيانات الدعوات من MongoDB"""
+        try:
+            doc = db.cgpt_invites_data.find_one({'_id': 'main'})
+            if doc and doc.get('data'):
+                return doc['data']
+        except Exception as e:
+            logger.debug(f"[CGPT] load_data DB err: {e}")
         return {'invites': {}, 'allowed_emails': [self.owner_email] if self.owner_email else []}
 
     def _save_data(self):
+        """حفظ بيانات الدعوات في MongoDB"""
         self.invites_data['allowed_emails'] = list(self.allowed_emails)
-        with open(self.data_file, 'w', encoding='utf-8') as f:
-            json.dump(self.invites_data, f, indent=2, ensure_ascii=False)
+        try:
+            db.cgpt_invites_data.update_one(
+                {'_id': 'main'},
+                {'$set': {'data': self.invites_data}},
+                upsert=True
+            )
+        except Exception as e:
+            logger.error(f"[CGPT] save_data DB err: {e}")
 
     def reload_token(self):
-        """إعادة تحميل الـ token من الملف"""
-        _rp = get_setting('cgpt_token_path')
-        path = _rp if _rp and _rp != 'Not Set' else 'pasted_content.txt'
-        self.token_file = path
+        """إعادة تحميل الـ token من MongoDB"""
         self._load_tokens()
         return self._loaded
 
@@ -3069,6 +3080,7 @@ def obscure_text(text):
 def find_product(pid):
     pid_str = str(pid)
     try:
+        # بحث بـ id field
         p = db.products.find_one({'id': pid_str})
         if p: return p
         if pid_str.isdigit():
@@ -3078,6 +3090,10 @@ def find_product(pid):
             p = db.products.find_one({'id': float(pid_str)})
             if p: return p
         except: pass
+        # بحث بـ _id كـ string (لمنتجات مثل cgpt_main_xxx)
+        p = db.products.find_one({'_id': pid_str})
+        if p: return p
+        # بحث بـ _id كـ ObjectId
         if len(pid_str) == 24:
             try:
                 p = db.products.find_one({'_id': ObjectId(pid_str)})
@@ -4471,8 +4487,11 @@ def shop_list_ui(call):
         for p in prods_no_cat:
             pid = p.get('id', str(p.get('_id', '')))
             is_manual = p.get('is_manual', False)
+            is_cgpt = p.get('product_type') == 'cgpt_main'
             st = get_product_stock_count(pid)
-            btn_style = "success" if (is_manual or st > 0) else "danger"
+            in_stock = is_manual or st > 0 or is_cgpt
+            db_style = p.get('btn_style')
+            btn_style = db_style if (db_style and in_stock) else ("success" if in_stock else "danger")
             is_hidden = p.get('is_hidden', False)
             hidden_icon = " 👻" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
@@ -4508,8 +4527,11 @@ def shop_list_ui(call):
                 continue
             is_manual = p.get('is_manual', False)
             pid = p.get('id', str(p.get('_id', '')))
+            is_cgpt = p.get('product_type') == 'cgpt_main'
             st = get_product_stock_count(pid)
-            btn_style = "success" if (is_manual or st > 0) else "danger"
+            in_stock = is_manual or st > 0 or is_cgpt
+            db_style = p.get('btn_style')
+            btn_style = db_style if (db_style and in_stock) else ("success" if in_stock else "danger")
             hidden_icon = " 👻(مخفي)" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n 
@@ -4569,8 +4591,9 @@ def catalog_view(call):
         if p.get('is_hidden', False) and not is_admin: continue
         is_manual = p.get('is_manual', False)
         actual_pid = p.get('id', str(p.get('_id', '')))
+        is_cgpt = p.get('product_type') == 'cgpt_main'
         st = get_product_stock_count(actual_pid)
-        in_stock = is_manual or st > 0
+        in_stock = is_manual or st > 0 or is_cgpt
         items.append((p, actual_pid, st, is_manual, in_stock))
     
     # المتوفر أول (True=1 > False=0 reversed)، ثم أبجدي
@@ -4583,8 +4606,13 @@ def catalog_view(call):
         hidden_icon = " 👻" if p.get('is_hidden', False) else ""
         n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
         short_n = n[:25] + ".." if len(n) > 25 else n
-        st_text = "FW" if is_manual else str(st)
-        btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+        is_cgpt_main = p.get('product_type') == 'cgpt_main'
+        if is_cgpt_main:
+            # لا نعرض السعر لأن المدد لها أسعار مختلفة
+            btn_text = f"{short_n} | 📦 FW{hidden_icon}"
+        else:
+            st_text = "FW" if is_manual else str(st)
+            btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
         btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{actual_pid}_c_{cat_id}", 'style': btn_style}
         custom_emoji_id = p.get('custom_emoji_id')
         if custom_emoji_id:
@@ -10282,17 +10310,26 @@ def cgpt_save_duration(message, pid):
             upsert=True
         )
 
+        # نعرض المجلدات مباشرة للاختيار
+        cats = list(db.catalogs.find().sort('order', 1))
         markup = InlineKeyboardMarkup(row_width=1)
+        for cat in cats:
+            cat_id = str(cat['_id'])
+            cat_name = cat.get('name_ar', cat.get('name', ''))
+            markup.add(InlineKeyboardButton(
+                f"\U0001f4c1 {cat_name}",
+                callback_data=f"cgpt_setcat_{pid}_{cat_id}"
+            ))
         markup.add(
+            InlineKeyboardButton("\U0001f6ab \u0628\u062f\u0648\u0646 \u0645\u062c\u0644\u062f", callback_data=f"cgpt_setcat_{pid}_none"),
             InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u062f\u0629 \u0623\u062e\u0631\u0649", callback_data=f"cgpt_add_dur_{pid}"),
             InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{main_pid}"),
-            InlineKeyboardButton("\U0001f4e6 \u0639\u0631\u0636 \u0643\u0644 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a", callback_data="cgpt_products_list"),
             InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
         )
         bot.send_message(message.chat.id,
             f"\u2705 <b>\u062a\u0645\u062a \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0645\u062f\u0629!</b>\n\n"
             f"\U0001f5d3 <b>{label}</b> | \U0001f4b0 <b>${price:.2f}</b>\n\n"
-            f"\u2699\ufe0f \u0627\u0636\u063a\u0637 \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c \u0644\u062a\u0636\u064a\u0641 \u0627\u0644\u0625\u064a\u0645\u0648\u062c\u064a \u0648\u062a\u062d\u062f\u064a\u062f \u0627\u0644\u0645\u062c\u0644\u062f",
+            f"\U0001f4c1 <b>\u0627\u062e\u062a\u0631 \u0627\u0644\u0645\u062c\u0644\u062f \u0627\u0644\u0630\u064a \u064a\u0638\u0647\u0631 \u0641\u064a\u0647 \u0627\u0644\u0645\u0646\u062a\u062c:</b>",
             parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         bot.send_message(message.chat.id, f"\u274c \u0635\u064a\u063a\u0629 \u062e\u0627\u0637\u0626\u0629. \u0627\u0633\u062a\u062e\u062f\u0645: <code>7 \u0623\u064a\u0627\u0645_5</code>\n<i>{e}</i>", parse_mode="HTML")
@@ -10388,6 +10425,53 @@ def cgpt_dur_cat_selected(call):
     )
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_setcat_"))
+@admin_required
+def cgpt_setcat(call):
+    """يضيف المنتج الرئيسي للمجلد المختار في الأول"""
+    bot.answer_callback_query(call.id)
+    raw = call.data.replace("cgpt_setcat_", "")
+    parts = raw.rsplit("_", 1)
+    pid = parts[0]
+    cat_id = parts[1] if len(parts) > 1 else "none"
+    main_pid = f"cgpt_main_{pid}"
+
+    # نزيله من أي مجلد قديم
+    for c in db.catalogs.find():
+        if main_pid in c.get('product_ids', []):
+            db.catalogs.update_one(
+                {'_id': c['_id']},
+                {'$pull': {'product_ids': main_pid}}
+            )
+
+    if cat_id == "none":
+        # بدون مجلد
+        bot.send_message(call.from_user.id,
+            "\u2705 <b>\u062a\u0645 \u062a\u0639\u064a\u064a\u0646 \u0627\u0644\u0645\u0646\u062a\u062c \u0628\u062f\u0648\u0646 \u0645\u062c\u0644\u062f.</b>",
+            parse_mode="HTML")
+        return
+
+    from bson import ObjectId as _ObjId3
+    # نضيفه في أول القائمة في المجلد
+    try:
+        db.catalogs.update_one(
+            {'_id': _ObjId3(cat_id)},
+            {'$push': {'product_ids': {'$each': [main_pid], '$position': 0}}}
+        )
+        cat = db.catalogs.find_one({'_id': _ObjId3(cat_id)})
+        cat_name = cat.get('name_ar', cat.get('name', '')) if cat else cat_id
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("\u2699\ufe0f \u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0645\u0646\u062a\u062c", callback_data=f"edit_p_{main_pid}"),
+            InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639 \u0644\u0644\u0648\u062d\u0629", callback_data="ad_cgpt_panel")
+        )
+        bot.send_message(call.from_user.id,
+            f"\u2705 <b>\u062a\u0645 \u0648\u0636\u0639 \u0627\u0644\u0645\u0646\u062a\u062c \u0641\u064a \u0627\u0644\u0645\u062c\u0644\u062f:</b>\n\U0001f4c1 <b>{cat_name}</b> (\u0623\u0648\u0644 \u0627\u0644\u0642\u0627\u0626\u0645\u0629)",
+            parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(call.from_user.id, f"\u274c \u062e\u0637\u0623: {e}")
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_del_prod_"))
 @admin_required
 def cgpt_del_product(call):
@@ -10426,8 +10510,8 @@ def cgpt_set_cookies(call):
     loaded_icon = "\u2705" if mgr._loaded else "\u274c"
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("\U0001f4c2 \u0645\u0633\u0627\u0631 \u0627\u0644\u0645\u0644\u0641", callback_data="ad_cgpt_reload_token"),
-        InlineKeyboardButton("\U0001f4cb \u0644\u0635\u0642 JSON \u0645\u0628\u0627\u0634\u0631\u0629", callback_data="cgpt_paste_json"),
+        InlineKeyboardButton("\U0001f4cb \u0644\u0635\u0642 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON)", callback_data="cgpt_paste_json"),
+        InlineKeyboardButton("\U0001f504 \u0625\u0639\u0627\u062f\u0629 \u062a\u062d\u0645\u064a\u0644 \u0645\u0646 DB", callback_data="ad_cgpt_reload_token"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
     )
     txt = f"\U0001f36a <b>\u0625\u0639\u062f\u0627\u062f \u0627\u0644\u0643\u0648\u0643\u064a\u0632</b>\n\n\u0627\u0644\u062d\u0627\u0644\u0629: {loaded_icon}\n\u0627\u062e\u062a\u0631 \u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0625\u0636\u0627\u0641\u0629:"
@@ -10446,17 +10530,16 @@ def cgpt_paste_json(call):
 def cgpt_save_json_cookies(message):
     try:
         data = json.loads(message.text.strip())
-        _tp = get_setting('cgpt_token_path')
-        token_path = _tp if _tp and _tp != 'Not Set' else 'pasted_content.txt'
-        with open(token_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # نحفظ في قاعدة البيانات (دائم)
+        db.cgpt_cookies.update_one({'_id': 'main'}, {'$set': {'data': data}}, upsert=True)
+        # نعيد تحميل المدير
         global _cgpt_manager_instance
         with _cgpt_lock:
             _cgpt_manager_instance = None
         ok = get_cgpt_manager()._loaded
         icon = "\u2705" if ok else "\u274c"
         bot.send_message(message.chat.id,
-            f"{icon} <b>{'\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0648\u062a\u062d\u0645\u064a\u0644\u0647\u0627 \u0628\u0646\u062c\u0627\u062d!' if ok else '\u062a\u0645 \u0627\u0644\u062d\u0641\u0638 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>",
+            f"{icon} <b>{'\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0641\u064a \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a!' if ok else '\u062a\u0645 \u0627\u0644\u062d\u0641\u0638 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>",
             parse_mode="HTML")
     except Exception as e:
         bot.send_message(message.chat.id, f"\u274c <b>JSON \u063a\u064a\u0631 \u0635\u062d\u064a\u062d!</b>\n<code>{e}</code>", parse_mode="HTML")
@@ -10476,21 +10559,16 @@ def ad_cgpt_cleanup_now(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_reload_token")
 @admin_required
 def ad_cgpt_reload_token(call):
+    """إعادة تحميل الكوكيز من MongoDB"""
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "\U0001f4c2 <b>\u0623\u0631\u0633\u0644 \u0627\u0644\u0645\u0633\u0627\u0631 \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0645\u0644\u0641 \u0627\u0644\u0643\u0648\u0643\u064a\u0632:</b>", parse_mode="HTML")
-    bot.register_next_step_handler(msg, _cgpt_save_token_path)
-
-def _cgpt_save_token_path(message):
-    path = message.text.strip()
-    if not os.path.exists(path):
-        bot.send_message(message.chat.id, f"\u274c \u0627\u0644\u0645\u0644\u0641 \u063a\u064a\u0631 \u0645\u0648\u062c\u0648\u062f: <code>{path}</code>", parse_mode="HTML"); return
-    db.settings.update_one({'key': 'cgpt_token_path'}, {'$set': {'value': path}}, upsert=True)
     global _cgpt_manager_instance
     with _cgpt_lock:
         _cgpt_manager_instance = None
     ok = get_cgpt_manager()._loaded
     icon = "\u2705" if ok else "\u274c"
-    bot.send_message(message.chat.id, f"{icon} <b>{'\u062a\u0645 \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0628\u0646\u062c\u0627\u062d!' if ok else '\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>\n\u0627\u0644\u0645\u0633\u0627\u0631: <code>{path}</code>", parse_mode="HTML")
+    bot.send_message(call.from_user.id,
+        f"{icon} <b>{'\u062a\u0645 \u0625\u0639\u0627\u062f\u0629 \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0645\u0646 \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a!' if ok else '\u0644\u0627 \u062a\u0648\u062c\u062f \u0643\u0648\u0643\u064a\u0632 \u0641\u064a \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a!'}</b>",
+        parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_invite")
