@@ -719,12 +719,18 @@ def _cgpt_daemon_loop():
     logger.info("[CGPT] Daemon started")
     while True:
         try:
-            interval = int(get_setting('cgpt_check_interval') or 300)
+            # نجلب الـ interval بأمان — لو 'Not Set' أو أي قيمة غير رقمية نستخدم 300
+            raw_interval = get_setting('cgpt_check_interval')
+            try:
+                interval = int(raw_interval) if str(raw_interval).isdigit() else 300
+            except (ValueError, TypeError):
+                interval = 300
             _t.sleep(interval)
             mgr = get_cgpt_manager()
             mgr.check_and_cleanup()
         except Exception as e:
             logger.error(f"[CGPT] daemon error: {e}")
+            _t.sleep(300)  # لو صار خطأ ننام 5 دقائق بدل ما نعيد فوراً
 
 # تشغيل الـ daemon في thread خلفية عند استيراد البوت
 _cgpt_daemon_thread = __import__('threading').Thread(
