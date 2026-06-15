@@ -2749,6 +2749,117 @@ LANG = {
 # 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
 # ============================================================
 
+def translate_duration_label(label, target_lang='en'):
+    if not label:
+        return label
+    if target_lang != 'en':
+        return label
+    
+    label_str = str(label).strip()
+    # Check if already English/numbers only
+    if re.match(r'^[a-zA-Z0-9\s\-\.\_\(\)]+$', label_str):
+        return label_str
+
+    words_map = {
+        'أيام': 'Days',
+        'ايام': 'Days',
+        'يوم': 'Day',
+        'شهور': 'Months',
+        'أشهر': 'Months',
+        'اشهر': 'Months',
+        'شهر': 'Month',
+        'سنوات': 'Years',
+        'سنة': 'Year',
+        'عام': 'Year',
+        'أعوام': 'Years',
+        'اعوام': 'Years',
+        'ساعات': 'Hours',
+        'ساعة': 'Hour',
+        'أسبوع': 'Week',
+        'اسبوع': 'Week',
+        'أسابيع': 'Weeks',
+        'اسابيع': 'Weeks',
+        'تلقائي': 'Auto',
+        'فوري': 'Instant',
+        'مدى الحياة': 'Lifetime',
+        'مفتوح': 'Unlimited',
+    }
+
+    # Match number(s) + spaces + word
+    match = re.match(r'^(\d+)\s+(.+)$', label_str)
+    if match:
+        num = match.group(1)
+        term = match.group(2).strip()
+        if term in words_map:
+            return f"{num} {words_map[term]}"
+
+    # Try exact match
+    if label_str in words_map:
+        return words_map[label_str]
+
+    res = label_str
+    for ar_w, en_w in words_map.items():
+        res = re.sub(rf'\b{ar_w}\b', en_w, res)
+        res = res.replace(ar_w, en_w)
+
+    if re.search(r'[\u0600-\u06FF]', res):
+        try:
+            translated = safe_translate_for_cms(label_str, 'en')
+            if translated and translated != label_str:
+                return translated
+        except:
+            pass
+
+    return res
+
+def get_translated_product_name(p, lang, is_cgpt=False):
+    if not p:
+        return "Unknown Product"
+    
+    if lang == 'en':
+        n = p.get('name_en') or p.get('name' if is_cgpt else 'name_ar', '')
+        if not n:
+            n = "Product"
+        if re.search(r'[\u0600-\u06FF]', n):
+            try:
+                translated = safe_translate_for_cms(n, 'en')
+                if translated and translated != n:
+                    n = translated
+                    try:
+                        if is_cgpt:
+                            db.cgpt_products.update_one({'_id': p['_id']}, {'$set': {'name_en': n}})
+                        else:
+                            db.products.update_one({'_id': p['_id']}, {'$set': {'name_en': n}})
+                    except: pass
+            except: pass
+        return n
+    else:
+        n = p.get('name' if is_cgpt else 'name_ar') or p.get('name_en', '')
+        if not n:
+            n = "بدون اسم"
+        return n
+
+def get_translated_product_desc(p, lang, is_cgpt=False):
+    if not p:
+        return ""
+    if lang == 'en':
+        d = p.get('desc_en') or p.get('desc' if is_cgpt else 'desc_ar', '')
+        if d and re.search(r'[\u0600-\u06FF]', d):
+            try:
+                translated = safe_translate_for_cms(d, 'en')
+                if translated and translated != d:
+                    d = translated
+                    try:
+                        if is_cgpt:
+                            db.cgpt_products.update_one({'_id': p['_id']}, {'$set': {'desc_en': d}})
+                        else:
+                            db.products.update_one({'_id': p['_id']}, {'$set': {'desc_en': d}})
+                    except: pass
+            except: pass
+        return d
+    else:
+        return p.get('desc' if is_cgpt else 'desc_ar') or p.get('desc_en', '')
+
 def clean_old_emojis(text):
     old_emojis = ['🛒', '💳', '👤', '👥', '👨‍💻', '🌐', '👑', '⭐️', '🟡', '🟢', '💎', '🔵', '🔴', '🛍', '📄', '🎓', '✨', '🔄', '🏠', '🔙', '✅', '📦', '✏️', '🎛', '📝', '🚚', '💰', '📊', '📉', '🔔']
     for emj in old_emojis:
@@ -3125,6 +3236,25 @@ def obscure_text(text):
 def find_product(pid):
     pid_str = str(pid)
     try:
+        # If it is a ChatGPT product id
+        if pid_str.startswith("cgpt_"):
+            clean_hex = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
+            if "_" in clean_hex:
+                clean_hex = clean_hex.split("_")[0]
+            if len(clean_hex) == 24:
+                try:
+                    cgpt_p = db.cgpt_products.find_one({'_id': ObjectId(clean_hex)})
+                    if cgpt_p:
+                        return {
+                            '_id': pid_str,
+                            'name_ar': cgpt_p.get('name', 'ChatGPT'),
+                            'name_en': cgpt_p.get('name_en', cgpt_p.get('name', 'ChatGPT')),
+                            'desc_ar': cgpt_p.get('desc', ''),
+                            'desc_en': cgpt_p.get('desc_en', cgpt_p.get('desc', '')),
+                            'custom_emoji_id': cgpt_p.get('custom_emoji_id')
+                        }
+                except: pass
+                
         # بحث بـ id field
         p = db.products.find_one({'id': pid_str})
         if p: return p
@@ -3997,17 +4127,16 @@ def user_download_buy_hist(call):
         return
         
     content = "=== Your Purchase History ===\n\n" if l == 'en' else "=== سجل المشتريات الخاص بك ===\n\n"
-    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
-    
     for i, r in enumerate(recs, 1):
         date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
         pid = str(r.get('product_id'))
-        p = all_prods.get(pid)
+        p = find_product(pid)
         
         if pid in ['GitHub_Student', 'Gemini_Activation']:
             n = pid.replace('_', ' ')
         else:
-            n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar')) if p else "Unknown Product"
+            is_cgpt_flag = pid.startswith('cgpt_')
+            n = clean_name(get_translated_product_name(p, l, is_cgpt=is_cgpt_flag)) if p else ("Unknown Product" if l == 'en' else "منتج غير معروف")
             
         code = r.get('code_delivered', '')
         
@@ -4072,7 +4201,8 @@ def show_hist_detail(call):
                 else:
                     p = find_product(pid)
                     if p:
-                        p_name = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar', p.get('name_en', 'Product')))
+                        is_cgpt_flag = pid.startswith('cgpt_')
+                        p_name = clean_name(get_translated_product_name(p, l, is_cgpt=is_cgpt_flag))
                         custom_emoji_id = p.get('custom_emoji_id')
                     else:
                         p_name = "منتج محذوف" if l == 'ar' else "Deleted Product"
@@ -4539,12 +4669,8 @@ def shop_detail_ui(call):
         except:
             parent = None
 
-        if l == 'en':
-            p_name = (parent.get('name_en', '') if parent else '') or clean_name(p.get('name_en') or p.get('name_ar', ''))
-            p_desc = (parent.get('desc_en', '') if parent else '') or clean_name(p.get('desc_en') or p.get('desc_ar', ''))
-        else:
-            p_name = (parent.get('name', '') if parent else '') or clean_name(p.get('name_ar') or p.get('name_en', ''))
-            p_desc = (parent.get('desc', '') if parent else '') or clean_name(p.get('desc_ar') or p.get('desc_en', ''))
+        p_name = clean_name(get_translated_product_name(parent, l, is_cgpt=True)) if parent else clean_name(get_translated_product_name(p, l))
+        p_desc = get_translated_product_desc(parent, l, is_cgpt=True) if parent else get_translated_product_desc(p, l)
         durations = (parent.get('durations', []) if parent else [])
         durations_sorted = sorted(durations, key=lambda x: x.get('price', 0))
         custom_emoji_id = p.get('custom_emoji_id')
@@ -4576,7 +4702,18 @@ def shop_detail_ui(call):
 
         for dur in durations_sorted:
             dur_id    = dur.get('dur_id', '')
-            dur_label = dur.get('label', '')
+            dur_label = dur.get('label_en') if l == 'en' and dur.get('label_en') else dur.get('label', '')
+            if l == 'en' and not dur.get('label_en'):
+                translated_label = translate_duration_label(dur.get('label', ''), 'en')
+                if translated_label and translated_label != dur.get('label', ''):
+                    dur_label = translated_label
+                    try:
+                        db.cgpt_products.update_one(
+                            {'_id': _ObjId(cgpt_parent_id), 'durations.dur_id': dur_id},
+                            {'$set': {'durations.$.label_en': translated_label}}
+                        )
+                    except:
+                        pass
             dur_price = float(dur.get('price', 0))
             markup.add(CustomInlineButton(
                 text=f"{dur_label} — ${dur_price:.2f}",
@@ -4605,10 +4742,8 @@ def shop_detail_ui(call):
         delivery_type = "Manual 🤝 (Contact admin after payment)" if is_manual else "Auto ⚡ (Instant delivery)"
         st_text = "Unlimited" if is_manual else f"{st} pcs"
 
-    n = p.get('name_en') if l == 'en' else p.get('name_ar')
-    if not n: n = "بدون اسم"
-    d = p.get('desc_en') if l == 'en' else p.get('desc_ar')
-    if not d: d = ""
+    n = clean_name(get_translated_product_name(p, l))
+    d = get_translated_product_desc(p, l)
     custom_emoji_id = p.get('custom_emoji_id')
     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '📦'
 
@@ -4669,7 +4804,8 @@ def prompt_quantity(call):
         return
     
     unit_price = float(p.get('price', 0))
-    p_name = clean_name(p.get('name_ar') if l == 'ar' else p.get('name_en', p.get('name_ar', '')))
+    is_cgpt_flag = pid.startswith('cgpt_')
+    p_name = clean_name(get_translated_product_name(p, l, is_cgpt=is_cgpt_flag))
     custom_emoji_id = p.get('custom_emoji_id')
     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> ' if custom_emoji_id else '📦 '
     
@@ -4880,7 +5016,18 @@ def cgpt_buy_duration(call):
         return
 
     price = float(dur.get('price', 0))
-    label = dur.get('label', '')
+    label = dur.get('label_en') if l == 'en' and dur.get('label_en') else dur.get('label', '')
+    if l == 'en' and not dur.get('label_en'):
+        translated_label = translate_duration_label(dur.get('label', ''), 'en')
+        if translated_label and translated_label != dur.get('label', ''):
+            label = translated_label
+            try:
+                db.cgpt_products.update_one(
+                    {'_id': _ObjId2(cgpt_pid), 'durations.dur_id': dur_id},
+                    {'$set': {'durations.$.label_en': translated_label}}
+                )
+            except:
+                pass
     minutes = int(dur.get('minutes', 10080))
     u = get_user_data_full(uid)
     balance = round(float(u.get('balance', 0)), 2) if u else 0.0
