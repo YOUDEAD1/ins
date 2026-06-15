@@ -5061,6 +5061,22 @@ def cgpt_email_confirmed(call):
             f"📧 <code>{email}</code>\n"
             f"⏱ {label}\n💰 ${price:.2f}\n🆔 <code>{order_id}</code>"
         )
+        # 📢 لوق القناة لشراء ChatGPT Duration/Package
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                obs_user = obscure_text(u_data.get('username') or str(buyer_uid))
+                p_name_clean = clean_name(p_name)
+                product_display = f"ChatGPT Plus ({label})" if p_name_clean == "Plus" else f"{p_name_clean} ({label})"
+                product_name_log = f"🤖 <b>{product_display}</b>"
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, 1)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, 1)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Log channel error for cgpt package: {log_err}")
     else:
         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
         bot.send_message(buyer_uid,
@@ -5125,6 +5141,23 @@ def _cgpt_handle_email(message, buyer_uid, lang):
             f"\U0001f4b0 ${pending['total_price']:.2f}\n"
             f"\U0001f194 <code>{pending['order_id']}</code>"
         )
+        # 📢 لوق القناة لشراء ChatGPT Seat
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                obs_user = obscure_text(u_data.get('username') or str(buyer_uid))
+                p_name_clean = clean_name(pending.get('p_name_en', pending.get('p_name_ar', 'ChatGPT Seat')))
+                product_display = f"{p_name_clean} ({days} Days)"
+                product_name_log = f"🤖 <b>{product_display}</b>"
+                qty = pending.get('qty', 1)
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Log channel error for cgpt seat: {log_err}")
     else:
         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
         bot.send_message(buyer_uid,
