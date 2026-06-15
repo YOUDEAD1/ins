@@ -3103,6 +3103,16 @@ def create_btn(uid, key, callback_data=None, url=None, style=None):
     if emj_id: kwargs['icon_custom_emoji_id'] = emj_id
     return CustomInlineButton(**kwargs)
 
+_bot_username_cache = None
+def get_bot_username():
+    global _bot_username_cache
+    if not _bot_username_cache:
+        try:
+            _bot_username_cache = bot.get_me().username
+        except Exception:
+            _bot_username_cache = "Bot"
+    return _bot_username_cache
+
 def clean_name(text):
     if not text: return "بدون اسم"
     cleaned = re.sub(r'<[^>]+>', '', str(text)).strip()
@@ -3530,6 +3540,24 @@ def start_handler(message):
     
     if user.get('is_admin') == 1 or uid == OWNER_ID:
         markup.add(create_btn(uid, 'btn_admin', callback_data="admin_panel_main"))
+
+    # 🆕 التحقق من روابط المجلدات أو المنتجات العميقة (Deep Linking)
+    deeplink_param = None
+    if not is_callback:
+        full_text = message.text or ""
+        args = full_text.split()
+        if len(args) > 1:
+            deeplink_param = args[1]
+
+    if deeplink_param:
+        if deeplink_param.startswith("p_"):
+            target_pid = deeplink_param[2:]
+            if shop_detail_ui_helper(chat_id, uid, target_pid, lang):
+                return
+        elif deeplink_param.startswith("c_"):
+            target_cat_id = deeplink_param[2:]
+            if catalog_view_helper(chat_id, uid, target_cat_id, lang):
+                return
 
     welcome_message = get_text(uid, 'welcome', uid, from_user.first_name, users_total, user.get('balance', 0.0))
     try:
@@ -4165,7 +4193,6 @@ def download_product_history(call):
     content += f"Total: {len(orders)} order(s)\n"
     content += f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     content += "=" * 50 + "\n\n"
-    
     for i, r in enumerate(orders, 1):
         date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
         code = r.get('code_delivered', '')
@@ -4190,202 +4217,6 @@ def download_product_history(call):
         logger.error(f"Failed to send product history file: {e}")
         bot.send_message(uid, bil(uid, "❌ فشل إرسال الملف، حاول مرة ثانية.", "❌ Failed to send file, please try again."))
 
-@bot.callback_query_handler(func=lambda call: call.data == "open_invite")
-def invite_ui(call):
-    try: bot.answer_callback_query(call.id)
-    except: pass
-    
-    uid = call.from_user.id
-    if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
-    
-    u = get_user_data_full(uid)
-    l = u.get('lang', 'ar') if u else 'ar'
-    b_n = bot.get_me().username
-    
-    # 🆕 تحديث رجعي - لو فيه إحالات نشطة لم يستلم مكافأتها، يضيف الآن
-    try:
-        update_referrer_balance(uid)
-        u = get_user_data_full(uid)
-    except Exception as e:
-        logger.error(f"Error updating referrer balance in invite_ui: {e}")
-    
-    # جلب الإحصائيات من الجدول الجديد
-    pending_count, active_count, left_count, total_clicks = get_ref_counts(uid)
-    
-    # 🆕 الأرباح من الإحالات (milestones - كل 10 إحالات)
-    earnings_from_referrals = round(float(u.get('ref_v2_earned', 0.0)), 2)
-    
-    # 🆕 الأرباح من مشتريات المُحالين
-    earnings_from_purchases = round(float(u.get('ref_v2_purchase_earned', 0.0)), 2)
-    
-    # 🆕 الإجمالي
-    total_earnings = round(earnings_from_referrals + earnings_from_purchases, 2)
-    
-    # 🆕 حساب باقي للمكافأة القادمة
-    threshold = get_referral_threshold()
-    reward = get_referral_reward()
-    current_in_batch = active_count % threshold
-    remaining_to_milestone = threshold - current_in_batch if current_in_batch > 0 else 0
-
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
-    markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
-    markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
-    
-    # نبني الرسالة يدوياً (نتجاوز LANG عشان نضمن العرض الجديد)
-    if l == 'en':
-        final_text = (
-            f"💎 <b>Referral System</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📊 <b>Your Stats</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"👥 Clicks:  <b>{total_clicks}</b>\n"
-            f"⏳ Pending:  <b>{pending_count}</b>\n"
-            f"✅ Active:  <b>{active_count}</b>\n"
-            f"❌ Left:  <b>{left_count}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>Your Earnings</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"🎯 From referrals:  <b>${earnings_from_referrals:.2f}</b>\n"
-            f"🛍 From purchases:  <b>${earnings_from_purchases:.2f}</b>\n"
-            f"💎 <b>Total:</b>  <b>${total_earnings:.2f}</b>\n"
-        )
-        
-        if remaining_to_milestone > 0:
-            final_text += (
-                f"\n━━━━━━━━━━━━━━\n"
-                f"⏳ <b>{remaining_to_milestone}</b> more active referrals to earn <b>${reward:.2f}</b>!\n"
-            )
-        
-        final_text += (
-            f"\n━━━━━━━━━━━━━━\n"
-            f"🔗 <b>Your Link:</b>\n"
-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🎁 <b>Two Ways to Earn:</b>\n\n"
-            f"🔥 Every {threshold} active joins = <b>${reward:.2f}</b>\n"
-            f"💸 Friend buys > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
-            f"⚡ <i>Real-time updates</i>"
-        )
-    else:
-        final_text = (
-            f"💎 <b>نظام الإحالات</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📊 <b>إحصائياتك</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"👥 الزيارات:  <b>{total_clicks}</b>\n"
-            f"⏳ معلق:  <b>{pending_count}</b>\n"
-            f"✅ نشط:  <b>{active_count}</b>\n"
-            f"❌ غادر:  <b>{left_count}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>أرباحك</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"🎯 من الإحالات:  <b>${earnings_from_referrals:.2f}</b>\n"
-            f"🛍 من المشتريات:  <b>${earnings_from_purchases:.2f}</b>\n"
-            f"💎 <b>المجموع:</b>  <b>${total_earnings:.2f}</b>\n"
-        )
-        
-        if remaining_to_milestone > 0:
-            final_text += (
-                f"\n━━━━━━━━━━━━━━\n"
-                f"⏳ باقي <b>{remaining_to_milestone}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n"
-            )
-        
-        final_text += (
-            f"\n━━━━━━━━━━━━━━\n"
-            f"🔗 <b>رابطك:</b>\n"
-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🎁 <b>طريقتان للربح:</b>\n\n"
-            f"🔥 كل {threshold} إحالة نشطة = <b>${reward:.2f}</b>\n"
-            f"💸 شراء صديق > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
-            f"⚡ <i>تحديثات لحظية</i>"
-        )
-    
-    # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
-    sent_successfully = False
-    
-    # المحاولة 1: HTML كامل
-    try: 
-        bot.edit_message_text(
-            final_text, 
-            call.message.chat.id, call.message.message_id, 
-            reply_markup=markup, parse_mode="HTML"
-        )
-        sent_successfully = True
-    except Exception as e:
-        error_str = str(e).lower()
-        # 🛡 "message is not modified" مو خطأ - الرسالة نفسها زي ما هي (المستخدم ضغط تحديث ولا فيه تغيير)
-        if 'message is not modified' in error_str or 'not modified' in error_str:
-            sent_successfully = True
-            # نظهر للمستخدم تأكيد إن البيانات محدثة
-            try:
-                # نسوي callback answer بدل ما نزعجه بإشعار
-                bot.answer_callback_query(
-                    call.id, 
-                    "✅ البيانات محدّثة بالفعل" if l == 'ar' else "✅ Already up to date",
-                    show_alert=False
-                )
-            except: pass
-        else:
-            # خطأ حقيقي - نسجله ونحاول fallback
-            logger.error(f"Failed to send invite message with HTML: {e}")
-    
-    # المحاولة 2: بدون parse_mode (نص عادي)
-    if not sent_successfully:
-        try:
-            # تنظيف HTML tags وعرض النص العادي
-            clean_text = re.sub(r'<[^>]+>', '', final_text)
-            bot.edit_message_text(
-                clean_text,
-                call.message.chat.id, call.message.message_id,
-                reply_markup=markup
-            )
-            sent_successfully = True
-            logger.warning(f"Sent invite as plain text (HTML failed) for user {uid}")
-        except Exception as e:
-            error_str = str(e).lower()
-            if 'message is not modified' in error_str or 'not modified' in error_str:
-                sent_successfully = True
-            else:
-                logger.error(f"Failed to send invite as plain text: {e}")
-    
-    # المحاولة 3: إرسال رسالة جديدة بدلاً من edit
-    if not sent_successfully:
-        try:
-            bot.send_message(
-                call.message.chat.id,
-                final_text,
-                reply_markup=markup,
-                parse_mode="HTML"
-            )
-            sent_successfully = True
-        except Exception as e:
-            logger.error(f"Failed to send new invite message: {e}")
-            # آخر شي - رسالة بسيطة جداً
-            try:
-                bot.send_message(
-                    call.message.chat.id,
-                    f"Your link: https://t.me/{b_n}?start={uid}\nBalance: ${actual_earned:.2f}",
-                    reply_markup=markup
-                )
-            except: pass
-
-# ============================================================
-# ═══ قائمة الإحالات بصفحات ═══
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ref_list_"))
-def referral_list_page(call):
-    try: bot.answer_callback_query(call.id)
-    except: pass
-    uid = call.from_user.id
-    l = get_lang(uid)
-    page = int(call.data.replace("ref_list_", ""))
-    PER_PAGE = 10
-    
-    # جلب الإحالات النشطة والمعلقة
-    refs_active = list(db.referrals_v2.find({'referrer_id': uid}))
-    # جلب المغادرين المؤكدين من الأرشيف
     refs_left = list(db.referrals_archived.find({'referrer_id': uid}))
     
     # دمج وترتيب: active أول، pending، ثم left
@@ -5080,11 +4911,45 @@ def cgpt_buy_duration(call):
             f"✅ <b>Selected: {label} — ${price:.2f}</b>\n\n"
             f"📧 <b>Send your ChatGPT account email:</b>"
         )
-    msg = bot.send_message(uid, msg_txt, parse_mode="HTML")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ إلغاء" if l == 'ar' else "❌ Cancel", callback_data=f"cgpt_cancel_buy_{uid}"))
+    msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l)
+
+def _cancel_cgpt_purchase(uid, lang):
+    try: bot.clear_step_handler_by_chat_id(uid)
+    except: pass
+    pending = _cgpt_pending.pop(uid, None)
+    if pending:
+        if 'total_price' in pending:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': pending['total_price']}})
+            txt = (
+                f"❌ <b>تم إلغاء عملية الشراء وإرجاع رصيدك:</b> <code>${pending['total_price']:.2f}</code>"
+                if lang == 'ar' else
+                f"❌ <b>Purchase cancelled. Refunded:</b> <code>${pending['total_price']:.2f}</code>"
+            )
+        else:
+            txt = "❌ تم إلغاء عملية الشراء." if lang == 'ar' else "❌ Purchase cancelled."
+        try: bot.send_message(uid, txt, parse_mode="HTML")
+        except: pass
+    else:
+        try: bot.send_message(uid, "❌ لا توجد عملية شراء جارية." if lang == 'ar' else "❌ No active purchase in progress.")
+        except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_cancel_buy_"))
+def cgpt_cancel_buy_callback(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = int(call.data.replace("cgpt_cancel_buy_", ""))
+    lang = get_lang(uid)
+    _cancel_cgpt_purchase(uid, lang)
 
 def cgpt_confirm_email_step(message, buyer_uid, lang):
     """الخطوة 1: يرسل الإيميل → نطلب تأكيده"""
+    text_cmd = (message.text or "").strip().lower()
+    if text_cmd in ['الغاء', 'cancel', '/cancel']:
+        _cancel_cgpt_purchase(buyer_uid, lang)
+        return
     import re as _re3
     email = (message.text or "").strip().lower()
     if not _re3.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
@@ -5205,6 +5070,10 @@ def cgpt_email_confirmed(call):
             parse_mode="HTML")
 
 def _cgpt_handle_email(message, buyer_uid, lang):
+    text_cmd = (message.text or "").strip().lower()
+    if text_cmd in ['الغاء', 'cancel', '/cancel']:
+        _cancel_cgpt_purchase(buyer_uid, lang)
+        return
     pending = _cgpt_pending.pop(buyer_uid, None)
     if not pending:
         bot.send_message(buyer_uid, "\u274c \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u0629 \u0627\u0644\u0637\u0644\u0628. \u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645.", parse_mode="HTML")
@@ -5378,7 +5247,9 @@ def _do_purchase(uid, pid, qty, lang):
                     f"📧 <b>Send your ChatGPT account email:</b>\n"
                     f"<i>(Must be registered on chatgpt.com)</i>"
                 )
-            msg = bot.send_message(uid, msg_txt, parse_mode="HTML")
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("❌ إلغاء" if lang == 'ar' else "❌ Cancel", callback_data=f"cgpt_cancel_buy_{uid}"))
+            msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
             bot.register_next_step_handler(msg, _cgpt_handle_email, uid, lang)
             return  # نرجع — الباقي سيتم في _cgpt_handle_email
 
@@ -10966,7 +10837,10 @@ def admin_edit_opts(call):
             markup.add(InlineKeyboardButton("⬆️ جعله أول في المجلد", callback_data=f"p_set_first_{short_pid}_{p_cat}"))
     markup.add(InlineKeyboardButton("🔙 Back", callback_data=back_cb))
     
-    try: bot.edit_message_text("⚙️ Options:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot_username = get_bot_username()
+    link = f"https://t.me/{bot_username}?start=p_{short_pid}"
+    txt = f"⚙️ <b>Options for product:</b> {clean_name(p.get('name_ar', p.get('name_en', '')))}\n🔗 <b>Link:</b> <code>{link}</code>"
+    try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
 
@@ -13154,10 +13028,13 @@ def ad_cat_edit(call):
     prod_ids = cat.get('product_ids') or []
     
     display_emoji = f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji>' if emoji_id else emoji
+    bot_username = get_bot_username()
+    link = f"https://t.me/{bot_username}?start=c_{cat_id}"
     txt = f"✏️ <b>Edit Catalog:</b> {display_emoji} {name_en or name_ar}\n"
     if emoji_id:
         txt += f"⭐ Premium Emoji: ✅\n"
-    txt += f"📦 Products: <b>{len(prod_ids)}</b>\n\n"
+    txt += f"📦 Products: <b>{len(prod_ids)}</b>\n"
+    txt += f"🔗 <b>Link:</b> <code>{link}</code>\n\n"
     
     if prod_ids:
         items = []
