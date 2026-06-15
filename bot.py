@@ -3236,7 +3236,38 @@ def obscure_text(text):
 def find_product(pid):
     pid_str = str(pid)
     try:
-        # If it is a ChatGPT product id
+        # ── 1. بحث بـ id field (الأكثر شيوعاً) ──
+        p = db.products.find_one({'id': pid_str})
+        if p: return p
+        if pid_str.isdigit():
+            p = db.products.find_one({'id': int(pid_str)})
+            if p: return p
+        try:
+            p = db.products.find_one({'id': float(pid_str)})
+            if p: return p
+        except: pass
+
+        # ── 2. بحث بـ _id كـ string (لمنتجات مثل cgpt_main_xxx) ──
+        p = db.products.find_one({'_id': pid_str})
+        if p: return p
+
+        # ── 3. بحث بـ _id كـ ObjectId أو كـ cgpt_main_xxx ──
+        if len(pid_str) == 24:
+            try:
+                p = db.products.find_one({'_id': f"cgpt_main_{pid_str}"})
+                if p: return p
+                p = db.products.find_one({'_id': ObjectId(pid_str)})
+                if p: return p
+            except: pass
+
+        # ── 4. بحث إضافي: ربما pid_str هو الجزء الرقمي من id مخزن كـ float ──
+        if '.' not in pid_str:
+            try:
+                p = db.products.find_one({'id': float(pid_str + '.0')})
+                if p: return p
+            except: pass
+
+        # ── 5. آخر محاولة: منتج ChatGPT من cgpt_products (فقط لو ما لقيناه في products) ──
         if pid_str.startswith("cgpt_"):
             clean_hex = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
             if "_" in clean_hex:
@@ -3251,38 +3282,16 @@ def find_product(pid):
                             'name_en': cgpt_p.get('name_en', cgpt_p.get('name', 'ChatGPT')),
                             'desc_ar': cgpt_p.get('desc', ''),
                             'desc_en': cgpt_p.get('desc_en', cgpt_p.get('desc', '')),
-                            'custom_emoji_id': cgpt_p.get('custom_emoji_id')
+                            'custom_emoji_id': cgpt_p.get('custom_emoji_id'),
+                            'product_type': 'cgpt_main',
+                            'cgpt_product_id': clean_hex,
+                            'cgpt_pinned': True,
+                            'is_manual': False,
+                            'is_hidden': False,
+                            'price': 0,
+                            'btn_style': 'primary',
                         }
                 except: pass
-                
-        # بحث بـ id field
-        p = db.products.find_one({'id': pid_str})
-        if p: return p
-        if pid_str.isdigit():
-            p = db.products.find_one({'id': int(pid_str)})
-            if p: return p
-        try:
-            p = db.products.find_one({'id': float(pid_str)})
-            if p: return p
-        except: pass
-        # بحث بـ _id كـ string (لمنتجات مثل cgpt_main_xxx)
-        p = db.products.find_one({'_id': pid_str})
-        if p: return p
-        # بحث بـ _id كـ ObjectId أو كـ cgpt_main_xxx
-        if len(pid_str) == 24:
-            try:
-                p = db.products.find_one({'_id': f"cgpt_main_{pid_str}"})
-                if p: return p
-                p = db.products.find_one({'_id': ObjectId(pid_str)})
-                if p: return p
-            except: pass
-        # 🆕 بحث إضافي: ربما pid_str هو الجزء الرقمي من id مخزن كـ float
-        # مثلاً pid_str="1" بينما في DB مخزن كـ id: 1.0 
-        if '.' not in pid_str:
-            try:
-                p = db.products.find_one({'id': float(pid_str + '.0')})
-                if p: return p
-            except: pass
     except Exception as fp_err:
         logger.error(f"find_product error for pid={pid}: {fp_err}")
     return None
