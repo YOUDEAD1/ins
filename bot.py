@@ -2931,28 +2931,38 @@ def _translate_single_line(line, target_lang='en'):
         
         # 🌐 الترجمة
         translated = None
-        try:
-            translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
-        except Exception as e:
-            logger.warning(f"Direct translation failed: {e}. Retrying with proxies...")
+        import requests
+        original_get = requests.get
+        def patched_get(*args, **kwargs):
+            kwargs['timeout'] = 4.0  # 4 seconds timeout
+            return original_get(*args, **kwargs)
             
-        if not translated:
-            proxies_to_try = list(VERIFIED_PROXIES)
-            if proxies_to_try:
-                random.shuffle(proxies_to_try)
-                for proxy in proxies_to_try[:5]:
-                    try:
-                        translated = GoogleTranslator(
-                            source='auto',
-                            target=target_lang,
-                            proxies={'http': proxy, 'https': proxy}
-                        ).translate(temp)
-                        if translated:
-                            logger.info(f"Translation succeeded using proxy: {proxy}")
-                            break
-                    except Exception as proxy_err:
-                        logger.debug(f"Translation proxy {proxy} failed: {proxy_err}")
-                        
+        requests.get = patched_get
+        try:
+            try:
+                translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
+            except Exception as e:
+                logger.warning(f"Direct translation failed: {e}. Retrying with proxies...")
+                
+            if not translated:
+                proxies_to_try = list(VERIFIED_PROXIES)
+                if proxies_to_try:
+                    random.shuffle(proxies_to_try)
+                    for proxy in proxies_to_try[:5]:
+                        try:
+                            translated = GoogleTranslator(
+                                source='auto',
+                                target=target_lang,
+                                proxies={'http': proxy, 'https': proxy}
+                            ).translate(temp)
+                            if translated:
+                                logger.info(f"Translation succeeded using proxy: {proxy}")
+                                break
+                        except Exception as proxy_err:
+                            logger.debug(f"Translation proxy {proxy} failed: {proxy_err}")
+        finally:
+            requests.get = original_get
+            
         if not translated:
             return line
         
@@ -4698,8 +4708,12 @@ def shop_detail_ui(call):
         except:
             parent = None
 
-        p_name = (parent.get('name', '') if parent else '') or clean_name(p.get('name_ar') or p.get('name_en', ''))
-        p_desc = (parent.get('desc', '') if parent else '') or clean_name(p.get('desc_ar') or p.get('desc_en', ''))
+        if l == 'en':
+            p_name = (parent.get('name_en', '') if parent else '') or clean_name(p.get('name_en') or p.get('name_ar', ''))
+            p_desc = (parent.get('desc_en', '') if parent else '') or clean_name(p.get('desc_en') or p.get('desc_ar', ''))
+        else:
+            p_name = (parent.get('name', '') if parent else '') or clean_name(p.get('name_ar') or p.get('name_en', ''))
+            p_desc = (parent.get('desc', '') if parent else '') or clean_name(p.get('desc_ar') or p.get('desc_en', ''))
         durations = (parent.get('durations', []) if parent else [])
         durations_sorted = sorted(durations, key=lambda x: x.get('price', 0))
         custom_emoji_id = p.get('custom_emoji_id')
