@@ -4506,7 +4506,7 @@ def shop_list_ui(call):
             else:
                 st_text = "FW" if is_manual else str(st)
                 btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
@@ -4549,7 +4549,7 @@ def shop_list_ui(call):
             else:
                 st_text = "FW" if is_manual else str(st)
                 btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
@@ -4630,7 +4630,7 @@ def catalog_view(call):
         else:
             st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
-        callback_pid = actual_pid.replace("cgpt_main_", "") if actual_pid.startswith("cgpt_main_") else actual_pid
+        callback_pid = str(actual_pid).replace("cgpt_main_", "") if str(actual_pid).startswith("cgpt_main_") else str(actual_pid)
         btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}_c_{cat_id}", 'style': btn_style}
         custom_emoji_id = p.get('custom_emoji_id')
         if custom_emoji_id:
@@ -4719,7 +4719,7 @@ def shop_detail_ui(call):
 
         markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
         if is_admin:
-            short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
@@ -4767,7 +4767,7 @@ def shop_detail_ui(call):
 
     back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
     markup = InlineKeyboardMarkup()
-    short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+    short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
     if is_manual or st > 0:
         qty_cb = f"buy_qty_{short_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{short_pid}"
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
@@ -10907,7 +10907,7 @@ def admin_edit_opts(call):
     c_sfx = f"_c_{cat_id_back}" if cat_id_back else ""
     
     # Shorten pid for callback_data
-    short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+    short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
     
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("💵 Price", callback_data=f"ep_price_{short_pid}{c_sfx}"))
@@ -13012,7 +13012,7 @@ def ad_cat_addp(call):
             emoji_id = p.get('custom_emoji_id')
             
             # Shorten pid for callback_data
-            callback_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{callback_pid}"}
             if emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = emoji_id
