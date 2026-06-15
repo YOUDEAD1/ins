@@ -2930,7 +2930,29 @@ def _translate_single_line(line, target_lang='en'):
             return line
         
         # 🌐 الترجمة
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
+        translated = None
+        try:
+            translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
+        except Exception as e:
+            logger.warning(f"Direct translation failed: {e}. Retrying with proxies...")
+            
+        if not translated:
+            proxies_to_try = list(VERIFIED_PROXIES)
+            if proxies_to_try:
+                random.shuffle(proxies_to_try)
+                for proxy in proxies_to_try[:5]:
+                    try:
+                        translated = GoogleTranslator(
+                            source='auto',
+                            target=target_lang,
+                            proxies={'http': proxy, 'https': proxy}
+                        ).translate(temp)
+                        if translated:
+                            logger.info(f"Translation succeeded using proxy: {proxy}")
+                            break
+                    except Exception as proxy_err:
+                        logger.debug(f"Translation proxy {proxy} failed: {proxy_err}")
+                        
         if not translated:
             return line
         
@@ -12918,13 +12940,13 @@ def admin_bc_exe(call):
                         btn_text = f"🛒 عرض المنتج: {p_name}" if lang == 'ar' else f"🛒 View Product: {p_name}"
                         short_pid = str(product_id).replace("cgpt_main_", "") if str(product_id).startswith("cgpt_main_") else str(product_id)
                         markup = InlineKeyboardMarkup()
-                        markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{short_pid}"))
+                        markup.add(CustomInlineButton(btn_text, callback_data=f"vi_p_{short_pid}", style="success"))
                 elif catalog_id:
                     if catalog_id == 'nocat':
                         lang = get_lang(tuid)
                         btn_text = f"🛍️ المنتجات غير المصنفة" if lang == 'ar' else f"🛍️ Uncategorized Products"
                         markup = InlineKeyboardMarkup()
-                        markup.add(InlineKeyboardButton(btn_text, callback_data="open_shop"))
+                        markup.add(CustomInlineButton(btn_text, callback_data="open_shop", style="primary"))
                     else:
                         from bson import ObjectId
                         cat = db.catalogs.find_one({'_id': ObjectId(catalog_id)})
@@ -12934,7 +12956,7 @@ def admin_bc_exe(call):
                             cat_name = clean_name(cat_name)[:25]
                             btn_text = f"📁 فتح المجلد: {cat_name}" if lang == 'ar' else f"📁 Open Folder: {cat_name}"
                             markup = InlineKeyboardMarkup()
-                            markup.add(InlineKeyboardButton(btn_text, callback_data=f"cat_{catalog_id}"))
+                            markup.add(CustomInlineButton(btn_text, callback_data=f"cat_{catalog_id}", style="primary"))
 
                 bot.copy_message(tuid, src_chat_id, src_msg_id, reply_markup=markup)
                 sent += 1
