@@ -745,13 +745,6 @@ def _cgpt_daemon_loop():
             logger.error(f"[CGPT] daemon error: {e}")
             _t.sleep(300)  # لو صار خطأ ننام 5 دقائق بدل ما نعيد فوراً
 
-# تشغيل الـ daemon في thread خلفية عند استيراد البوت
-_cgpt_daemon_thread = __import__('threading').Thread(
-    target=_cgpt_daemon_loop, daemon=True, name="cgpt_seat_daemon"
-)
-_cgpt_daemon_thread.start()
-
-
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -1647,6 +1640,48 @@ def initialize_referrals_v2():
         logger.info("✅ تم تهيئة نظام الإحالات V2 بنجاح. (كل شي يبدأ من الصفر)")
     except Exception as e:
         logger.error(f"❌ فشل تهيئة نظام الإحالات V2: {e}")
+
+
+def normalize_tx_id(tx_id):
+    """
+    🛡 توحيد رقم العملية (TxID) لمنع الالتفاف على الحماية.
+    
+    يتعامل مع الحالات:
+    - 0x1db4... و 1db4... → نفس الشي
+    - ABCdef... و abcdef... → نفس الشي
+    - " abc " (مع مسافات) → "abc"
+    - "abc\n" (سطر جديد) → "abc"
+    - أحرف غير مرئية → تُحذف
+    """
+    if not tx_id:
+        return ""
+    
+    # 1. تحويل لـ string وتنظيف
+    s = str(tx_id).strip()
+    
+    # 2. إزالة المسافات والأسطر الجديدة من داخل النص (احتياط)
+    s = re.sub(r'\s+', '', s)
+    
+    # 3. إزالة أحرف غير مرئية (zero-width chars)
+    s = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]', '', s)
+    
+    # 4. تحويل لـ lowercase
+    s = s.lower()
+    
+    # 5. إزالة بادئات شائعة:
+    # - 0x (Ethereum/USDT-BEP20/USDT-ERC20)
+    # - 0X (نسخة كبيرة)
+    if s.startswith('0x'):
+        s = s[2:]
+    
+    # 6. إزالة أحرف غريبة (نحتفظ بأحرف وأرقام فقط)
+    # ملاحظة: TON hashes ممكن تحتوي على = و / و +
+    # فما نحذفها لو الـ tx_id فيها هذي الحروف
+    if not any(c in s for c in '=/+'):
+        # ما فيها رموز TON - نحذف أي رمز غير alphanumeric
+        s = re.sub(r'[^a-z0-9]', '', s)
+    
+    return s
 
 
 # 🛡 دالة منفصلة لإنشاء الـ unique indexes - تتنفذ في كل تشغيل
@@ -8498,48 +8533,6 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
         return False
 
 
-def normalize_tx_id(tx_id):
-    """
-    🛡 توحيد رقم العملية (TxID) لمنع الالتفاف على الحماية.
-    
-    يتعامل مع الحالات:
-    - 0x1db4... و 1db4... → نفس الشي
-    - ABCdef... و abcdef... → نفس الشي
-    - " abc " (مع مسافات) → "abc"
-    - "abc\n" (سطر جديد) → "abc"
-    - أحرف غير مرئية → تُحذف
-    """
-    if not tx_id:
-        return ""
-    
-    # 1. تحويل لـ string وتنظيف
-    s = str(tx_id).strip()
-    
-    # 2. إزالة المسافات والأسطر الجديدة من داخل النص (احتياط)
-    s = re.sub(r'\s+', '', s)
-    
-    # 3. إزالة أحرف غير مرئية (zero-width chars)
-    s = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]', '', s)
-    
-    # 4. تحويل لـ lowercase
-    s = s.lower()
-    
-    # 5. إزالة بادئات شائعة:
-    # - 0x (Ethereum/USDT-BEP20/USDT-ERC20)
-    # - 0X (نسخة كبيرة)
-    if s.startswith('0x'):
-        s = s[2:]
-    
-    # 6. إزالة أحرف غريبة (نحتفظ بأحرف وأرقام فقط)
-    # ملاحظة: TON hashes ممكن تحتوي على = و / و +
-    # فما نحذفها لو الـ tx_id فيها هذي الحروف
-    if not any(c in s for c in '=/+'):
-        # ما فيها رموز TON - نحذف أي رمز غير alphanumeric
-        s = re.sub(r'[^a-z0-9]', '', s)
-    
-    return s
-
-
 def claim_tx_hash(tx_id, uid):
     """
     🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه - atomic 100%.
@@ -14119,6 +14112,16 @@ def api_disable(call):
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
+    # تشغيل الـ daemon في thread خلفية عند بدء البوت
+    try:
+        _cgpt_daemon_thread = __import__('threading').Thread(
+            target=_cgpt_daemon_loop, daemon=True, name="cgpt_seat_daemon"
+        )
+        _cgpt_daemon_thread.start()
+        logger.info("✅ تم بدء خيط مراقبة مقاعد ChatGPT بنجاح.")
+    except Exception as e:
+        logger.error(f"❌ فشل بدء خيط مراقبة مقاعد ChatGPT: {e}")
+
     try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
     except: pass
     while True:
