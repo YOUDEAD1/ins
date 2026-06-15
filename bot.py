@@ -4641,6 +4641,196 @@ def download_product_history(call):
         logger.error(f"Failed to send product history file: {e}")
         bot.send_message(uid, bil(uid, "❌ فشل إرسال الملف، حاول مرة ثانية.", "❌ Failed to send file, please try again."))
 
+
+@bot.callback_query_handler(func=lambda call: call.data == "open_invite")
+def invite_ui(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    if not check_forced_sub(uid): start_handler(call.message); return
+    
+    u = get_user_data_full(uid)
+    l = u.get('lang', 'ar') if u else 'ar'
+    b_n = bot.get_me().username
+    
+    # 🆕 تحديث رجعي - لو فيه إحالات نشطة لم يستلم مكافأتها، يضيف الآن
+    try:
+        update_referrer_balance(uid)
+        u = get_user_data_full(uid)
+    except Exception as e:
+        logger.error(f"Error updating referrer balance in invite_ui: {e}")
+    
+    # جلب الإحصائيات من الجدول الجديد
+    pending_count, active_count, left_count, total_clicks = get_ref_counts(uid)
+    
+    # 🆕 الأرباح من الإحالات (milestones - كل 10 إحالات)
+    earnings_from_referrals = round(float(u.get('ref_v2_earned', 0.0)), 2)
+    
+    # 🆕 الأرباح من مشتريات المُحالين
+    earnings_from_purchases = round(float(u.get('ref_v2_purchase_earned', 0.0)), 2)
+    
+    # 🆕 الإجمالي
+    total_earnings = round(earnings_from_referrals + earnings_from_purchases, 2)
+    
+    # 🆕 حساب باقي للمكافأة القادمة
+    threshold = get_referral_threshold()
+    reward = get_referral_reward()
+    current_in_batch = active_count % threshold
+    remaining_to_milestone = threshold - current_in_batch if current_in_batch > 0 else 0
+
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
+    markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
+    markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
+    
+    # نبني الرسالة يدوياً (نتجاوز LANG عشان نضمن العرض الجديد)
+    if l == 'en':
+        final_text = (
+            f"💎 <b>Referral System</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📊 <b>Your Stats</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"👥 Clicks:  <b>{total_clicks}</b>\n"
+            f"⏳ Pending:  <b>{pending_count}</b>\n"
+            f"✅ Active:  <b>{active_count}</b>\n"
+            f"❌ Left:  <b>{left_count}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>Your Earnings</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"🎯 From referrals:  <b>${earnings_from_referrals:.2f}</b>\n"
+            f"🛍 From purchases:  <b>${earnings_from_purchases:.2f}</b>\n"
+            f"💎 <b>Total:</b>  <b>${total_earnings:.2f}</b>\n"
+        )
+        
+        if remaining_to_milestone > 0:
+            final_text += (
+                f"\n━━━━━━━━━━━━━━\n"
+                f"⏳ <b>{remaining_to_milestone}</b> more active referrals to earn <b>${reward:.2f}</b>!\n"
+            )
+        
+        final_text += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"🔗 <b>Your Link:</b>\n"
+            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎁 <b>Two Ways to Earn:</b>\n\n"
+            f"🔥 Every {threshold} active joins = <b>${reward:.2f}</b>\n"
+            f"💸 Friend buys > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+            f"⚡ <i>Real-time updates</i>"
+        )
+    else:
+        final_text = (
+            f"💎 <b>نظام الإحالات</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📊 <b>إحصائياتك</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"👥 الزيارات:  <b>{total_clicks}</b>\n"
+            f"⏳ معلق:  <b>{pending_count}</b>\n"
+            f"✅ نشط:  <b>{active_count}</b>\n"
+            f"❌ غادر:  <b>{left_count}</b>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 <b>أرباحك</b>\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"🎯 من الإحالات:  <b>${earnings_from_referrals:.2f}</b>\n"
+            f"🛍 من المشتريات:  <b>${earnings_from_purchases:.2f}</b>\n"
+            f"💎 <b>المجموع:</b>  <b>${total_earnings:.2f}</b>\n"
+        )
+        
+        if remaining_to_milestone > 0:
+            final_text += (
+                f"\n━━━━━━━━━━━━━━\n"
+                f"⏳ باقي <b>{remaining_to_milestone}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n"
+            )
+        
+        final_text += (
+            f"\n━━━━━━━━━━━━━━\n"
+            f"🔗 <b>رابطك:</b>\n"
+            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎁 <b>طريقتان للربح:</b>\n\n"
+            f"🔥 كل {threshold} إحالة نشطة = <b>${reward:.2f}</b>\n"
+            f"💸 شراء صديق > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+            f"⚡ <i>تحديثات لحظية</i>"
+        )
+    
+    # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
+    sent_successfully = False
+    
+    # المحاولة 1: HTML كامل
+    try: 
+        bot.edit_message_text(
+            final_text, 
+            call.message.chat.id, call.message.message_id, 
+            reply_markup=markup, parse_mode="HTML"
+        )
+        sent_successfully = True
+    except Exception as e:
+        error_str = str(e).lower()
+        if 'message is not modified' in error_str or 'not modified' in error_str:
+            sent_successfully = True
+            try:
+                bot.answer_callback_query(
+                    call.id, 
+                    "✅ البيانات محدّثة بالفعل" if l == 'ar' else "✅ Already up to date",
+                    show_alert=False
+                )
+            except: pass
+        else:
+            logger.error(f"Failed to send invite message with HTML: {e}")
+    
+    # المحاولة 2: بدون parse_mode (نص عادي)
+    if not sent_successfully:
+        try:
+            clean_text = re.sub(r'<[^>]+>', '', final_text)
+            bot.edit_message_text(
+                clean_text,
+                call.message.chat.id, call.message.message_id,
+                reply_markup=markup
+            )
+            sent_successfully = True
+            logger.warning(f"Sent invite as plain text (HTML failed) for user {uid}")
+        except Exception as e:
+            error_str = str(e).lower()
+            if 'message is not modified' in error_str or 'not modified' in error_str:
+                sent_successfully = True
+            else:
+                logger.error(f"Failed to send invite as plain text: {e}")
+    
+    # المحاولة 3: إرسال رسالة جديدة بدلاً من edit
+    if not sent_successfully:
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                final_text,
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+            sent_successfully = True
+        except Exception as e:
+            logger.error(f"Failed to send new invite message: {e}")
+            try:
+                bot.send_message(
+                    call.message.chat.id,
+                    f"Your link: https://t.me/{b_n}?start={uid}\nBalance: ${total_earnings:.2f}",
+                    reply_markup=markup
+                )
+            except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ref_list_"))
+def referral_list_page(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    l = get_lang(uid)
+    page = int(call.data.replace("ref_list_", ""))
+    PER_PAGE = 10
+    
+    # جلب الإحالات النشطة والمعلقة
+    refs_active = list(db.referrals_v2.find({'referrer_id': uid}))
+    # جلب المغادرين المؤكدين من الأرشيف
     refs_left = list(db.referrals_archived.find({'referrer_id': uid}))
     
     # دمج وترتيب: active أول، pending، ثم left
@@ -4661,7 +4851,6 @@ def download_product_history(call):
     
     txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
     
-    # هل المستخدم أدمن؟
     u_data = get_user_data_full(uid)
     is_admin = (u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID))
     
@@ -4680,7 +4869,6 @@ def download_product_history(call):
                 icon = "🔴"
             
             if is_admin:
-                # الأدمن يشوف كل شيء
                 inv_user = get_user_data_full(inv_id)
                 if inv_user:
                     name = inv_user.get('name', '')[:15]
@@ -4689,10 +4877,8 @@ def download_product_history(call):
                 else:
                     txt += f"{icon} <code>{inv_id}</code>\n"
             else:
-                # المستخدم العادي يشوف الآيدي فقط
                 txt += f"{icon} <code>{inv_id}</code>\n"
     
-    # أزرار التنقل
     markup = InlineKeyboardMarkup(row_width=2)
     nav_buttons = []
     if page > 0:
@@ -4706,6 +4892,7 @@ def download_product_history(call):
     
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
 
 
 # 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
