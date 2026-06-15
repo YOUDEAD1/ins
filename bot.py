@@ -12662,18 +12662,219 @@ def admin_bc_pick_product(message):
         'chat_id': message.chat.id,
         'product_id': None  # None = للكل
     }
-    products = list(db.products.find({'is_hidden': {'$ne': True}}, {'_id': 1, 'name_ar': 1, 'name_en': 1}))
+    _bc_show_folders(uid)
+
+
+def _bc_show_folders(uid, edit_message_id=None):
     total = db.users.count_documents({})
+    catalogs = list(db.catalogs.find().sort('order', 1))
+    
     markup = InlineKeyboardMarkup(row_width=1)
-    for p in products[:20]:
-        pid = str(p['_id'])
-        name = clean_name(p.get('name_ar') or p.get('name_en', ''))[:30]
-        markup.add(InlineKeyboardButton(f"📦 {name}", callback_data=f"bc_pick_{pid}"))
-    markup.add(InlineKeyboardButton(f"✅ إرسال للكل ({total})", callback_data="bc_pick_all"))
+    # خيار الإرسال للكل
+    markup.add(InlineKeyboardButton(f"👥 إرسال للكل ({total})", callback_data="bc_pick_all"))
+    
+    # المجلدات
+    for cat in catalogs:
+        cat_id = str(cat['_id'])
+        cat_name = cat.get('name_ar', cat.get('name', ''))
+        count = len(cat.get('product_ids') or [])
+        markup.add(InlineKeyboardButton(f"📁 {cat_name} ({count} منتجات)", callback_data=f"bc_cat_{cat_id}"))
+        
+    # خيار منتجات بدون مجلد
+    markup.add(InlineKeyboardButton("📦 منتجات بدون مجلد", callback_data="bc_nocat"))
     markup.add(InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel_main"))
-    bot.send_message(uid,
-        "📦 <b>اختر منتجاً للإرسال لمشتريه فقط، أو اضغط إرسال للكل:</b>",
-        parse_mode="HTML", reply_markup=markup)
+    
+    txt = "📂 <b>اختر المجلد المستهدف للبرودكاست، أو اختر إرسال للكل:</b>"
+    if edit_message_id:
+        try: bot.edit_message_text(txt, uid, edit_message_id, reply_markup=markup, parse_mode="HTML")
+        except: pass
+    else:
+        bot.send_message(uid, txt, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "bc_back")
+@admin_required
+def bc_back_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    _bc_show_folders(call.from_user.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("bc_cat_"))
+@admin_required
+def bc_cat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    try:
+        cat_id = call.data.replace("bc_cat_", "")
+        from bson import ObjectId
+        cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
+        if not cat: return
+        
+        prod_ids = cat.get('product_ids') or []
+        products = []
+        for pid in prod_ids:
+            p = find_product(str(pid))
+            if p:
+                products.append(p)
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        # إرسال لجميع مشتري المجلد
+        markup.add(InlineKeyboardButton(f"👥 إرسال لجميع مشتري هذا المجلد", callback_data=f"bc_sendcat_{cat_id}"))
+        
+        # المنتجات
+        for p in products:
+            pid = str(p.get('id', str(p.get('_id', ''))))
+            name = clean_name(p.get('name_ar') or p.get('name_en', ''))[:30]
+            short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            markup.add(InlineKeyboardButton(f"📦 {name}", callback_data=f"bc_pick_{short_pid}"))
+            
+        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="bc_back"))
+        
+        txt = f"📁 <b>مجلد: {cat.get('name_ar', '')}</b>\n\nاختر منتجاً لإرسال برودكاست لمشتريه فقط، أو اضغط إرسال لجميع مشتري المجلد:"
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Error in bc_cat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "bc_nocat")
+@admin_required
+def bc_nocat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    try:
+        all_catalog_pids = set()
+        for c in db.catalogs.find():
+            all_catalog_pids.update([str(x) for x in (c.get('product_ids') or [])])
+        
+        prods = list(db.products.find())
+        products_no_cat = []
+        for p in prods:
+            pid = str(p.get('id', str(p.get('_id', ''))))
+            if pid not in all_catalog_pids:
+                products_no_cat.append(p)
+                
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("👥 إرسال لجميع مشتري المنتجات غير المصنفة", callback_data="bc_sendnocat"))
+        
+        for p in products_no_cat:
+            pid = str(p.get('id', str(p.get('_id', ''))))
+            name = clean_name(p.get('name_ar') or p.get('name_en', ''))[:30]
+            short_pid = pid.replace("cgpt_main_", "") if pid.startswith("cgpt_main_") else pid
+            markup.add(InlineKeyboardButton(f"📦 {name}", callback_data=f"bc_pick_{short_pid}"))
+            
+        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="bc_back"))
+        
+        txt = "📦 <b>منتجات بدون مجلد:</b>\n\nاختر منتجاً لإرسال برودكاست لمشتريه فقط، أو اضغط إرسال لجميع مشتري هذه المنتجات:"
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Error in bc_nocat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("bc_sendcat_"))
+@admin_required
+def bc_sendcat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    pending = _bc_pending.get(uid)
+    if not pending:
+        bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
+        
+    try:
+        cat_id = call.data.replace("bc_sendcat_", "")
+        from bson import ObjectId
+        cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
+        if not cat: return
+        
+        prod_ids = cat.get('product_ids') or []
+        all_pids = []
+        for pid in prod_ids:
+            p = find_product(str(pid))
+            if p:
+                all_pids.append(p['_id'])
+                if p.get('cgpt_product_id'):
+                    all_pids.append(p['cgpt_product_id'])
+                p_id_str = str(p.get('id', ''))
+                if p_id_str:
+                    all_pids.append(p_id_str)
+                    if p_id_str.isdigit():
+                        all_pids.append(int(p_id_str))
+                        all_pids.append(float(p_id_str))
+        
+        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': all_pids}}))
+        label = f"📁 مجلد: {cat.get('name_ar', '')} ({len(target_ids)} مشتري)"
+        
+        pending['target_ids'] = target_ids
+        pending['label'] = label
+        
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("✅ موافق", callback_data="bc_go"),
+            InlineKeyboardButton("❌ لا", callback_data="admin_panel_main")
+        )
+        bot.send_message(uid,
+            f"📋 سيُرسل البرودكاست لـ <b>{label}</b>\n\nموافق؟",
+            parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        logger.exception("Error in bc_sendcat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "bc_sendnocat")
+@admin_required
+def bc_sendnocat_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = call.from_user.id
+    pending = _bc_pending.get(uid)
+    if not pending:
+        bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
+        
+    try:
+        all_catalog_pids = set()
+        for c in db.catalogs.find():
+            all_catalog_pids.update([str(x) for x in (c.get('product_ids') or [])])
+        
+        prods = list(db.products.find())
+        all_pids = []
+        for p in prods:
+            pid = str(p.get('id', str(p.get('_id', ''))))
+            if pid not in all_catalog_pids:
+                all_pids.append(p['_id'])
+                if p.get('cgpt_product_id'):
+                    all_pids.append(p['cgpt_product_id'])
+                p_id_str = str(p.get('id', ''))
+                if p_id_str:
+                    all_pids.append(p_id_str)
+                    if p_id_str.isdigit():
+                        all_pids.append(int(p_id_str))
+                        all_pids.append(float(p_id_str))
+                        
+        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': all_pids}}))
+        label = f"📦 المنتجات غير المصنفة ({len(target_ids)} مشتري)"
+        
+        pending['target_ids'] = target_ids
+        pending['label'] = label
+        
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("✅ موافق", callback_data="bc_go"),
+            InlineKeyboardButton("❌ لا", callback_data="admin_panel_main")
+        )
+        bot.send_message(uid,
+            f"📋 سيُرسل البرودكاست لـ <b>{label}</b>\n\nموافق؟",
+            parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        logger.exception("Error in bc_sendnocat_handler:")
+        try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+        except: pass
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("bc_pick_"))
 @admin_required
@@ -12691,16 +12892,28 @@ def admin_bc_confirm(call):
         label = f"👥 الكل ({len(target_ids)})"
         pending['product_id'] = None
     else:
-        # نبحث بكل أشكال الـ product_id (string / int / float)
+        p = find_product(target)
         pid_variants = [target]
+        if p:
+            actual_pid = p['_id']
+            pid_variants.append(actual_pid)
+            if p.get('cgpt_product_id'):
+                pid_variants.append(p['cgpt_product_id'])
+            p_id_str = str(p.get('id', ''))
+            if p_id_str:
+                pid_variants.append(p_id_str)
+                if p_id_str.isdigit():
+                    pid_variants.append(int(p_id_str))
+                    pid_variants.append(float(p_id_str))
+                    
         if target.isdigit():
             pid_variants.append(int(target))
             pid_variants.append(float(target))
+            
         target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': pid_variants}}))
-        p = find_product(target)
         p_name = clean_name(p.get('name_ar') or p.get('name_en', '')) if p else target
         label = f"📦 مشتري {p_name} ({len(target_ids)})"
-        pending['product_id'] = target
+        pending['product_id'] = p['_id'] if p else target
 
     pending['target_ids'] = target_ids
     pending['label'] = label
