@@ -12793,20 +12793,32 @@ def bc_sendcat_handler(call):
         
         prod_ids = cat.get('product_ids') or []
         all_pids = []
+        cgpt_parent_ids = []
         for pid in prod_ids:
             p = find_product(str(pid))
             if p:
                 all_pids.append(p['_id'])
                 if p.get('cgpt_product_id'):
                     all_pids.append(p['cgpt_product_id'])
+                    cgpt_parent_ids.append(str(p['cgpt_product_id']))
                 p_id_str = str(p.get('id', ''))
                 if p_id_str:
                     all_pids.append(p_id_str)
                     if p_id_str.isdigit():
                         all_pids.append(int(p_id_str))
                         all_pids.append(float(p_id_str))
+                # extract parent ID if _id has a cgpt format
+                pid_str = str(p['_id'])
+                if pid_str.startswith("cgpt_"):
+                    t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
+                    parts = t_clean.split("_")
+                    if len(parts[0]) == 24:
+                        cgpt_parent_ids.append(parts[0])
         
-        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': all_pids}}))
+        or_queries = [{'product_id': {'$in': all_pids}}]
+        for parent_id in set(cgpt_parent_ids):
+            or_queries.append({'product_id': {'$regex': parent_id}})
+        target_ids = list(db.orders.distinct('user_id', {'$or': or_queries}))
         label = f"📁 مجلد: {cat.get('name_ar', '')} ({len(target_ids)} مشتري)"
         
         pending['target_ids'] = target_ids
@@ -12843,20 +12855,32 @@ def bc_sendnocat_handler(call):
         
         prods = list(db.products.find())
         all_pids = []
+        cgpt_parent_ids = []
         for p in prods:
             pid = str(p.get('id', str(p.get('_id', ''))))
             if pid not in all_catalog_pids:
                 all_pids.append(p['_id'])
                 if p.get('cgpt_product_id'):
                     all_pids.append(p['cgpt_product_id'])
+                    cgpt_parent_ids.append(str(p['cgpt_product_id']))
                 p_id_str = str(p.get('id', ''))
                 if p_id_str:
                     all_pids.append(p_id_str)
                     if p_id_str.isdigit():
                         all_pids.append(int(p_id_str))
                         all_pids.append(float(p_id_str))
+                # extract parent ID if _id has a cgpt format
+                pid_str = str(p['_id'])
+                if pid_str.startswith("cgpt_"):
+                    t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
+                    parts = t_clean.split("_")
+                    if len(parts[0]) == 24:
+                        cgpt_parent_ids.append(parts[0])
                         
-        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': all_pids}}))
+        or_queries = [{'product_id': {'$in': all_pids}}]
+        for parent_id in set(cgpt_parent_ids):
+            or_queries.append({'product_id': {'$regex': parent_id}})
+        target_ids = list(db.orders.distinct('user_id', {'$or': or_queries}))
         label = f"📦 المنتجات غير المصنفة ({len(target_ids)} مشتري)"
         
         pending['target_ids'] = target_ids
@@ -12894,23 +12918,49 @@ def admin_bc_confirm(call):
     else:
         p = find_product(target)
         pid_variants = [target]
+        parent_id = None
         if p:
             actual_pid = p['_id']
             pid_variants.append(actual_pid)
             if p.get('cgpt_product_id'):
                 pid_variants.append(p['cgpt_product_id'])
+                parent_id = str(p['cgpt_product_id'])
             p_id_str = str(p.get('id', ''))
             if p_id_str:
                 pid_variants.append(p_id_str)
                 if p_id_str.isdigit():
                     pid_variants.append(int(p_id_str))
                     pid_variants.append(float(p_id_str))
+            
+            # extract parent ID if actual_pid starts with cgpt_
+            pid_str = str(actual_pid)
+            if pid_str.startswith("cgpt_"):
+                t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
+                parts = t_clean.split("_")
+                if len(parts[0]) == 24:
+                    parent_id = parts[0]
                     
         if target.isdigit():
             pid_variants.append(int(target))
             pid_variants.append(float(target))
+        elif target.startswith("cgpt_"):
+            t_clean = target.replace("cgpt_main_", "").replace("cgpt_", "")
+            parts = t_clean.split("_")
+            if len(parts[0]) == 24:
+                parent_id = parts[0]
+        elif len(target) == 24:
+            parent_id = target
             
-        target_ids = list(db.orders.distinct('user_id', {'product_id': {'$in': pid_variants}}))
+        if parent_id:
+            query = {
+                '$or': [
+                    {'product_id': {'$in': pid_variants}},
+                    {'product_id': {'$regex': parent_id}}
+                ]
+            }
+        else:
+            query = {'product_id': {'$in': pid_variants}}
+        target_ids = list(db.orders.distinct('user_id', query))
         p_name = clean_name(p.get('name_ar') or p.get('name_en', '')) if p else target
         label = f"📦 مشتري {p_name} ({len(target_ids)})"
         pending['product_id'] = p['_id'] if p else target
