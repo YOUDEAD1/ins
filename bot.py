@@ -12791,38 +12791,13 @@ def bc_sendcat_handler(call):
         cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
         if not cat: return
         
-        prod_ids = cat.get('product_ids') or []
-        all_pids = []
-        cgpt_parent_ids = []
-        for pid in prod_ids:
-            p = find_product(str(pid))
-            if p:
-                all_pids.append(p['_id'])
-                if p.get('cgpt_product_id'):
-                    all_pids.append(p['cgpt_product_id'])
-                    cgpt_parent_ids.append(str(p['cgpt_product_id']))
-                p_id_str = str(p.get('id', ''))
-                if p_id_str:
-                    all_pids.append(p_id_str)
-                    if p_id_str.isdigit():
-                        all_pids.append(int(p_id_str))
-                        all_pids.append(float(p_id_str))
-                # extract parent ID if _id has a cgpt format
-                pid_str = str(p['_id'])
-                if pid_str.startswith("cgpt_"):
-                    t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
-                    parts = t_clean.split("_")
-                    if len(parts[0]) == 24:
-                        cgpt_parent_ids.append(parts[0])
-        
-        or_queries = [{'product_id': {'$in': all_pids}}]
-        for parent_id in set(cgpt_parent_ids):
-            or_queries.append({'product_id': {'$regex': parent_id}})
-        target_ids = list(db.orders.distinct('user_id', {'$or': or_queries}))
-        label = f"📁 مجلد: {cat.get('name_ar', '')} ({len(target_ids)} مشتري)"
+        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
+        label = f"📁 مجلد: {cat.get('name_ar', '')} ({len(target_ids)} مستخدم)"
         
         pending['target_ids'] = target_ids
         pending['label'] = label
+        pending['catalog_id'] = cat_id
+        pending['product_id'] = None
         
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -12849,42 +12824,13 @@ def bc_sendnocat_handler(call):
         bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
         
     try:
-        all_catalog_pids = set()
-        for c in db.catalogs.find():
-            all_catalog_pids.update([str(x) for x in (c.get('product_ids') or [])])
-        
-        prods = list(db.products.find())
-        all_pids = []
-        cgpt_parent_ids = []
-        for p in prods:
-            pid = str(p.get('id', str(p.get('_id', ''))))
-            if pid not in all_catalog_pids:
-                all_pids.append(p['_id'])
-                if p.get('cgpt_product_id'):
-                    all_pids.append(p['cgpt_product_id'])
-                    cgpt_parent_ids.append(str(p['cgpt_product_id']))
-                p_id_str = str(p.get('id', ''))
-                if p_id_str:
-                    all_pids.append(p_id_str)
-                    if p_id_str.isdigit():
-                        all_pids.append(int(p_id_str))
-                        all_pids.append(float(p_id_str))
-                # extract parent ID if _id has a cgpt format
-                pid_str = str(p['_id'])
-                if pid_str.startswith("cgpt_"):
-                    t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
-                    parts = t_clean.split("_")
-                    if len(parts[0]) == 24:
-                        cgpt_parent_ids.append(parts[0])
-                        
-        or_queries = [{'product_id': {'$in': all_pids}}]
-        for parent_id in set(cgpt_parent_ids):
-            or_queries.append({'product_id': {'$regex': parent_id}})
-        target_ids = list(db.orders.distinct('user_id', {'$or': or_queries}))
-        label = f"📦 المنتجات غير المصنفة ({len(target_ids)} مشتري)"
+        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
+        label = f"📦 المنتجات غير المصنفة ({len(target_ids)} مستخدم)"
         
         pending['target_ids'] = target_ids
         pending['label'] = label
+        pending['catalog_id'] = 'nocat'
+        pending['product_id'] = None
         
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -12911,59 +12857,18 @@ def admin_bc_confirm(call):
         bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
 
     target = call.data.replace("bc_pick_", "")
+    target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
+    
     if target == "all":
-        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
-        label = f"👥 الكل ({len(target_ids)})"
+        label = f"👥 الكل ({len(target_ids)} مستخدم)"
         pending['product_id'] = None
+        pending['catalog_id'] = None
     else:
         p = find_product(target)
-        pid_variants = [target]
-        parent_id = None
-        if p:
-            actual_pid = p['_id']
-            pid_variants.append(actual_pid)
-            if p.get('cgpt_product_id'):
-                pid_variants.append(p['cgpt_product_id'])
-                parent_id = str(p['cgpt_product_id'])
-            p_id_str = str(p.get('id', ''))
-            if p_id_str:
-                pid_variants.append(p_id_str)
-                if p_id_str.isdigit():
-                    pid_variants.append(int(p_id_str))
-                    pid_variants.append(float(p_id_str))
-            
-            # extract parent ID if actual_pid starts with cgpt_
-            pid_str = str(actual_pid)
-            if pid_str.startswith("cgpt_"):
-                t_clean = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
-                parts = t_clean.split("_")
-                if len(parts[0]) == 24:
-                    parent_id = parts[0]
-                    
-        if target.isdigit():
-            pid_variants.append(int(target))
-            pid_variants.append(float(target))
-        elif target.startswith("cgpt_"):
-            t_clean = target.replace("cgpt_main_", "").replace("cgpt_", "")
-            parts = t_clean.split("_")
-            if len(parts[0]) == 24:
-                parent_id = parts[0]
-        elif len(target) == 24:
-            parent_id = target
-            
-        if parent_id:
-            query = {
-                '$or': [
-                    {'product_id': {'$in': pid_variants}},
-                    {'product_id': {'$regex': parent_id}}
-                ]
-            }
-        else:
-            query = {'product_id': {'$in': pid_variants}}
-        target_ids = list(db.orders.distinct('user_id', query))
         p_name = clean_name(p.get('name_ar') or p.get('name_en', '')) if p else target
-        label = f"📦 مشتري {p_name} ({len(target_ids)})"
+        label = f"📦 {p_name} ({len(target_ids)} مستخدم)"
         pending['product_id'] = p['_id'] if p else target
+        pending['catalog_id'] = None
 
     pending['target_ids'] = target_ids
     pending['label'] = label
@@ -12991,6 +12896,8 @@ def admin_bc_exe(call):
     src_chat_id = pending['chat_id']
     target_ids  = pending.get('target_ids', [])
     label       = pending.get('label', '?')
+    product_id  = pending.get('product_id')
+    catalog_id  = pending.get('catalog_id')
 
     bot.send_message(uid,
         f"📢 <b>بدأ البرودكاست!</b> ({label})\n"
@@ -13001,7 +12908,35 @@ def admin_bc_exe(call):
         sent = failed = blocked = 0
         for tuid in target_ids:
             try:
-                bot.copy_message(tuid, src_chat_id, src_msg_id)
+                markup = None
+                if product_id:
+                    p = find_product(product_id)
+                    if p:
+                        lang = get_lang(tuid)
+                        p_name = p.get('name_ar') or p.get('name_en', '') if lang == 'ar' else p.get('name_en') or p.get('name_ar', '')
+                        p_name = clean_name(p_name)[:25]
+                        btn_text = f"🛒 عرض المنتج: {p_name}" if lang == 'ar' else f"🛒 View Product: {p_name}"
+                        short_pid = str(product_id).replace("cgpt_main_", "") if str(product_id).startswith("cgpt_main_") else str(product_id)
+                        markup = InlineKeyboardMarkup()
+                        markup.add(InlineKeyboardButton(btn_text, callback_data=f"vi_p_{short_pid}"))
+                elif catalog_id:
+                    if catalog_id == 'nocat':
+                        lang = get_lang(tuid)
+                        btn_text = f"🛍️ المنتجات غير المصنفة" if lang == 'ar' else f"🛍️ Uncategorized Products"
+                        markup = InlineKeyboardMarkup()
+                        markup.add(InlineKeyboardButton(btn_text, callback_data="open_shop"))
+                    else:
+                        from bson import ObjectId
+                        cat = db.catalogs.find_one({'_id': ObjectId(catalog_id)})
+                        if cat:
+                            lang = get_lang(tuid)
+                            cat_name = cat.get('name_ar') or cat.get('name', '') if lang == 'ar' else cat.get('name_en') or cat.get('name', '')
+                            cat_name = clean_name(cat_name)[:25]
+                            btn_text = f"📁 فتح المجلد: {cat_name}" if lang == 'ar' else f"📁 Open Folder: {cat_name}"
+                            markup = InlineKeyboardMarkup()
+                            markup.add(InlineKeyboardButton(btn_text, callback_data=f"cat_{catalog_id}"))
+
+                bot.copy_message(tuid, src_chat_id, src_msg_id, reply_markup=markup)
                 sent += 1
             except Exception as e:
                 err = str(e).lower()
