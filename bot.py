@@ -3333,7 +3333,13 @@ def find_product(pid):
 
 def get_product_stock_count(pid):
     try:
-        pid_str = str(pid)
+        # Resolve the product first to get the correct 'id' field if it exists
+        p = find_product(pid)
+        if p and p.get('id'):
+            pid_str = str(p.get('id'))
+        else:
+            pid_str = str(pid)
+
         queries = [{'product_id': pid_str}]
         if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
         try: queries.append({'product_id': float(pid_str)})
@@ -5540,6 +5546,13 @@ def _cgpt_handle_email(message, buyer_uid, lang):
 
 def _do_purchase(uid, pid, qty, lang):
     """المنطق الفعلي للشراء"""
+    # Resolve pid to actual product id field if it exists
+    try:
+        p_res = find_product(pid)
+        if p_res and p_res.get('id'):
+            pid = str(p_res.get('id'))
+    except: pass
+
     # 🛡 Rate Limiting
     if not _acquire_purchase_lock(uid):
         bot.send_message(uid, bil(uid,
