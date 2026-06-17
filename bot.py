@@ -4953,8 +4953,13 @@ def shop_list_ui(call):
         
         prods_no_cat = []
         for p in db.products.find():
-            pid = str(p.get('id', str(p.get('_id', ''))))
-            if pid not in all_catalog_pids:
+            # نقارن بـ id و _id الاثنين لأن الكتالوج يخزّن _id
+            pid_id  = str(p.get('id', '')) if p.get('id') is not None else ''
+            pid__id = str(p.get('_id', ''))
+            if pid_id in all_catalog_pids or pid__id in all_catalog_pids:
+                continue
+            pid = p.get('id', str(p.get('_id', '')))
+            if True:
                 if p.get('is_hidden', False) and not is_admin:
                     continue
                 prods_no_cat.append(p)
@@ -13694,8 +13699,17 @@ def ad_cat_addp(call):
         markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
         
         txt = "➕ <b>Choose a product to add:</b>" if found else "✅ <b>All products are already in catalogs.</b>"
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        try:
+            bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception as edit_err:
+            # تجاهل خطأ "message is not modified" - مش خطأ حقيقي
+            if "message is not modified" in str(edit_err).lower():
+                pass
+            else:
+                raise
     except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
         logger.exception("Error in ad_cat_addp:")
         try: bot.send_message(call.message.chat.id, f"❌ Error loading products: {e}")
         except: pass
@@ -13762,8 +13776,16 @@ def ad_cat_remp(call):
             markup.add(CustomInlineButton(**btn_kwargs))
         
         markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
-        bot.edit_message_text("↩️ <b>Choose a product to move back to regular:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        try:
+            bot.edit_message_text("↩️ <b>Choose a product to move back to regular:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception as edit_err:
+            if "message is not modified" in str(edit_err).lower():
+                pass
+            else:
+                raise
     except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
         logger.exception("Error in ad_cat_remp:")
         try: bot.send_message(call.message.chat.id, f"❌ Error loading products to remove: {e}")
         except: pass
