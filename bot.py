@@ -4440,7 +4440,7 @@ def user_download_buy_hist(call):
             content += f"{i}. التاريخ: {date_str}\nالمنتج: {n}\nالكود/التفاصيل: {code}\n{'-'*30}\n"
         
     f = io.BytesIO(content.encode('utf-8'))
-    f.name = f"My_Purchases_{uid}.txt"
+    f.name = f"My_Purchases_{uid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     caption = "📄 Here are all your purchases." if l == 'en' else "📄 ملف يحتوي على جميع مشترياتك وتواريخها."
     bot.send_document(call.message.chat.id, f, caption=caption)
 
@@ -4628,7 +4628,7 @@ def download_product_history(call):
     # إرسال الملف
     f = io.BytesIO(content.encode('utf-8'))
     safe_name = re.sub(r'[^\w\-]', '_', p_name)[:30]
-    f.name = f"My_{safe_name}_Codes.txt"
+    f.name = f"My_{safe_name}_Codes_{uid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     
     if l == 'en':
         caption = f"📄 <b>{p_name}</b>\n\nAll your codes for this product ({len(orders)} total).\n\n<i>Keep this file safe!</i>"
@@ -5912,8 +5912,12 @@ def _do_purchase(uid, pid, qty, lang):
                     file_content += f"{i}. {code}\n"
 
                 f = io.BytesIO(file_content.encode('utf-8'))
-                safe_name = re.sub(r'[^\w\-]', '_', str(pid))[:20]
-                f.name = f"codes_{safe_name}.txt"
+                # اسم ملف فريد لكل عملية شراء (اسم المنتج + يوزر + تاريخ + رقم عشوائي)
+                # عشان تيليجرام ما يكاش نفس الملف ويعرضه للمشتري التاني
+                safe_pname = re.sub(r'[^\w\-]', '_', clean_name(p_name))[:25].strip('_') or 'product'
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                rand_sfx = _uuid_mod.uuid4().hex[:6]
+                f.name = f"{safe_pname}_{uid}_{ts}_{rand_sfx}.txt"
 
                 if lang == 'ar':
                     success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 {clean_name(p.get('name_ar'))}\n🔢 الكمية: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 الأكواد في الملف أدناه 👇"
