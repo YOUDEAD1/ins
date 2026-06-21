@@ -745,6 +745,204 @@ def _cgpt_daemon_loop():
             logger.error(f"[CGPT] daemon error: {e}")
             _t.sleep(300)  # لو صار خطأ ننام 5 دقائق بدل ما نعيد فوراً
 
+
+# ============================================================
+# 🔄 نظام مزامنة API — Webhooks + Polling
+# ============================================================
+# هدف هذا النظام: لما يصير أي تغيير في الستوك/المنتجات
+# (بيع، إضافة، حذف، تعديل) — البوتات المتصلة بالـ API
+# تستلم إشعار فوري عبر webhook، أو تقدر تسأل عبر /changes.
+#
+# الأحداث المدعومة:
+#   stock.added      — أضيف ستوك جديد (qty_added, remaining_stock)
+#   stock.sold       — تم بيع (qty_sold, remaining_stock, via_api)
+#   stock.removed    — حُذف ستوك يدوياً (qty_removed, remaining_stock)
+#   stock.updated    — تم تعديل كود في الستوك
+#   product.created  — منتج جديد
+#   product.updated  — تعديل منتج (price/name/desc/visibility/emoji)
+#   product.deleted  — حُذف منتج
+#   order.completed  — اكتمل طلب يدوي عبر API
+# ============================================================
+
+import hmac as _hmac
+import hashlib as _hashlib
+from queue import Queue as _Queue, Empty as _QEmpty
+
+# قائمة انتظار الأحداث (in-memory) — الـ worker يسحب منها
+_event_queue = _Queue(maxsize=10000)
+
+# TTL للأحداث المخزنة في DB (لـ polling) — 24 ساعة
+_EVENT_TTL_SECONDS = 24 * 60 * 60
+
+# يُنشَأ index على api_events.created_at مرة واحدة (TTL)
+def _ensure_event_indexes():
+    try:
+        db.api_events.create_index('created_at', expireAfterSeconds=_EVENT_TTL_SECONDS)
+        db.api_events.create_index([('created_at', -1)])
+        db.api_webhooks.create_index('api_user_id', unique=True)
+    except Exception as _ie:
+        logger.debug(f"event index create skipped: {_ie}")
+
+try: _ensure_event_indexes()
+except Exception: pass
+
+
+def _build_product_snapshot(pr):
+    """ينشئ snapshot صغير من المنتج للأحداث"""
+    if not pr: return {}
+    pid = str(pr.get('id', str(pr.get('_id', ''))))
+    manual = pr.get('is_manual', False)
+    return {
+        'product_id': pid,
+        'name_ar': pr.get('name_ar', ''),
+        'name_en': pr.get('name_en', ''),
+        'price': float(pr.get('price', 0)),
+        'is_manual': manual,
+        'is_hidden': pr.get('is_hidden', False),
+        'stock': 'unlimited' if manual else get_product_stock_count(pid)
+    }
+
+
+def _emit_event(event_type, data, product_id=None):
+    """
+    🔔 يبث حدث لكل المطورين (يُحفظ في DB + يُرسل لـ webhooks).
+
+    event_type: نوع الحدث (stock.sold / stock.added / product.updated / ...)
+    data: dict يحتوي تفاصيل الحدث
+    product_id: للفلترة (اختياري)
+    """
+    try:
+        import time as _t
+        now = _t.time()
+        evt = {
+            'event_id': f"evt_{int(now*1000)}_{secrets.token_hex(4)}",
+            'event_type': event_type,
+            'timestamp': int(now),
+            'created_at': datetime.datetime.utcnow(),
+            'data': data or {},
+        }
+        if product_id is not None:
+            evt['product_id'] = str(product_id)
+
+        # 1) خزّن في DB للـ polling
+        try:
+            db.api_events.insert_one(dict(evt))
+        except Exception as _de:
+            logger.debug(f"event insert err: {_de}")
+
+        # 2) ادفع في queue الـ webhooks
+        try:
+            # نظّف ObjectId و datetime قبل ما نضعها في queue (للـ JSON)
+            evt_for_q = {
+                'event_id': evt['event_id'],
+                'event_type': evt['event_type'],
+                'timestamp': evt['timestamp'],
+                'data': evt['data'],
+                'product_id': evt.get('product_id')
+            }
+            _event_queue.put_nowait(evt_for_q)
+        except Exception:
+            pass  # queue ممتلئة — الـ polling لسه شغال
+    except Exception as _ee:
+        logger.debug(f"_emit_event error: {_ee}")
+
+
+def _sign_webhook_body(secret, body_bytes, timestamp):
+    """HMAC-SHA256(secret, f'{timestamp}.{body}')"""
+    msg = f"{timestamp}.".encode('utf-8') + body_bytes
+    return _hmac.new(secret.encode('utf-8'), msg, _hashlib.sha256).hexdigest()
+
+
+def _deliver_webhook(webhook_doc, evt):
+    """
+    يرسل event لـ webhook URL واحد — مع retry بسيط.
+    webhook_doc: {api_user_id, url, secret, event_filter (optional), failures}
+    """
+    url = webhook_doc.get('url')
+    secret = webhook_doc.get('secret', '')
+    if not url:
+        return False
+
+    # فلترة: لو المطور حدد أنواع معينة فقط
+    ev_filter = webhook_doc.get('event_filter') or []
+    if ev_filter and evt['event_type'] not in ev_filter:
+        return True  # ما هو خطأ — مفلتر
+
+    import time as _t
+    timestamp = str(int(_t.time()))
+    body = json.dumps(evt, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    sig = _sign_webhook_body(secret, body, timestamp) if secret else ''
+
+    headers = {
+        'Content-Type': 'application/json; charset=utf-8',
+        'User-Agent': 'ShopBot-Webhook/1.0',
+        'X-Event-Id': evt['event_id'],
+        'X-Event-Type': evt['event_type'],
+        'X-Webhook-Timestamp': timestamp,
+    }
+    if sig:
+        headers['X-Webhook-Signature'] = f"sha256={sig}"
+
+    for attempt in range(3):
+        try:
+            r = requests.post(url, data=body, headers=headers, timeout=8)
+            if 200 <= r.status_code < 300:
+                # نجاح — صفّر العداد
+                if webhook_doc.get('failures', 0) > 0:
+                    db.api_webhooks.update_one(
+                        {'_id': webhook_doc['_id']},
+                        {'$set': {'failures': 0, 'last_success': datetime.datetime.utcnow()}}
+                    )
+                return True
+        except Exception as _we:
+            logger.debug(f"webhook attempt {attempt+1} fail: {_we}")
+        _t.sleep(1 + attempt)  # 1s, 2s, 3s
+
+    # فشل كل المحاولات — زِد عداد الفشل
+    try:
+        db.api_webhooks.update_one(
+            {'_id': webhook_doc['_id']},
+            {'$inc': {'failures': 1},
+             '$set': {'last_failure': datetime.datetime.utcnow()}}
+        )
+        # لو فشل 50 مرة متتالية — نعطّل الـ webhook تلقائياً
+        fresh = db.api_webhooks.find_one({'_id': webhook_doc['_id']})
+        if fresh and fresh.get('failures', 0) >= 50:
+            db.api_webhooks.update_one(
+                {'_id': webhook_doc['_id']},
+                {'$set': {'is_active': False, 'disabled_reason': 'Too many failures'}}
+            )
+            logger.warning(f"Webhook auto-disabled (50 failures): {url}")
+    except Exception:
+        pass
+    return False
+
+
+def _webhook_worker():
+    """Thread خلفي يسحب من queue ويوزع لكل المطورين المسجلين"""
+    logger.info("[Webhook] worker started")
+    while True:
+        try:
+            evt = _event_queue.get(timeout=10)
+        except _QEmpty:
+            continue
+        try:
+            # كل webhooks النشطة
+            hooks = list(db.api_webhooks.find({'is_active': True}))
+            for h in hooks:
+                # نشغل كل تسليم في thread صغير عشان webhook بطيء ما يعطّل البقية
+                threading.Thread(
+                    target=_deliver_webhook,
+                    args=(h, evt),
+                    daemon=True
+                ).start()
+        except Exception as _wre:
+            logger.debug(f"webhook worker iter err: {_wre}")
+
+
+threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").start()
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -970,6 +1168,80 @@ class APIHandler(BaseHTTPRequestHandler):
                 }
             })
 
+        # GET /webhook — عرض إعدادات الـ webhook الحالية للمطور
+        if route == '/webhook':
+            w = db.api_webhooks.find_one({'api_user_id': uid})
+            if not w:
+                return _json_resp(self, 200, {
+                    'success': True,
+                    'webhook': None,
+                    'note': 'No webhook configured. Use POST /set_webhook to register one.'
+                })
+            return _json_resp(self, 200, {
+                'success': True,
+                'webhook': {
+                    'url': w.get('url', ''),
+                    'is_active': w.get('is_active', True),
+                    'has_secret': bool(w.get('secret')),
+                    'event_filter': w.get('event_filter', []),
+                    'failures': w.get('failures', 0),
+                    'last_success': str(w.get('last_success', '')),
+                    'last_failure': str(w.get('last_failure', '')),
+                    'disabled_reason': w.get('disabled_reason')
+                },
+                'supported_events': [
+                    'stock.added', 'stock.sold', 'stock.removed', 'stock.updated',
+                    'product.created', 'product.updated', 'product.deleted',
+                    'order.completed'
+                ]
+            })
+
+        # GET /changes?since=TIMESTAMP — polling fallback لو ما تستخدم webhook
+        # يرجع كل الأحداث منذ timestamp معين (آخر 24 ساعة فقط)
+        if route == '/changes':
+            try:
+                since = int(params.get('since', ['0'])[0])
+            except: since = 0
+            try:
+                limit = min(int(params.get('limit', ['100'])[0]), 500)
+            except: limit = 100
+
+            # فلترة اختيارية بنوع
+            ev_type = params.get('event_type', [None])[0]
+
+            query = {'timestamp': {'$gt': since}}
+            if ev_type:
+                query['event_type'] = ev_type
+
+            try:
+                events = list(db.api_events.find(query).sort('timestamp', 1).limit(limit))
+            except Exception as _ce:
+                logger.debug(f"/changes query err: {_ce}")
+                events = []
+
+            result = []
+            latest_ts = since
+            for e in events:
+                ts = e.get('timestamp', 0)
+                if ts > latest_ts: latest_ts = ts
+                result.append({
+                    'event_id': e.get('event_id', ''),
+                    'event_type': e.get('event_type', ''),
+                    'timestamp': ts,
+                    'data': e.get('data', {}),
+                    'product_id': e.get('product_id')
+                })
+
+            import time as _tcs
+            return _json_resp(self, 200, {
+                'success': True,
+                'events': result,
+                'count': len(result),
+                'cursor': latest_ts,                # ابعتها في 'since' المرة الجاية
+                'server_time': int(_tcs.time()),
+                'note': 'Use the "cursor" value as "since" on your next /changes call. Events older than 24h are deleted automatically.'
+            })
+
         # GET /stats — إحصائيات المطور
         if route == '/stats':
             total_orders = db.api_orders.count_documents({'api_user_id': uid})
@@ -1081,6 +1353,19 @@ class APIHandler(BaseHTTPRequestHandler):
                 # 🔔 إشعار لكل الأدمن
                 try: _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=True)
                 except: pass
+                # 🔄 بث حدث API للمزامنة (manual order pending)
+                try:
+                    _emit_event('order.completed', {
+                        'order_id': order_id,
+                        'product_id': pid,
+                        'qty': qty,
+                        'total_price': total,
+                        'status': 'pending_manual',
+                        'is_manual': True,
+                        'via_api': True,
+                        'api_user_id': uid
+                    }, product_id=pid)
+                except: pass
                 return _json_resp(self, 200, {
                     'success': True,
                     'order_id': order_id,
@@ -1172,6 +1457,30 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as _stk_e:
                 logger.debug(f"API stock alert error: {_stk_e}")
 
+            # 🔄 بث حدث API للمزامنة (بيع تلقائي عبر API)
+            try:
+                _emit_event('stock.sold', {
+                    'product_id': pid,
+                    'qty_sold': qty,
+                    'remaining_stock': get_product_stock_count(pid),
+                    'is_manual': False,
+                    'via_api': True,
+                    'api_user_id': uid,
+                    'order_id': order_id
+                }, product_id=pid)
+                _emit_event('order.completed', {
+                    'order_id': order_id,
+                    'product_id': pid,
+                    'qty': qty,
+                    'total_price': total,
+                    'status': 'completed',
+                    'is_manual': False,
+                    'via_api': True,
+                    'api_user_id': uid,
+                    'codes_count': len(codes)
+                }, product_id=pid)
+            except: pass
+
             return _json_resp(self, 200, {
                 'success': True,
                 'order_id': order_id,
@@ -1230,6 +1539,94 @@ class APIHandler(BaseHTTPRequestHandler):
                 'your_price': sell_price,
                 'profit_per_unit': profit,
                 'note': 'Your price is locked. Store price changes will NOT affect it.'
+            })
+
+        # POST /set_webhook — تسجيل/تحديث webhook URL للمزامنة الفورية
+        # Body: {"url": "https://...", "secret": "اختياري", "event_filter": [...]}
+        if route == '/set_webhook':
+            try:
+                body = json.loads(_read_body(self))
+            except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
+
+            url = str(body.get('url', '')).strip()
+            if not url:
+                return _json_resp(self, 400, {'error': 'url required'})
+            if not (url.startswith('http://') or url.startswith('https://')):
+                return _json_resp(self, 400, {'error': 'url must start with http:// or https://'})
+            if len(url) > 500:
+                return _json_resp(self, 400, {'error': 'url too long'})
+
+            # secret اختياري — لو ما أرسله نولّد واحد له
+            secret = str(body.get('secret', '')).strip()
+            if not secret:
+                secret = secrets.token_hex(24)
+            if len(secret) > 200:
+                return _json_resp(self, 400, {'error': 'secret too long'})
+
+            # event_filter اختياري — قائمة بأنواع الأحداث المطلوبة فقط
+            ev_filter = body.get('event_filter') or []
+            if not isinstance(ev_filter, list):
+                return _json_resp(self, 400, {'error': 'event_filter must be array'})
+            allowed_events = {
+                'stock.added', 'stock.sold', 'stock.removed', 'stock.updated',
+                'product.created', 'product.updated', 'product.deleted',
+                'order.completed'
+            }
+            ev_filter = [str(x) for x in ev_filter if str(x) in allowed_events]
+
+            db.api_webhooks.update_one(
+                {'api_user_id': uid},
+                {'$set': {
+                    'api_user_id': uid,
+                    'url': url,
+                    'secret': secret,
+                    'event_filter': ev_filter,
+                    'is_active': True,
+                    'failures': 0,
+                    'disabled_reason': None,
+                    'updated_at': datetime.datetime.utcnow()
+                }},
+                upsert=True
+            )
+
+            return _json_resp(self, 200, {
+                'success': True,
+                'url': url,
+                'secret': secret,
+                'event_filter': ev_filter,
+                'note': (
+                    'Webhook registered. We will POST events to your URL.\n'
+                    'Verify signature: X-Webhook-Signature header = "sha256=" + '
+                    'hmac_sha256(secret, f"{X-Webhook-Timestamp}." + raw_body).\n'
+                    'Respond with 2xx within 8 seconds. After 50 consecutive failures '
+                    'the webhook will be disabled automatically.'
+                )
+            })
+
+        # POST /delete_webhook — حذف webhook
+        if route == '/delete_webhook':
+            db.api_webhooks.delete_one({'api_user_id': uid})
+            return _json_resp(self, 200, {'success': True, 'message': 'Webhook deleted'})
+
+        # POST /test_webhook — يرسل event تجريبي لـ webhook
+        if route == '/test_webhook':
+            w = db.api_webhooks.find_one({'api_user_id': uid, 'is_active': True})
+            if not w:
+                return _json_resp(self, 404, {'error': 'No active webhook configured'})
+            import time as _twt
+            test_evt = {
+                'event_id': f"evt_test_{int(_twt.time()*1000)}",
+                'event_type': 'webhook.test',
+                'timestamp': int(_twt.time()),
+                'data': {'message': 'This is a test event from your shop bot.'},
+                'product_id': None
+            }
+            ok = _deliver_webhook(w, test_evt)
+            return _json_resp(self, 200, {
+                'success': ok,
+                'delivered': ok,
+                'url': w.get('url', ''),
+                'note': 'If delivered=false, check that your endpoint returns 2xx within 8s.'
             })
 
         # POST /set_product — المطوّر يعدّل اسم/وصف المنتج لعملائه
@@ -5977,6 +6374,18 @@ def _do_purchase(uid, pid, qty, lang):
                     )
             except Exception as _stk_e:
                 logger.debug(f"Stock alert error: {_stk_e}")
+
+        # 🔄 بث حدث للمزامنة (بيع عبر البوت — يدوي أو تلقائي)
+        try:
+            _emit_event('stock.sold', {
+                'product_id': str(pid),
+                'qty_sold': qty,
+                'remaining_stock': 'unlimited' if is_manual else get_product_stock_count(pid),
+                'is_manual': bool(is_manual),
+                'via_api': False,
+                'buyer_user_id': uid
+            }, product_id=pid)
+        except: pass
 
     finally:
         _release_purchase_lock(uid)
@@ -11328,7 +11737,20 @@ def ad_p_final(call):
         'desc_ar': p['d_ar'], 'desc_en': p['d_en'], 
         'price': p['price'], 'is_manual': is_manual, 'is_hidden': False
     })
-    
+
+    # 🔄 بث حدث للمزامنة
+    try:
+        _emit_event('product.created', {
+            'product_id': pid,
+            'name_ar': p['n_ar'],
+            'name_en': p['n_en'],
+            'price': float(p['price']),
+            'is_manual': is_manual,
+            'is_hidden': False,
+            'stock': 'unlimited' if is_manual else 0
+        }, product_id=pid)
+    except: pass
+
     type_txt = "التسليم اليدوي 🤝" if is_manual else "التسليم التلقائي ⚡"
     bot.edit_message_text(f"✅ <b>تم إضافة المنتج بنجاح بنظام ({type_txt})!</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
 
@@ -11605,6 +12027,14 @@ def admin_toggle_hide(call):
     if p:
         new_status = not p.get('is_hidden', False)
         db.products.update_one({'_id': p['_id']}, {'$set': {'is_hidden': new_status}})
+        # 🔄 بث حدث للمزامنة
+        try:
+            pid_e = str(p.get('id', str(p.get('_id', ''))))
+            _emit_event('product.updated', {
+                'product_id': pid_e,
+                'changes': {'is_hidden': new_status}
+            }, product_id=pid_e)
+        except: pass
         bot.answer_callback_query(call.id, "✅ Visibility updated!", show_alert=True)
         call.data = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
         admin_edit_opts(call)
@@ -11930,6 +12360,12 @@ def admin_del_exec(call):
         db.product_stock.delete_many({'$or': queries})
         db.orders.delete_many({'$or': queries})
         db.products.delete_one({'_id': p['_id']})
+        # 🔄 بث حدث للمزامنة
+        try:
+            _emit_event('product.deleted', {
+                'product_id': pid_str
+            }, product_id=pid_str)
+        except: pass
         bot.answer_callback_query(call.id, "✅ Deleted Successfully!", show_alert=True)
         admin_main_ui(call)
     except: bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
@@ -12021,7 +12457,17 @@ def admin_stock_save(message, pid):
         if l.strip():
             db.product_stock.insert_one({'product_id': str(pid), 'code_line': l.strip(), 'is_sold': False})
             count += 1
-    
+
+    # 🔄 بث حدث للمزامنة — ستوك أُضيف
+    if count > 0:
+        try:
+            _emit_event('stock.added', {
+                'product_id': str(pid),
+                'qty_added': count,
+                'remaining_stock': get_product_stock_count(pid)
+            }, product_id=pid)
+        except: pass
+
     # عدد المستخدمين الكلي - للتأكد من إن البرودكاست بيشتغل
     total_users = db.users.count_documents({})
     logger.info(f"📢 بدء البرودكاست للستوك الجديد - منتج {pid} - عدد المستخدمين: {total_users}")
@@ -12148,6 +12594,14 @@ def admin_stock_delcode_exec(message, pid):
     except: pass
     res = db.product_stock.delete_one({'$or': queries, 'code_line': code_to_del, 'is_sold': False})
     if res.deleted_count > 0:
+        # 🔄 بث حدث للمزامنة
+        try:
+            _emit_event('stock.removed', {
+                'product_id': str(pid),
+                'qty_removed': 1,
+                'remaining_stock': get_product_stock_count(pid)
+            }, product_id=pid)
+        except: pass
         bot.send_message(message.chat.id, "✅ <b>تم حذف الكود بنجاح من الستوك!</b>", parse_mode="HTML")
     else:
         bot.send_message(message.chat.id, "❌ <b>لم يتم العثور على هذا الكود في الستوك.</b>", parse_mode="HTML")
@@ -12162,6 +12616,16 @@ def admin_stock_clear_exec(call):
     try: queries.append({'product_id': float(pid_str)})
     except: pass
     res = db.product_stock.delete_many({'$or': queries, 'is_sold': False})
+    # 🔄 بث حدث للمزامنة
+    if res.deleted_count > 0:
+        try:
+            _emit_event('stock.removed', {
+                'product_id': str(pid),
+                'qty_removed': res.deleted_count,
+                'remaining_stock': get_product_stock_count(pid),
+                'reason': 'cleared_all'
+            }, product_id=pid)
+        except: pass
     bot.answer_callback_query(call.id, f"🧨 تم مسح {res.deleted_count} كود من الستوك بنجاح!", show_alert=True)
     admin_stock_opts_ui(call)
 
@@ -12191,7 +12655,18 @@ def admin_stock_edit_step3(message):
     new_code = message.text.strip()
     item_id = temp_stock_edit.get(message.from_user.id)
     if item_id:
+        # نجيب المنتج المرتبط بالكود قبل التحديث (للحدث)
+        old_item = db.product_stock.find_one({'_id': item_id})
         db.product_stock.update_one({'_id': item_id}, {'$set': {'code_line': new_code}})
+        # 🔄 بث حدث للمزامنة
+        if old_item:
+            try:
+                pid_e = old_item.get('product_id')
+                _emit_event('stock.updated', {
+                    'product_id': str(pid_e),
+                    'remaining_stock': get_product_stock_count(pid_e)
+                }, product_id=pid_e)
+            except: pass
         bot.send_message(message.chat.id, "✅ <b>تم تعديل الكود وحفظه بنجاح!</b>", parse_mode="HTML")
     else:
         bot.send_message(message.chat.id, "❌ حدث خطأ، يرجى المحاولة مرة أخرى.", parse_mode="HTML")
@@ -13966,7 +14441,7 @@ def open_api(call):
 
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
-        markup.add(InlineKeyboardButton("📋 رسالة للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "📋 Message for AI", callback_data="api_ai_prompt"))
+        markup.add(InlineKeyboardButton("🤖 برومبت جاهز للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "🤖 AI Build Prompt", callback_data="api_ai_prompt"))
         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
         markup.add(InlineKeyboardButton("📜 Recent Orders", callback_data="api_orders"))
         markup.add(InlineKeyboardButton("🔄 Regenerate Key", callback_data="api_regen"))
@@ -14041,28 +14516,27 @@ def api_ai_prompt(call):
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
-    
+
     existing = db.api_keys.find_one({'user_id': uid, 'is_active': True})
     if not existing:
         bot.answer_callback_query(call.id, "❌", show_alert=True); return
-    
+
     conn_code = _generate_connection_code(existing['api_key'])
     if not conn_code:
         bot.send_message(uid, "❌ Server URL not detected."); return
-    
+
     l = get_lang(uid)
-    
+
     if l == 'ar':
         bot.send_message(uid,
-            "📋 <b>انسخ الرسالة التالية كاملة وأرسلها لأي ذكاء اصطناعي:</b>",
+            "📋 <b>انسخ هذه الرسالة كاملة وأرسلها لأي ذكاء اصطناعي (ChatGPT/Claude/Gemini):</b>",
             parse_mode="HTML"
         )
-        
-        prompt = f"""أبي تسوي لي بوت تيليجرام بايثون (pyTelegramBotAPI + MongoDB) يشتغل كمتجر.
 
-البوت يتصل بمتجر خارجي عبر كود اتصال مشفّر. الكود فيه كل المعلومات (الرابط + المفتاح).
+        prompt = f"""ابنِ لي بوت تيليجرام بايثون بسيط (pyTelegramBotAPI) يعمل كمتجر يبيع منتجات من API خارجي.
 
-كود الاتصال:
+═══════════════════════════════
+🔗 كود الاتصال (يحتوي الرابط + المفتاح):
 {conn_code}
 
 كيف تفك الكود:
@@ -14071,80 +14545,140 @@ data = json.loads(base64.b64decode(code.replace("conn_", "")))
 API_KEY = data["k"]
 API_URL = data["u"]
 
-كل الطلبات تكون:
+كل الطلبات:
 GET/POST {{API_URL}}/endpoint
-مع Header: Authorization: Bearer {{API_KEY}}
+Header: Authorization: Bearer {{API_KEY}}
+═══════════════════════════════
 
-⚠️ مهم: لما ترسل أي رسالة فيها أسماء منتجات، استخدم parse_mode="HTML" عشان الإيموجي المميز (Premium Emoji) يبان.
+📦 الأساسيات الـ 4 اللي يحتاجها البوت:
 
-الـ Endpoints:
-
-GET /products → قائمة المنتجات
+────────────────────────
+1️⃣ جلب المنتجات
+────────────────────────
+GET /products
+Response:
 {{"success": true, "products": [{{
   "id": "1",
   "name_ar": "نتفلكس",
   "name_en": "Netflix",
-  "name_ar_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> نتفلكس",
-  "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
-  "custom_emoji_id": "5123",
-  "has_premium_emoji": true,
-  "desc_ar": "وصف فيه إيموجي مميز جاهز داخل النص نفسه",
-  "desc_en": "description with premium emoji ready inside the text",
-  "desc_has_premium_emoji": true,
-  "desc_emoji_ids": ["6677"],
-  "all_emoji_ids": ["5123", "6677"],
+  "desc_ar": "وصف المنتج",
   "your_price": 3.5,
-  "stock": 45,
-  "is_manual": false
+  "stock": 45,            ← رقم أو "unlimited"
+  "is_manual": false       ← ⚠️ مهم جداً: نوع التسليم
 }}]}}
 
-🌟 كيف تعرض المنتج (الاسم + الوصف) مع الإيموجي المميز:
-- الاسم في الرسائل: استخدم name_ar_html أو name_en_html (فيه وسم tg-emoji جاهز) مع parse_mode="HTML"
-- الاسم في الأزرار (InlineKeyboardButton): استخدم name_ar العادي، ولو تبي الإيموجي داخل الزر أضف icon_custom_emoji_id = custom_emoji_id
-- 📝 الوصف مهم: حقول desc_ar و desc_en تحتوي أصلاً على وسوم <tg-emoji> جاهزة داخل النص! اعرضهم مباشرة مع parse_mode="HTML" والإيموجي المميز بيبان داخل الوصف تلقائياً
-- لو has_premium_emoji = false استخدم الاسم العادي بدون HTML
-- 🌐 لو تبني موقع (مو بوت تيليجرام): استخدم all_emoji_ids (كل معرّفات الإيموجي في المنتج: الاسم + الوصف) لجلب صور الإيموجي من تيليجرام
+⚡ is_manual = false → تسليم فوري (الأكواد ترجع مباشرة)
+🤝 is_manual = true  → تسليم يدوي (الأدمن يسلم لاحقاً)
 
-مثال للأزرار مع الإيموجي:
-btn = InlineKeyboardButton(text=p["name_ar"], callback_data=f"buy_{{p['id']}}")
-if p.get("custom_emoji_id"):
-    btn.icon_custom_emoji_id = p["custom_emoji_id"]
+اعرض المنتجات للعميل واذكر له النوع:
+  ⚡ تسليم فوري — لو is_manual = false
+  🤝 تسليم يدوي — لو is_manual = true
 
-مثال للرسائل:
-text = f"{{p['name_ar_html']}}\\n💰 السعر: ${{p['your_price']}}"
-bot.send_message(chat_id, text, parse_mode="HTML")
+────────────────────────
+2️⃣ الشراء (إرسال المنتج للعميل)
+────────────────────────
+POST /purchase
+Body: {{"product_id":"1", "qty":1, "buyer_info":"@username"}}
 
-GET /balance → الرصيد
-{{"success": true, "balance": 25.00}}
+🔹 لو المنتج فوري (is_manual=false):
+Response: {{
+  "success": true,
+  "status": "completed",
+  "codes": ["xxxx-yyyy-zzzz"],   ← أرسلها مباشرة للعميل
+  "total_price": 3.5,
+  "new_balance": 21.5
+}}
 
-POST /purchase → شراء
-Body: {{"product_id":"1","qty":1,"buyer_info":"@customer"}}
-نجاح: {{"success":true,"codes":["the_code"],"total_price":3.5,"new_balance":21.5}}
-فشل: {{"error":"Insufficient balance"}} أو {{"error":"Not enough stock"}}
+🔹 لو المنتج يدوي (is_manual=true):
+Response: {{
+  "success": true,
+  "status": "pending_manual",   ← لا توجد أكواد بعد
+  "order_id": "API_xxx",
+  "total_price": 3.5
+}}
+في هذه الحالة قل للعميل: "✅ تم استلام طلبك! سيتم التسليم خلال دقائق."
 
-GET /orders → الطلبات السابقة
+🔹 أخطاء محتملة:
+{{"error":"Insufficient balance"}} → الرصيد قليل
+{{"error":"Not enough stock"}}    → الستوك خلص
 
-المطلوب في البوت:
-- /start → زر المنتجات + زر الرصيد
-- المنتجات تجي من API وتظهر كأزرار مع الإيموجي المميز (استخدم icon_custom_emoji_id)
-- في رسالة تفاصيل المنتج استخدم name_ar_html مع parse_mode="HTML"
-- شراء → POST /purchase → الأكواد ترسل للعميل
-- لو الرصيد قليل → رسالة خطأ
-- لو خلص الستوك → رسالة خطأ
-- التخزين في MongoDB (كود الاتصال يتحفظ)
-- لا متغيرات في الكود — كل شيء من MongoDB
-- أمر /api للأدمن يلصق فيه كود الاتصال"""
+────────────────────────
+3️⃣ استقبال/متابعة الطلبات
+────────────────────────
+GET /orders              → آخر 20 طلب (للأدمن)
+GET /order/ORDER_ID      → تفاصيل طلب معيّن (مهم للطلبات اليدوية —
+                            تشيك لحد ما status = completed وفيها codes)
+GET /balance             → رصيدك المتبقي
+
+────────────────────────
+4️⃣ المزامنة الفورية (مهم جداً للستوك الحي 🔥)
+────────────────────────
+المتجر يرسل لك إشعار فوراً لما يصير أي تغيير
+(بيع/إضافة ستوك/حذف منتج). فيه طريقتين:
+
+🅰️ Webhook (الأفضل):
+POST /set_webhook
+Body: {{"url":"https://your-bot.com/webhook"}}
+
+بيرسل لك POST عند كل حدث:
+{{
+  "event_type": "stock.sold" | "stock.added" | "stock.removed"
+              | "product.created" | "product.updated" | "product.deleted"
+              | "order.completed",
+  "product_id": "1",
+  "data": {{
+    "qty_sold": 1,
+    "remaining_stock": 44,
+    "is_manual": false
+  }}
+}}
+
+🅱️ Polling (لو ما عندك URL عام):
+GET /changes?since=0
+Response: {{"events":[...], "cursor": 1718973123}}
+خزن cursor واستخدمه في الطلب التالي كـ ?since=cursor
+نادي كل 30 ثانية.
+
+═══════════════════════════════
+
+🎯 المطلوب من البوت:
+
+/start → زرين فقط:
+  • 🛒 المنتجات
+  • 💰 رصيدي
+
+عند الضغط على "المنتجات":
+  - GET /products
+  - اعرض كل منتج كزر بالاسم + سعره + رمز نوع التسليم (⚡ أو 🤝)
+
+عند اختيار منتج:
+  - اعرض الوصف + السعر + الستوك + نوع التسليم
+  - زر "شراء"
+
+عند الشراء:
+  - POST /purchase
+  - لو is_manual=false → ارسل الأكواد فوراً
+  - لو is_manual=true  → اعرض رسالة "سيتم التسليم قريباً"
+  - في الحالتين أرسل رسالة للأدمن (notify_admin) فيها تفاصيل الطلب
+
+أمر /sync للأدمن:
+  - يفحص أي تغييرات في الستوك من /changes
+  - يحدّث القائمة المحلية
+
+التخزين: MongoDB (احفظ فيه connection_code + balances + orders)
+لا تضع API_KEY في الكود — اقرأه من DB دائماً
+استخدم parse_mode="HTML" في كل الرسائل"""
+
     else:
         bot.send_message(uid,
-            "📋 <b>Copy the following message and send it to any AI:</b>",
+            "📋 <b>Copy this whole message and send it to any AI (ChatGPT/Claude/Gemini):</b>",
             parse_mode="HTML"
         )
-        
-        prompt = f"""Build me a Python Telegram bot (pyTelegramBotAPI + MongoDB) that works as a store.
 
-The bot connects to an external store via an encrypted connection code. The code contains all info (URL + API key).
+        prompt = f"""Build me a simple Python Telegram bot (pyTelegramBotAPI) that works as a store, selling products from an external API.
 
-Connection code:
+═══════════════════════════════
+🔗 Connection code (contains URL + API key):
 {conn_code}
 
 How to decode:
@@ -14156,66 +14690,126 @@ API_URL = data["u"]
 All requests:
 GET/POST {{API_URL}}/endpoint
 Header: Authorization: Bearer {{API_KEY}}
+═══════════════════════════════
 
-⚠️ IMPORTANT: When sending messages with product names, use parse_mode="HTML" so premium emojis render.
+📦 The 4 essentials the bot needs:
 
-Endpoints:
-
-GET /products → Product list
+────────────────────────
+1️⃣ Fetch products
+────────────────────────
+GET /products
+Response:
 {{"success": true, "products": [{{
   "id": "1",
   "name_ar": "نتفلكس",
   "name_en": "Netflix",
-  "name_ar_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> نتفلكس",
-  "name_en_html": "<tg-emoji emoji-id=\\"5123\\">✨</tg-emoji> Netflix",
-  "custom_emoji_id": "5123",
-  "has_premium_emoji": true,
-  "desc_ar": "وصف فيه إيموجي مميز جاهز داخل النص نفسه",
-  "desc_en": "description with premium emoji ready inside the text",
-  "desc_has_premium_emoji": true,
-  "desc_emoji_ids": ["6677"],
-  "all_emoji_ids": ["5123", "6677"],
+  "desc_en": "Product description",
   "your_price": 3.5,
-  "stock": 45,
-  "is_manual": false
+  "stock": 45,            ← number or "unlimited"
+  "is_manual": false       ← ⚠️ CRITICAL: delivery type
 }}]}}
 
-🌟 How to display products (name + description) with premium emojis:
-- Name in messages: use name_en_html or name_ar_html (already has the tg-emoji tag) with parse_mode="HTML"
-- Name in buttons (InlineKeyboardButton): use the plain name_en, and to show the emoji inside the button add icon_custom_emoji_id = custom_emoji_id
-- 📝 IMPORTANT description: desc_ar and desc_en ALREADY contain ready <tg-emoji> tags inside the text! Show them directly with parse_mode="HTML" and the premium emoji renders inside the description automatically
-- If has_premium_emoji = false, use the plain name without HTML
-- 🌐 If building a website (not a Telegram bot): use all_emoji_ids (all premium emoji IDs in the product: name + description) to fetch the emoji images from Telegram
+⚡ is_manual = false → INSTANT delivery (codes returned directly)
+🤝 is_manual = true  → MANUAL delivery (admin delivers later)
 
-Button example with emoji:
-btn = InlineKeyboardButton(text=p["name_en"], callback_data=f"buy_{{p['id']}}")
-if p.get("custom_emoji_id"):
-    btn.icon_custom_emoji_id = p["custom_emoji_id"]
+Show products to the customer and indicate the type:
+  ⚡ Instant — if is_manual = false
+  🤝 Manual  — if is_manual = true
 
-Message example:
-text = f"{{p['name_en_html']}}\\n💰 Price: ${{p['your_price']}}"
-bot.send_message(chat_id, text, parse_mode="HTML")
+────────────────────────
+2️⃣ Purchase (send product to customer)
+────────────────────────
+POST /purchase
+Body: {{"product_id":"1", "qty":1, "buyer_info":"@username"}}
 
-GET /balance → Balance
-{{"success": true, "balance": 25.00}}
+🔹 If instant (is_manual=false):
+Response: {{
+  "success": true,
+  "status": "completed",
+  "codes": ["xxxx-yyyy-zzzz"],   ← send these to the customer directly
+  "total_price": 3.5,
+  "new_balance": 21.5
+}}
 
-POST /purchase → Buy product
-Body: {{"product_id":"1","qty":1,"buyer_info":"@customer"}}
-Success: {{"success":true,"codes":["the_code"],"total_price":3.5,"new_balance":21.5}}
-Error: {{"error":"Insufficient balance"}} or {{"error":"Not enough stock"}}
+🔹 If manual (is_manual=true):
+Response: {{
+  "success": true,
+  "status": "pending_manual",   ← no codes yet
+  "order_id": "API_xxx",
+  "total_price": 3.5
+}}
+Tell the customer: "✅ Order received! Delivery within minutes."
 
-GET /orders → Order history
+🔹 Possible errors:
+{{"error":"Insufficient balance"}} → low balance
+{{"error":"Not enough stock"}}    → out of stock
 
-Requirements:
-- /start → Products button + Balance button
-- Products fetched from API, shown as buttons WITH premium emojis (use icon_custom_emoji_id)
-- In product detail messages use name_en_html with parse_mode="HTML"
-- Buy → POST /purchase → send codes to customer
-- Low balance → error message
-- Out of stock → error message
-- Store connection in MongoDB
-- No hardcoded variables — everything from MongoDB
-- /api command for admin to paste connection code"""
+────────────────────────
+3️⃣ Receiving/tracking orders
+────────────────────────
+GET /orders              → last 20 orders (for admin)
+GET /order/ORDER_ID      → details of a specific order (important for manual
+                            orders — poll until status = completed with codes)
+GET /balance             → your remaining balance
+
+────────────────────────
+4️⃣ Real-time sync (critical for live stock 🔥)
+────────────────────────
+The store pushes you events immediately when anything changes
+(sale / stock added / product deleted). Two ways:
+
+🅰️ Webhook (preferred):
+POST /set_webhook
+Body: {{"url":"https://your-bot.com/webhook"}}
+
+You receive POST on every event:
+{{
+  "event_type": "stock.sold" | "stock.added" | "stock.removed"
+              | "product.created" | "product.updated" | "product.deleted"
+              | "order.completed",
+  "product_id": "1",
+  "data": {{
+    "qty_sold": 1,
+    "remaining_stock": 44,
+    "is_manual": false
+  }}
+}}
+
+🅱️ Polling (if no public URL):
+GET /changes?since=0
+Response: {{"events":[...], "cursor": 1718973123}}
+Save cursor and use it in next call as ?since=cursor
+Poll every 30 seconds.
+
+═══════════════════════════════
+
+🎯 Bot requirements:
+
+/start → only two buttons:
+  • 🛒 Products
+  • 💰 My Balance
+
+When "Products" is tapped:
+  - GET /products
+  - Show each product as a button with name + price + delivery icon (⚡ or 🤝)
+
+When a product is selected:
+  - Show description + price + stock + delivery type
+  - "Buy" button
+
+On purchase:
+  - POST /purchase
+  - If is_manual=false → send codes immediately
+  - If is_manual=true  → show "Delivery coming soon"
+  - In both cases notify the admin with order details
+
+/sync command for admin:
+  - Polls /changes for any updates
+  - Refreshes the local product cache
+
+Storage: MongoDB (save connection_code + balances + orders there)
+Never hardcode API_KEY — always read from DB
+Use parse_mode="HTML" for all messages"""
 
     bot.send_message(uid, prompt)
 
@@ -14257,20 +14851,24 @@ def api_products_manage(call):
     prods = list(db.products.find({'is_hidden': {'$ne': True}}))
     prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
     
-    txt = "📦 <b>Manage Products</b>\n\n"
-    txt += "🟢 = Visible in your bot\n🔴 = Hidden from your bot\n\n"
-    txt += "<i>Tap to toggle:</i>"
+    txt  = "📦 <b>Manage Products</b>\n\n"
+    txt += "🟢 = Visible in your bot   🔴 = Hidden\n"
+    txt += "⚡ = Instant delivery        🤝 = Manual delivery\n\n"
+    txt += "<i>Tap to toggle visibility:</i>"
     
     markup = InlineKeyboardMarkup(row_width=1)
     for p in prods:
         pid = str(p.get('id', str(p.get('_id', ''))))
-        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:28]
+        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:24]
         is_hidden = pid in hidden_pids
+        is_manual = p.get('is_manual', False)
         emoji_id = p.get('custom_emoji_id')
-        
-        icon = "🔴" if is_hidden else "🟢"
+
+        vis_icon = "🔴" if is_hidden else "🟢"
+        type_icon = "🤝" if is_manual else "⚡"
+
         btn_kwargs = {
-            'text': f"{icon} {name}",
+            'text': f"{vis_icon} {type_icon} {name}",
             'callback_data': f"api_toggle_{pid}",
             'style': 'danger' if is_hidden else 'success'
         }
