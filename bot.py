@@ -3117,20 +3117,43 @@ DEFAULT_BUTTONS = {
 # ═══════════════════════════════════════════════
 # 📋 Helper: زر نسخ النص (Bot API 7.10+ CopyTextButton)
 # ═══════════════════════════════════════════════
+def _parse_btn_label(text):
+    """
+    ينظف HTML من نص الزر ويستخرج Premium Emoji كأيقونة منفصلة.
+    تيليجرام ما يدعم HTML داخل label الزر — لازم نص عادي.
+    
+    Returns: (clean_text, emoji_id_or_None)
+    """
+    if not text:
+        return text, None
+    import re as _re_lbl
+    emoji_id = None
+    # ابحث عن أول <tg-emoji emoji-id="..."> واحفظ ID
+    m = _re_lbl.search(r'<tg-emoji\s+emoji-id="(\d+)"\s*>([^<]*)</tg-emoji>', text)
+    if m:
+        emoji_id = m.group(1)
+    # نظّف tg-emoji: احتفظ بالإيموجي العادي اللي جواه
+    text = _re_lbl.sub(r'<tg-emoji[^>]*>([^<]*)</tg-emoji>', r'\1', text)
+    # شيل أي HTML tags باقية
+    text = _re_lbl.sub(r'<[^>]+>', '', text)
+    return text.strip(), emoji_id
+
+
 def _copy_button(label, text_to_copy):
     """
-    يصنع InlineKeyboardButton مع copy_text (نسخ بضغطة).
-    fallback: لو الـ telebot القديم ما يدعم CopyTextButton — يرجع كـ <code>.
+    يصنع زر نسخ بـ CopyTextButton (Bot API 7.10+).
+    يستخرج Premium Emoji من label تلقائياً ويحطه كأيقونة الزر.
     """
+    clean_label, emoji_id = _parse_btn_label(label)
     try:
         from telebot.types import CopyTextButton
-        return InlineKeyboardButton(
-            label,
-            copy_text=CopyTextButton(text=str(text_to_copy)[:256])
-        )
+        kwargs = {'copy_text': CopyTextButton(text=str(text_to_copy)[:256])}
+        if emoji_id:
+            return CustomInlineButton(clean_label, icon_custom_emoji_id=emoji_id, **kwargs)
+        return InlineKeyboardButton(clean_label, **kwargs)
     except Exception:
-        # Fallback لإصدارات قديمة — زر callback يفتح alert بالنص
-        return InlineKeyboardButton(label, callback_data=f"copy_fb")
+        # Fallback لإصدارات قديمة
+        return InlineKeyboardButton(clean_label, callback_data="copy_fb")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "copy_fb")
@@ -3823,6 +3846,14 @@ def get_btn_data(uid, key):
 
 def create_btn(uid, key, callback_data=None, url=None, style=None):
     text, emj_id = get_btn_data(uid, key)
+    # 🆕 لو ما في style override، نجيبها من DB (Bot API 9.4: danger/success/primary)
+    if style is None:
+        try:
+            l = get_lang(uid) if get_lang(uid) in ['ar', 'en'] else 'ar'
+            custom = db.custom_buttons.find_one({'lang': l, 'key': key})
+            if custom and custom.get('style'):
+                style = custom['style']
+        except Exception: pass
     kwargs = {'text': text}
     if callback_data: kwargs['callback_data'] = callback_data
     if url: kwargs['url'] = url
@@ -10931,14 +10962,28 @@ def ad_edit_btn_prompt(call):
 
     current_text, current_emoji = get_btn_data(call.from_user.id, key)
 
+    # نجيب اللون الحالي
+    try:
+        cur = db.custom_buttons.find_one({'lang': 'ar', 'key': key})
+        cur_style = (cur or {}).get('style')
+    except: cur_style = None
+    style_label = {
+        None: "⚪️ افتراضي",
+        'primary': "🔵 أزرق",
+        'success': "🟢 أخضر",
+        'danger': "🔴 أحمر",
+    }.get(cur_style, "⚪️ افتراضي")
+
     # نرسل النص الحالي للنسخ
     try:
-        bot.send_message(call.message.chat.id, f"📋 الزر الحالي:\n{current_text}")
+        bot.send_message(call.message.chat.id, f"📋 الزر الحالي:\n{current_text}\n🎨 اللون: {style_label}")
     except: pass
 
     msg = bot.send_message(
         call.message.chat.id,
-        "👇 <b>أرسل اسم الزر الجديد</b> (مع إيموجي إن أردت)\n\n<i>للإلغاء: <b>الغاء</b></i>",
+        "👇 <b>أرسل اسم الزر الجديد</b> (مع إيموجي إن أردت)\n\n"
+        "<i>بعد الحفظ راح أعطيك خيارات اللون 🎨</i>\n\n"
+        "<i>للإلغاء: <b>الغاء</b></i>",
         parse_mode="HTML"
     )
     bot.register_next_step_handler(msg, ad_save_custom_btn, key)
@@ -10975,9 +11020,81 @@ def ad_save_custom_btn(message, key):
             
     db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
     db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
-    
+
     emoji_status = f"<code>{emoji_id}</code>" if emoji_id else "لا يوجد"
-    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ! وتم تنظيف الرموز القديمة.</b>\n\n🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n🌟 الأيدي للرمز: {emoji_status}", parse_mode="HTML")
+
+    # 🆕 الحين نعرض خيارات اللون (Bot API 9.4)
+    current = db.custom_buttons.find_one({'lang': 'ar', 'key': key}) or {}
+    cur_style = current.get('style', None)
+    style_labels = {
+        None: "⚪️ افتراضي",
+        'primary': "🔵 أزرق",
+        'success': "🟢 أخضر",
+        'danger': "🔴 أحمر",
+    }
+    cur_label = style_labels.get(cur_style, "⚪️ افتراضي")
+
+    color_markup = InlineKeyboardMarkup(row_width=2)
+    color_markup.add(
+        InlineKeyboardButton(f"⚪️ افتراضي{' ✓' if cur_style is None else ''}", callback_data=f"btnstyle_{key}_default"),
+        InlineKeyboardButton(f"🔵 أزرق{' ✓' if cur_style == 'primary' else ''}", callback_data=f"btnstyle_{key}_primary"),
+    )
+    color_markup.add(
+        InlineKeyboardButton(f"🟢 أخضر{' ✓' if cur_style == 'success' else ''}", callback_data=f"btnstyle_{key}_success"),
+        InlineKeyboardButton(f"🔴 أحمر{' ✓' if cur_style == 'danger' else ''}", callback_data=f"btnstyle_{key}_danger"),
+    )
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>تم حفظ اسم الزر!</b>\n\n"
+        f"🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n"
+        f"🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n"
+        f"🌟 Premium Emoji: {emoji_status}\n"
+        f"🎨 اللون الحالي: <b>{cur_label}</b>\n\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👇 <b>اختر لون الزر:</b>\n"
+        f"<i>(Bot API 9.4 — تيليجرام الإصدار 11.0+)</i>",
+        parse_mode="HTML",
+        reply_markup=color_markup
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("btnstyle_"))
+@admin_required
+def ad_set_btn_style(call):
+    """يحفظ لون الزر (style)"""
+    bot.answer_callback_query(call.id)
+    try:
+        # format: btnstyle_<key>_<style>
+        # الـ key ممكن يحتوي '_' فنفك من اليمين
+        rest = call.data[len("btnstyle_"):]
+        idx = rest.rfind('_')
+        key = rest[:idx]
+        style_choice = rest[idx+1:]
+
+        style_val = None if style_choice == 'default' else style_choice
+        update_doc = {'$set': {'style': style_val}} if style_val else {'$unset': {'style': ''}}
+
+        db.custom_buttons.update_one({'lang': 'ar', 'key': key}, update_doc, upsert=True)
+        db.custom_buttons.update_one({'lang': 'en', 'key': key}, update_doc, upsert=True)
+
+        label_map = {
+            None: "⚪️ افتراضي (رمادي)",
+            'primary': "🔵 أزرق",
+            'success': "🟢 أخضر",
+            'danger': "🔴 أحمر",
+        }
+        bot.edit_message_text(
+            f"✅ <b>تم تعيين لون الزر:</b> {label_map.get(style_val, 'افتراضي')}\n\n"
+            f"<i>اللون يظهر في تيليجرام الإصدار 11.0+ فقط — الإصدارات الأقدم ترى رمادي عادي.</i>",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"btnstyle err: {e}")
+        try: bot.answer_callback_query(call.id, "❌ خطأ في حفظ اللون", show_alert=True)
+        except: pass
 
 # ----------- تعيين أيقونة لمنتج -----------
 @bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
