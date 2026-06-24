@@ -1697,6 +1697,81 @@ def _safe_answer_cbq(callback_query_id, text='', show_alert=False, url=None, cac
 bot.answer_callback_query = _safe_answer_cbq
 
 
+# ═══════════════════════════════════════════════════════════
+# 🔒 حارس عملية الدفع
+# يمنع المستخدم من أي زر/أمر أثناء عملية دفع نشطة.
+# يعتمد على دالة is_deposit_locked() الموجودة (DB-based).
+# الـ guards مسجّلة هنا مبكراً عشان تكون أول handler يطابق.
+# ═══════════════════════════════════════════════════════════
+
+# الـ callbacks المسموح بها أثناء القفل
+_ALLOWED_LOCKED_CB_PREFIXES = (
+    'cancel_deposit',       # زر إلغاء الدفع
+    'binance_check_',       # زر فحص الدفع
+    'copy_fb',              # fallback نسخ
+)
+# الأوامر/الكلمات المسموح بها (نصوص) أثناء القفل
+_ALLOWED_LOCKED_TEXTS = ('الغاء', 'cancel', 'إلغاء', 'اغلاق', '/cancel')
+
+
+def _check_locked(uid):
+    """نسخة آمنة من is_deposit_locked قبل ما تتعرّف لاحقاً في الملف"""
+    try:
+        return is_deposit_locked(uid)
+    except NameError:
+        # الدالة لسه ما اتعرّفت — نرجع False (يفتح كل شي)
+        return False
+    except Exception:
+        return False
+
+
+# ─── الحارس الأول: callbacks ───
+@bot.callback_query_handler(
+    func=lambda call: _check_locked(call.from_user.id)
+                      and not str(call.data or '').startswith(_ALLOWED_LOCKED_CB_PREFIXES)
+)
+def _deposit_lock_guard_callback(call):
+    """يبلوك أي زر للمستخدم اللي في عملية دفع"""
+    try:
+        uid = call.from_user.id
+        l = 'ar'
+        try: l = get_lang(uid)
+        except: pass
+        warn = (
+            "⚠️ أنت في عملية دفع نشطة!\n\nاضغط ❌ إلغاء أولاً قبل أي إجراء آخر."
+            if l == 'ar' else
+            "⚠️ You have an active payment!\n\nPress ❌ Cancel first."
+        )
+        bot.answer_callback_query(call.id, warn, show_alert=True)
+    except Exception:
+        pass
+
+
+# ─── الحارس الثاني: الرسائل النصية ───
+@bot.message_handler(
+    func=lambda m: _check_locked(m.from_user.id)
+                   and (m.text or '').strip().lower() not in _ALLOWED_LOCKED_TEXTS
+                   and not (m.text or '').strip().replace('.', '').replace(',', '').replace('$', '').isdigit()
+)
+def _deposit_lock_guard_message(message):
+    """يبلوك أي رسالة (غير رقم أو إلغاء) للمستخدم اللي في عملية دفع"""
+    try:
+        uid = message.from_user.id
+        l = 'ar'
+        try: l = get_lang(uid)
+        except: pass
+        warn = (
+            "⚠️ <b>أنت في عملية دفع نشطة!</b>\n\n"
+            "اكتب <b>إلغاء</b> أو اضغط زر ❌ إلغاء عشان تخرج."
+            if l == 'ar' else
+            "⚠️ <b>You have an active payment!</b>\n\n"
+            "Type <b>cancel</b> or press the ❌ Cancel button to exit."
+        )
+        bot.send_message(uid, warn, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 # 🛡 دالة فحص صلاحية الأدمن (تُستخدم بكل دوال الأدمن)
 def _is_admin_check(uid):
     """يتحقق إن المستخدم أدمن أو OWNER"""
@@ -3039,6 +3114,33 @@ DEFAULT_BUTTONS = {
     }
 }
 
+# ═══════════════════════════════════════════════
+# 📋 Helper: زر نسخ النص (Bot API 7.10+ CopyTextButton)
+# ═══════════════════════════════════════════════
+def _copy_button(label, text_to_copy):
+    """
+    يصنع InlineKeyboardButton مع copy_text (نسخ بضغطة).
+    fallback: لو الـ telebot القديم ما يدعم CopyTextButton — يرجع كـ <code>.
+    """
+    try:
+        from telebot.types import CopyTextButton
+        return InlineKeyboardButton(
+            label,
+            copy_text=CopyTextButton(text=str(text_to_copy)[:256])
+        )
+    except Exception:
+        # Fallback لإصدارات قديمة — زر callback يفتح alert بالنص
+        return InlineKeyboardButton(label, callback_data=f"copy_fb")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "copy_fb")
+def _copy_fb_handler(call):
+    """Fallback لو CopyTextButton مش متاح"""
+    try:
+        bot.answer_callback_query(call.id, "💡 اضغط على النص داخل الرسالة لنسخه", show_alert=True)
+    except: pass
+
+
 LANG = {
     'ar': {
         'welcome': "👋 <b>أهلاً بك في المتجر الاحترافي!</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n👥 المستخدمين: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>",
@@ -3075,6 +3177,47 @@ LANG = {
         'profile_txt': "👤 <b>ملفك الشخصي</b>\n\n🆔 الأيدي: <code>{}</code>\n👤 الاسم: <b>{}</b>\n💰 الرصيد: <b>${:.2f}</b>\n✅ المشتريات: <b>{}</b>\n📦 إجمالي الشحن: <b>${:.2f}</b>",
         'invite_txt': "💎 <b>نظام الإحالات</b>\n\n━━━━━━━━━━━━━━\n📊 <b>إحصائياتك المباشرة</b>\n━━━━━━━━━━━━━━\n\n👥 <b>الزيارات:</b>  <b>{}</b>\n⏳ <b>المعلق:</b>  <b>{}</b>\n✅ <b>النشط:</b>  <b>{}</b>\n❌ <b>غادر:</b>  <b>{}</b>\n\n💰 <b>أرباحك:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>رابطك:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>طريقتين للربح:</b>\n\n🔥 كل <b>10</b> اشتراكات نشطة = <b>$0.10</b>\n💸 شراء صديقك > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>التحديث فوري</i>",
         'dep_choose': "💳 <b>اختر طريقة الدفع المناسبة:</b>",
+
+        # 🆕 رسائل الدفع الجديدة (قابلة للتعديل من إعدادات الأدمن)
+        # {0}=المبلغ، {1}=العنوان/الـID، {2}=user_id (مكرر للملاحظات)
+        'dep_msg_binance': (
+            "🟡 <b>Binance Pay</b>\n\n"
+            "💰 <b>المبلغ:</b>\n<code>${0}</code>\n\n"
+            "📬 <b>الآيدي:</b>\n<code>{1}</code>\n\n"
+            "🆔 <b>الآيدي الخاص بك:</b>\n<code>{2}</code>\n\n"
+            "📝 <b>مهم جداً:</b> ضع الآيدي الخاص بك <code>{2}</code> "
+            "في خانة <b>Remark / Notes</b> داخل Binance Pay عند الإرسال "
+            "حتى يصلك المبلغ تلقائياً.\n\n"
+            "⏰ صلاحية: <b>30 دقيقة</b>\n"
+            "✨ <i>الرصيد يُضاف تلقائياً</i>"
+        ),
+        # {0}=emoji، {1}=اسم العملة، {2}=المبلغ بالدولار، {3}=نص المبلغ بالعملة (ممكن فاضي)، {4}=العنوان
+        'dep_msg_crypto': (
+            "{0} <b>{1}</b>\n\n"
+            "💰 <b>المبلغ:</b>\n<code>${2}</code>{3}\n\n"
+            "📬 <b>العنوان:</b>\n<code>{4}</code>\n\n"
+            "⏰ صلاحية: <b>30 دقيقة</b>\n"
+            "✨ <i>الرصيد يُضاف تلقائياً</i>"
+        ),
+        # أزرار الدفع
+        'dep_btn_copy_amount': "📋 نسخ المبلغ",
+        'dep_btn_copy_wallet': "📋 نسخ العنوان",
+        'dep_btn_copy_id': "📋 نسخ الآيدي",
+        'dep_btn_check': "🔍 فحص الدفع",
+        'dep_btn_cancel': "❌ إلغاء",
+        # 🆕 prompts وأخطاء الدفع
+        'dep_prompt_amount': (
+            "🟡 <b>الإيداع عبر {0}</b>\n\n"
+            "━━━━━━━━━━━━━━\n"
+            "💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
+            "📌 أمثلة: 5 / 10 / 25 / 50\n"
+            "⚠️ الحد الأدنى: <b>$1</b>"
+        ),
+        'dep_err_not_number': "❌ أرسل رقماً فقط. مثال: 10",
+        'dep_err_min': "❌ الحد الأدنى للإيداع: <b>$1</b>",
+        'dep_err_max': "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.",
+        'dep_err_general': "❌ حدث خطأ. حاول مرة ثانية.",
+        'dep_cancelled': "❌ تم الإلغاء.",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
         'dep_ltc': "🔵 <b>شحن عبر Litecoin (LTC)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -3139,6 +3282,47 @@ LANG = {
         'profile_txt': "👤 <b>Your Profile</b>\n\n🆔 ID: <code>{}</code>\n👤 Name: <b>{}</b>\n💰 Balance: <b>${:.2f}</b>\n✅ Purchases: <b>{}</b>\n📦 Total Deposited: <b>${:.2f}</b>",
         'invite_txt': "💎 <b>Referral System</b>\n\n━━━━━━━━━━━━━━\n📊 <b>Your Live Stats</b>\n━━━━━━━━━━━━━━\n\n👥 <b>Clicks:</b>  <b>{}</b>\n⏳ <b>Pending:</b>  <b>{}</b>\n✅ <b>Active:</b>  <b>{}</b>\n❌ <b>Left:</b>  <b>{}</b>\n\n💰 <b>Earnings:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>Your Link:</b>\n<code>https://t.me/{}?start={}</code>\n\n━━━━━━━━━━━━━━\n🎁 <b>Two Ways to Earn:</b>\n\n🔥 Every <b>10</b> active joins = <b>$0.10</b>\n💸 Friend buys > <b>$2</b> = <b>$0.10</b>\n\n⚡ <i>Real-time updates</i>",
         'dep_choose': "💳 <b>Choose payment method:</b>",
+
+        # 🆕 New customizable payment messages
+        # {0}=amount, {1}=wallet/ID, {2}=user_id (repeated for notes)
+        'dep_msg_binance': (
+            "🟡 <b>Binance Pay</b>\n\n"
+            "💰 <b>Amount:</b>\n<code>${0}</code>\n\n"
+            "📬 <b>Pay ID:</b>\n<code>{1}</code>\n\n"
+            "🆔 <b>Your ID:</b>\n<code>{2}</code>\n\n"
+            "📝 <b>IMPORTANT:</b> put your ID <code>{2}</code> in the "
+            "<b>Remark / Notes</b> field on Binance Pay when sending "
+            "so the balance is credited automatically.\n\n"
+            "⏰ Valid: <b>30 minutes</b>\n"
+            "✨ <i>Balance added automatically</i>"
+        ),
+        # {0}=emoji, {1}=coin name, {2}=USD amount, {3}=crypto amount text (may be empty), {4}=wallet
+        'dep_msg_crypto': (
+            "{0} <b>{1}</b>\n\n"
+            "💰 <b>Amount:</b>\n<code>${2}</code>{3}\n\n"
+            "📬 <b>Address:</b>\n<code>{4}</code>\n\n"
+            "⏰ Valid: <b>30 minutes</b>\n"
+            "✨ <i>Balance added automatically</i>"
+        ),
+        # Payment buttons
+        'dep_btn_copy_amount': "📋 Copy Amount",
+        'dep_btn_copy_wallet': "📋 Copy Address",
+        'dep_btn_copy_id': "📋 Copy ID",
+        'dep_btn_check': "🔍 Check Payment",
+        'dep_btn_cancel': "❌ Cancel",
+        # 🆕 Payment prompts & errors
+        'dep_prompt_amount': (
+            "🟡 <b>Deposit via {0}</b>\n\n"
+            "━━━━━━━━━━━━━━\n"
+            "💡 Send the USD amount you want to deposit:\n\n"
+            "📌 Examples: 5 / 10 / 25 / 50\n"
+            "⚠️ Minimum: <b>$1</b>"
+        ),
+        'dep_err_not_number': "❌ Send numbers only. Example: 10",
+        'dep_err_min': "❌ Minimum deposit: <b>$1</b>",
+        'dep_err_max': "❌ Amount too large. Max: <b>$10,000</b>\n\nFor large deposits, contact admin.",
+        'dep_err_general': "❌ An error occurred. Please try again.",
+        'dep_cancelled': "❌ Cancelled.",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
         'dep_ltc': "🔵 <b>Litecoin (LTC) Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -6653,28 +6837,22 @@ def dep_binance_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid)
     bot.clear_step_handler_by_chat_id(chat_id=uid)
 
-    wallet = get_setting('wallet_address')
-
-    if l == 'ar':
-        msg_text = (
-            f"🟡 <b>الإيداع عبر Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
-            f"📌 أمثلة: 5 / 10 / 25 / 50\n"
-            f"⚠️ الحد الأدنى: <b>$1</b>"
+    # 🔒 قفل مبكر — حتى قبل إدخال المبلغ
+    try:
+        db.users.update_one(
+            {'user_id': uid},
+            {'$set': {
+                'deposit_locked': True,
+                'deposit_lock_expires': int(time.time()) + 30 * 60
+            }},
+            upsert=True
         )
-    else:
-        msg_text = (
-            f"🟡 <b>Deposit via Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 Send the USD amount you want to deposit:\n\n"
-            f"📌 Examples: 5 / 10 / 25 / 50\n"
-            f"⚠️ Minimum: <b>$1</b>"
-        )
+    except Exception: pass
 
+    # نص قابل للتعديل من admin
+    msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
     msg = bot.send_message(uid, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, ask_binance_deposit_amount)
 
@@ -6684,27 +6862,28 @@ def ask_binance_deposit_amount(message):
     """يستلم المبلغ ويعطي مبلغ فريد لـ Binance Pay"""
     uid = message.from_user.id
     if is_user_banned(uid): return
-    l = get_lang(uid)
 
     if not message.text or message.text.startswith('/'):
         return
 
-    if message.text.lower() in ['الغاء', 'cancel']:
-        bot.send_message(uid, bil(uid, "❌ تم الإلغاء.", "❌ Cancelled."))
+    if message.text.lower() in ['الغاء', 'cancel', 'إلغاء']:
+        try: unlock_deposit(uid)
+        except: pass
+        bot.send_message(uid, get_text(uid, 'dep_cancelled'), parse_mode="HTML")
         return
 
     try:
         base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
     except ValueError:
-        bot.send_message(uid, bil(uid, "❌ أرسل رقماً فقط. مثال: 10", "❌ Numbers only. Example: 10"), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_not_number'), parse_mode="HTML")
         return
 
     if base_amount < 1:
-        bot.send_message(uid, bil(uid, "❌ الحد الأدنى $1", "❌ Minimum $1"), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML")
         return
 
     if base_amount > 10000:
-        bot.send_message(uid, bil(uid, "❌ الحد الأقصى $10,000", "❌ Maximum $10,000"), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML")
         return
 
     # نولّد مبلغ فريد بـ 4 خانات عشرية = 9000 احتمال
@@ -6713,63 +6892,35 @@ def ask_binance_deposit_amount(message):
     # نسجّل في DB
     pending = register_pending_deposit(uid, base_amount, unique_amount, 'BINANCE')
     if not pending:
-        bot.send_message(uid, bil(uid, "❌ حدث خطأ. حاول مرة ثانية.", "❌ Error. Try again."), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
         return
 
     wallet = get_setting('wallet_address')
 
-    if l == 'ar':
-        msg_text = (
-            f"🟡 <b>Binance Pay</b>\n\n"
-            f"💰 <b>المبلغ:</b>\n<code>${unique_amount:.4f}</code>\n\n"
-            f"📬 <b>الآيدي:</b>\n<code>{wallet}</code>\n\n"
-            f"⏰ صلاحية: <b>30 دقيقة</b>\n"
-            f"✨ <i>الرصيد يُضاف تلقائياً</i>"
-        )
-    else:
-        msg_text = (
-            f"🟡 <b>Binance Pay</b>\n\n"
-            f"💰 <b>Amount:</b>\n<code>${unique_amount:.4f}</code>\n\n"
-            f"📬 <b>Pay ID:</b>\n<code>{wallet}</code>\n\n"
-            f"⏰ Valid: <b>30 minutes</b>\n"
-            f"✨ <i>Balance added automatically</i>"
-        )
+    # نص قابل للتعديل من إعدادات الأدمن (key: dep_msg_binance)
+    msg_text = get_text(uid, 'dep_msg_binance', f"{unique_amount:.4f}", wallet, uid)
 
-    cancel_markup = InlineKeyboardMarkup(row_width=1)
+    cancel_markup = InlineKeyboardMarkup(row_width=2)
+    # صف أزرار النسخ
+    cancel_markup.add(
+        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.4f}"),
+        _copy_button(get_text(uid, 'dep_btn_copy_wallet'), wallet)
+    )
+    # زر نسخ الآيدي (مهم — Binance يحتاجه في الـ Notes)
+    cancel_markup.add(
+        _copy_button(get_text(uid, 'dep_btn_copy_id'), str(uid))
+    )
     cancel_markup.add(InlineKeyboardButton(
-        "🔍 فحص الدفع" if l == 'ar' else "🔍 Check Payment",
+        get_text(uid, 'dep_btn_check'),
         callback_data=f"binance_check_{uid}"
     ))
     cancel_markup.add(InlineKeyboardButton(
-        "❌ إلغاء" if l == 'ar' else "❌ Cancel",
+        get_text(uid, 'dep_btn_cancel'),
         callback_data="cancel_deposit"
     ))
     
     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
-    l = get_lang(uid)
     bot.clear_step_handler_by_chat_id(chat_id=uid)
-
-    wallet = get_setting('wallet_address')
-
-    if l == 'ar':
-        msg_text = (
-            f"🟡 <b>الإيداع عبر Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
-            f"📌 أمثلة: 5 / 10 / 25 / 50\n"
-            f"⚠️ الحد الأدنى: <b>$1</b>"
-        )
-    else:
-        msg_text = (
-            f"🟡 <b>Deposit via Binance Pay</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💡 Send the USD amount you want to deposit:\n\n"
-            f"📌 Examples: 5 / 10 / 25 / 50\n"
-            f"⚠️ Minimum: <b>$1</b>"
-        )
-
-    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
-    bot.register_next_step_handler(msg, ask_binance_deposit_amount)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("binance_check_"))
@@ -6989,22 +7140,13 @@ def unlock_deposit(uid):
 
 
 def is_deposit_locked(uid):
-    """هل المستخدم في عملية إيداع جارية؟"""
+    """هل المستخدم في عملية إيداع جارية؟ (يعتمد على flag + TTL فقط)"""
     try:
         u = db.users.find_one({'user_id': uid}, {'deposit_locked': 1, 'deposit_lock_expires': 1})
         if not u or not u.get('deposit_locked'):
             return False
-        # نفحص إن القفل ما انتهت صلاحيته
+        # نفحص إن القفل ما انتهت صلاحيته (TTL)
         if u.get('deposit_lock_expires', 0) < int(time.time()):
-            unlock_deposit(uid)
-            return False
-        # نفحص إن في pending فعلاً
-        pending = db.pending_deposits.find_one({
-            'user_id': uid,
-            'status': 'pending',
-            'expires_at': {'$gt': int(time.time())}
-        })
-        if not pending:
             unlock_deposit(uid)
             return False
         return True
@@ -7775,33 +7917,28 @@ def start_amount_protected_deposit(call, coin):
     🛡 يبدأ عملية إيداع محمية بمبلغ فريد.
     """
     uid = call.from_user.id
-    l = get_lang(uid)
-    
-    # رسالة طلب المبلغ
+
+    # 🔒 قفل مبكر — حتى قبل إدخال المبلغ
+    try:
+        db.users.update_one(
+            {'user_id': uid},
+            {'$set': {
+                'deposit_locked': True,
+                'deposit_lock_expires': int(time.time()) + 30 * 60
+            }},
+            upsert=True
+        )
+    except Exception: pass
+
+    # رسالة طلب المبلغ — قابلة للتعديل من admin
     coin_name = {
         'USDT': 'USDT (TRC-20)',
         'USDT_BEP20': 'USDT (BEP-20)',
         'TON': 'Toncoin (TON)',
         'LTC': 'Litecoin (LTC)'
     }.get(coin, coin)
-    
-    if l == 'ar':
-        msg_text = (
-            f"💵 <b>الإيداع عبر {coin_name}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"💡 أرسل المبلغ بالدولار الذي تريد إيداعه:\n\n"
-            f"📌 <i>أمثلة: 5 / 10 / 25 / 50</i>\n"
-            f"⚠️ الحد الأدنى: <b>$1</b>"
-        )
-    else:
-        msg_text = (
-            f"💵 <b>Deposit via {coin_name}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"💡 Send the USD amount you want to deposit:\n\n"
-            f"📌 <i>Examples: 5 / 10 / 25 / 50</i>\n"
-            f"⚠️ Minimum: <b>$1</b>"
-        )
-    
+
+    msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
     msg = bot.send_message(uid, msg_text, parse_mode="HTML")
     bot.register_next_step_handler(msg, ask_deposit_amount, coin)
 
@@ -7825,23 +7962,25 @@ def ask_deposit_amount(message, coin):
     
     # إلغاء
     if text.lower() in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
-        bot.send_message(uid, "❌ تم الإلغاء.")
+        try: unlock_deposit(uid)
+        except: pass
+        bot.send_message(uid, get_text(uid, 'dep_cancelled'))
         return
     
     # parsing المبلغ
     try:
         base_amount = float(text.replace(',', '.').replace('$', ''))
     except ValueError:
-        bot.send_message(uid, bil(uid, "❌ أرسل رقم فقط.\nمثال: 5 أو 10.5", "❌ Send numbers only.\nExample: 5 or 10.5"), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_not_number'), parse_mode="HTML")
         return
     
     # validation
     if base_amount < 1:
-        bot.send_message(uid, bil(uid, "❌ الحد الأدنى للإيداع: <b>$1</b>", "❌ Minimum deposit: <b>$1</b>"), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML")
         return
     
     if base_amount > 10000:
-        bot.send_message(uid, bil(uid, "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.", "❌ Amount too large. Max: <b>$10,000</b>\n\nFor large deposits, contact admin."), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML")
         return
     
     # نولّد المبلغ الفريد
@@ -7850,7 +7989,7 @@ def ask_deposit_amount(message, coin):
     # نسجّل في DB
     pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
     if not pending:
-        bot.send_message(uid, bil(uid, "❌ حدث خطأ. حاول مرة ثانية.", "❌ An error occurred. Please try again."), parse_mode="HTML")
+        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
         return
     
     # نجلب عنوان المحفظة
@@ -7869,34 +8008,46 @@ def ask_deposit_amount(message, coin):
     
     # نحسب المبلغ بعملة الكريبتو
     crypto_amount_text = ""
+    crypto_amount_value = ""  # للنسخ
     try:
         if coin == 'LTC':
             ltc_price = get_ltc_price_usd()
             crypto_amount = unique_amount / ltc_price
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ LTC:</b> <code>{crypto_amount:.8f}</code> LTC"
+            crypto_amount_value = f"{crypto_amount:.8f}"
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ LTC:</b> <code>{crypto_amount_value}</code> LTC"
         elif coin == 'TON':
             ton_price = get_ton_price_usd()
             crypto_amount = unique_amount / ton_price
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ TON:</b> <code>{crypto_amount:.6f}</code> TON"
+            crypto_amount_value = f"{crypto_amount:.6f}"
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ TON:</b> <code>{crypto_amount_value}</code> TON"
         elif coin in ['USDT', 'USDT_BEP20']:
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ USDT:</b> <code>{unique_amount:.4f}</code> USDT"
+            crypto_amount_value = f"{unique_amount:.4f}"
+            crypto_amount_text = f"\n💰 <b>المبلغ بـ USDT:</b> <code>{crypto_amount_value}</code> USDT"
     except Exception: pass
     
     # رسالة التعليمات
     coin_emoji = {'USDT': '🟢', 'USDT_BEP20': '🟡', 'TON': '💎', 'LTC': '🔵'}.get(coin, '💰')
-    
-    msg_text = (
-        f"{coin_emoji} <b>{coin_name}</b>\n\n"
-        f"💰 <b>Amount:</b>\n<code>${unique_amount:.6f}</code>"
-        f"{crypto_amount_text}\n\n"
-        f"📬 <b>Address:</b>\n<code>{wallet}</code>\n\n"
-        f"⏰ Valid: <b>30 minutes</b>\n"
-        f"✨ <i>Balance added automatically</i>"
+
+    # نص قابل للتعديل من إعدادات الأدمن (key: dep_msg_crypto)
+    msg_text = get_text(
+        uid, 'dep_msg_crypto',
+        coin_emoji, coin_name, f"{unique_amount:.6f}", crypto_amount_text, wallet
     )
-    
-    cancel_markup = InlineKeyboardMarkup(row_width=1)
+
+    cancel_markup = InlineKeyboardMarkup(row_width=2)
+    # صف أزرار النسخ — المبلغ + العنوان
+    cancel_markup.add(
+        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+        _copy_button(get_text(uid, 'dep_btn_copy_wallet'), wallet)
+    )
+    # لو متاح مبلغ بالعملة (LTC/TON/USDT)، نضيف زر نسخه
+    if crypto_amount_value:
+        coin_short = {'USDT': 'USDT', 'USDT_BEP20': 'USDT', 'TON': 'TON', 'LTC': 'LTC'}.get(coin, '')
+        cancel_markup.add(
+            _copy_button(f"📋 {crypto_amount_value} {coin_short}", crypto_amount_value)
+        )
     cancel_markup.add(InlineKeyboardButton(
-        "❌ إلغاء" if l == 'ar' else "❌ Cancel",
+        get_text(uid, 'dep_btn_cancel'),
         callback_data="cancel_deposit"
     ))
     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
@@ -10354,6 +10505,21 @@ def ad_cms_msgs_ui(call):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("📋 رسالة الترحيب (Start)", callback_data="edit_txt_welcome"))
     markup.add(InlineKeyboardButton("💳 رسالة قسم الشحن", callback_data="edit_txt_dep_choose"))
+    # 🆕 رسائل وأزرار الدفع الجديدة
+    markup.add(InlineKeyboardButton("🟡 رسالة Binance Pay", callback_data="edit_txt_dep_msg_binance"))
+    markup.add(InlineKeyboardButton("💎 رسالة العملات (USDT/TON/LTC)", callback_data="edit_txt_dep_msg_crypto"))
+    markup.add(InlineKeyboardButton("📋 زر: نسخ المبلغ", callback_data="edit_txt_dep_btn_copy_amount"))
+    markup.add(InlineKeyboardButton("📋 زر: نسخ العنوان", callback_data="edit_txt_dep_btn_copy_wallet"))
+    markup.add(InlineKeyboardButton("📋 زر: نسخ الآيدي", callback_data="edit_txt_dep_btn_copy_id"))
+    markup.add(InlineKeyboardButton("🔍 زر: فحص الدفع", callback_data="edit_txt_dep_btn_check"))
+    markup.add(InlineKeyboardButton("❌ زر: إلغاء الدفع", callback_data="edit_txt_dep_btn_cancel"))
+    # 🆕 prompts وأخطاء الدفع
+    markup.add(InlineKeyboardButton("💡 رسالة طلب المبلغ (Prompt)", callback_data="edit_txt_dep_prompt_amount"))
+    markup.add(InlineKeyboardButton("❌ خطأ: ليس رقم", callback_data="edit_txt_dep_err_not_number"))
+    markup.add(InlineKeyboardButton("❌ خطأ: الحد الأدنى $1", callback_data="edit_txt_dep_err_min"))
+    markup.add(InlineKeyboardButton("❌ خطأ: الحد الأقصى $10K", callback_data="edit_txt_dep_err_max"))
+    markup.add(InlineKeyboardButton("❌ خطأ عام", callback_data="edit_txt_dep_err_general"))
+    markup.add(InlineKeyboardButton("❌ رسالة الإلغاء", callback_data="edit_txt_dep_cancelled"))
     markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_invite_txt"))
     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
@@ -10384,6 +10550,28 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("✅ رسالة إنشاء API ناجح", callback_data="edit_txt_api_created"))
     markup.add(InlineKeyboardButton("📖 رسالة كيف تتصل (API)", callback_data="edit_txt_api_howto"))
     markup.add(InlineKeyboardButton("🤖 لوق: Auto Buy API", callback_data="edit_txt_api_log"))
+    # 🆕 رسائل عامة (ناقصة)
+    markup.add(InlineKeyboardButton("🚫 رسالة المحظور (Banned)", callback_data="edit_txt_banned"))
+    markup.add(InlineKeyboardButton("📢 رسالة الانضمام للقناة", callback_data="edit_txt_must_join"))
+    markup.add(InlineKeyboardButton("👤 رسالة الملف الشخصي", callback_data="edit_txt_profile_txt"))
+    # 🆕 المنتجات والشراء
+    markup.add(InlineKeyboardButton("🎉 إشعار منتج جديد", callback_data="edit_txt_new_product"))
+    markup.add(InlineKeyboardButton("📦 رسالة نفاد الستوك", callback_data="edit_txt_out_stock"))
+    markup.add(InlineKeyboardButton("📜 رسالة لا يوجد سجل", callback_data="edit_txt_no_hist"))
+    markup.add(InlineKeyboardButton("📋 عنوان سجل المشتريات", callback_data="edit_txt_history_title"))
+    markup.add(InlineKeyboardButton("🔢 رسالة طلب الكمية", callback_data="edit_txt_qty_prompt"))
+    markup.add(InlineKeyboardButton("❌ خطأ: كمية غير صحيحة", callback_data="edit_txt_qty_invalid"))
+    markup.add(InlineKeyboardButton("❌ خطأ: كمية أكبر من المتاح", callback_data="edit_txt_qty_not_enough"))
+    # 🆕 رسائل العملات القديمة
+    markup.add(InlineKeyboardButton("🟡 رسالة دفع قديمة (Binance)", callback_data="edit_txt_dep_pay"))
+    markup.add(InlineKeyboardButton("🟢 رسالة دفع قديمة (USDT)", callback_data="edit_txt_dep_usdt"))
+    markup.add(InlineKeyboardButton("🔵 رسالة دفع قديمة (LTC)", callback_data="edit_txt_dep_ltc"))
+    # 🆕 رسائل الإيداع/المعاملات
+    markup.add(InlineKeyboardButton("⏳ رسالة جاري الفحص (كريبتو)", callback_data="edit_txt_crypto_checking"))
+    markup.add(InlineKeyboardButton("⏳ رسالة الإيداع معلق", callback_data="edit_txt_dep_pending"))
+    markup.add(InlineKeyboardButton("✅ رسالة الإيداع ناجح", callback_data="edit_txt_dep_success"))
+    markup.add(InlineKeyboardButton("❌ رسالة الإيداع فشل", callback_data="edit_txt_dep_fail"))
+    markup.add(InlineKeyboardButton("⚠️ رسالة معاملة مستخدمة", callback_data="edit_txt_tx_used"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -10405,10 +10593,10 @@ def ad_cms_btns_list(call):
     cat = call.data.replace("ad_cms_b_", "")
     
     btn_categories = {
-        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin'],
+        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin', 'btn_api', 'btn_check_sub'],
         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc'],
         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy'],
-        'shop': ['btn_gh', 'btn_gemini', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
+        'shop': ['btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
     }
     
     markup = InlineKeyboardMarkup(row_width=1)
@@ -10430,6 +10618,25 @@ def ad_edit_txt_prompt(call):
     
     # 🆕 شرح المتغيرات لكل نص (يساعد الأدمن)
     placeholders_info = {
+        'dep_msg_binance': (
+            "💡 <b>المتغيرات (3):</b>\n"
+            "<code>{0}</code> = المبلغ بالدولار (مثال: 10.0042)\n"
+            "<code>{1}</code> = الـ Binance ID (من الإعدادات)\n"
+            "<code>{2}</code> = الآيدي الخاص بالمستخدم (تيليجرام)\n\n"
+            "⚠️ <i>الآيدي {2} مهم لأنه يستخدم في خانة Remark/Notes — اذكره مرتين في النص (مرة للعرض، ومرة في الإرشاد).</i>"
+        ),
+        'dep_msg_crypto': (
+            "💡 <b>المتغيرات (5):</b>\n"
+            "<code>{0}</code> = إيموجي العملة (🟢🟡💎🔵)\n"
+            "<code>{1}</code> = اسم العملة (USDT TRC-20 / Toncoin / ...)\n"
+            "<code>{2}</code> = المبلغ بالدولار\n"
+            "<code>{3}</code> = نص المبلغ بالعملة (ممكن يكون فاضي)\n"
+            "<code>{4}</code> = عنوان المحفظة"
+        ),
+        'dep_prompt_amount': (
+            "💡 <b>متغير واحد (1):</b>\n"
+            "<code>{0}</code> = اسم طريقة الدفع (Binance Pay / USDT / ...)"
+        ),
         'invite_txt': (
             "💡 <b>المتغيرات في هذا النص (بالترتيب):</b>\n"
             "<code>{}</code> 1 = إجمالي الزيارات\n"
@@ -10603,19 +10810,12 @@ def ad_edit_txt_prompt(call):
         logger.error(f"Failed to send current text: {send_err}")
         bot.send_message(call.message.chat.id, "📝 النص الحالي غير قابل للعرض.")
     
-    # ثانياً: رسالة التعليمات (هذي آمنة لأن الـ HTML تحت سيطرتنا)
-    msg_text = (
-        f"━━━━━━━━━━━━━━━\n"
-        f"👇 <b>انسخ النص فوق، عدّل عليه، وأرسله لي الآن.</b>"
-        f"{info_block}\n\n"
-        f"<i>سيتم ترجمته للإنجليزي تلقائياً مع حماية الرموز والتنسيقات والأسطر!</i>\n\n"
-        f"💡 <i>لإلغاء العملية أرسل: <b>الغاء</b></i>"
-    )
+    # ثانياً: رسالة التعليمات (مختصرة)
+    msg_text = "👇 <b>أرسل النص الجديد</b> (مع الرموز/الإيموجيات/التنسيقات إن أردت)\n\n<i>للإلغاء: <b>الغاء</b></i>"
     try:
         msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
     except Exception:
-        # fallback بدون parse_mode
-        msg = bot.send_message(call.message.chat.id, "👇 أرسل النص الجديد. أرسل 'الغاء' للإلغاء.")
+        msg = bot.send_message(call.message.chat.id, "👇 أرسل النص الجديد. للإلغاء: الغاء")
     
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
@@ -10728,11 +10928,19 @@ def ad_save_custom_text(message, key):
 def ad_edit_btn_prompt(call):
     bot.answer_callback_query(call.id)
     key = call.data.replace("edit_btn_", "")
-    
+
     current_text, current_emoji = get_btn_data(call.from_user.id, key)
-    
-    msg_text = f"الزر الحالي: <code>{html.escape(current_text)}</code>\n\n👇 <b>أرسل الاسم الجديد للزر الآن. يمكنك إضافة (Premium Emoji) في رسالتك وسأقوم بالتقاطه وجعله أيقونة رسمية للزر!</b>\n(لإلغاء العملية أرسل: الغاء)"
-    msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
+
+    # نرسل النص الحالي للنسخ
+    try:
+        bot.send_message(call.message.chat.id, f"📋 الزر الحالي:\n{current_text}")
+    except: pass
+
+    msg = bot.send_message(
+        call.message.chat.id,
+        "👇 <b>أرسل اسم الزر الجديد</b> (مع إيموجي إن أردت)\n\n<i>للإلغاء: <b>الغاء</b></i>",
+        parse_mode="HTML"
+    )
     bot.register_next_step_handler(msg, ad_save_custom_btn, key)
 
 @safe_next_step
