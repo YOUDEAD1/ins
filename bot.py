@@ -1710,8 +1710,6 @@ _ALLOWED_LOCKED_CB_PREFIXES = (
     'binance_check_',       # زر فحص الدفع
     'copy_fb',              # fallback نسخ
 )
-# الأوامر/الكلمات المسموح بها (نصوص) أثناء القفل
-_ALLOWED_LOCKED_TEXTS = ('الغاء', 'cancel', 'إلغاء', 'اغلاق', '/cancel')
 
 
 def _check_locked(uid):
@@ -1723,6 +1721,34 @@ def _check_locked(uid):
         return False
     except Exception:
         return False
+
+
+def send_payment_lock_warning(uid, lang=None):
+    """تنبيه دفع نشط مع زر الإلغاء"""
+    if not lang:
+        try: lang = get_lang(uid)
+        except: lang = 'ar'
+    
+    warn = (
+        "⚠️ <b>تنبيه: لديك عملية دفع معلقة!</b>\n\n"
+        "لا يمكنك القيام بأي إجراء آخر في البوت حتى تقوم بإتمام عملية الدفع الحالية أو إلغائها.\n\n"
+        "💡 <b>للإلغاء والعودة لاستخدام البوت:</b>\n"
+        "اضغط على الزر أدناه مباشرة 👇"
+        if lang == 'ar' else
+        "⚠️ <b>Warning: You have a pending payment!</b>\n\n"
+        "You cannot perform any other actions in the bot until you complete or cancel the current payment.\n\n"
+        "💡 <b>To cancel and return to using the bot:</b>\n"
+        "Press the button below 👇"
+    )
+    
+    markup = InlineKeyboardMarkup()
+    btn_text = "❌ إلغاء عملية الدفع" if lang == 'ar' else "❌ Cancel Payment"
+    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    
+    try:
+        bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        pass
 
 
 # ─── الحارس الأول: callbacks ───
@@ -1743,6 +1769,7 @@ def _deposit_lock_guard_callback(call):
             "⚠️ You have an active payment!\n\nPress ❌ Cancel first."
         )
         bot.answer_callback_query(call.id, warn, show_alert=True)
+        send_payment_lock_warning(uid, l)
     except Exception:
         pass
 
@@ -1750,26 +1777,10 @@ def _deposit_lock_guard_callback(call):
 # ─── الحارس الثاني: الرسائل النصية ───
 @bot.message_handler(
     func=lambda m: _check_locked(m.from_user.id)
-                   and (m.text or '').strip().lower() not in _ALLOWED_LOCKED_TEXTS
-                   and not (m.text or '').strip().replace('.', '').replace(',', '').replace('$', '').isdigit()
 )
 def _deposit_lock_guard_message(message):
-    """يبلوك أي رسالة (غير رقم أو إلغاء) للمستخدم اللي في عملية دفع"""
-    try:
-        uid = message.from_user.id
-        l = 'ar'
-        try: l = get_lang(uid)
-        except: pass
-        warn = (
-            "⚠️ <b>أنت في عملية دفع نشطة!</b>\n\n"
-            "اكتب <b>إلغاء</b> أو اضغط زر ❌ إلغاء عشان تخرج."
-            if l == 'ar' else
-            "⚠️ <b>You have an active payment!</b>\n\n"
-            "Type <b>cancel</b> or press the ❌ Cancel button to exit."
-        )
-        bot.send_message(uid, warn, parse_mode="HTML")
-    except Exception:
-        pass
+    """يبلوك أي رسالة للمستخدم اللي في عملية دفع"""
+    send_payment_lock_warning(message.from_user.id)
 
 
 # 🛡 دالة فحص صلاحية الأدمن (تُستخدم بكل دوال الأدمن)
@@ -6698,6 +6709,11 @@ def cancel_deposit_handler(call):
     # 🔓 فك القفل
     unlock_deposit(uid)
     
+    # مسح أي step handler معلّق
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id=uid)
+    except: pass
+    
     if l == 'ar':
         msg = "❌ <b>تم إلغاء عملية الإيداع.</b>\n\nيمكنك البدء من جديد في أي وقت."
     else:
@@ -6894,9 +6910,12 @@ def dep_binance_ui(call):
         )
     except Exception: pass
 
-    # نص قابل للتعديل من admin
+    # نص قابل للتعديل من admin مع إضافة زر إلغاء عملية الدفع
     msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
-    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    markup = InlineKeyboardMarkup()
+    btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
+    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_binance_deposit_amount)
 
 
@@ -6906,27 +6925,44 @@ def ask_binance_deposit_amount(message):
     uid = message.from_user.id
     if is_user_banned(uid): return
 
-    if not message.text or message.text.startswith('/'):
-        return
+    valid_number = False
+    base_amount = 0.0
+    if message.text and not message.text.startswith('/'):
+        try:
+            base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+            valid_number = True
+        except ValueError:
+            pass
 
-    if message.text.lower() in ['الغاء', 'cancel', 'إلغاء']:
-        try: unlock_deposit(uid)
-        except: pass
-        bot.send_message(uid, get_text(uid, 'dep_cancelled'), parse_mode="HTML")
-        return
-
-    try:
-        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
-    except ValueError:
-        bot.send_message(uid, get_text(uid, 'dep_err_not_number'), parse_mode="HTML")
+    if not valid_number:
+        # إذا كتب إلغاء أو أي نص غير رقمي، نعرض رسالة تنبيه مع الزر ونبقى في نفس الخطوة
+        send_payment_lock_warning(uid)
+        msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
 
     if base_amount < 1:
         bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML")
+        msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
 
     if base_amount > 10000:
         bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML")
+        msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
 
     # نولّد مبلغ فريد بـ 4 خانات عشرية = 9000 احتمال
@@ -7973,7 +8009,7 @@ def start_amount_protected_deposit(call, coin):
         )
     except Exception: pass
 
-    # رسالة طلب المبلغ — قابلة للتعديل من admin
+    # رسالة طلب المبلغ — قابلة للتعديل من admin مع إضافة زر إلغاء عملية الدفع
     coin_name = {
         'USDT': 'USDT (TRC-20)',
         'USDT_BEP20': 'USDT (BEP-20)',
@@ -7982,7 +8018,10 @@ def start_amount_protected_deposit(call, coin):
     }.get(coin, coin)
 
     msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
-    msg = bot.send_message(uid, msg_text, parse_mode="HTML")
+    markup = InlineKeyboardMarkup()
+    btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
+    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_deposit_amount, coin)
 
 
@@ -7992,38 +8031,64 @@ def ask_deposit_amount(message, coin):
     uid = message.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
-    
-    if not message.text:
-        bot.send_message(uid, bil(uid, "❌ يجب إرسال رقم.", "❌ Please send a number."), parse_mode="HTML")
+
+    valid_number = False
+    base_amount = 0.0
+    if message.text and not message.text.startswith('/'):
+        try:
+            base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+            valid_number = True
+        except ValueError:
+            pass
+
+    if not valid_number:
+        # إذا كتب إلغاء أو أي نص غير رقمي، نعرض رسالة تنبيه مع الزر ونبقى في نفس الخطوة
+        send_payment_lock_warning(uid, l)
+        coin_name = {
+            'USDT': 'USDT (TRC-20)',
+            'USDT_BEP20': 'USDT (BEP-20)',
+            'TON': 'Toncoin (TON)',
+            'LTC': 'Litecoin (LTC)'
+        }.get(coin, coin)
+        msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
-    
-    text = message.text.strip()
-    
-    # 🛡 فحص أوامر البوت - نوقف بصمت
-    if text.startswith('/'):
-        return
-    
-    # إلغاء
-    if text.lower() in ['الغاء', 'cancel', 'إلغاء', 'اغلاق']:
-        try: unlock_deposit(uid)
-        except: pass
-        bot.send_message(uid, get_text(uid, 'dep_cancelled'))
-        return
-    
-    # parsing المبلغ
-    try:
-        base_amount = float(text.replace(',', '.').replace('$', ''))
-    except ValueError:
-        bot.send_message(uid, get_text(uid, 'dep_err_not_number'), parse_mode="HTML")
-        return
-    
-    # validation
+
+    # التحقق من الحدود
     if base_amount < 1:
         bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML")
+        coin_name = {
+            'USDT': 'USDT (TRC-20)',
+            'USDT_BEP20': 'USDT (BEP-20)',
+            'TON': 'Toncoin (TON)',
+            'LTC': 'Litecoin (LTC)'
+        }.get(coin, coin)
+        msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
-    
+
     if base_amount > 10000:
         bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML")
+        coin_name = {
+            'USDT': 'USDT (TRC-20)',
+            'USDT_BEP20': 'USDT (BEP-20)',
+            'TON': 'Toncoin (TON)',
+            'LTC': 'Litecoin (LTC)'
+        }.get(coin, coin)
+        msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
+        markup = InlineKeyboardMarkup()
+        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
+        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
     
     # نولّد المبلغ الفريد
