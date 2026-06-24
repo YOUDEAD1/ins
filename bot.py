@@ -3241,6 +3241,12 @@ LANG = {
         'dep_err_max': "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.",
         'dep_err_general': "❌ حدث خطأ. حاول مرة ثانية.",
         'dep_cancelled': "❌ تم الإلغاء.",
+        # 🆕 المفاتيح الناقصة (كانت تطلع فاضية)
+        'wallet_header': "💼 <b>محفظتك</b>\n\n👤 <b>الأيدي:</b> <code>{0}</code>\n💰 <b>الرصيد:</b> <b>${1:.2f}</b>",
+        'auto_deposit_msg': "✅ <b>تم استلام إيداعك بنجاح!</b>\n\n💰 <b>المبلغ:</b> <b>${0}</b>\n💼 <b>رصيدك الجديد:</b> <b>${1:.2f}</b>\n🔄 <b>الطريقة:</b> {2}",
+        'wrong_amount_msg': "⚠️ <b>المبلغ غير صحيح!</b>\n\nيرجى إرسال نفس المبلغ الفريد المُحدد لك بالضبط.\nلو حدث خطأ، تواصل مع الإدارة.",
+        'processing_msg': "⏳ <b>جاري معالجة طلبك...</b>\n\nانتظر قليلاً.",
+        'terms_content': "📜 <b>شروط الاستخدام</b>\n\n━━━━━━━━━━━━━━\n• جميع المنتجات تُسلَّم تلقائياً بعد الدفع.\n• لا يوجد استرداد بعد تسليم الكود.\n• المسؤولية على المستخدم في حفظ الأكواد.\n• مخالفة الشروط تؤدي للحظر.\n\n<i>باستخدامك للبوت فأنت توافق على هذه الشروط.</i>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nأرسل المبلغ إلى الـ ID التالي:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ أرسل <b>رقم العملية (Order ID)</b> كنص هنا.",
         'dep_usdt': "🟢 <b>شحن عبر USDT (TRC-20)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
         'dep_ltc': "🔵 <b>شحن عبر Litecoin (LTC)</b>\n\nالمحفظة:\n<code>{}</code>\n\n⚠️ أرسل <b>الهاش (TxID)</b> كنص هنا.",
@@ -3346,6 +3352,12 @@ LANG = {
         'dep_err_max': "❌ Amount too large. Max: <b>$10,000</b>\n\nFor large deposits, contact admin.",
         'dep_err_general': "❌ An error occurred. Please try again.",
         'dep_cancelled': "❌ Cancelled.",
+        # 🆕 Missing keys (were showing empty)
+        'wallet_header': "💼 <b>Your Wallet</b>\n\n👤 <b>ID:</b> <code>{0}</code>\n💰 <b>Balance:</b> <b>${1:.2f}</b>",
+        'auto_deposit_msg': "✅ <b>Deposit received!</b>\n\n💰 <b>Amount:</b> <b>${0}</b>\n💼 <b>New balance:</b> <b>${1:.2f}</b>\n🔄 <b>Method:</b> {2}",
+        'wrong_amount_msg': "⚠️ <b>Wrong amount!</b>\n\nPlease send the exact unique amount assigned to you.\nIf there's a mistake, contact admin.",
+        'processing_msg': "⏳ <b>Processing your request...</b>\n\nPlease wait.",
+        'terms_content': "📜 <b>Terms of Service</b>\n\n━━━━━━━━━━━━━━\n• All products are delivered automatically after payment.\n• No refunds after the code is delivered.\n• User is responsible for saving codes.\n• Violating these terms leads to a ban.\n\n<i>By using this bot you agree to these terms.</i>",
         'dep_pay': "🟡 <b>Binance Pay</b>\n\nSend amount to ID:\n🆔 Binance ID: <code>{}</code>\n\n⚠️ Send <b>Order ID</b> here as text.",
         'dep_usdt': "🟢 <b>USDT Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
         'dep_ltc': "🔵 <b>Litecoin (LTC) Deposit</b>\n\nSend to address:\n<code>{}</code>\n\n⚠️ Send <b>TxID (Hash)</b> here as text.",
@@ -10643,9 +10655,58 @@ def ad_cms_btns_list(call):
 def ad_edit_txt_prompt(call):
     bot.answer_callback_query(call.id)
     key = call.data.replace("edit_txt_", "")
-    
-    current_val = db.custom_texts.find_one({'lang': 'ar', 'key': key})
-    current_text = current_val['value'] if current_val else LANG['ar'].get(key, "")
+
+    # 🔧 جلب النص الحالي مع fallbacks متعددة
+    current_text = ""
+    source = "none"
+
+    # 1) DB ar
+    try:
+        cv = db.custom_texts.find_one({'lang': 'ar', 'key': key})
+        if cv and cv.get('value') and str(cv['value']).strip():
+            current_text = str(cv['value'])
+            source = "db_ar"
+    except Exception as _ce:
+        logger.debug(f"DB ar read err for {key}: {_ce}")
+
+    # 2) DB en (لو ar فاضي)
+    if not current_text:
+        try:
+            cv = db.custom_texts.find_one({'lang': 'en', 'key': key})
+            if cv and cv.get('value') and str(cv['value']).strip():
+                current_text = str(cv['value'])
+                source = "db_en"
+        except Exception as _ce:
+            logger.debug(f"DB en read err for {key}: {_ce}")
+
+    # 3) LANG ar
+    if not current_text:
+        v = LANG.get('ar', {}).get(key, '')
+        if v and str(v).strip():
+            current_text = str(v)
+            source = "lang_ar"
+
+    # 4) LANG en
+    if not current_text:
+        v = LANG.get('en', {}).get(key, '')
+        if v and str(v).strip():
+            current_text = str(v)
+            source = "lang_en"
+
+    logger.info(f"edit_txt: key={key} source={source} len={len(current_text)}")
+
+    # لو ما لقينا أي نص — نوقف ونبيّن للأدمن بوضوح
+    if not current_text:
+        bot.send_message(
+            call.message.chat.id,
+            f"⚠️ <b>المفتاح فاضي تماماً (لا في DB ولا في LANG):</b>\n"
+            f"<code>{html.escape(key)}</code>\n\n"
+            f"أرسل النص الجديد الآن وراح أحفظه كقيمة جديدة:",
+            parse_mode="HTML"
+        )
+        # نسجّل step handler عشان يقدر يحفظ نص جديد
+        bot.register_next_step_handler_by_chat_id(call.message.chat.id, ad_save_custom_text, key)
+        return    # 🔧 الـ return المفقود اللي كان يسبب الـ preview الفاضي!
     
     # 🆕 شرح المتغيرات لكل نص (يساعد الأدمن)
     placeholders_info = {
@@ -10822,24 +10883,46 @@ def ad_edit_txt_prompt(call):
     # المشكلة: لو النص يحتوي على <u> أو tag غير متوازن، Telegram يرفضه
     # الحل: نرسله كرسالة plain text (بدون parse_mode أصلاً)
     # 1) المعاينة بالتنسيق
+    preview_sent = False
     try:
         bot.send_message(
             call.message.chat.id,
             f"👁 <b>Preview:</b>\n\n{current_text}",
             parse_mode="HTML"
         )
-    except:
-        pass
-    
-    # 2) النص الخام للنسخ
+        preview_sent = True
+    except Exception as _pe:
+        logger.debug(f"HTML preview failed: {_pe}")
+        # fallback: ابعتها بدون parse_mode عشان يشوف النص كاملاً
+        try:
+            bot.send_message(
+                call.message.chat.id,
+                f"👁 Preview (raw — HTML غير صالح):\n\n{current_text}"
+            )
+            preview_sent = True
+        except Exception as _pe2:
+            logger.debug(f"Plain preview failed: {_pe2}")
+
+    # 2) النص الخام للنسخ — نقسّمه لو طويل
     try:
-        bot.send_message(
-            call.message.chat.id, 
-            f"📋 انسخ وعدّل:\n\n{current_text}"
-        )
+        # تيليجرام يحدّد الرسالة بـ 4096 حرف
+        body = current_text
+        prefix = "📋 انسخ وعدّل:\n\n"
+        # لو طويل جداً، نرسله بدون البرفكس عشان ما نخسر حروف
+        if len(body) + len(prefix) > 4000:
+            bot.send_message(call.message.chat.id, "📋 انسخ وعدّل النص التالي:")
+            # قسّمه على عدة رسائل
+            for i in range(0, len(body), 3900):
+                bot.send_message(call.message.chat.id, body[i:i+3900])
+        else:
+            bot.send_message(call.message.chat.id, f"{prefix}{body}")
     except Exception as send_err:
         logger.error(f"Failed to send current text: {send_err}")
-        bot.send_message(call.message.chat.id, "📝 النص الحالي غير قابل للعرض.")
+        # آخر محاولة: ابعت بدون أي formatting
+        try:
+            bot.send_message(call.message.chat.id, current_text[:4000])
+        except:
+            bot.send_message(call.message.chat.id, f"📝 النص الحالي للمفتاح: {key}")
     
     # ثانياً: رسالة التعليمات (مختصرة)
     msg_text = "👇 <b>أرسل النص الجديد</b> (مع الرموز/الإيموجيات/التنسيقات إن أردت)\n\n<i>للإلغاء: <b>الغاء</b></i>"
