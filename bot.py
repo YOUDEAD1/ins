@@ -3167,6 +3167,21 @@ def _copy_button(label, text_to_copy):
         return InlineKeyboardButton(clean_label, callback_data="copy_fb")
 
 
+def _make_btn(label, callback_data=None, url=None, style=None):
+    """
+    drop-in replacement لـ InlineKeyboardButton ينظّف HTML تلقائياً
+    ويستخرج Premium Emoji كأيقونة (icon_custom_emoji_id).
+    استخدمه بدل InlineKeyboardButton لما الـ label يجي من get_text.
+    """
+    clean_label, emoji_id = _parse_btn_label(label)
+    kwargs = {'text': clean_label}
+    if callback_data: kwargs['callback_data'] = callback_data
+    if url: kwargs['url'] = url
+    if style: kwargs['style'] = style
+    if emoji_id: kwargs['icon_custom_emoji_id'] = emoji_id
+    return CustomInlineButton(**kwargs)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "copy_fb")
 def _copy_fb_handler(call):
     """Fallback لو CopyTextButton مش متاح"""
@@ -3225,11 +3240,12 @@ LANG = {
             "⏰ صلاحية: <b>30 دقيقة</b>\n"
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
-        # {0}=emoji، {1}=اسم العملة، {2}=المبلغ بالدولار، {3}=نص المبلغ بالعملة (ممكن فاضي)، {4}=العنوان
+        # {0}=emoji، {1}=اسم العملة الكامل، {2}=المبلغ بالدولار، {3}=رمز العملة القصير (USDT/TON/LTC)، {4}=المبلغ بالعملة، {5}=العنوان
         'dep_msg_crypto': (
             "{0} <b>{1}</b>\n\n"
-            "💰 <b>المبلغ:</b>\n<code>${2}</code>{3}\n\n"
-            "📬 <b>العنوان:</b>\n<code>{4}</code>\n\n"
+            "💰 <b>المبلغ بالدولار:</b>\n<code>${2}</code>\n\n"
+            "💎 <b>المبلغ بـ {3}:</b>\n<code>{4}</code> {3}\n\n"
+            "📬 <b>العنوان:</b>\n<code>{5}</code>\n\n"
             "⏰ صلاحية: <b>30 دقيقة</b>\n"
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
@@ -3252,6 +3268,9 @@ LANG = {
         'dep_err_max': "❌ المبلغ كبير جداً. الحد الأقصى: <b>$10,000</b>\n\nللإيداعات الكبيرة، تواصل مع الإدارة.",
         'dep_err_general': "❌ حدث خطأ. حاول مرة ثانية.",
         'dep_cancelled': "❌ تم الإلغاء.",
+        # 🆕 سطر المبلغ بالعملة الكريبتو (يظهر داخل رسالة الدفع)
+        # {0} = اسم العملة (USDT/TON/LTC) — {1} = المبلغ بالعملة
+        'dep_crypto_amount_line': "\n💰 <b>المبلغ بـ {0}:</b> <code>{1}</code> {0}",
         # 🆕 المفاتيح الناقصة (كانت تطلع فاضية)
         'wallet_header': "💼 <b>محفظتك</b>\n\n👤 <b>الأيدي:</b> <code>{0}</code>\n💰 <b>الرصيد:</b> <b>${1:.2f}</b>",
         'auto_deposit_msg': "✅ <b>تم استلام إيداعك بنجاح!</b>\n\n💰 <b>المبلغ:</b> <b>${0}</b>\n💼 <b>رصيدك الجديد:</b> <b>${1:.2f}</b>\n🔄 <b>الطريقة:</b> {2}",
@@ -3336,11 +3355,12 @@ LANG = {
             "⏰ Valid: <b>30 minutes</b>\n"
             "✨ <i>Balance added automatically</i>"
         ),
-        # {0}=emoji, {1}=coin name, {2}=USD amount, {3}=crypto amount text (may be empty), {4}=wallet
+        # {0}=emoji, {1}=full coin name, {2}=USD amount, {3}=short coin (USDT/TON/LTC), {4}=crypto amount, {5}=wallet
         'dep_msg_crypto': (
             "{0} <b>{1}</b>\n\n"
-            "💰 <b>Amount:</b>\n<code>${2}</code>{3}\n\n"
-            "📬 <b>Address:</b>\n<code>{4}</code>\n\n"
+            "💰 <b>Amount in USD:</b>\n<code>${2}</code>\n\n"
+            "💎 <b>Amount in {3}:</b>\n<code>{4}</code> {3}\n\n"
+            "📬 <b>Address:</b>\n<code>{5}</code>\n\n"
             "⏰ Valid: <b>30 minutes</b>\n"
             "✨ <i>Balance added automatically</i>"
         ),
@@ -3363,6 +3383,9 @@ LANG = {
         'dep_err_max': "❌ Amount too large. Max: <b>$10,000</b>\n\nFor large deposits, contact admin.",
         'dep_err_general': "❌ An error occurred. Please try again.",
         'dep_cancelled': "❌ Cancelled.",
+        # 🆕 Crypto amount line (inside deposit message)
+        # {0} = coin name (USDT/TON/LTC) — {1} = crypto amount
+        'dep_crypto_amount_line': "\n💰 <b>Amount in {0}:</b> <code>{1}</code> {0}",
         # 🆕 Missing keys (were showing empty)
         'wallet_header': "💼 <b>Your Wallet</b>\n\n👤 <b>ID:</b> <code>{0}</code>\n💰 <b>Balance:</b> <b>${1:.2f}</b>",
         'auto_deposit_msg': "✅ <b>Deposit received!</b>\n\n💰 <b>Amount:</b> <b>${0}</b>\n💼 <b>New balance:</b> <b>${1:.2f}</b>\n🔄 <b>Method:</b> {2}",
@@ -6989,11 +7012,11 @@ def ask_binance_deposit_amount(message):
     cancel_markup.add(
         _copy_button(get_text(uid, 'dep_btn_copy_id'), str(uid))
     )
-    cancel_markup.add(InlineKeyboardButton(
+    cancel_markup.add(_make_btn(
         get_text(uid, 'dep_btn_check'),
         callback_data=f"binance_check_{uid}"
     ))
-    cancel_markup.add(InlineKeyboardButton(
+    cancel_markup.add(_make_btn(
         get_text(uid, 'dep_btn_cancel'),
         callback_data="cancel_deposit"
     ))
@@ -7655,8 +7678,9 @@ def _binance_pay_request():
 
 def check_binance_pay_auto():
     """
-    🔍 يفحص Binance Pay كل 10 ثواني بالمبلغ الفريد.
-    المستخدم يحوّل المبلغ الفريد → البوت يطابقه مع pending_deposits → يضيف الرصيد.
+    🔍 يفحص Binance Pay كل 10 ثواني.
+    1️⃣ يطابق بالمبلغ الفريد (لو المستخدم بدأ deposit flow)
+    2️⃣ يطابق بالـ Remark/Notes (لو المستخدم حط user_id مباشرة بدون deposit)
     """
     try:
         if not BINANCE_API_KEY or not BINANCE_API_SECRET:
@@ -7669,23 +7693,13 @@ def check_binance_pay_auto():
         
         if not transactions:
             return
-        
-        # نشيك إن في pending لـ BINANCE قبل ما نكلّم API
-        pending_count = db.pending_deposits.count_documents({
-            'coin': 'BINANCE',
-            'status': 'pending',
-            'expires_at': {'$gt': int(time.time())}
-        })
-        if pending_count == 0:
-            return
 
         current_time_ms = int(time.time() * 1000)
         cutoff_ms = current_time_ms - (2 * 60 * 60 * 1000)  # آخر ساعتين
 
         for tx in transactions:
             try:
-                # نفضّل orderId الرقمي (مثل 433332644536672256)
-                # على transactionId الحروفي (مثل pa223f41nn6s7111a)
+                # نفضّل orderId الرقمي
                 order_id = str(tx.get('orderId') or '').strip()
                 trans_id = str(tx.get('transactionId') or tx.get('bizOrderNo') or '').strip()
                 
@@ -7709,22 +7723,80 @@ def check_binance_pay_auto():
                 if amount <= 0:
                     continue
 
-                # 🛡 نطابق بالمبلغ الفريد (tolerance صغير جداً = 0.0001)
+                # ─── 1️⃣ المسار الأول: مطابقة بالمبلغ الفريد ───
                 pending = find_pending_deposit_for_amount(amount, 'BINANCE', tolerance=0.0001)
-                if not pending:
+                if pending:
+                    uid = pending['user_id']
+                    base_amount = float(pending.get('base_amount_usd', amount))
+
+                    user = db.users.find_one({'user_id': uid})
+                    if not user or user.get('is_banned') == 1:
+                        continue
+
+                    logger.info(f"✅ Binance Pay AMOUNT MATCH: user {uid} amount=${amount:.4f} → base=${base_amount:.2f}")
+                    success = auto_credit_from_pending(pending, tx_id_norm, "Binance Pay")
+                    if success:
+                        logger.info(f"✅ Binance Pay credited (amount): user {uid} ${base_amount:.2f}")
+                    continue  # خلصنا هالـ tx
+
+                # ─── 2️⃣ المسار الثاني: مطابقة بالـ Remark/Notes ───
+                # نجمع كل الحقول النصية اللي ممكن تحتوي الـ remark
+                remark_candidates = [
+                    str(tx.get('remark') or ''),
+                    str(tx.get('note') or ''),
+                    str(tx.get('orderTitle') or ''),
+                    str(tx.get('memo') or ''),
+                    str(tx.get('description') or ''),
+                    str((tx.get('fundsDetail') or [{}])[0].get('remark', '') if tx.get('fundsDetail') else ''),
+                ]
+                combined_remark = ' '.join(c for c in remark_candidates if c).strip()
+                
+                if not combined_remark:
                     continue
 
-                uid = pending['user_id']
-                base_amount = float(pending.get('base_amount_usd', amount))
-
-                user = db.users.find_one({'user_id': uid})
-                if not user or user.get('is_banned') == 1:
+                # نبحث عن user_id (5-12 خانة) في الـ remark
+                uid_matches = re.findall(r'\b(\d{5,12})\b', combined_remark)
+                if not uid_matches:
                     continue
 
-                logger.info(f"✅ Binance Pay MATCH: user {uid} amount=${amount:.4f} → base=${base_amount:.2f}")
-                success = auto_credit_from_pending(pending, tx_id_norm, "Binance Pay")
-                if success:
-                    logger.info(f"✅ Binance Pay credited: user {uid} ${base_amount:.2f}")
+                # نجرّب كل user_id محتمل (نأخذ أول واحد موجود في DB)
+                target_uid = None
+                for potential_uid_str in uid_matches:
+                    try:
+                        potential_uid = int(potential_uid_str)
+                    except: continue
+                    
+                    user = db.users.find_one({'user_id': potential_uid})
+                    if user and user.get('is_banned') != 1:
+                        target_uid = potential_uid
+                        break
+
+                if not target_uid:
+                    continue
+
+                # 🛡 atomic: نحجز الـ tx قبل الإضافة
+                try:
+                    db.used_transactions.insert_one({
+                        'transaction_id': tx_id_norm,
+                        'user_id': target_uid,
+                        'amount': amount,
+                        'method': 'Binance Pay (Auto Remark)',
+                        'used_at': datetime.datetime.utcnow(),
+                        'remark': combined_remark[:200]
+                    })
+                except Exception as _de:
+                    # duplicate key — تم حجزه من thread آخر
+                    logger.debug(f"tx already claimed: {_de}")
+                    continue
+
+                logger.info(f"✅ Binance Pay REMARK MATCH: user {target_uid} amount=${amount:.4f} remark={combined_remark[:80]!r}")
+                
+                # نضيف الرصيد للمستخدم
+                user_lang = (db.users.find_one({'user_id': target_uid}) or {}).get('language', 'ar')
+                try:
+                    credit_user(target_uid, amount, tx_id_norm, user_lang, "Binance Pay (Auto Notes)")
+                except Exception as ce:
+                    logger.error(f"credit_user fail in remark match: {ce}")
 
             except Exception as tx_err:
                 logger.debug(f"Binance Pay tx error: {tx_err}")
@@ -8115,31 +8187,33 @@ def ask_deposit_amount(message, coin):
     }.get(coin, coin)
     
     # نحسب المبلغ بعملة الكريبتو
-    crypto_amount_text = ""
-    crypto_amount_value = ""  # للنسخ
+    crypto_amount_value = ""
+    coin_short = ""
     try:
         if coin == 'LTC':
             ltc_price = get_ltc_price_usd()
             crypto_amount = unique_amount / ltc_price
             crypto_amount_value = f"{crypto_amount:.8f}"
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ LTC:</b> <code>{crypto_amount_value}</code> LTC"
+            coin_short = "LTC"
         elif coin == 'TON':
             ton_price = get_ton_price_usd()
             crypto_amount = unique_amount / ton_price
             crypto_amount_value = f"{crypto_amount:.6f}"
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ TON:</b> <code>{crypto_amount_value}</code> TON"
+            coin_short = "TON"
         elif coin in ['USDT', 'USDT_BEP20']:
             crypto_amount_value = f"{unique_amount:.4f}"
-            crypto_amount_text = f"\n💰 <b>المبلغ بـ USDT:</b> <code>{crypto_amount_value}</code> USDT"
+            coin_short = "USDT"
     except Exception: pass
     
     # رسالة التعليمات
     coin_emoji = {'USDT': '🟢', 'USDT_BEP20': '🟡', 'TON': '💎', 'LTC': '🔵'}.get(coin, '💰')
 
     # نص قابل للتعديل من إعدادات الأدمن (key: dep_msg_crypto)
+    # {0}=emoji {1}=اسم كامل {2}=USD {3}=رمز قصير {4}=مبلغ بالعملة {5}=العنوان
     msg_text = get_text(
         uid, 'dep_msg_crypto',
-        coin_emoji, coin_name, f"{unique_amount:.6f}", crypto_amount_text, wallet
+        coin_emoji, coin_name, f"{unique_amount:.6f}",
+        coin_short, crypto_amount_value, wallet
     )
 
     cancel_markup = InlineKeyboardMarkup(row_width=2)
@@ -8154,7 +8228,7 @@ def ask_deposit_amount(message, coin):
         cancel_markup.add(
             _copy_button(f"📋 {crypto_amount_value} {coin_short}", crypto_amount_value)
         )
-    cancel_markup.add(InlineKeyboardButton(
+    cancel_markup.add(_make_btn(
         get_text(uid, 'dep_btn_cancel'),
         callback_data="cancel_deposit"
     ))
@@ -10783,12 +10857,13 @@ def ad_edit_txt_prompt(call):
             "⚠️ <i>الآيدي {2} مهم لأنه يستخدم في خانة Remark/Notes — اذكره مرتين في النص (مرة للعرض، ومرة في الإرشاد).</i>"
         ),
         'dep_msg_crypto': (
-            "💡 <b>المتغيرات (5):</b>\n"
+            "💡 <b>المتغيرات (6):</b>\n"
             "<code>{0}</code> = إيموجي العملة (🟢🟡💎🔵)\n"
-            "<code>{1}</code> = اسم العملة (USDT TRC-20 / Toncoin / ...)\n"
+            "<code>{1}</code> = اسم العملة الكامل (USDT TRC-20 / Toncoin / ...)\n"
             "<code>{2}</code> = المبلغ بالدولار\n"
-            "<code>{3}</code> = نص المبلغ بالعملة (ممكن يكون فاضي)\n"
-            "<code>{4}</code> = عنوان المحفظة"
+            "<code>{3}</code> = رمز العملة القصير (USDT / TON / LTC)\n"
+            "<code>{4}</code> = المبلغ بالعملة (مثال: 1.0068)\n"
+            "<code>{5}</code> = عنوان المحفظة"
         ),
         'dep_prompt_amount': (
             "💡 <b>متغير واحد (1):</b>\n"
