@@ -10976,30 +10976,39 @@ def ad_check_tx_handle(message):
             
             # نجيب اسم المستخدم
             user_doc = db.users.find_one({'user_id': user_id}) if isinstance(user_id, int) else None
-            user_name = ''
+            username = ''
+            first_name = ''
             if user_doc:
-                user_name = user_doc.get('username') or user_doc.get('first_name') or ''
-            
+                username = user_doc.get('username', '') or ''
+                first_name = user_doc.get('first_name', '') or ''
+
             # نجيب رصيده الحالي
             user_balance = float(user_doc.get('balance', 0)) if user_doc else 0
-            
+
+            # 🆕 رابط قابل للضغط حتى لو ما عنده يوزر (tg://user?id=...)
+            display_name = first_name or username or str(user_id)
+            user_link = f'<a href="tg://user?id={user_id}">{html.escape(display_name)}</a>'
+
             detail = (
                 f"━━━ #{i} ━━━\n"
                 f"🆔 <b>TX:</b> <code>{html.escape(str(tx_id))}</code>\n"
-                f"👤 <b>User ID:</b> <code>{html.escape(str(user_id))}</code>"
+                f"👤 <b>المستخدم:</b> {user_link}\n"
+                f"🔢 <b>User ID:</b> <code>{user_id}</code>"
             )
-            if user_name:
-                detail += f" ({html.escape(user_name)})"
+            # نضيف اليوزر لو موجود (قابل للضغط أيضاً)
+            if username:
+                detail += f"\n📱 <b>Username:</b> <a href=\"https://t.me/{html.escape(username)}\">@{html.escape(username)}</a>"
             detail += (
                 f"\n💰 <b>المبلغ:</b> <b>${float(amount):.4f}</b>\n"
-                f"💼 <b>الرصيد الحالي للمستخدم:</b> <b>${user_balance:.2f}</b>\n"
+                f"💼 <b>الرصيد الحالي:</b> <b>${user_balance:.2f}</b>\n"
                 f"🔄 <b>الطريقة:</b> {html.escape(str(method))}\n"
                 f"📅 <b>الوقت:</b> {str(used_at)[:19]}"
             )
             if remark:
                 detail += f"\n📝 <b>Note:</b> <code>{html.escape(str(remark)[:200])}</code>"
-            
-            bot.send_message(uid, detail, parse_mode="HTML")
+
+            # disable_web_page_preview عشان رابط t.me ما يفتح preview كبير
+            bot.send_message(uid, detail, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as fe:
             bot.send_message(uid, f"❌ Error formatting result #{i}: {fe}")
 
