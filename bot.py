@@ -2442,7 +2442,7 @@ def _send_referral_spam_alert(referrer_id, count):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_ban_"))
 def refspam_ban_handler(call):
     """حظر المستخدم"""
-    if not is_admin(call.from_user.id):
+    if not _is_admin_check(call.from_user.id):
         try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
         except: pass
         return
@@ -2475,7 +2475,7 @@ def refspam_ban_handler(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_view_"))
 def refspam_view_handler(call):
     """عرض آخر إحالات للمستخدم"""
-    if not is_admin(call.from_user.id):
+    if not _is_admin_check(call.from_user.id):
         try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
         except: pass
         return
@@ -2537,7 +2537,7 @@ def refspam_view_handler(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_ok_"))
 def refspam_ok_handler(call):
     """تجاهل الإنذار — مش spam"""
-    if not is_admin(call.from_user.id):
+    if not _is_admin_check(call.from_user.id):
         try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
         except: pass
         return
@@ -8073,7 +8073,7 @@ def cmd_binance_debug(message):
     """
     uid = message.from_user.id
     try:
-        if not is_admin(uid):
+        if not _is_admin_check(uid):
             return
     except: return
     
@@ -10876,7 +10876,7 @@ def ad_check_tx_handle(message):
     uid = message.from_user.id
     logger.info(f"[CHECK_TX] received from admin {uid}: text={(message.text or '')[:50]!r}")
 
-    if not is_admin(uid):
+    if not _is_admin_check(uid):
         logger.warning(f"[CHECK_TX] non-admin {uid} hit the handler")
         return
     
