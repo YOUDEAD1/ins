@@ -2343,6 +2343,224 @@ except Exception as _owner_e:
     logger.debug(f"Owner promote skipped: {_owner_e}")
 
 
+# ============================================================
+# 🛡 نظام كشف Spam في الإحالات
+# يفحص بعد كل إحالة جديدة:
+#   إذا الـ referrer عنده 5+ إحالات في آخر دقيقة → إشعار للأدمن
+# الأدمن يقدر يحظر / يعرض الإحالات / يتجاهل
+# ============================================================
+
+REFERRAL_SPAM_THRESHOLD = 5       # عدد الإحالات
+REFERRAL_SPAM_WINDOW_SEC = 60     # في كم ثانية
+REFERRAL_SPAM_COOLDOWN = 600      # عشر دقائق بين الإشعارات لنفس الشخص
+
+
+def _check_referral_spam(referrer_id):
+    """يفحص لو في spam ويرسل إشعار للأدمن"""
+    try:
+        now = int(time.time())
+        window_start = now - REFERRAL_SPAM_WINDOW_SEC
+
+        recent_count = db.referrals_v2.count_documents({
+            'referrer_id': referrer_id,
+            'created_at': {'$gte': window_start}
+        })
+
+        if recent_count < REFERRAL_SPAM_THRESHOLD:
+            return False
+
+        # cooldown — ما نرسل أكثر من مرة في 10 دقايق
+        spam_record = db.ref_spam_alerts.find_one({'referrer_id': referrer_id})
+        if spam_record:
+            last_alert = spam_record.get('last_alert', 0)
+            if now - last_alert < REFERRAL_SPAM_COOLDOWN:
+                return False
+
+        # سجل التحذير
+        db.ref_spam_alerts.update_one(
+            {'referrer_id': referrer_id},
+            {'$set': {'last_alert': now, 'last_count': recent_count}},
+            upsert=True
+        )
+
+        # ابعت إشعار للأدمن
+        _send_referral_spam_alert(referrer_id, recent_count)
+        return True
+    except Exception as e:
+        logger.debug(f"check ref spam err: {e}")
+        return False
+
+
+def _send_referral_spam_alert(referrer_id, count):
+    """يرسل إشعار للأدمن مع 3 أزرار: حظر / عرض / تجاهل"""
+    try:
+        ref_user = db.users.find_one({'user_id': referrer_id})
+        ref_name = '?'
+        ref_username = ''
+        if ref_user:
+            ref_username = ref_user.get('username', '')
+            ref_name = ref_user.get('first_name', '') or ref_username or '?'
+
+        text = (
+            f"⚠️ <b>تنبيه: احتمال Spam إحالات!</b>\n\n"
+            f"👤 <b>المستخدم:</b> <code>{referrer_id}</code>"
+        )
+        if ref_username:
+            text += f" (@{html.escape(ref_username)})"
+        elif ref_name and ref_name != '?':
+            text += f" ({html.escape(ref_name)})"
+        text += (
+            f"\n📊 <b>عدد الإحالات في آخر دقيقة:</b> <b>{count}</b>\n"
+            f"📈 <b>الحد المسموح:</b> {REFERRAL_SPAM_THRESHOLD}/دقيقة\n\n"
+            f"<i>راجع إحالاته قبل ما تحظر — ممكن يكون عنده قناة فعلاً.</i>"
+        )
+
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("🚫 حظر", callback_data=f"refspam_ban_{referrer_id}"),
+            InlineKeyboardButton("👁 عرض إحالاته", callback_data=f"refspam_view_{referrer_id}")
+        )
+        markup.add(InlineKeyboardButton("✅ تجاهل (مش spam)", callback_data=f"refspam_ok_{referrer_id}"))
+
+        # ابعت لكل الأدمن
+        sent_to = set()
+        if OWNER_ID:
+            try:
+                bot.send_message(OWNER_ID, text, parse_mode="HTML", reply_markup=markup)
+                sent_to.add(OWNER_ID)
+            except: pass
+        for admin in db.users.find({'is_admin': 1}):
+            aid = admin.get('user_id')
+            if aid and aid not in sent_to:
+                try: bot.send_message(aid, text, parse_mode="HTML", reply_markup=markup)
+                except: pass
+    except Exception as e:
+        logger.debug(f"send spam alert err: {e}")
+
+
+# ─── معالجات الأزرار ───
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_ban_"))
+def refspam_ban_handler(call):
+    """حظر المستخدم"""
+    if not is_admin(call.from_user.id):
+        try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
+        except: pass
+        return
+    try:
+        target_uid = int(call.data.replace("refspam_ban_", ""))
+        db.users.update_one(
+            {'user_id': target_uid},
+            {'$set': {'is_banned': 1, 'banned_reason': 'Spam referrals', 'banned_at': int(time.time())}}
+        )
+        # إلغاء إحالاته
+        db.referrals_v2.update_many(
+            {'referrer_id': target_uid},
+            {'$set': {'status': 'cancelled'}}
+        )
+        bot.answer_callback_query(call.id, "✅ تم الحظر", show_alert=True)
+        try:
+            bot.edit_message_text(
+                f"🚫 <b>تم حظر المستخدم <code>{target_uid}</code></b>\n\n"
+                f"<i>سبب الحظر: Spam إحالات</i>\n"
+                f"<i>تم إلغاء كل إحالاته.</i>",
+                call.message.chat.id, call.message.message_id, parse_mode="HTML"
+            )
+        except: pass
+    except Exception as e:
+        logger.error(f"refspam_ban err: {e}")
+        try: bot.answer_callback_query(call.id, f"❌ خطأ: {e}", show_alert=True)
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_view_"))
+def refspam_view_handler(call):
+    """عرض آخر إحالات للمستخدم"""
+    if not is_admin(call.from_user.id):
+        try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
+        except: pass
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        target_uid = int(call.data.replace("refspam_view_", ""))
+        recent_refs = list(db.referrals_v2.find(
+            {'referrer_id': target_uid}
+        ).sort('created_at', -1).limit(15))
+
+        if not recent_refs:
+            bot.send_message(call.message.chat.id, "📭 لا يوجد إحالات لهذا المستخدم.")
+            return
+
+        text = f"👁 <b>آخر {len(recent_refs)} إحالة للمستخدم <code>{target_uid}</code>:</b>\n\n"
+        for i, r in enumerate(recent_refs, 1):
+            invited = r.get('invited_id', '?')
+            status = r.get('status', '?')
+            ts = r.get('created_at', 0)
+            time_str = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S') if ts else '?'
+            
+            # نجيب معلومات المُدعَى
+            inv_user = db.users.find_one({'user_id': invited}) if isinstance(invited, int) else None
+            inv_info = ''
+            if inv_user:
+                username = inv_user.get('username', '')
+                first_name = inv_user.get('first_name', '')
+                if username: inv_info = f" @{username}"
+                elif first_name: inv_info = f" ({html.escape(first_name[:15])})"
+                # علامات شك (حساب جديد بدون اسم وبدون يوزر)
+                if not username and not first_name:
+                    inv_info += " ⚠️"
+            
+            status_icon = {'pending': '⏳', 'qualified': '✅', 'cancelled': '❌'}.get(status, '❓')
+            text += f"{i}. {status_icon} <code>{invited}</code>{inv_info} — {time_str}\n"
+
+        # نحسب التوقيت الزمني
+        if len(recent_refs) >= 2:
+            first_ts = recent_refs[-1].get('created_at', 0)
+            last_ts = recent_refs[0].get('created_at', 0)
+            diff_sec = last_ts - first_ts
+            text += f"\n⏱ <b>المدة بين أول وآخر إحالة:</b> {diff_sec} ثانية"
+            if diff_sec > 0:
+                rate = len(recent_refs) / diff_sec * 60
+                text += f"\n📊 <b>المعدل:</b> ~{rate:.1f} إحالة/دقيقة"
+
+        text += "\n\n⚠️ <i>الإحالات اللي عليها ⚠️ هي حسابات بدون يوزر/اسم — مؤشر spam قوي.</i>"
+
+        # نعطي الأدمن خيار يحظر بعد المراجعة
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(f"🚫 حظر هذا المستخدم", callback_data=f"refspam_ban_{target_uid}"))
+        bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        logger.error(f"refspam_view err: {e}")
+        try: bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
+        except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refspam_ok_"))
+def refspam_ok_handler(call):
+    """تجاهل الإنذار — مش spam"""
+    if not is_admin(call.from_user.id):
+        try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
+        except: pass
+        return
+    try:
+        target_uid = int(call.data.replace("refspam_ok_", ""))
+        # نضيف cooldown أطول عشان ما نزعج الأدمن بنفس الشخص قريب
+        db.ref_spam_alerts.update_one(
+            {'referrer_id': target_uid},
+            {'$set': {'last_alert': int(time.time()) + 3600, 'whitelisted_until': int(time.time()) + 86400}},
+            upsert=True
+        )
+        bot.answer_callback_query(call.id, "✅ تم تجاهل التنبيه", show_alert=False)
+        try:
+            bot.edit_message_text(
+                f"✅ <b>تم التجاهل — مش spam</b>\n\n"
+                f"<i>لن تصلك تنبيهات عن هذا المستخدم لمدة 24 ساعة.</i>",
+                call.message.chat.id, call.message.message_id, parse_mode="HTML"
+            )
+        except: pass
+    except Exception as e:
+        logger.debug(f"refspam_ok err: {e}")
+
+
 def register_new_referral(invited_id, referrer_id):
     """
     تسجيل إحالة جديدة في الجدول الجديد - محمي من race conditions.
@@ -2375,6 +2593,14 @@ def register_new_referral(invited_id, referrer_id):
                 'created_at': int(time.time()),
                 'updated_at': int(time.time())
             })
+            # 🆕 فحص spam بعد كل إحالة ناجحة
+            try:
+                threading.Thread(
+                    target=_check_referral_spam,
+                    args=(referrer_id,),
+                    daemon=True
+                ).start()
+            except Exception: pass
             return True
         except Exception as dup_err:
             # DuplicateKeyError - الإحالة مسجلة من قبل (طبيعي، نتجاهل)
@@ -7695,7 +7921,7 @@ def check_binance_pay_auto():
             return
 
         current_time_ms = int(time.time() * 1000)
-        cutoff_ms = current_time_ms - (2 * 60 * 60 * 1000)  # آخر ساعتين
+        cutoff_ms = current_time_ms - (24 * 60 * 60 * 1000)  # آخر 24 ساعة
 
         for tx in transactions:
             try:
@@ -7723,7 +7949,73 @@ def check_binance_pay_auto():
                 if amount <= 0:
                     continue
 
-                # ─── 1️⃣ المسار الأول: مطابقة بالمبلغ الفريد ───
+                # ─── 1️⃣ المسار الأول: مطابقة بحقل `note` (الأولوية الأعلى) ───
+                # حسب توثيق Binance Pay الرسمي: حقل note يحتوي الملاحظة من المرسل
+                # نفحصه أولاً لأنه أوضح وأدق من tolerance المبلغ
+                try:
+                    tx_keys = list(tx.keys())
+                    logger.info(f"[BINANCE TX] tx_id={tx_id_norm[:20]}... amount=${amount:.4f} keys={tx_keys}")
+                except: pass
+                
+                # نجمع الحقول النصية الفعلية (مش اسم المرسل!)
+                remark_candidates = []
+                for field in ('note', 'remark', 'orderTitle', 'memo', 'description',
+                              'goodsName', 'goodsDetail', 'attachment'):
+                    v = tx.get(field)
+                    if v: remark_candidates.append(str(v))
+                
+                # حقول داخل fundsDetail (مش payerInfo — لأن payerInfo.name = اسم المرسل مش الـ note)
+                fd = tx.get('fundsDetail') or []
+                if isinstance(fd, list):
+                    for item in fd:
+                        if isinstance(item, dict):
+                            for field in ('note', 'remark', 'memo', 'description'):
+                                v = item.get(field)
+                                if v: remark_candidates.append(str(v))
+                
+                combined_remark = ' '.join(c for c in remark_candidates if c).strip()
+                
+                # لو في note، نحاول matching بالـ user_id فيه
+                target_uid_from_note = None
+                if combined_remark:
+                    logger.info(f"[BINANCE NOTE FOUND] tx={tx_id_norm[:20]} note={combined_remark[:150]!r}")
+                    # نبحث عن user_id (5-12 خانة) في الـ note
+                    uid_matches = re.findall(r'\b(\d{5,12})\b', combined_remark)
+                    for potential_uid_str in uid_matches:
+                        try:
+                            potential_uid = int(potential_uid_str)
+                        except: continue
+                        user = db.users.find_one({'user_id': potential_uid})
+                        if user and user.get('is_banned') != 1:
+                            target_uid_from_note = potential_uid
+                            break
+                
+                # ✅ لو لقينا user_id صحيح في الـ note → نضيف الرصيد فوراً (بدون deposit)
+                if target_uid_from_note:
+                    # 🛡 atomic: نحجز الـ tx قبل الإضافة
+                    try:
+                        db.used_transactions.insert_one({
+                            'transaction_id': tx_id_norm,
+                            'user_id': target_uid_from_note,
+                            'amount': amount,
+                            'method': 'Binance Pay (Auto Note)',
+                            'used_at': datetime.datetime.utcnow(),
+                            'remark': combined_remark[:200]
+                        })
+                    except Exception as _de:
+                        logger.debug(f"tx already claimed: {_de}")
+                        continue
+
+                    logger.info(f"✅ Binance Pay NOTE MATCH: user {target_uid_from_note} amount=${amount:.4f} note={combined_remark[:80]!r}")
+                    
+                    user_lang = (db.users.find_one({'user_id': target_uid_from_note}) or {}).get('language', 'ar')
+                    try:
+                        credit_user(target_uid_from_note, amount, tx_id_norm, user_lang, "Binance Pay (Auto Note)")
+                    except Exception as ce:
+                        logger.error(f"credit_user fail in note match: {ce}")
+                    continue  # خلصنا هالـ tx
+
+                # ─── 2️⃣ المسار الثاني: مطابقة بالمبلغ الفريد (fallback لو ما في note) ───
                 pending = find_pending_deposit_for_amount(amount, 'BINANCE', tolerance=0.0001)
                 if pending:
                     uid = pending['user_id']
@@ -7737,66 +8029,11 @@ def check_binance_pay_auto():
                     success = auto_credit_from_pending(pending, tx_id_norm, "Binance Pay")
                     if success:
                         logger.info(f"✅ Binance Pay credited (amount): user {uid} ${base_amount:.2f}")
-                    continue  # خلصنا هالـ tx
+                    continue
 
-                # ─── 2️⃣ المسار الثاني: مطابقة بالـ Remark/Notes ───
-                # نجمع كل الحقول النصية اللي ممكن تحتوي الـ remark
-                remark_candidates = [
-                    str(tx.get('remark') or ''),
-                    str(tx.get('note') or ''),
-                    str(tx.get('orderTitle') or ''),
-                    str(tx.get('memo') or ''),
-                    str(tx.get('description') or ''),
-                    str((tx.get('fundsDetail') or [{}])[0].get('remark', '') if tx.get('fundsDetail') else ''),
-                ]
-                combined_remark = ' '.join(c for c in remark_candidates if c).strip()
-                
+                # لا في note ولا pending — نتجاهل
                 if not combined_remark:
-                    continue
-
-                # نبحث عن user_id (5-12 خانة) في الـ remark
-                uid_matches = re.findall(r'\b(\d{5,12})\b', combined_remark)
-                if not uid_matches:
-                    continue
-
-                # نجرّب كل user_id محتمل (نأخذ أول واحد موجود في DB)
-                target_uid = None
-                for potential_uid_str in uid_matches:
-                    try:
-                        potential_uid = int(potential_uid_str)
-                    except: continue
-                    
-                    user = db.users.find_one({'user_id': potential_uid})
-                    if user and user.get('is_banned') != 1:
-                        target_uid = potential_uid
-                        break
-
-                if not target_uid:
-                    continue
-
-                # 🛡 atomic: نحجز الـ tx قبل الإضافة
-                try:
-                    db.used_transactions.insert_one({
-                        'transaction_id': tx_id_norm,
-                        'user_id': target_uid,
-                        'amount': amount,
-                        'method': 'Binance Pay (Auto Remark)',
-                        'used_at': datetime.datetime.utcnow(),
-                        'remark': combined_remark[:200]
-                    })
-                except Exception as _de:
-                    # duplicate key — تم حجزه من thread آخر
-                    logger.debug(f"tx already claimed: {_de}")
-                    continue
-
-                logger.info(f"✅ Binance Pay REMARK MATCH: user {target_uid} amount=${amount:.4f} remark={combined_remark[:80]!r}")
-                
-                # نضيف الرصيد للمستخدم
-                user_lang = (db.users.find_one({'user_id': target_uid}) or {}).get('language', 'ar')
-                try:
-                    credit_user(target_uid, amount, tx_id_norm, user_lang, "Binance Pay (Auto Notes)")
-                except Exception as ce:
-                    logger.error(f"credit_user fail in remark match: {ce}")
+                    logger.info(f"[BINANCE NO MATCH] tx={tx_id_norm[:20]} amount=${amount:.4f} no note no pending")
 
             except Exception as tx_err:
                 logger.debug(f"Binance Pay tx error: {tx_err}")
@@ -7826,6 +8063,62 @@ def auto_deposit_monitor_thread():
 
 # نشغل الـ monitor في الخلفية
 threading.Thread(target=auto_deposit_monitor_thread, daemon=True).start()
+
+
+@bot.message_handler(commands=['binance_debug'])
+def cmd_binance_debug(message):
+    """
+    🔍 يطبع آخر 5 معاملات Binance Pay مع كل حقولها — للأدمن فقط.
+    عشان نعرف اسم حقل الـ Remark/Note الفعلي اللي يجي من Binance.
+    """
+    uid = message.from_user.id
+    try:
+        if not is_admin(uid):
+            return
+    except: return
+    
+    try:
+        bot.send_message(uid, "🔍 جاري جلب آخر معاملات Binance Pay...")
+        transactions = _binance_pay_request()
+        
+        if not transactions:
+            bot.send_message(uid, "❌ ما في معاملات أو فشل الاتصال بـ Binance.")
+            return
+        
+        # نأخذ آخر 5
+        sample = transactions[:5]
+        bot.send_message(uid, f"✅ لقيت {len(transactions)} معاملة. هذه أول {len(sample)}:")
+        
+        for i, tx in enumerate(sample, 1):
+            try:
+                # نبني نص فيه كل الحقول
+                lines = [f"━━━ TX #{i} ━━━"]
+                for k, v in tx.items():
+                    val_str = str(v)
+                    if len(val_str) > 200:
+                        val_str = val_str[:200] + "..."
+                    lines.append(f"<b>{html.escape(k)}</b>: <code>{html.escape(val_str)}</code>")
+                
+                text = "\n".join(lines)
+                # نقسّم لو طويل
+                if len(text) > 3800:
+                    text = text[:3800] + "\n...(truncated)"
+                bot.send_message(uid, text, parse_mode="HTML")
+            except Exception as e:
+                bot.send_message(uid, f"❌ Error formatting tx #{i}: {e}")
+        
+        bot.send_message(
+            uid,
+            "💡 <b>كيف تستخدمها:</b>\n"
+            "1. حوّل لنفسك $1 على Binance Pay\n"
+            "2. حط رقم في حقل الـ Remark/Note (مثلاً 123456)\n"
+            "3. شغّل /binance_debug مرة ثانية\n"
+            "4. شوف في أي حقل الرقم 123456 ظهر\n"
+            "5. ابعثلي اسم الحقل وراح أضبط الكود",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        bot.send_message(uid, f"❌ Error: {html.escape(str(e))}", parse_mode="HTML")
 
 
 def mark_pending_deposit_used(pending_id):
@@ -10500,6 +10793,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 API Settings", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🔍 Check Transaction", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
@@ -10515,6 +10809,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🔍 فحص معاملة (هاش / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
@@ -10527,6 +10822,159 @@ def admin_main_ui(call):
         
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
+
+# ============================================================
+# 🔍 فحص معاملة (هاش/Order ID) — للأدمن
+# ============================================================
+@bot.callback_query_handler(func=lambda call: call.data == "ad_check_tx")
+@admin_required
+def ad_check_tx_prompt(call):
+    """يطلب من الأدمن إدخال الهاش أو Order ID للفحص"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    
+    msg = bot.send_message(
+        uid,
+        "🔍 <b>فحص معاملة</b>\n\n"
+        "أرسل أحد التالي:\n"
+        "• <b>هاش العملية</b> (TxID) للعملات الكريبتو (USDT/TON/LTC)\n"
+        "• <b>Order ID</b> لمعاملات Binance Pay\n"
+        "• <b>أي جزء من الـ ID</b> (آخر 10 خانات يكفي)\n\n"
+        "<i>سأخبرك إن كانت تم استلامها في النظام أم لا، ولأي مستخدم.</i>\n\n"
+        "❌ للإلغاء: /cancel",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, ad_check_tx_handle)
+
+
+def ad_check_tx_handle(message):
+    """يفحص الهاش/Order ID في DB ويرجع النتيجة"""
+    uid = message.from_user.id
+    if not is_admin(uid): return
+    
+    text = (message.text or '').strip()
+    if not text or text.lower() in ('/cancel', 'الغاء', 'إلغاء', 'cancel'):
+        bot.send_message(uid, "❌ تم الإلغاء.")
+        return
+    
+    # ننظف الـ text
+    query = text.strip()
+    query_norm = normalize_tx_id(query) if 'normalize_tx_id' in globals() else query.lower()
+    
+    bot.send_message(uid, f"🔍 جاري البحث عن: <code>{html.escape(query[:80])}</code>", parse_mode="HTML")
+    
+    # نبحث في used_transactions بأكثر من طريقة
+    found = []
+    seen_ids = set()  # عشان ما نكرر نفس النتيجة
+    try:
+        # 1) مطابقة كاملة (normalized)
+        for r in db.used_transactions.find({'transaction_id': query_norm}).limit(5):
+            if r['_id'] not in seen_ids:
+                found.append(r); seen_ids.add(r['_id'])
+        # 2) مطابقة كاملة (raw)
+        if not found:
+            for r in db.used_transactions.find({'transaction_id': query}).limit(5):
+                if r['_id'] not in seen_ids:
+                    found.append(r); seen_ids.add(r['_id'])
+        # 3) regex - يحتوي
+        if len(found) < 5:
+            try:
+                import re as _re_tx
+                safe = _re_tx.escape(query[-20:] if len(query) > 20 else query)
+                for r in db.used_transactions.find({'transaction_id': {'$regex': safe, '$options': 'i'}}).limit(5):
+                    if r['_id'] not in seen_ids:
+                        found.append(r); seen_ids.add(r['_id'])
+                # 4) regex على remark/note كذلك
+                for r in db.used_transactions.find({'remark': {'$regex': safe, '$options': 'i'}}).limit(5):
+                    if r['_id'] not in seen_ids:
+                        found.append(r); seen_ids.add(r['_id'])
+            except Exception: pass
+
+        # 5) 🆕 نبحث في balance_logs أيضاً (للإضافات اليدوية اللي حطها الأدمن بنوت)
+        try:
+            import re as _re_tx2
+            safe2 = _re_tx2.escape(query[-20:] if len(query) > 20 else query)
+            for r in db.balance_logs.find({
+                '$or': [
+                    {'note': query},
+                    {'note': {'$regex': safe2, '$options': 'i'}}
+                ]
+            }).limit(5):
+                # نحول لـ format يطابق used_transactions عشان العرض موحّد
+                synth = {
+                    '_id': r.get('_id'),
+                    'transaction_id': f"[Manual Note] {r.get('note', '')[:50]}",
+                    'user_id': r.get('user_id'),
+                    'amount': r.get('amount', 0),
+                    'method': f"Manual Gift by Admin ({r.get('type', '?')})",
+                    'used_at': r.get('date', ''),
+                    'remark': r.get('note', ''),
+                    '_from_balance_logs': True
+                }
+                if synth['_id'] not in seen_ids:
+                    found.append(synth); seen_ids.add(synth['_id'])
+        except Exception as _be:
+            logger.debug(f"balance_logs search err: {_be}")
+    except Exception as e:
+        bot.send_message(uid, f"❌ خطأ في البحث: {html.escape(str(e))}", parse_mode="HTML")
+        return
+    
+    if not found:
+        # ما لقينا — نعرض رسالة واضحة
+        bot.send_message(
+            uid,
+            f"❌ <b>لم يتم استلام هذه المعاملة في النظام</b>\n\n"
+            f"🔎 البحث: <code>{html.escape(query[:80])}</code>\n\n"
+            f"<i>الأسباب المحتملة:</i>\n"
+            f"• المعاملة لم تصل للنظام بعد\n"
+            f"• الـ ID غلط أو ناقص\n"
+            f"• المرسل لم يحط User ID في الـ Notes (لـ Binance)\n"
+            f"• المبلغ لم يطابق pending_deposit",
+            parse_mode="HTML"
+        )
+        return
+    
+    # لقينا — نعرض تفاصيل كل النتائج
+    bot.send_message(uid, f"✅ <b>لقيت {len(found)} نتيجة:</b>", parse_mode="HTML")
+    
+    for i, r in enumerate(found, 1):
+        try:
+            tx_id = r.get('transaction_id', '?')
+            user_id = r.get('user_id', '?')
+            amount = r.get('amount', 0)
+            method = r.get('method', '?')
+            used_at = r.get('used_at', '')
+            remark = r.get('remark', '')
+            
+            # نجيب اسم المستخدم
+            user_doc = db.users.find_one({'user_id': user_id}) if isinstance(user_id, int) else None
+            user_name = ''
+            if user_doc:
+                user_name = user_doc.get('username') or user_doc.get('first_name') or ''
+            
+            # نجيب رصيده الحالي
+            user_balance = float(user_doc.get('balance', 0)) if user_doc else 0
+            
+            detail = (
+                f"━━━ #{i} ━━━\n"
+                f"🆔 <b>TX:</b> <code>{html.escape(str(tx_id))}</code>\n"
+                f"👤 <b>User ID:</b> <code>{html.escape(str(user_id))}</code>"
+            )
+            if user_name:
+                detail += f" ({html.escape(user_name)})"
+            detail += (
+                f"\n💰 <b>المبلغ:</b> <b>${float(amount):.4f}</b>\n"
+                f"💼 <b>الرصيد الحالي للمستخدم:</b> <b>${user_balance:.2f}</b>\n"
+                f"🔄 <b>الطريقة:</b> {html.escape(str(method))}\n"
+                f"📅 <b>الوقت:</b> {str(used_at)[:19]}"
+            )
+            if remark:
+                detail += f"\n📝 <b>Note:</b> <code>{html.escape(str(remark)[:200])}</code>"
+            
+            bot.send_message(uid, detail, parse_mode="HTML")
+        except Exception as fe:
+            bot.send_message(uid, f"❌ Error formatting result #{i}: {fe}")
+
 
 # ============================================================
 # ✏️ نظام تخصيص نصوص البوت والأزرار المتقدم (CMS)
@@ -13879,8 +14327,36 @@ def ad_ugift_prompt(call):
     bot.send_message(call.message.chat.id,
         "💰 <b>اختر نوع تعديل الرصيد:</b>\n\n"
         "🔄 <b>تعويض</b> — يُضاف مباشرة بدون ملاحظة\n"
-        "💰 <b>إضافة عادية</b> — تكتب نوت (مثل: hash أو order ID)",
+        "💰 <b>إضافة عادية</b> — تكتب نوت (مثل: hash أو order ID — راح يظهر في البحث)",
         parse_mode="HTML", reply_markup=markup)
+
+
+def _is_cancel_msg(message):
+    """يفحص لو الأدمن أرسل أمر إلغاء"""
+    t = (message.text or '').strip().lower()
+    return t in ('الغاء', 'إلغاء', 'cancel', '/cancel', 'اغلاق', 'الغ')
+
+
+def _cancel_markup(target_uid):
+    """زر إلغاء inline يرجّع لملف العميل"""
+    m = InlineKeyboardMarkup()
+    m.add(InlineKeyboardButton("❌ إلغاء العملية", callback_data=f"gift_cancel_{target_uid}"))
+    return m
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gift_cancel_"))
+def ad_gift_cancel(call):
+    """إلغاء عملية إضافة الرصيد في أي خطوة"""
+    bot.answer_callback_query(call.id, "تم الإلغاء", show_alert=False)
+    try:
+        target_uid = int(call.data.replace("gift_cancel_", ""))
+        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+        bot.send_message(call.message.chat.id, "❌ تم إلغاء عملية تعديل الرصيد.")
+        try: show_user_admin_profile(call.message.chat.id, target_uid)
+        except: pass
+    except Exception as e:
+        logger.debug(f"gift_cancel err: {e}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_gift_comp_"))
 @admin_required
@@ -13888,17 +14364,24 @@ def ad_gift_comp_amount(call):
     bot.answer_callback_query(call.id)
     target_uid = int(call.data.replace("ad_gift_comp_", ""))
     msg = bot.send_message(call.message.chat.id,
-        "🔄 <b>تعويض — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>",
-        parse_mode="HTML")
+        "🔄 <b>تعويض — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>\n\n"
+        "<i>للإلغاء: اكتب <b>الغاء</b> أو اضغط الزر</i>",
+        parse_mode="HTML", reply_markup=_cancel_markup(target_uid))
     bot.register_next_step_handler(msg, ad_gift_comp_exec, target_uid)
 
+
 def ad_gift_comp_exec(message, target_uid):
+    # ✅ فحص الإلغاء
+    if _is_cancel_msg(message):
+        bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
+        try: show_user_admin_profile(message.chat.id, target_uid)
+        except: pass
+        return
     try:
         val = float(message.text.strip())
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
         u = get_user_data_full(target_uid)
         new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
-        # حفظ السجل في قاعدة البيانات
         import datetime as _dt
         db.balance_logs.insert_one({
             'user_id': target_uid,
@@ -13916,27 +14399,46 @@ def ad_gift_comp_exec(message, target_uid):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطأ: {e}")
 
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_gift_note_"))
 @admin_required
 def ad_gift_note_amount(call):
     bot.answer_callback_query(call.id)
     target_uid = int(call.data.replace("ad_gift_note_", ""))
     msg = bot.send_message(call.message.chat.id,
-        "💰 <b>إضافة عادية — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>",
-        parse_mode="HTML")
+        "💰 <b>إضافة عادية — أرسل المبلغ:</b>\n<i>(سالب للخصم، موجب للإضافة)</i>\n\n"
+        "<i>للإلغاء: اكتب <b>الغاء</b> أو اضغط الزر</i>",
+        parse_mode="HTML", reply_markup=_cancel_markup(target_uid))
     bot.register_next_step_handler(msg, ad_gift_note_step2, target_uid)
 
+
 def ad_gift_note_step2(message, target_uid):
+    # ✅ فحص الإلغاء
+    if _is_cancel_msg(message):
+        bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
+        try: show_user_admin_profile(message.chat.id, target_uid)
+        except: pass
+        return
     try:
         val = float(message.text.strip())
         msg = bot.send_message(message.chat.id,
-            "📝 <b>أرسل الملاحظة (نوت):</b>\n<i>مثال: hash أو order ID أو أي سبب</i>",
-            parse_mode="HTML")
+            "📝 <b>أرسل الملاحظة (نوت):</b>\n"
+            "<i>مثال: hash العملية، Order ID، رقم تحويل، أو أي سبب</i>\n\n"
+            "💡 <i>هذه النوت راح تظهر في البحث عن المعاملة من زر</i> 🔍 <i>فحص معاملة</i>\n\n"
+            "<i>للإلغاء: اكتب <b>الغاء</b> أو اضغط الزر</i>",
+            parse_mode="HTML", reply_markup=_cancel_markup(target_uid))
         bot.register_next_step_handler(msg, ad_gift_note_exec, target_uid, val)
     except:
-        bot.send_message(message.chat.id, "❌ خطأ في الرقم.")
+        bot.send_message(message.chat.id, "❌ خطأ في الرقم.\nللإلغاء اضغط زر الإلغاء، أو حاول مرة ثانية بإرسال الرقم.")
+
 
 def ad_gift_note_exec(message, target_uid, val):
+    # ✅ فحص الإلغاء
+    if _is_cancel_msg(message):
+        bot.send_message(message.chat.id, "❌ تم إلغاء العملية.")
+        try: show_user_admin_profile(message.chat.id, target_uid)
+        except: pass
+        return
     try:
         note = message.text.strip()
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
@@ -13952,8 +14454,32 @@ def ad_gift_note_exec(message, target_uid, val):
             'by_admin': message.from_user.id,
             'date': _dt.datetime.utcnow()
         })
+
+        # 🆕 نحفظ نسخة في used_transactions كذلك عشان زر "فحص معاملة" يلقاها
+        # transaction_id = الـ note نفسها (normalized) — يخلي البحث يربط الـ hash/order ID بالنوت
+        try:
+            tx_id_from_note = normalize_tx_id(note) if note else f"manual_{int(_dt.datetime.utcnow().timestamp())}"
+            db.used_transactions.insert_one({
+                'transaction_id': tx_id_from_note,
+                'user_id': target_uid,
+                'amount': val,
+                'method': 'Manual Gift (Admin)',
+                'used_at': _dt.datetime.utcnow(),
+                'remark': note,
+                'manual': True,
+                'by_admin': message.from_user.id
+            })
+        except Exception as _ute:
+            # duplicate ممكن لو نفس النوت دخل قبل — مش مشكلة
+            logger.debug(f"manual gift tx record skipped: {_ute}")
+
         bot.send_message(message.chat.id,
-            f"✅ تم تعديل الرصيد <b>${val:.2f}</b>\n📝 النوت: <code>{note}</code>",
+            f"✅ <b>تم تعديل الرصيد بنجاح</b>\n\n"
+            f"👤 <b>المستخدم:</b> <code>{target_uid}</code>\n"
+            f"💰 <b>المبلغ:</b> <b>${val:.2f}</b>\n"
+            f"💼 <b>الرصيد الجديد:</b> <b>${new_bal:.2f}</b>\n"
+            f"📝 <b>النوت:</b> <code>{html.escape(note)}</code>\n\n"
+            f"🔍 <i>تقدر تبحث عن هذي العملية من زر 🔍 فحص معاملة بـ النوت أو جزء منها</i>",
             parse_mode="HTML")
         try: notify_balance_gift(target_uid, val, note=note, gift_type='manual')
         except Exception as _e: logger.debug(f"gift notify err: {_e}")
