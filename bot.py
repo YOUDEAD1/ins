@@ -7992,25 +7992,25 @@ def check_binance_pay_auto():
                 
                 # ✅ لو لقينا user_id صحيح في الـ note → نضيف الرصيد فوراً (بدون deposit)
                 if target_uid_from_note:
-                    # 🛡 atomic: نحجز الـ tx قبل الإضافة
-                    try:
-                        db.used_transactions.insert_one({
-                            'transaction_id': tx_id_norm,
-                            'user_id': target_uid_from_note,
-                            'amount': amount,
-                            'method': 'Binance Pay (Auto Note)',
-                            'used_at': datetime.datetime.utcnow(),
-                            'remark': combined_remark[:200]
-                        })
-                    except Exception as _de:
-                        logger.debug(f"tx already claimed: {_de}")
-                        continue
-
                     logger.info(f"✅ Binance Pay NOTE MATCH: user {target_uid_from_note} amount=${amount:.4f} note={combined_remark[:80]!r}")
                     
+                    # 🔧 مهم: ما نحجز الـ tx بأنفسنا — credit_user() بنفسه يحجزها بشكل atomic.
+                    # لو حجزناها قبله، يفشل credit_user لأنه يحسبها duplicate ويرفض الإضافة.
                     user_lang = (db.users.find_one({'user_id': target_uid_from_note}) or {}).get('language', 'ar')
                     try:
                         credit_user(target_uid_from_note, amount, tx_id_norm, user_lang, "Binance Pay (Auto Note)")
+                        
+                        # بعد النجاح، نضيف معلومات الـ note للسجل (مش للحجز)
+                        try:
+                            db.used_transactions.update_one(
+                                {'transaction_id': tx_id_norm},
+                                {'$set': {
+                                    'method': 'Binance Pay (Auto Note)',
+                                    'remark': combined_remark[:200],
+                                    'note_matched': True
+                                }}
+                            )
+                        except: pass
                     except Exception as ce:
                         logger.error(f"credit_user fail in note match: {ce}")
                     continue  # خلصنا هالـ tx
@@ -10847,21 +10847,29 @@ def ad_check_tx_prompt(call):
     if l == 'en':
         prompt_text = (
             "🔍 <b>Check Transaction</b>\n\n"
-            "Send one of:\n"
-            "• <b>Hash (TxID)</b> for crypto coins (USDT/TON/LTC)\n"
-            "• <b>Order ID</b> for Binance Pay transactions\n"
-            "• <b>Any part of the ID</b> (last 10 chars enough)\n\n"
-            "<i>I'll tell you if it was received in the system and for which user.</i>\n\n"
-            "❌ To cancel: /cancel"
+            "Send ANY of the following:\n"
+            "• <b>Hash (TxID)</b> for crypto (USDT/BNB/BTC/ETH/TRX/LTC)\n"
+            "• <b>Order ID</b> for Binance Pay\n"
+            "• <b>Transaction ID</b>\n"
+            "• <b>Any partial ID</b> (last 15 chars enough)\n\n"
+            "<i>I'll search in:</i>\n"
+            "1. Database (used / manually added)\n"
+            "2. Binance Pay live\n"
+            "3. Binance Crypto Deposits live\n\n"
+            "❌ Cancel: /cancel"
         )
     else:
         prompt_text = (
             "🔍 <b>فحص معاملة</b>\n\n"
-            "أرسل أحد التالي:\n"
-            "• <b>هاش العملية</b> (TxID) للعملات الكريبتو (USDT/TON/LTC)\n"
-            "• <b>Order ID</b> لمعاملات Binance Pay\n"
-            "• <b>أي جزء من الـ ID</b> (آخر 10 خانات يكفي)\n\n"
-            "<i>سأخبرك إن كانت تم استلامها في النظام أم لا، ولأي مستخدم.</i>\n\n"
+            "أرسل أي واحد من التالي:\n"
+            "• <b>هاش العملية</b> (TxID) للكريبتو (USDT/BNB/BTC/ETH/TRX/LTC)\n"
+            "• <b>Order ID</b> لـ Binance Pay\n"
+            "• <b>Transaction ID</b>\n"
+            "• <b>أي جزء من الـ ID</b> (آخر 15 حرف يكفي)\n\n"
+            "<i>سأبحث في:</i>\n"
+            "1. قاعدة البيانات (المُستخدَمة + المضافة يدوياً)\n"
+            "2. Binance Pay مباشرة\n"
+            "3. Binance Crypto Deposits مباشرة\n\n"
             "❌ للإلغاء: /cancel"
         )
 
@@ -10948,16 +10956,118 @@ def ad_check_tx_handle(message):
         return
     
     if not found:
-        # ما لقينا — نعرض رسالة واضحة
+        # 🆕 ما لقينا في DB — نفحص في Binance Pay مباشرة
+        # ممكن المعاملة وصلت لـ Binance لكن لسه ما عُولجت
+        bot.send_message(uid, "🔍 لم تُسجَّل في النظام... جاري الفحص في Binance Pay مباشرة...")
+
+        binance_match = None
+        binance_source = None  # 'pay' أو 'deposit'
+        try:
+            import re as _re_b
+            safe_b = _re_b.escape(query[-15:] if len(query) > 15 else query)
+            pattern = _re_b.compile(safe_b, _re_b.IGNORECASE)
+
+            # 1) Binance Pay (Order ID / Transaction ID)
+            transactions = _binance_pay_request()
+            if transactions:
+                for tx in transactions:
+                    tx_id_fields = [
+                        str(tx.get('orderId', '') or ''),
+                        str(tx.get('transactionId', '') or ''),
+                        str(tx.get('bizOrderNo', '') or ''),
+                    ]
+                    if any(pattern.search(f) for f in tx_id_fields):
+                        binance_match = tx
+                        binance_source = 'pay'
+                        break
+
+            # 2) Binance Deposits (TX Hash للكريبتو USDT/BNB/etc)
+            if not binance_match:
+                for coin in ('USDT', 'BNB', 'BTC', 'ETH', 'TRX', 'LTC'):
+                    try:
+                        res = execute_binance_call(
+                            lambda c, _coin=coin: c.get_deposit_history(coin=_coin),
+                            max_retries=2
+                        )
+                        if not res:
+                            continue
+                        for d in res[:50]:
+                            tx_hash = str(d.get('txId', '') or '')
+                            if tx_hash and pattern.search(tx_hash):
+                                # نضيف معلومات الـ coin
+                                d['_coin'] = coin
+                                binance_match = d
+                                binance_source = 'deposit'
+                                break
+                        if binance_match:
+                            break
+                    except Exception: continue
+        except Exception as be:
+            logger.debug(f"Binance direct check err: {be}")
+
+        if binance_match:
+            # ✅ موجودة في Binance لكن غير معالجة
+            if binance_source == 'pay':
+                order_id = str(binance_match.get('orderId') or binance_match.get('transactionId') or '?')
+                amount_b = float(binance_match.get('amount') or 0)
+                note_b = str(binance_match.get('note') or '').strip()
+                payer = binance_match.get('payerInfo') or {}
+                payer_name = payer.get('name', '') if isinstance(payer, dict) else ''
+                tx_time = int(binance_match.get('transactionTime') or 0)
+                time_str = datetime.datetime.fromtimestamp(tx_time / 1000).strftime('%Y-%m-%d %H:%M') if tx_time else '?'
+                source_label = "🟡 Binance Pay"
+            else:  # deposit
+                order_id = str(binance_match.get('txId') or '?')
+                amount_b = float(binance_match.get('amount') or 0)
+                coin_name = binance_match.get('_coin', 'CRYPTO')
+                note_b = ''
+                payer_name = binance_match.get('address', '')[:20] + '...' if binance_match.get('address') else ''
+                tx_time = int(binance_match.get('insertTime') or 0)
+                time_str = datetime.datetime.fromtimestamp(tx_time / 1000).strftime('%Y-%m-%d %H:%M') if tx_time else '?'
+                source_label = f"💎 Crypto Deposit ({coin_name})"
+
+            pending_credit_id = f"pc_{int(time.time())}_{order_id[-10:]}"
+            db.pending_admin_credits.insert_one({
+                '_id': pending_credit_id,
+                'tx_id': normalize_tx_id(order_id),
+                'amount': amount_b,
+                'note': note_b,
+                'payer_name': payer_name,
+                'source': binance_source,
+                'created_at': datetime.datetime.utcnow(),
+                'admin_id': uid
+            })
+
+            text = (
+                f"⚠️ <b>المعاملة موجودة لكن غير مُعالَجَة!</b>\n\n"
+                f"📡 <b>المصدر:</b> {source_label}\n"
+                f"🆔 <b>ID/Hash:</b> <code>{html.escape(order_id[:60])}</code>\n"
+                f"💰 <b>المبلغ:</b> <b>${amount_b:.4f}</b>\n"
+            )
+            if payer_name:
+                text += f"👤 <b>المرسل:</b> <code>{html.escape(payer_name)}</code>\n"
+            text += f"📅 <b>الوقت:</b> {time_str}\n"
+            if note_b:
+                text += f"📝 <b>Note:</b> <code>{html.escape(note_b)}</code>\n"
+            text += "\n💡 <i>المبلغ متاح للإضافة لمستخدم.</i>"
+
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(
+                f"💰 إضافة ${amount_b:.2f} لمستخدم",
+                callback_data=f"credit_pending_{pending_credit_id}"
+            ))
+            bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # لا في DB ولا في Binance
         bot.send_message(
             uid,
-            f"❌ <b>لم يتم استلام هذه المعاملة في النظام</b>\n\n"
+            f"❌ <b>المعاملة غير موجودة في أي مكان</b>\n\n"
             f"🔎 البحث: <code>{html.escape(query[:80])}</code>\n\n"
             f"<i>الأسباب المحتملة:</i>\n"
-            f"• المعاملة لم تصل للنظام بعد\n"
             f"• الـ ID غلط أو ناقص\n"
-            f"• المرسل لم يحط User ID في الـ Notes (لـ Binance)\n"
-            f"• المبلغ لم يطابق pending_deposit",
+            f"• المعاملة لم تصل بعد لـ Binance\n"
+            f"• المعاملة أقدم من 30 يوم (حدود الـ API)",
             parse_mode="HTML"
         )
         return
@@ -11011,6 +11121,125 @@ def ad_check_tx_handle(message):
             bot.send_message(uid, detail, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as fe:
             bot.send_message(uid, f"❌ Error formatting result #{i}: {fe}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("credit_pending_"))
+def credit_pending_handler(call):
+    """يطلب من الأدمن User ID أو username لإضافة المبلغ المعلق"""
+    if not _is_admin_check(call.from_user.id):
+        try: bot.answer_callback_query(call.id, "❌ ليس لديك صلاحية", show_alert=True)
+        except: pass
+        return
+    bot.answer_callback_query(call.id)
+
+    pending_id = call.data.replace("credit_pending_", "")
+    pending = db.pending_admin_credits.find_one({'_id': pending_id})
+    if not pending:
+        bot.send_message(call.message.chat.id, "❌ المعاملة منتهية أو محذوفة. اضغط 🔍 فحص معاملة من جديد.")
+        return
+
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"💰 <b>إضافة ${float(pending['amount']):.4f}</b>\n\n"
+        f"أرسل <b>User ID</b> (رقم) أو <b>@username</b> للمستخدم اللي يستلم المبلغ:\n\n"
+        f"❌ للإلغاء: <b>الغاء</b>",
+        parse_mode="HTML"
+    )
+    bot.register_next_step_handler(msg, credit_pending_exec, pending_id)
+
+
+@safe_next_step
+def credit_pending_exec(message, pending_id):
+    """ينفذ إضافة الرصيد للمستخدم المحدد"""
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
+        return
+
+    text = (message.text or '').strip()
+    if not text or text.lower() in ('/cancel', 'الغاء', 'إلغاء', 'cancel'):
+        bot.send_message(uid, "❌ تم الإلغاء.")
+        return
+
+    pending = db.pending_admin_credits.find_one({'_id': pending_id})
+    if not pending:
+        bot.send_message(uid, "❌ المعاملة منتهية. ابدأ من جديد.")
+        return
+
+    # نحدد المستخدم — رقم أو username
+    target_uid = None
+    target_user = None
+
+    if text.startswith('@'):
+        text = text[1:]
+
+    if text.isdigit():
+        try:
+            target_uid = int(text)
+            target_user = db.users.find_one({'user_id': target_uid})
+        except: pass
+
+    if not target_user:
+        import re as _re_un
+        target_user = db.users.find_one({
+            'username': {'$regex': f'^{_re_un.escape(text)}$', '$options': 'i'}
+        })
+        if target_user:
+            target_uid = target_user.get('user_id')
+
+    if not target_user or not target_uid:
+        bot.send_message(
+            uid,
+            f"❌ ما لقيت مستخدم بالاسم: <code>{html.escape(text)}</code>\n\n"
+            f"<i>تأكد إن المستخدم عمل /start في البوت قبل.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    if target_user.get('is_banned') == 1:
+        bot.send_message(uid, f"❌ المستخدم <code>{target_uid}</code> محظور!", parse_mode="HTML")
+        return
+
+    amount = float(pending['amount'])
+    tx_id = pending['tx_id']
+    note = pending.get('note', '')
+    user_lang = target_user.get('language', 'ar')
+
+    try:
+        credit_user(target_uid, amount, tx_id, user_lang, "Binance Pay (Admin Manual Match)")
+        try:
+            db.used_transactions.update_one(
+                {'transaction_id': tx_id},
+                {'$set': {
+                    'method': 'Binance Pay (Admin Manual Match)',
+                    'remark': note,
+                    'manual_assigned_by': uid,
+                    'manual_assigned_at': datetime.datetime.utcnow()
+                }}
+            )
+        except: pass
+        db.pending_admin_credits.delete_one({'_id': pending_id})
+
+        username = target_user.get('username', '')
+        first_name = target_user.get('first_name', '')
+        display = first_name or username or str(target_uid)
+        user_link = f'<a href="tg://user?id={target_uid}">{html.escape(display)}</a>'
+
+        result_text = (
+            f"✅ <b>تم إضافة الرصيد بنجاح!</b>\n\n"
+            f"👤 <b>المستخدم:</b> {user_link}\n"
+            f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        )
+        if username:
+            result_text += f"📱 <b>Username:</b> @{html.escape(username)}\n"
+        result_text += (
+            f"💰 <b>المبلغ المُضاف:</b> <b>${amount:.4f}</b>\n"
+            f"🆔 <b>TX:</b> <code>{html.escape(tx_id[:40])}</code>\n\n"
+            f"<i>المستخدم استلم إشعار تلقائي بإضافة الرصيد.</i>"
+        )
+        bot.send_message(uid, result_text, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as ce:
+        logger.error(f"manual credit fail: {ce}")
+        bot.send_message(uid, f"❌ فشل: {html.escape(str(ce))}", parse_mode="HTML")
 
 
 # ============================================================
