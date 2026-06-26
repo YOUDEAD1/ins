@@ -10793,8 +10793,14 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 API Settings", callback_data="ad_api_main"))
-        markup.add(InlineKeyboardButton("🔍 Check Transaction", callback_data="ad_check_tx"))
+        markup.add(InlineKeyboardButton("🔍 Check Transaction (Hash / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
+        markup.add(InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
+        markup.add(InlineKeyboardButton("👥 Referrals Settings", callback_data="ad_ref_settings"))
+        # 🛡 زر الحماية ضد سرقة الحوالات
+        protection_on = is_amount_protection_enabled()
+        protection_label_en = "✅ Enabled (Recommended)" if protection_on else "⚠️ Disabled (Risky!)"
+        markup.add(InlineKeyboardButton(f"🛡 Deposit Protection: {protection_label_en}", callback_data="toggle_amount_protection"))
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
@@ -10832,25 +10838,47 @@ def ad_check_tx_prompt(call):
     """يطلب من الأدمن إدخال الهاش أو Order ID للفحص"""
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
-    
-    msg = bot.send_message(
-        uid,
-        "🔍 <b>فحص معاملة</b>\n\n"
-        "أرسل أحد التالي:\n"
-        "• <b>هاش العملية</b> (TxID) للعملات الكريبتو (USDT/TON/LTC)\n"
-        "• <b>Order ID</b> لمعاملات Binance Pay\n"
-        "• <b>أي جزء من الـ ID</b> (آخر 10 خانات يكفي)\n\n"
-        "<i>سأخبرك إن كانت تم استلامها في النظام أم لا، ولأي مستخدم.</i>\n\n"
-        "❌ للإلغاء: /cancel",
-        parse_mode="HTML"
-    )
+    l = get_lang(uid)
+
+    # نمسح أي step handlers معلقة (لو الأدمن في وسط عملية ثانية)
+    try: bot.clear_step_handler_by_chat_id(chat_id=uid)
+    except: pass
+
+    if l == 'en':
+        prompt_text = (
+            "🔍 <b>Check Transaction</b>\n\n"
+            "Send one of:\n"
+            "• <b>Hash (TxID)</b> for crypto coins (USDT/TON/LTC)\n"
+            "• <b>Order ID</b> for Binance Pay transactions\n"
+            "• <b>Any part of the ID</b> (last 10 chars enough)\n\n"
+            "<i>I'll tell you if it was received in the system and for which user.</i>\n\n"
+            "❌ To cancel: /cancel"
+        )
+    else:
+        prompt_text = (
+            "🔍 <b>فحص معاملة</b>\n\n"
+            "أرسل أحد التالي:\n"
+            "• <b>هاش العملية</b> (TxID) للعملات الكريبتو (USDT/TON/LTC)\n"
+            "• <b>Order ID</b> لمعاملات Binance Pay\n"
+            "• <b>أي جزء من الـ ID</b> (آخر 10 خانات يكفي)\n\n"
+            "<i>سأخبرك إن كانت تم استلامها في النظام أم لا، ولأي مستخدم.</i>\n\n"
+            "❌ للإلغاء: /cancel"
+        )
+
+    msg = bot.send_message(uid, prompt_text, parse_mode="HTML")
+    logger.info(f"[CHECK_TX] admin {uid} clicked, waiting for hash/orderID")
     bot.register_next_step_handler(msg, ad_check_tx_handle)
 
 
+@safe_next_step
 def ad_check_tx_handle(message):
     """يفحص الهاش/Order ID في DB ويرجع النتيجة"""
     uid = message.from_user.id
-    if not is_admin(uid): return
+    logger.info(f"[CHECK_TX] received from admin {uid}: text={(message.text or '')[:50]!r}")
+
+    if not is_admin(uid):
+        logger.warning(f"[CHECK_TX] non-admin {uid} hit the handler")
+        return
     
     text = (message.text or '').strip()
     if not text or text.lower() in ('/cancel', 'الغاء', 'إلغاء', 'cancel'):
