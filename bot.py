@@ -36,12 +36,19 @@ def _early_handler(path=''):
 
 def _start_early_server():
     import os as _os
+    import time as _tt
+    # Render يستخدم PORT=10000 دائماً - نستمع عليه ثابتاً
     _port = int(_os.environ.get('PORT', 10000))
-    try:
-        _srv = _early_make_server('0.0.0.0', _port, _early_app)
-        _srv.serve_forever()
-    except Exception as _e:
-        pass
+    _ports_to_try = list(set([_port, 10000]))
+    for _p in _ports_to_try:
+        try:
+            _srv = _early_make_server('0.0.0.0', _p, _early_app)
+            _early_threading.Thread(target=_srv.serve_forever, daemon=True).start()
+        except Exception:
+            pass
+    # نبقى حياً
+    while True:
+        _tt.sleep(3600)
 
 _early_server_thread = _early_threading.Thread(target=_start_early_server, daemon=True)
 _early_server_thread.start()
