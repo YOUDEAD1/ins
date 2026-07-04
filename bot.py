@@ -15,11 +15,38 @@ import urllib.parse
 import base64
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from flask import Flask as _Flask, request as _flask_req, Response as _FlaskResp
-from werkzeug.serving import make_server as _make_server
 
 from dotenv import load_dotenv
 load_dotenv()
+
+# ============================================================
+# 🚀 EARLY SERVER START - يبدأ قبل أي شيء لضمان Render Health Check
+# ============================================================
+import threading as _early_threading
+from flask import Flask as _EarlyFlask
+from werkzeug.serving import make_server as _early_make_server
+
+_early_app = _EarlyFlask(__name__)
+
+@_early_app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'OPTIONS', 'HEAD'])
+@_early_app.route('/<path:path>', methods=['GET', 'POST', 'OPTIONS', 'HEAD'])
+def _early_handler(path=''):
+    from flask import request as _r, jsonify as _j
+    return _j({'status': 'online'}), 200
+
+def _start_early_server():
+    import os as _os
+    _port = int(_os.environ.get('PORT', 10000))
+    try:
+        _srv = _early_make_server('0.0.0.0', _port, _early_app)
+        _srv.serve_forever()
+    except Exception as _e:
+        pass
+
+_early_server_thread = _early_threading.Thread(target=_start_early_server, daemon=True)
+_early_server_thread.start()
+import time as _t; _t.sleep(1)  # نعطي السيرفر ثانية ليبدأ
+# ============================================================
 
 try:
     import telebot
@@ -1673,113 +1700,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
 
 def keep_alive():
-    import io as _io
-    _flask_app = _Flask(__name__)
-
-    @_flask_app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'])
-    @_flask_app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'])
-    def _proxy_to_handler(path):
-        # نبني request وهمي لـ APIHandler
-        import io as _io2
-        from http.server import BaseHTTPRequestHandler
-        import socket
-
-        class _FakeSocket:
-            def __init__(self, data):
-                self._data = data
-                self._file = _io2.BytesIO(data)
-            def makefile(self, mode, **kwargs):
-                return _io2.BytesIO(self._data)
-            def sendall(self, data): pass
-            def close(self): pass
-
-        class _FakeRequest:
-            def __init__(self):
-                self._response = _io2.BytesIO()
-            def makefile(self, mode, **kwargs):
-                return self._response
-            def sendall(self, data):
-                self._response.write(data)
-            def close(self): pass
-
-        class _FakeHandler(APIHandler):
-            def __init__(self, method, path, headers, body, address):
-                self.command = method
-                self.path = path
-                self.headers = headers
-                self.rfile = _io2.BytesIO(body)
-                self.client_address = address
-                self._response_code = 200
-                self._response_headers = {}
-                self._response_body = b''
-                self._wfile = _io2.BytesIO()
-                self.wfile = self._wfile
-                self.server = type('S', (), {'server_name': 'localhost', 'server_port': 8080})()
-                self.requestline = f"{method} {path} HTTP/1.1"
-                self.request_version = "HTTP/1.1"
-                self.close_connection = True
-                self.log_message = lambda *a: None
-
-            def send_response(self, code, message=None):
-                self._response_code = code
-
-            def send_header(self, key, value):
-                self._response_headers[key] = value
-
-            def end_headers(self):
-                pass
-
-        # نبني headers من Flask request
-        from email.message import Message
-        msg = Message()
-        for k, v in _flask_req.headers:
-            msg[k] = v
-
-        body = _flask_req.get_data()
-        full_path = _flask_req.full_path if _flask_req.query_string else _flask_req.path
-
-        handler = _FakeHandler(
-            method=_flask_req.method,
-            path=full_path,
-            headers=msg,
-            body=body,
-            address=(_flask_req.remote_addr or '127.0.0.1', 0)
-        )
-
-        # نجمع الرد
-        response_parts = []
-
-        def _capture_write(data):
-            response_parts.append(data)
-
-        handler.wfile.write = _capture_write
-
-        try:
-            if _flask_req.method == 'GET':
-                handler.do_GET()
-            elif _flask_req.method == 'POST':
-                handler.do_POST()
-            elif _flask_req.method == 'OPTIONS':
-                handler.do_OPTIONS()
-            else:
-                handler._response_code = 405
-        except Exception as e:
-            handler._response_code = 500
-            response_parts = [('{"error":"Internal server error"}').encode()]
-
-        body_data = b''.join(response_parts) if response_parts else b'{}'
-        resp = _FlaskResp(
-            response=body_data,
-            status=handler._response_code,
-            headers=handler._response_headers,
-            content_type=handler._response_headers.get('Content-Type', 'application/json')
-        )
-        return resp
-
-    port = int(os.environ.get('PORT', 8080))
-    srv = _make_server('0.0.0.0', port, _flask_app)
-    logger.info(f"✅ Flask server started on port {port}")
-    srv.serve_forever()
+    # السيرفر يعمل بالفعل من بداية الملف
+    pass
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
