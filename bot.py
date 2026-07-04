@@ -14,7 +14,9 @@ import json
 import urllib.parse
 import base64
 from bson.objectid import ObjectId
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from flask import Flask, request, jsonify
+import threading
+from werkzeug.serving import make_server
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -943,736 +945,133 @@ def _webhook_worker():
 threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").start()
 
 
-class APIHandler(BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.end_headers()
+app = Flask(__name__)
 
-    def _auth(self):
-        auth = self.headers.get('Authorization', '')
-        if not auth.startswith('Bearer '): return None, None
-        key = auth[7:].strip()
-        return _get_api_user(key)
+def _auth_flask():
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '): return None, None
+    key = auth[7:].strip()
+    return _get_api_user(key)
 
-    def do_GET(self):
-        p = urllib.parse.urlparse(self.path).path.rstrip('/')
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        gw = _get_api_gateway()
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
 
-        if p in ('', '/'):
-            return _json_resp(self, 200, {'status': 'online'})
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({'status': 'online'}), 200
 
-        # فحص المسار السري — لو ما يطابق، 404 عادي
-        if not p.startswith(f'/{gw}'):
-            return _json_resp(self, 404, {'error': 'Not found'})
+@app.route('/<path:path>', methods=['GET', 'POST', 'OPTIONS'])
+def catch_all(path):
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    gw = _get_api_gateway()
+    
+    if not path.startswith(gw):
+        return jsonify({'error': 'Not found'}), 404
+        
+    route = '/' + path[len(gw):].lstrip('/')
+    
+    doc, user = _auth_flask()
+    if not doc or not user:
+        return jsonify({'error': 'Invalid API key'}), 401
+        
+    uid = doc['user_id']
+    
+    if not _check_rate_limit(doc['api_key']):
+        return jsonify({'error': 'Rate limit exceeded. Max 30 requests/minute.'}), 429
 
-        # نشيل المسار السري من الرابط ونحلل الباقي
-        route = p[len(f'/{gw}'):]  # مثلاً /products أو /product/123
-
-        doc, user = self._auth()
-        if not doc or not user:
-            return _json_resp(self, 401, {'error': 'Invalid API key'})
-        uid = doc['user_id']
-
-        if not _check_rate_limit(doc['api_key']):
-            return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
-
+    if request.method == 'GET':
         if route == '/products':
-            # is_hidden=True من الأدمن = محجوب من الجميع بلا استثناء
-            prods = list(db.products.find({'is_hidden': {'$ne': True}}))
-            # api_hidden = المطور أخفى المنتج من متجره هو فقط
-            hidden_pids = set()
-            for h in db.api_hidden.find({'api_user_id': uid}):
-                hidden_pids.add(h['product_id'])
-            # جلب أسعار المطوّر المخصصة
-            custom_prices = {}
-            for cp in db.api_pricing.find({'api_user_id': uid}):
-                custom_prices[cp['product_id']] = cp
-            result = []
-            for pr in prods:
-                pid = str(pr.get('id', str(pr.get('_id', ''))))
-                if pid in hidden_pids:
-                    continue
-                manual = pr.get('is_manual', False)
-                base_price = float(pr.get('price', 0))
-                cp = custom_prices.get(pid, {})
-                # 🌟 دعم Premium Emoji
-                custom_emoji_id = pr.get('custom_emoji_id')
-                p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
-                p_name_en = cp.get('name_en') or pr.get('name_en', '')
-                p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
-                p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
-                # your_price: من sell_price المقفول، أو null لو لم يُضبط بعد
-                your_price = cp.get('sell_price')
-                item = {
-                    'id': pid,
-                    'name_ar': p_name_ar,
-                    'name_en': p_name_en,
-                    'desc_ar': p_desc_ar,
-                    'desc_en': p_desc_en,
-                    'store_price': base_price,         # سعر المتجر الحالي (يتغير)
-                    'your_price': your_price,          # سعرك المقفول (لا يتغير بتغيير المتجر)
-                    'price_locked': your_price is not None,
-                    'stock': 'unlimited' if manual else get_product_stock_count(pid),
-                    'is_manual': manual,
-                    'discount_tiers': pr.get('discount_tiers', []),
-                    # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
-                    'custom_emoji_id': custom_emoji_id,
-                    'has_premium_emoji': bool(custom_emoji_id),
-                    'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
-                    'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
-                }
-                # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
-                emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
-                item.update(emoji_fields)
-                # دليل الاستخدام الكامل للمطورين
-                item['emoji_guide'] = {
-                    'parse_mode': 'HTML',
-                    'name_ar_html': item.get('name_ar_html', p_name_ar),
-                    'name_en_html': item.get('name_en_html', p_name_en),
-                    'desc_ar_html': item.get('desc_ar_html', p_desc_ar),
-                    'desc_en_html': item.get('desc_en_html', p_desc_en),
-                    'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
-                }
-                result.append(item)
-            return _json_resp(self, 200, {'success': True, 'products': result})
+            cats = db.categories.find({'user_id': uid})
+            cat_map = {str(c['_id']): c.get('name', '') for c in cats}
+            prods = db.products.find({'user_id': uid, 'is_hidden': {'$ne': True}})
+            res = []
+            for p in prods:
+                c_id = p.get('category_id')
+                res.append({
+                    'id': str(p['_id']),
+                    'name': p.get('name', ''),
+                    'price': p.get('price', 0),
+                    'desc': p.get('desc', ''),
+                    'category': cat_map.get(c_id, 'Uncategorized'),
+                    'stock': len(p.get('items', []))
+                })
+            return jsonify(res), 200
 
         if route.startswith('/product/'):
-            pid = route.split('/product/')[1]
-            pr = find_product(pid)
-            if not pr or pr.get('is_hidden'):
-                return _json_resp(self, 404, {'error': 'Product not found'})
-            pid = str(pr.get('id', str(pr.get('_id', ''))))
-            manual = pr.get('is_manual', False)
-            base_price = float(pr.get('price', 0))
-            cp = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
-            # 🌟 دعم Premium Emoji
-            custom_emoji_id = pr.get('custom_emoji_id')
-            p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
-            p_name_en = cp.get('name_en') or pr.get('name_en', '')
-            p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
-            p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
-            your_price_s = cp.get('sell_price') if cp else None
-            product_obj = {
-                'id': pid,
-                'name_ar': p_name_ar,
-                'name_en': p_name_en,
-                'desc_ar': p_desc_ar,
-                'desc_en': p_desc_en,
-                'store_price': base_price,
-                'your_price': your_price_s,
-                'price_locked': your_price_s is not None,
-                'stock': 'unlimited' if manual else get_product_stock_count(pid),
-                'is_manual': manual, 'discount_tiers': pr.get('discount_tiers', []),
-                # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
-                'custom_emoji_id': custom_emoji_id,
-                'has_premium_emoji': bool(custom_emoji_id),
-                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
-                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
-            }
-            # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
-            emoji_fields_s = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
-            product_obj.update(emoji_fields_s)
-            product_obj['emoji_guide'] = {
-                'parse_mode': 'HTML',
-                'name_ar_html': product_obj.get('name_ar_html', p_name_ar),
-                'name_en_html': product_obj.get('name_en_html', p_name_en),
-                'desc_ar_html': product_obj.get('desc_ar_html', p_desc_ar),
-                'desc_en_html': product_obj.get('desc_en_html', p_desc_en),
-                'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
-            }
-            return _json_resp(self, 200, {'success': True, 'product': product_obj})
-
-        if route == '/balance':
-            u = get_user_data_full(uid)
-            return _json_resp(self, 200, {'success': True, 'balance': round(u.get('balance', 0), 2), 'user_id': uid})
-
-        if route == '/orders':
-            limit = min(int(params.get('limit', ['20'])[0]), 100)
-            orders = list(db.api_orders.find({'api_user_id': uid}).sort('_id', -1).limit(limit))
-            result = []
-            for o in orders:
-                try:
-                    order_date = o['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
-                except Exception:
-                    order_date = o.get('date', '')
-                result.append({
-                    'order_id': o.get('order_id', ''),
-                    'product_id': o.get('product_id', ''),
-                    'product_name': o.get('product_name', ''),
-                    'qty': o.get('qty', 1),
-                    'unit_price': round(o.get('total_price', 0) / max(o.get('qty', 1), 1), 2),
-                    'total_price': o.get('total_price', 0),
-                    'codes': o.get('codes', []),
-                    'codes_count': len(o.get('codes', [])),
-                    'status': o.get('status', 'completed'),
-                    'buyer_info': o.get('buyer_info', ''),
-                    'date': order_date
-                })
-            return _json_resp(self, 200, {'success': True, 'orders': result})
-
-        # GET /my_prices — أسعار المطوّر المخصصة
-        if route == '/my_prices':
-            customs = list(db.api_pricing.find({'api_user_id': uid}))
-            result = []
-            for cp in customs:
-                pr = find_product(cp['product_id'])
-                if not pr: continue
-                base = float(pr.get('price', 0))
-                sell = cp.get('sell_price', base)
-                snap = cp.get('base_price_snapshot', base)
-                item = {
-                    'product_id': cp['product_id'],
-                    'original_name': pr.get('name_ar', ''),
-                    'your_name_ar': cp.get('name_ar', ''),
-                    'your_name_en': cp.get('name_en', ''),
-                    'store_price_now': base,           # سعر المتجر الحالي
-                    'store_price_when_set': snap,      # سعر المتجر وقت ما ضبطت سعرك
-                    'your_price': sell,                # سعرك المقفول
-                    'profit_per_unit': round(sell - base, 2),  # الربح بناءً على سعر المتجر الحالي
-                    'price_locked': True,
-                    'price_set_at': cp.get('updated_at', '')
-                }
-                result.append(item)
-            return _json_resp(self, 200, {'success': True, 'custom_products': result})
-
-        # GET /order/{id} — جلب تفاصيل طلب واحد
-        if route.startswith('/order/'):
-            order_id = route.split('/order/')[1]
-            o = db.api_orders.find_one({'order_id': order_id, 'api_user_id': uid})
-            if not o:
-                return _json_resp(self, 404, {'error': 'Order not found'})
+            pid = route.split('/')[-1]
             try:
-                order_date = o['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
-            except Exception:
-                order_date = o.get('date', '')
-            return _json_resp(self, 200, {
-                'success': True,
-                'order': {
-                    'order_id': o.get('order_id', ''),
-                    'product_id': o.get('product_id', ''),
-                    'product_name': o.get('product_name', ''),
-                    'qty': o.get('qty', 1),
-                    'unit_price': round(o.get('total_price', 0) / max(o.get('qty', 1), 1), 2),
-                    'total_price': o.get('total_price', 0),
-                    'codes': o.get('codes', []),
-                    'codes_count': len(o.get('codes', [])),
-                    'status': o.get('status', 'completed'),
-                    'buyer_info': o.get('buyer_info', ''),
-                    'date': order_date
-                }
-            })
+                p = db.products.find_one({'_id': ObjectId(pid), 'user_id': uid, 'is_hidden': {'$ne': True}})
+                if not p: return jsonify({'error': 'Product not found'}), 404
+                c = db.categories.find_one({'_id': ObjectId(p.get('category_id'))})
+                c_name = c.get('name', '') if c else 'Uncategorized'
+                return jsonify({
+                    'id': str(p['_id']),
+                    'name': p.get('name', ''),
+                    'price': p.get('price', 0),
+                    'desc': p.get('desc', ''),
+                    'category': c_name,
+                    'stock': len(p.get('items', []))
+                }), 200
+            except:
+                return jsonify({'error': 'Invalid ID'}), 400
+                
+    elif request.method == 'POST':
+        if route.startswith('/buy/'):
+            pid = route.split('/')[-1]
+            try:
+                data = request.get_json() or {}
+                qty = int(data.get('quantity', 1))
+                if qty < 1: return jsonify({'error': 'Invalid quantity'}), 400
+            except:
+                return jsonify({'error': 'Invalid request body'}), 400
 
-        # GET /webhook — عرض إعدادات الـ webhook الحالية للمطور
-        if route == '/webhook':
-            w = db.api_webhooks.find_one({'api_user_id': uid})
-            if not w:
-                return _json_resp(self, 200, {
+            try:
+                p = db.products.find_one({'_id': ObjectId(pid), 'user_id': uid, 'is_hidden': {'$ne': True}})
+                if not p: return jsonify({'error': 'Product not found'}), 404
+                
+                items = p.get('items', [])
+                if len(items) < qty:
+                    return jsonify({'error': 'Not enough stock'}), 400
+                    
+                bought = items[:qty]
+                db.products.update_one({'_id': p['_id']}, {'$set': {'items': items[qty:]}})
+                
+                total_price = p.get('price', 0) * qty
+                
+                return jsonify({
                     'success': True,
-                    'webhook': None,
-                    'note': 'No webhook configured. Use POST /set_webhook to register one.'
-                })
-            return _json_resp(self, 200, {
-                'success': True,
-                'webhook': {
-                    'url': w.get('url', ''),
-                    'is_active': w.get('is_active', True),
-                    'has_secret': bool(w.get('secret')),
-                    'event_filter': w.get('event_filter', []),
-                    'failures': w.get('failures', 0),
-                    'last_success': str(w.get('last_success', '')),
-                    'last_failure': str(w.get('last_failure', '')),
-                    'disabled_reason': w.get('disabled_reason')
-                },
-                'supported_events': [
-                    'stock.added', 'stock.sold', 'stock.removed', 'stock.updated',
-                    'product.created', 'product.updated', 'product.deleted',
-                    'order.completed'
-                ]
-            })
+                    'product': p.get('name', ''),
+                    'quantity': qty,
+                    'total_price': total_price,
+                    'items': bought
+                }), 200
+            except:
+                return jsonify({'error': 'Invalid ID'}), 400
 
-        # GET /changes?since=TIMESTAMP — polling fallback لو ما تستخدم webhook
-        # يرجع كل الأحداث منذ timestamp معين (آخر 24 ساعة فقط)
-        if route == '/changes':
-            try:
-                since = int(params.get('since', ['0'])[0])
-            except: since = 0
-            try:
-                limit = min(int(params.get('limit', ['100'])[0]), 500)
-            except: limit = 100
+    return jsonify({'error': 'Endpoint not found'}), 404
 
-            # فلترة اختيارية بنوع
-            ev_type = params.get('event_type', [None])[0]
+class ServerThread(threading.Thread):
+    def __init__(self, app):
+        threading.Thread.__init__(self)
+        self.server = make_server('0.0.0.0', int(os.environ.get('PORT', 8080)), app)
+        self.ctx = app.app_context()
+        self.ctx.push()
 
-            query = {'timestamp': {'$gt': since}}
-            if ev_type:
-                query['event_type'] = ev_type
-
-            try:
-                events = list(db.api_events.find(query).sort('timestamp', 1).limit(limit))
-            except Exception as _ce:
-                logger.debug(f"/changes query err: {_ce}")
-                events = []
-
-            result = []
-            latest_ts = since
-            for e in events:
-                ts = e.get('timestamp', 0)
-                if ts > latest_ts: latest_ts = ts
-                result.append({
-                    'event_id': e.get('event_id', ''),
-                    'event_type': e.get('event_type', ''),
-                    'timestamp': ts,
-                    'data': e.get('data', {}),
-                    'product_id': e.get('product_id')
-                })
-
-            import time as _tcs
-            return _json_resp(self, 200, {
-                'success': True,
-                'events': result,
-                'count': len(result),
-                'cursor': latest_ts,                # ابعتها في 'since' المرة الجاية
-                'server_time': int(_tcs.time()),
-                'note': 'Use the "cursor" value as "since" on your next /changes call. Events older than 24h are deleted automatically.'
-            })
-
-        # GET /stats — إحصائيات المطور
-        if route == '/stats':
-            total_orders = db.api_orders.count_documents({'api_user_id': uid})
-            completed = db.api_orders.count_documents({'api_user_id': uid, 'status': 'completed'})
-            pending = db.api_orders.count_documents({'api_user_id': uid, 'status': 'pending_manual'})
-            revenue = sum(o.get('total_price', 0) for o in db.api_orders.find({'api_user_id': uid, 'status': 'completed'}, {'total_price': 1}))
-            u_data = get_user_data_full(uid)
-            return _json_resp(self, 200, {
-                'success': True,
-                'balance': round(u_data.get('balance', 0), 2),
-                'total_orders': total_orders,
-                'completed_orders': completed,
-                'pending_orders': pending,
-                'total_revenue': round(revenue, 2)
-            })
-
-        return _json_resp(self, 404, {'error': 'Not found'})
-
-    def do_POST(self):
-        p = urllib.parse.urlparse(self.path).path.rstrip('/')
-        gw = _get_api_gateway()
-
-        if not p.startswith(f'/{gw}'):
-            return _json_resp(self, 404, {'error': 'Not found'})
-
-        route = p[len(f'/{gw}'):]
-        doc, user = self._auth()
-        if not doc or not user:
-            return _json_resp(self, 401, {'error': 'Invalid API key'})
-        uid = doc['user_id']
-
-        if not _check_rate_limit(doc['api_key']):
-            return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
-
-        if route == '/purchase':
-            try:
-                body = json.loads(_read_body(self))
-            except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
-
-            product_id = str(body.get('product_id', '')).strip()
-            qty = body.get('qty', 1)
-            buyer_info = str(body.get('buyer_info', ''))[:200]
-
-            if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
-            try:
-                qty = int(qty)
-                if qty < 1 or qty > 50: return _json_resp(self, 400, {'error': 'qty: 1-50'})
-            except: return _json_resp(self, 400, {'error': 'qty must be integer'})
-
-            pr = find_product(product_id)
-            if not pr or pr.get('is_hidden'):
-                return _json_resp(self, 404, {'error': 'Product not found'})
-
-            pid = str(pr.get('id', str(pr.get('_id', ''))))
-            is_manual = pr.get('is_manual', False)
-
-            if not is_manual and get_product_stock_count(pid) < qty:
-                return _json_resp(self, 409, {'error': 'Not enough stock', 'available': get_product_stock_count(pid)})
-
-            # سعر الشراء الفعلي من المتجر (base) — يُستخدم للخصم من رصيد المطور
-            cp_doc = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
-            store_price = float(pr.get('price', 0))
-            # الكمية → تطبيق خصومات المتجر على store_price
-            purchase_unit = store_price
-            for t in sorted(pr.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0), reverse=True):
-                if qty >= t.get('min_qty', 0):
-                    purchase_unit = float(t.get('price', store_price))
-                    break
-            total = round(purchase_unit * qty, 2)
-            # sell_price المقفول للـ response فقط (ما يؤثر على الخصم من رصيده)
-            unit = float(cp_doc.get('sell_price', store_price))
-
-            order_id = f"API_{int(time.time())}_{uid}"
-
-            if is_manual:
-                # atomic: فحص الرصيد والخصم في عملية واحدة
-                updated = db.users.find_one_and_update(
-                    {'user_id': uid, 'balance': {'$gte': total}},
-                    {'$inc': {'balance': -total}},
-                    return_document=True
-                )
-                if not updated:
-                    return _json_resp(self, 402, {'error': 'Insufficient balance', 'required': total})
-                db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': [], 'buyer_info': buyer_info, 'status': 'pending_manual'})
-                db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': f"API: {order_id}", 'qty': qty, 'total_price': total, 'via_api': True})
-                # 📢 لوق القناة
-                try:
-                    log_ch = get_setting('log_channel')
-                    if log_ch and log_ch != 'Not Set':
-                        product_name_clean = clean_name(pr.get('name_en', pr.get('name_ar', '')))
-                        custom_emoji_id = pr.get('custom_emoji_id')
-                        product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
-                        
-                        inner_msg = LANG['en']['log_purchase'].format('API User', product_name_log, qty)
-                        custom_inner = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
-                        if custom_inner and custom_inner.get('value'):
-                            try: inner_msg = custom_inner['value'].format('API User', product_name_log, qty)
-                            except: pass
-                        
-                        cms_api_log = db.custom_texts.find_one({'lang': 'en', 'key': 'api_log'})
-                        if cms_api_log and cms_api_log.get('value'):
-                            try: pub_msg = cms_api_log['value'].format(inner_msg)
-                            except: pub_msg = LANG['en']['api_log'].format(inner_msg)
-                        else:
-                            pub_msg = LANG['en']['api_log'].format(inner_msg)
-                        
-                        bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-                except: pass
-                # 🔔 إشعار لكل الأدمن
-                try: _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=True)
-                except: pass
-                # 🔄 بث حدث API للمزامنة (manual order pending)
-                try:
-                    _emit_event('order.completed', {
-                        'order_id': order_id,
-                        'product_id': pid,
-                        'qty': qty,
-                        'total_price': total,
-                        'status': 'pending_manual',
-                        'is_manual': True,
-                        'via_api': True,
-                        'api_user_id': uid
-                    }, product_id=pid)
-                except: pass
-                return _json_resp(self, 200, {
-                    'success': True,
-                    'order_id': order_id,
-                    'status': 'pending_manual',
-                    'product_id': pid,
-                    'qty': qty,
-                    'unit_price': unit,
-                    'total_price': total,
-                    'new_balance': round(updated.get('balance', 0), 2),
-                    'note': 'Manual product — admin will deliver soon'
-                })
-
-            # تلقائي — حجز أكواد
-            pid_str = str(pid)
-            qs = [{'product_id': pid_str}]
-            if pid_str.isdigit(): qs.append({'product_id': int(pid_str)})
-            try: qs.append({'product_id': float(pid_str)})
-            except: pass
-
-            res_id = f"api_{uid}_{int(time.time()*1000)}"
-            reserved = []
-            for _ in range(qty):
-                r = db.product_stock.find_one_and_update({'$or': qs, 'is_sold': False}, {'$set': {'is_sold': True, 'reservation_id': res_id}}, return_document=True)
-                if not r:
-                    db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
-                    return _json_resp(self, 409, {'error': 'Stock ran out during purchase'})
-                reserved.append(r)
-
-            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}}, {'$inc': {'balance': -total}}, return_document=True)
-            if not updated:
-                db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
-                return _json_resp(self, 402, {'error': 'Insufficient balance'})
-
-            codes = []
-            for item in reserved:
-                db.product_stock.update_one({'_id': item['_id']}, {'$unset': {'reservation_id': ''}})
-                codes.append(item.get('code_line', ''))
-                db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': item.get('code_line', ''), 'qty': 1, 'price': unit, 'via_api': True, 'api_order_id': order_id})
-
-            db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': codes, 'buyer_info': buyer_info, 'status': 'completed'})
-
-            # 📢 لوق القناة — نفس شكل الشراء العادي + CMS
-            try:
-                log_ch = get_setting('log_channel')
-                if log_ch and log_ch != 'Not Set':
-                    product_name_clean = clean_name(pr.get('name_en', pr.get('name_ar', '')))
-                    custom_emoji_id = pr.get('custom_emoji_id')
-                    product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
-                    
-                    inner_msg = LANG['en']['log_purchase'].format('API User', product_name_log, qty)
-                    custom_inner = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
-                    if custom_inner and custom_inner.get('value'):
-                        try: inner_msg = custom_inner['value'].format('API User', product_name_log, qty)
-                        except: pass
-                    
-                    # غلاف API
-                    cms_api_log = db.custom_texts.find_one({'lang': 'en', 'key': 'api_log'})
-                    if cms_api_log and cms_api_log.get('value'):
-                        try: pub_msg = cms_api_log['value'].format(inner_msg)
-                        except: pub_msg = LANG['en']['api_log'].format(inner_msg)
-                    else:
-                        pub_msg = LANG['en']['api_log'].format(inner_msg)
-                    
-                    bot.send_message(log_ch, pub_msg, parse_mode="HTML")
-            except: pass
-            
-            # 🔔 إشعار لكل الأدمن
-            try: _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, is_manual=False)
-            except: pass
-
-            # 🔔 تنبيه الستوك بعد البيع عبر API (يصل لكل الأدمن عشان يعيد التعبئة)
-            try:
-                remaining = get_product_stock_count(pid)
-                pname = clean_name(pr.get('name_ar', pr.get('name_en', '')))
-                if remaining == 0:
-                    notify_admins(
-                        f"🚨 <b>تنبيه: ستوك انتهى! (بيع عبر API)</b>\n\n"
-                        f"📦 المنتج: <b>{pname}</b>\n"
-                        f"📊 المتبقي: <b>0</b>\n\n"
-                        f"⚠️ أعد إضافة ستوك لهذا المنتج الآن!"
-                    )
-                elif remaining <= 2:
-                    notify_admins(
-                        f"⚠️ <b>تنبيه: ستوك قارب على الانتهاء! (بيع عبر API)</b>\n\n"
-                        f"📦 المنتج: <b>{pname}</b>\n"
-                        f"📊 المتبقي: <b>{remaining}</b>\n\n"
-                        f"⚠️ يُفضّل إضافة ستوك جديد قريباً!"
-                    )
-            except Exception as _stk_e:
-                logger.debug(f"API stock alert error: {_stk_e}")
-
-            # 🔄 بث حدث API للمزامنة (بيع تلقائي عبر API)
-            try:
-                _emit_event('stock.sold', {
-                    'product_id': pid,
-                    'qty_sold': qty,
-                    'remaining_stock': get_product_stock_count(pid),
-                    'is_manual': False,
-                    'via_api': True,
-                    'api_user_id': uid,
-                    'order_id': order_id
-                }, product_id=pid)
-                _emit_event('order.completed', {
-                    'order_id': order_id,
-                    'product_id': pid,
-                    'qty': qty,
-                    'total_price': total,
-                    'status': 'completed',
-                    'is_manual': False,
-                    'via_api': True,
-                    'api_user_id': uid,
-                    'codes_count': len(codes)
-                }, product_id=pid)
-            except: pass
-
-            return _json_resp(self, 200, {
-                'success': True,
-                'order_id': order_id,
-                'status': 'completed',
-                'product_id': pid,
-                'qty': qty,
-                'unit_price': unit,
-                'total_price': total,
-                'codes': codes,
-                'codes_count': len(codes),
-                'new_balance': round(updated.get('balance', 0), 2)
-            })
-
-        # POST /set_price — المطوّر يحدد سعر البيع لعملائه
-        if route == '/set_price':
-            try:
-                body = json.loads(_read_body(self))
-            except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
-
-            product_id = str(body.get('product_id', '')).strip()
-            sell_price = body.get('price')
-
-            if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
-
-            pr = find_product(product_id)
-            if not pr or pr.get('is_hidden'):
-                return _json_resp(self, 404, {'error': 'Product not found'})
-
-            pid = str(pr.get('id', str(pr.get('_id', ''))))
-            base_price = float(pr.get('price', 0))
-
-            try:
-                sell_price = round(float(sell_price), 2)
-                if sell_price < base_price:
-                    return _json_resp(self, 400, {'error': f'Price cannot be less than base price (${base_price:.2f})'})
-                if sell_price > 9999:
-                    return _json_resp(self, 400, {'error': 'Price too high'})
-            except (TypeError, ValueError):
-                return _json_resp(self, 400, {'error': 'price must be a number'})
-
-            import datetime as _dt2
-            db.api_pricing.update_one(
-                {'api_user_id': uid, 'product_id': pid},
-                {'$set': {
-                    'sell_price': sell_price,
-                    'base_price_snapshot': base_price,  # snapshot وقت الضبط
-                    'updated_at': _dt2.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-                }},
-                upsert=True
-            )
-            profit = round(sell_price - base_price, 2)
-            return _json_resp(self, 200, {
-                'success': True,
-                'product_id': pid,
-                'base_price': base_price,
-                'your_price': sell_price,
-                'profit_per_unit': profit,
-                'note': 'Your price is locked. Store price changes will NOT affect it.'
-            })
-
-        # POST /set_webhook — تسجيل/تحديث webhook URL للمزامنة الفورية
-        # Body: {"url": "https://...", "secret": "اختياري", "event_filter": [...]}
-        if route == '/set_webhook':
-            try:
-                body = json.loads(_read_body(self))
-            except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
-
-            url = str(body.get('url', '')).strip()
-            if not url:
-                return _json_resp(self, 400, {'error': 'url required'})
-            if not (url.startswith('http://') or url.startswith('https://')):
-                return _json_resp(self, 400, {'error': 'url must start with http:// or https://'})
-            if len(url) > 500:
-                return _json_resp(self, 400, {'error': 'url too long'})
-
-            # secret اختياري — لو ما أرسله نولّد واحد له
-            secret = str(body.get('secret', '')).strip()
-            if not secret:
-                secret = secrets.token_hex(24)
-            if len(secret) > 200:
-                return _json_resp(self, 400, {'error': 'secret too long'})
-
-            # event_filter اختياري — قائمة بأنواع الأحداث المطلوبة فقط
-            ev_filter = body.get('event_filter') or []
-            if not isinstance(ev_filter, list):
-                return _json_resp(self, 400, {'error': 'event_filter must be array'})
-            allowed_events = {
-                'stock.added', 'stock.sold', 'stock.removed', 'stock.updated',
-                'product.created', 'product.updated', 'product.deleted',
-                'order.completed'
-            }
-            ev_filter = [str(x) for x in ev_filter if str(x) in allowed_events]
-
-            db.api_webhooks.update_one(
-                {'api_user_id': uid},
-                {'$set': {
-                    'api_user_id': uid,
-                    'url': url,
-                    'secret': secret,
-                    'event_filter': ev_filter,
-                    'is_active': True,
-                    'failures': 0,
-                    'disabled_reason': None,
-                    'updated_at': datetime.datetime.utcnow()
-                }},
-                upsert=True
-            )
-
-            return _json_resp(self, 200, {
-                'success': True,
-                'url': url,
-                'secret': secret,
-                'event_filter': ev_filter,
-                'note': (
-                    'Webhook registered. We will POST events to your URL.\n'
-                    'Verify signature: X-Webhook-Signature header = "sha256=" + '
-                    'hmac_sha256(secret, f"{X-Webhook-Timestamp}." + raw_body).\n'
-                    'Respond with 2xx within 8 seconds. After 50 consecutive failures '
-                    'the webhook will be disabled automatically.'
-                )
-            })
-
-        # POST /delete_webhook — حذف webhook
-        if route == '/delete_webhook':
-            db.api_webhooks.delete_one({'api_user_id': uid})
-            return _json_resp(self, 200, {'success': True, 'message': 'Webhook deleted'})
-
-        # POST /test_webhook — يرسل event تجريبي لـ webhook
-        if route == '/test_webhook':
-            w = db.api_webhooks.find_one({'api_user_id': uid, 'is_active': True})
-            if not w:
-                return _json_resp(self, 404, {'error': 'No active webhook configured'})
-            import time as _twt
-            test_evt = {
-                'event_id': f"evt_test_{int(_twt.time()*1000)}",
-                'event_type': 'webhook.test',
-                'timestamp': int(_twt.time()),
-                'data': {'message': 'This is a test event from your shop bot.'},
-                'product_id': None
-            }
-            ok = _deliver_webhook(w, test_evt)
-            return _json_resp(self, 200, {
-                'success': ok,
-                'delivered': ok,
-                'url': w.get('url', ''),
-                'note': 'If delivered=false, check that your endpoint returns 2xx within 8s.'
-            })
-
-        # POST /set_product — المطوّر يعدّل اسم/وصف المنتج لعملائه
-        if route == '/set_product':
-            try:
-                body = json.loads(_read_body(self))
-            except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
-
-            product_id = str(body.get('product_id', '')).strip()
-            if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
-
-            pr = find_product(product_id)
-            if not pr or pr.get('is_hidden'):
-                return _json_resp(self, 404, {'error': 'Product not found'})
-
-            pid = str(pr.get('id', str(pr.get('_id', ''))))
-            update = {}
-            if 'name_ar' in body: update['name_ar'] = str(body['name_ar'])[:100]
-            if 'name_en' in body: update['name_en'] = str(body['name_en'])[:100]
-            if 'desc_ar' in body: update['desc_ar'] = str(body['desc_ar'])[:500]
-            if 'desc_en' in body: update['desc_en'] = str(body['desc_en'])[:500]
-            if 'price' in body:
-                try:
-                    sp = round(float(body['price']), 2)
-                    base_price = float(pr.get('price', 0))
-                    if sp < base_price:
-                        return _json_resp(self, 400, {'error': f'Price cannot be less than ${base_price:.2f}'})
-                    update['sell_price'] = sp
-                except: pass
-
-            if not update:
-                return _json_resp(self, 400, {'error': 'Nothing to update. Send: name_ar, name_en, desc_ar, desc_en, or price'})
-
-            db.api_pricing.update_one(
-                {'api_user_id': uid, 'product_id': pid},
-                {'$set': update},
-                upsert=True
-            )
-            return _json_resp(self, 200, {'success': True, 'product_id': pid, 'updated': list(update.keys())})
-
-        return _json_resp(self, 404, {'error': 'Endpoint not found'})
-
+    def run(self):
+        self.server.serve_forever()
 
 def keep_alive():
-    port = int(os.environ.get('PORT', 8080))
-    HTTPServer(('0.0.0.0', port), APIHandler).serve_forever()
+    global server
+    server = ServerThread(app)
+    server.start()
+
 
 threading.Thread(target=keep_alive, daemon=True).start()
 

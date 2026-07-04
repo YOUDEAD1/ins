@@ -1,11 +1,2 @@
-pyTelegramBotAPI
-python-binance
-pymongo
-deep-translator
-requests
-python-dotenv
-telethon
-cryptg
-pillow
-cryptography
-curl_cffi
+flask
+werkzeug
