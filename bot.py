@@ -37,18 +37,49 @@ def _early_handler(path=''):
 def _start_early_server():
     import os as _os
     import time as _tt
-    # Render يستخدم PORT=10000 دائماً - نستمع عليه ثابتاً
+    import subprocess as _sp
+    import sys as _sys
     _port = int(_os.environ.get('PORT', 10000))
-    _ports_to_try = list(set([_port, 10000]))
-    for _p in _ports_to_try:
-        try:
-            _srv = _early_make_server('0.0.0.0', _p, _early_app)
-            _early_threading.Thread(target=_srv.serve_forever, daemon=True).start()
-        except Exception:
-            pass
-    # نبقى حياً
-    while True:
-        _tt.sleep(3600)
+    # نكتب ملف wsgi بسيط
+    _wsgi_code = 'from flask import Flask, jsonify\napp = Flask(__name__)\n@app.route(\'/<path:p>\', methods=[\'GET\',\'POST\',\'OPTIONS\',\'HEAD\'])\ndef h(p=\'\'):return jsonify(status=\'online\'),200\n@app.route(\'/\', methods=[\'GET\',\'POST\',\'OPTIONS\',\'HEAD\'])\ndef root():return jsonify(status=\'online\'),200\n'
+    _wsgi_path = '/tmp/_render_health.py'
+    try:
+        with open(_wsgi_path, 'w') as _f:
+            _f.write(_wsgi_code)
+    except Exception:
+        pass
+    def _launch_gunicorn():
+        return _sp.Popen(
+            [_sys.executable, '-m', 'gunicorn',
+             '--bind', f'0.0.0.0:{_port}',
+             '--workers', '2', '--threads', '4',
+             '--timeout', '120',
+             '_render_health:app'],
+            cwd='/tmp',
+            stdout=_sp.PIPE, stderr=_sp.PIPE
+        )
+    try:
+        _proc = _launch_gunicorn()
+        _tt.sleep(2)
+        if _proc.poll() is None:
+            print(f'\u2705 gunicorn started on port {_port}')
+        else:
+            # gunicorn فشل - نستخدم Werkzeug
+            raise Exception('gunicorn failed')
+        while True:
+            if _proc.poll() is not None:
+                _proc = _launch_gunicorn()
+            _tt.sleep(30)
+    except Exception:
+        # fallback: Werkzeug
+        for _p in set([_port, 10000]):
+            try:
+                _srv = _early_make_server('0.0.0.0', _p, _early_app)
+                _early_threading.Thread(target=_srv.serve_forever, daemon=True).start()
+            except Exception:
+                pass
+        while True:
+            _tt.sleep(3600)
 
 _early_server_thread = _early_threading.Thread(target=_start_early_server, daemon=True)
 _early_server_thread.start()
@@ -16654,11 +16685,28 @@ def run_bot():
     except Exception as e:
         logger.error(f"❌ فشل بدء خيط مراقبة مقاعد ChatGPT: {e}")
 
-    try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
-    except: pass
+    # حذف أي webhook قديم وانتظار حتى تنتهي النسخة القديمة
+    for _attempt in range(5):
+        try:
+            bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ تم حذف الـ webhook")
+            break
+        except Exception as _e:
+            logger.warning(f"محاولة {_attempt+1} لحذف webhook: {_e}")
+            time.sleep(3)
+    time.sleep(5)  # انتظار 5 ثوانٍ لضمان انتهاء النسخة القديمة
     while True:
-        try: bot.polling(non_stop=True, skip_pending=True)
-        except Exception as e: logger.error(f"Polling Error Critical: {e}"); time.sleep(5)
+        try:
+            bot.polling(non_stop=True, skip_pending=True, timeout=30, long_polling_timeout=25)
+        except Exception as e:
+            err = str(e)
+            logger.error(f"Polling Error: {err}")
+            if '409' in err or 'Conflict' in err:
+                # نسخة أخرى لا تزال تعمل - ننتظر حتى تنتهي
+                logger.info("⏳ انتظار 30 ثانية حتى تنتهي النسخة القديمة...")
+                time.sleep(30)
+            else:
+                time.sleep(5)
 
 if __name__ == "__main__":
     run_bot()

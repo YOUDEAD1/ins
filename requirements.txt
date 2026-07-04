@@ -11,3 +11,4 @@ cryptography
 curl_cffi
 flask
 werkzeug
+gunicorn
