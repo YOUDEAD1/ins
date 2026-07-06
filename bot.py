@@ -13193,9 +13193,16 @@ def ep_dosetcat_handler(call):
 def ep_disc_ui(call):
     """إدارة خصومات الكمية للمنتج"""
     bot.answer_callback_query(call.id)
-    pid = call.data.replace("ep_disc_", "")
+    raw = call.data.replace("ep_disc_", "")
+    # فصل لاحقة المجلد إن وُجدت: {pid}_c_{cat_id}
+    if '_c_' in raw:
+        pid, _ = raw.split('_c_', 1)
+    else:
+        pid = raw
     p = find_product(pid)
-    if not p: return
+    if not p:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
 
     tiers = p.get('discount_tiers', [])
     tiers_sorted = sorted(tiers, key=lambda x: x.get('min_qty', 0))
