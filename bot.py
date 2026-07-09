@@ -10830,6 +10830,205 @@ def admin_main_ui(call):
     except: pass
 
 # ============================================================
+# 🔗 دوال مساعدة: بحث الأدمن عن هاش على الشبكة (TON / LTC)
+# ============================================================
+# ملاحظة مهمة: إيداعات TON و LTC تروح لمحفظة البوت مباشرة على السلسلة،
+# مو لـ Binance. فبحث الأدمن لازم يفحص شبكة TON (TONCenter/TonAPI)
+# وشبكة LTC (litecoinspace/blockcypher) — مو Binance فقط.
+
+def _tx_hash_to_bytes(h):
+    """يحوّل هاش معاملة (hex أو base64/base64url) إلى 32 byte للمقارنة الموحّدة.
+
+    السبب: مستكشفات TON (Tonviewer/Tonscan) تعرض الهاش بصيغة hex (64 حرف)،
+    بينما TONCenter API يرجّعه بصيغة base64 (44 حرف). نفس الهاش لكن ترميز مختلف،
+    فلو قارنّا نصياً ما يتطابقان أبداً. نحوّل الاثنين لـ bytes ونقارن.
+    يرجّع None لو ما قدر يفك الترميز."""
+    if not h:
+        return None
+    s = str(h).strip().replace(' ', '').replace('\n', '')
+    # 1) جرّب hex أولاً (64 حرف hex = 32 byte، مع أو بدون 0x)
+    try:
+        hs = s[2:] if s.lower().startswith('0x') else s
+        if len(hs) in (64, 66) and all(c in '0123456789abcdefABCDEF' for c in hs):
+            return bytes.fromhex(hs[:64] if len(hs) == 66 else hs)
+    except Exception:
+        pass
+    # 2) جرّب base64 / base64url (نحوّل url-safe ونضيف padding)
+    try:
+        b = s.replace('-', '+').replace('_', '/')
+        b += '=' * (-len(b) % 4)
+        raw = base64.b64decode(b)
+        if len(raw) == 32:
+            return raw
+    except Exception:
+        pass
+    return None
+
+
+def _tx_hash_matches(user_hash, api_hash):
+    """يقارن هاشين مع مراعاة اختلاف الترميز (hex ضد base64) في TON.
+    - يقارن الـ bytes لو أمكن (الأدق والأهم لـ TON)
+    - يرجع للمقارنة النصية (substring) كخطة بديلة"""
+    if not user_hash or not api_hash:
+        return False
+    ub = _tx_hash_to_bytes(user_hash)
+    ab = _tx_hash_to_bytes(api_hash)
+    if ub is not None and ab is not None and ub == ab:
+        return True
+    # fallback نصي (يغطي الحالات اللي فيها الهاش مو 32 byte قياسي)
+    u = str(user_hash).strip().lower().replace(' ', '')
+    a = str(api_hash).strip().lower().replace(' ', '')
+    if u.startswith('0x'):
+        u = u[2:]
+    if a.startswith('0x'):
+        a = a[2:]
+    if not u or not a:
+        return False
+    return u == a or u in a or a in u
+
+
+def _admin_search_ton_tx(query):
+    """يبحث عن هاش TON في شبكة TON (TONCenter ثم TonAPI) مقابل محفظة البوت.
+
+    يرجّع dict:
+      - {'is_sender': True, 'hash': ...}                لو الحوالة صادرة من محفظتنا
+      - {'received_ton': float, 'utime': int, 'hash':..., 'source_addr':...}  لو إيداع
+      - None لو ما لقى شيء
+    """
+    wallet_address = get_setting('ton_address')
+    if not wallet_address or wallet_address == 'Not Set' or len(wallet_address) < 10:
+        return None
+
+    q = str(query).strip().replace(' ', '').replace('\n', '')
+
+    # 1) TONCenter: آخر معاملات المحفظة
+    try:
+        res = requests.get(
+            "https://toncenter.com/api/v2/getTransactions",
+            params={"address": wallet_address, "limit": 100, "archival": "true"},
+            timeout=15
+        )
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("ok"):
+                for tx in data.get("result", []):
+                    tx_hash = tx.get("transaction_id", {}).get("hash", "")
+                    if not _tx_hash_matches(q, tx_hash):
+                        continue
+                    in_msg = tx.get("in_msg", {}) or {}
+                    source_addr = in_msg.get("source", "") or ""
+                    if source_addr == wallet_address:
+                        return {'is_sender': True, 'hash': tx_hash}
+                    value_nano = int(in_msg.get("value", 0) or 0)
+                    if value_nano <= 0:
+                        continue
+                    return {
+                        'received_ton': value_nano / 1_000_000_000,
+                        'utime': int(tx.get("utime", 0) or 0),
+                        'hash': tx_hash,
+                        'source_addr': source_addr,
+                    }
+    except Exception as e:
+        logger.debug(f"[CHECK_TX] TONCenter list err: {e}")
+
+    # 2) TonAPI (احتياطي)
+    try:
+        res2 = requests.get(
+            f"https://tonapi.io/v2/blockchain/accounts/{wallet_address}/transactions",
+            params={"limit": 100}, timeout=15
+        )
+        if res2.status_code == 200:
+            for tx in res2.json().get("transactions", []):
+                tx_hash = tx.get("hash", "")
+                if not _tx_hash_matches(q, tx_hash):
+                    continue
+                in_msg = tx.get("in_msg", {}) or {}
+                source = in_msg.get("source", {})
+                source_addr = source.get("address", "") if isinstance(source, dict) else str(source or "")
+                if source_addr == wallet_address:
+                    return {'is_sender': True, 'hash': tx_hash}
+                value_nano = int(in_msg.get("value", 0) or 0)
+                if value_nano <= 0:
+                    continue
+                return {
+                    'received_ton': value_nano / 1_000_000_000,
+                    'utime': int(tx.get("utime", 0) or 0),
+                    'hash': tx_hash,
+                    'source_addr': source_addr,
+                }
+    except Exception as e:
+        logger.debug(f"[CHECK_TX] TonAPI err: {e}")
+
+    return None
+
+
+def _admin_search_ltc_tx(query):
+    """يبحث عن هاش LTC في الشبكة (litecoinspace ثم blockcypher) مقابل محفظة البوت.
+
+    يرجّع dict:
+      - {'is_sender': True, 'hash': ...}                          لو صادرة من محفظتنا
+      - {'received_ltc': float, 'confirmed': bool, 'block_time': int, 'hash':...}  لو إيداع
+      - None لو ما لقى / الهاش مو بصيغة LTC صالحة
+    """
+    wallet_address = get_setting('ltc_address')
+    if not wallet_address or wallet_address == 'Not Set' or len(wallet_address) < 10:
+        return None
+
+    q = str(query).strip().replace(' ', '').replace('\n', '').lower()
+    if q.startswith('0x'):
+        q = q[2:]
+    # هاش LTC/BTC = 64 حرف hex — لو مو كذا ما نتعب الـ API
+    if not (len(q) == 64 and all(c in '0123456789abcdef' for c in q)):
+        return None
+
+    # 1) litecoinspace.org
+    try:
+        res = requests.get(f"https://litecoinspace.org/api/tx/{q}", timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            for vin in data.get("vin", []):
+                if vin.get("prevout", {}).get("scriptpubkey_address") == wallet_address:
+                    return {'is_sender': True, 'hash': q}
+            received = 0.0
+            for vout in data.get("vout", []):
+                if vout.get("scriptpubkey_address") == wallet_address:
+                    received += float(vout.get("value", 0)) / 100000000.0
+            if received > 0:
+                return {
+                    'received_ltc': received,
+                    'block_time': int(data.get("status", {}).get("block_time", 0) or 0),
+                    'confirmed': bool(data.get("status", {}).get("confirmed")),
+                    'hash': q,
+                }
+    except Exception as e:
+        logger.debug(f"[CHECK_TX] litecoinspace err: {e}")
+
+    # 2) blockcypher (احتياطي)
+    try:
+        res2 = requests.get(f"https://api.blockcypher.com/v1/ltc/main/txs/{q}", timeout=10)
+        if res2.status_code == 200:
+            data2 = res2.json()
+            for inp in data2.get("inputs", []):
+                if wallet_address in inp.get("addresses", []):
+                    return {'is_sender': True, 'hash': q}
+            received = 0.0
+            for output in data2.get("outputs", []):
+                if wallet_address in output.get("addresses", []):
+                    received += float(output.get("value", 0)) / 100000000.0
+            if received > 0:
+                return {
+                    'received_ltc': received,
+                    'block_time': 0,
+                    'confirmed': (int(data2.get("confirmations", 0) or 0) >= 1),
+                    'hash': q,
+                }
+    except Exception as e:
+        logger.debug(f"[CHECK_TX] blockcypher err: {e}")
+
+    return None
+
+
+# ============================================================
 # 🔍 فحص معاملة (هاش/Order ID) — للأدمن
 # ============================================================
 @bot.callback_query_handler(func=lambda call: call.data == "ad_check_tx")
@@ -10848,28 +11047,33 @@ def ad_check_tx_prompt(call):
         prompt_text = (
             "🔍 <b>Check Transaction</b>\n\n"
             "Send ANY of the following:\n"
-            "• <b>Hash (TxID)</b> for crypto (USDT/BNB/BTC/ETH/TRX/LTC)\n"
+            "• <b>Hash (TxID)</b> for crypto (USDT/BNB/BTC/ETH/TRX/LTC/TON)\n"
             "• <b>Order ID</b> for Binance Pay\n"
             "• <b>Transaction ID</b>\n"
             "• <b>Any partial ID</b> (last 15 chars enough)\n\n"
             "<i>I'll search in:</i>\n"
             "1. Database (used / manually added)\n"
             "2. Binance Pay live\n"
-            "3. Binance Crypto Deposits live\n\n"
+            "3. Binance Crypto Deposits live\n"
+            "4. TON blockchain live (TONCenter / TonAPI)\n"
+            "5. LTC blockchain live (litecoinspace / blockcypher)\n\n"
             "❌ Cancel: /cancel"
         )
     else:
         prompt_text = (
             "🔍 <b>فحص معاملة</b>\n\n"
             "أرسل أي واحد من التالي:\n"
-            "• <b>هاش العملية</b> (TxID) للكريبتو (USDT/BNB/BTC/ETH/TRX/LTC)\n"
+            "• <b>هاش العملية</b> (TxID) للكريبتو (USDT/BNB/BTC/ETH/TRX/LTC/TON)\n"
             "• <b>Order ID</b> لـ Binance Pay\n"
             "• <b>Transaction ID</b>\n"
             "• <b>أي جزء من الـ ID</b> (آخر 15 حرف يكفي)\n\n"
             "<i>سأبحث في:</i>\n"
             "1. قاعدة البيانات (المُستخدَمة + المضافة يدوياً)\n"
             "2. Binance Pay مباشرة\n"
-            "3. Binance Crypto Deposits مباشرة\n\n"
+            "3. Binance Crypto Deposits مباشرة\n"
+            "4. شبكة TON مباشرة (TONCenter / TonAPI)\n"
+            "5. شبكة LTC مباشرة (litecoinspace / blockcypher)\n\n"
+            "💡 <i>لـ TON: أرسل الـ TxID الكامل (64 حرف hex) من Tonviewer.</i>\n\n"
             "❌ للإلغاء: /cancel"
         )
 
@@ -10982,18 +11186,21 @@ def ad_check_tx_handle(message):
                         break
 
             # 2) Binance Deposits (TX Hash للكريبتو USDT/BNB/etc)
+            #    🔧 رفعنا عدد المحاولات والنافذة عشان مشكلة "ما يلقى إلا بعد ٣-٤ مرات"
+            #    (كانت max_retries=2 و res[:50] فقط، فلو البروكسي فشل تُتخطى بصمت)
             if not binance_match:
-                for coin in ('USDT', 'BNB', 'BTC', 'ETH', 'TRX', 'LTC'):
+                for coin in ('USDT', 'BNB', 'BTC', 'ETH', 'TRX', 'LTC', 'TON'):
                     try:
                         res = execute_binance_call(
                             lambda c, _coin=coin: c.get_deposit_history(coin=_coin),
-                            max_retries=2
+                            max_retries=5
                         )
                         if not res:
                             continue
-                        for d in res[:50]:
+                        for d in res[:200]:
                             tx_hash = str(d.get('txId', '') or '')
-                            if tx_hash and pattern.search(tx_hash):
+                            # مطابقة قوية: نصياً (regex) أو bytes (hex/base64)
+                            if tx_hash and (pattern.search(tx_hash) or _tx_hash_matches(query, tx_hash)):
                                 # نضيف معلومات الـ coin
                                 d['_coin'] = coin
                                 binance_match = d
@@ -11059,15 +11266,139 @@ def ad_check_tx_handle(message):
             bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
             return
 
-        # لا في DB ولا في Binance
+        # ============================================================
+        # 🔗 ما لقينا في Binance — نفحص شبكات TON و LTC مباشرة (على السلسلة)
+        # ============================================================
+        # مهم: إيداعات TON/LTC تروح لمحفظة البوت على السلسلة، مو Binance.
+        # فبدون هالفحص، الأدمن ما بيلقى أبداً هاش TON ولا LTC.
+        onchain_match = None       # dict فيه coin/amount_usd/...
+        onchain_is_sender = None   # (coin, hash) لو الحوالة صادرة من محفظتنا
+        try:
+            bot.send_message(uid, "🔍 لم تُوجد في Binance... جاري الفحص في شبكات TON و LTC مباشرة...")
+
+            # --- TON (TONCenter + TonAPI) ---
+            ton_r = _admin_search_ton_tx(query)
+            if ton_r:
+                if ton_r.get('is_sender'):
+                    onchain_is_sender = ('TON', ton_r.get('hash', query))
+                else:
+                    ton_price = get_ton_price_usd()
+                    if ton_price:
+                        onchain_match = {
+                            'coin': 'TON', 'label': '💎 Toncoin (TON)',
+                            'amount_usd': round(ton_r['received_ton'] * ton_price, 4),
+                            'crypto_amount': ton_r['received_ton'],
+                            'hash': ton_r.get('hash', query),
+                            'when': ton_r.get('utime', 0),
+                            'source_addr': ton_r.get('source_addr', ''),
+                        }
+                    else:
+                        # لقينا الحوالة بس سعر TON فشل — نبلّغ الأدمن بدل ما نقول "غير موجودة"
+                        bot.send_message(
+                            uid,
+                            f"⚠️ <b>لقيت حوالة TON على الشبكة</b> "
+                            f"({ton_r['received_ton']:.6f} TON) لكن تعذّر جلب سعر TON الآن.\n"
+                            f"🆔 <code>{html.escape(str(ton_r.get('hash', query))[:70])}</code>\n\n"
+                            f"<i>جرّب بعد دقيقة، أو أضف الرصيد يدوياً من (شحن رصيد).</i>",
+                            parse_mode="HTML"
+                        )
+                        return
+
+            # --- LTC (litecoinspace + blockcypher) — لو TON ما لقى ---
+            if not onchain_match and not onchain_is_sender:
+                ltc_r = _admin_search_ltc_tx(query)
+                if ltc_r:
+                    if ltc_r.get('is_sender'):
+                        onchain_is_sender = ('LTC', ltc_r.get('hash', query))
+                    else:
+                        ltc_price = get_ltc_price_usd()
+                        if ltc_price:
+                            onchain_match = {
+                                'coin': 'LTC', 'label': '🔵 Litecoin (LTC)',
+                                'amount_usd': round(ltc_r['received_ltc'] * ltc_price, 4),
+                                'crypto_amount': ltc_r['received_ltc'],
+                                'hash': ltc_r.get('hash', query),
+                                'when': ltc_r.get('block_time', 0),
+                                'confirmed': ltc_r.get('confirmed', True),
+                                'source_addr': '',
+                            }
+                        else:
+                            bot.send_message(
+                                uid,
+                                f"⚠️ <b>لقيت حوالة LTC على الشبكة</b> "
+                                f"({ltc_r['received_ltc']:.8f} LTC) لكن تعذّر جلب سعر LTC الآن.\n"
+                                f"🆔 <code>{html.escape(str(ltc_r.get('hash', query))[:70])}</code>\n\n"
+                                f"<i>جرّب بعد دقيقة، أو أضف الرصيد يدوياً من (شحن رصيد).</i>",
+                                parse_mode="HTML"
+                            )
+                            return
+        except Exception as oe:
+            logger.debug(f"[CHECK_TX] on-chain search err: {oe}")
+
+        # حوالة صادرة من محفظتنا (مو إيداع)
+        if onchain_is_sender:
+            _coin, _hash = onchain_is_sender
+            bot.send_message(
+                uid,
+                f"⚠️ <b>هذه حوالة صادرة من محفظتنا ({_coin}) — ليست إيداعاً.</b>\n\n"
+                f"🆔 <code>{html.escape(str(_hash)[:70])}</code>\n\n"
+                f"<i>لا يمكن إضافتها لمستخدم.</i>",
+                parse_mode="HTML"
+            )
+            return
+
+        # ✅ لقينا إيداع على الشبكة لكنه غير معالَج — نعرضه مع زر الإضافة
+        if onchain_match:
+            amt_usd = onchain_match['amount_usd']
+            _hash = onchain_match['hash']
+            _coin = onchain_match['coin']
+            pending_credit_id = f"pc_{int(time.time())}_{str(_hash)[-10:]}"
+            db.pending_admin_credits.insert_one({
+                '_id': pending_credit_id,
+                'tx_id': normalize_tx_id(_hash),
+                'amount': amt_usd,
+                'note': f"{_coin} on-chain ({onchain_match['crypto_amount']:.6f} {_coin})",
+                'payer_name': onchain_match.get('source_addr', '') or '',
+                'source': f"onchain_{_coin.lower()}",
+                'created_at': datetime.datetime.utcnow(),
+                'admin_id': uid
+            })
+
+            when_str = '?'
+            if onchain_match.get('when'):
+                try:
+                    when_str = datetime.datetime.fromtimestamp(int(onchain_match['when'])).strftime('%Y-%m-%d %H:%M')
+                except Exception:
+                    pass
+
+            text = (
+                f"⚠️ <b>المعاملة موجودة على الشبكة لكن غير مُعالَجَة!</b>\n\n"
+                f"📡 <b>المصدر:</b> {onchain_match['label']}\n"
+                f"🆔 <b>Hash:</b> <code>{html.escape(str(_hash)[:70])}</code>\n"
+                f"💰 <b>المبلغ:</b> <b>${amt_usd:.4f}</b>  "
+                f"(<code>{onchain_match['crypto_amount']:.6f} {_coin}</code>)\n"
+                f"📅 <b>الوقت:</b> {when_str}\n\n"
+                f"💡 <i>المبلغ متاح للإضافة لمستخدم.</i>"
+            )
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(
+                f"💰 إضافة ${amt_usd:.2f} لمستخدم",
+                callback_data=f"credit_pending_{pending_credit_id}"
+            ))
+            bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # لا في DB ولا في Binance ولا على شبكات TON/LTC
         bot.send_message(
             uid,
             f"❌ <b>المعاملة غير موجودة في أي مكان</b>\n\n"
             f"🔎 البحث: <code>{html.escape(query[:80])}</code>\n\n"
             f"<i>الأسباب المحتملة:</i>\n"
-            f"• الـ ID غلط أو ناقص\n"
-            f"• المعاملة لم تصل بعد لـ Binance\n"
-            f"• المعاملة أقدم من 30 يوم (حدود الـ API)",
+            f"• الـ Hash / ID غلط أو ناقص\n"
+            f"• لـ TON: أرسل الـ TxID الكامل (64 حرف hex) مو in_msg hash القصير\n"
+            f"• الحوالة لم تُؤكَّد بعد على الشبكة (انتظر دقيقة وأعد المحاولة)\n"
+            f"• الحوالة أُرسلت لمحفظة/شبكة مختلفة\n"
+            f"• المعاملة أقدم من حدود الـ API",
             parse_mode="HTML"
         )
         return
@@ -11204,13 +11535,24 @@ def credit_pending_exec(message, pending_id):
     note = pending.get('note', '')
     user_lang = target_user.get('language', 'ar')
 
+    # 🔖 نحدد اسم الطريقة حسب مصدر المعاملة (عشان ما نسمّي إيداع TON "Binance Pay")
+    _src = pending.get('source', '')
+    if _src == 'onchain_ton':
+        method_label = "Toncoin (TON) (Admin Manual Match)"
+    elif _src == 'onchain_ltc':
+        method_label = "Litecoin (LTC) (Admin Manual Match)"
+    elif _src == 'deposit':
+        method_label = "Crypto Deposit (Admin Manual Match)"
+    else:
+        method_label = "Binance Pay (Admin Manual Match)"
+
     try:
-        credit_user(target_uid, amount, tx_id, user_lang, "Binance Pay (Admin Manual Match)")
+        credit_user(target_uid, amount, tx_id, user_lang, method_label)
         try:
             db.used_transactions.update_one(
                 {'transaction_id': tx_id},
                 {'$set': {
-                    'method': 'Binance Pay (Admin Manual Match)',
+                    'method': method_label,
                     'remark': note,
                     'manual_assigned_by': uid,
                     'manual_assigned_at': datetime.datetime.utcnow()
