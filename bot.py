@@ -90,6 +90,7 @@ PROXY_REFRESH_LOCK = threading.Lock()
 LAST_PROXY_REFRESH = 0
 PROXY_REFRESH_INTERVAL = 3600   # ساعة كاملة بين كل refresh (توفير RAM)
 MAX_PROXIES_IN_POOL = 10        # نحتفظ بـ 10 فقط (بدل 30)
+LAST_GOOD_PROXY = None          # 🚀 آخر بروكسي نجح — نعيد استخدامه أولاً (يسرّع الكشف كثيراً)
 
 
 def _fetch_proxies_simple():
@@ -144,10 +145,13 @@ def refresh_proxies(force=False):
 
 def _remove_dead_proxy(proxy_url):
     """يحذف بروكسي ميت من القائمة"""
-    global VERIFIED_PROXIES
+    global VERIFIED_PROXIES, LAST_GOOD_PROXY
     try:
         if proxy_url in VERIFIED_PROXIES:
             VERIFIED_PROXIES.remove(proxy_url)
+        # لو البروكسي الميت هو "الجيد" المحفوظ، نمسحه عشان ما نعيد استخدامه
+        if proxy_url == LAST_GOOD_PROXY:
+            LAST_GOOD_PROXY = None
         # لو نزل العدد كثير، نطلب تحديث (بدون thread - يتم في الـ call التالي)
         if len(VERIFIED_PROXIES) < 5:
             threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
@@ -156,46 +160,63 @@ def _remove_dead_proxy(proxy_url):
 
 
 def get_binance_client():
-    """ينشئ Binance client مع بروكسي عشوائي"""
+    """ينشئ Binance client مع بروكسي — يفضّل آخر بروكسي نجح (أسرع بكثير)"""
+    global LAST_GOOD_PROXY
     if not VERIFIED_PROXIES:
         refresh_proxies(force=True)
-    
-    if VERIFIED_PROXIES:
+
+    # 🚀 نفضّل آخر بروكسي نجح؛ وإلا نختار عشوائياً
+    proxy = None
+    if LAST_GOOD_PROXY and LAST_GOOD_PROXY in VERIFIED_PROXIES:
+        proxy = LAST_GOOD_PROXY
+    elif VERIFIED_PROXIES:
         proxy = random.choice(VERIFIED_PROXIES)
+
+    if proxy:
         try:
             client = BinanceClient(
                 BINANCE_API_KEY,
                 BINANCE_API_SECRET,
                 requests_params={
                     'proxies': {'http': proxy, 'https': proxy},
-                    'timeout': 8
+                    'timeout': 5   # ⏱ كان 8 — تقليله يخلي البروكسي الميت يفشل أسرع
                 }
             )
             client._used_proxy = proxy
             return client
         except Exception:
             _remove_dead_proxy(proxy)
-    
+
     # آخر محاولة بدون بروكسي
-    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 10})
+    return BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 8})
 
 
 # جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
 threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
 
 
-def execute_binance_call(call_fn, max_retries=10, fast_mode=False, total_timeout=8):
+def execute_binance_call(call_fn, max_retries=10, fast_mode=False, total_timeout=20):
     """
     يحاول تنفيذ استدعاء Binance API بتجربة بروكسي تلو الآخر.
-    
-    fast_mode متجاهل (نستخدم نظام sequential بسيط لتوفير RAM).
-    max_retries = عدد المحاولات (كل وحدة ببروكسي مختلف)
+
+    🚀 التحسينات:
+    - يحفظ البروكسي الناجح في LAST_GOOD_PROXY ليُعاد استخدامه أولاً (سرعة كبيرة).
+    - total_timeout: سقف زمني إجمالي (ثانية) — يمنع الاستدعاء من التعلّق طويلاً
+      على بروكسيات ميتة، فيتحرّر الفاحص التلقائي بسرعة للدورة التالية.
     """
+    global LAST_GOOD_PROXY
+    start = time.time()
     for attempt in range(max_retries):
+        # لو تجاوزنا السقف الزمني، نوقف (ما نعلّق الحلقة)
+        if (time.time() - start) > total_timeout:
+            break
         client = None
         try:
             client = get_binance_client()
             result = call_fn(client)
+            # ✅ نجح — نحفظ البروكسي الناجح لإعادة استخدامه
+            if client is not None and getattr(client, '_used_proxy', None):
+                LAST_GOOD_PROXY = client._used_proxy
             return result
         except Exception as e:
             error_msg = str(e).lower()
@@ -7302,9 +7323,11 @@ def binance_check_payment(call):
                     if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
                         continue
                     
-                    # المبلغ
-                    amount = float(tx.get('amount') or tx.get('totalFee') or 0)
-                    if amount <= 0:
+                    # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
+                    _raw_amount = float(tx.get('amount') or tx.get('totalFee') or 0)
+                    _tx_cur = _binance_tx_currency(tx) or 'USDT'
+                    amount, _price_used = binance_amount_to_usd(_raw_amount, _tx_cur)
+                    if amount is None or amount <= 0:
                         continue
                     
                     # نقرأ كل الحقول الممكنة للـ remark
@@ -7781,7 +7804,7 @@ def check_usdt_blockchain_auto():
         # نجلب آخر deposits من Binance
         res = execute_binance_call(
             lambda c: c.get_deposit_history(coin='USDT'),
-            max_retries=3
+            max_retries=5
         )
         
         if res is None:
@@ -7837,6 +7860,122 @@ def check_usdt_blockchain_auto():
         logger.error(f"check_usdt_blockchain_auto error: {e}")
 
 
+# ============================================================
+# 💱 تحويل عملات Binance إلى الدولار (BTC/BNB/ETH/... مو دولار!)
+# ============================================================
+# مشكلة: Binance Pay يسمح للمرسل يدفع بأي عملة (بيتكوين مثلاً). حقل amount
+# يكون بوحدة تلك العملة مو بالدولار. فلو أضفناه مباشرة نعطي رصيداً غلط —
+# وقد تكون ثغرة خطيرة: كمية كبيرة من عملة رخيصة = رصيد ضخم.
+# الحل: نحوّل حسب السعر الحقيقي، ونرفض لو ما قدرنا نحدد السعر.
+
+# العملات المستقرة (قيمتها ≈ 1 دولار) — نعتبرها دولاراً مباشرة
+USD_STABLECOINS = {
+    'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'DAI', 'USDP', 'PYUSD', 'USD',
+}
+
+# خريطة رموز CoinGecko (احتياطي لو Binance ما رجّع سعر)
+_CG_IDS = {
+    'BTC': 'bitcoin', 'ETH': 'ethereum', 'BNB': 'binancecoin', 'LTC': 'litecoin',
+    'TON': 'the-open-network', 'TRX': 'tron', 'SOL': 'solana', 'XRP': 'ripple',
+    'DOGE': 'dogecoin', 'ADA': 'cardano', 'MATIC': 'matic-network', 'DOT': 'polkadot',
+    'AVAX': 'avalanche-2', 'SHIB': 'shiba-inu', 'BCH': 'bitcoin-cash', 'LINK': 'chainlink',
+    'XLM': 'stellar', 'ATOM': 'cosmos', 'ETC': 'ethereum-classic', 'NEAR': 'near',
+}
+
+_coin_price_cache = {}   # {SYMBOL: (price, ts)} — cache صغير لتخفيف الضغط
+_COIN_PRICE_TTL = 30     # ثانية
+
+
+def get_coin_price_usd(symbol):
+    """يجلب سعر أي عملة بالدولار (USDT).
+    - العملات المستقرة ترجّع 1.0
+    - غيرها: Binance ticker (SYMBOLUSDT) ثم CoinGecko احتياطي
+    - يرجّع None لو تعذّر تحديد السعر (فلا نضيف رصيداً خاطئاً)."""
+    if not symbol:
+        return None
+    sym = str(symbol).strip().upper()
+    if sym in USD_STABLECOINS:
+        return 1.0
+
+    now = time.time()
+    c = _coin_price_cache.get(sym)
+    if c and (now - c[1]) < _COIN_PRICE_TTL:
+        return c[0]
+
+    price = None
+    # 1) Binance ticker: SYMBOLUSDT
+    try:
+        ticker = execute_binance_call(
+            lambda cl: cl.get_symbol_ticker(symbol=f"{sym}USDT"),
+            fast_mode=True, total_timeout=5
+        )
+        if ticker:
+            p = float(ticker.get('price', 0) or 0)
+            if p > 0:
+                price = p
+    except Exception as e:
+        logger.debug(f"Binance price {sym} err: {e}")
+
+    # 2) CoinGecko احتياطي (للعملات المعروفة)
+    if price is None:
+        cg_id = _CG_IDS.get(sym)
+        if cg_id:
+            try:
+                cg = requests.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={"ids": cg_id, "vs_currencies": "usd"}, timeout=8
+                )
+                if cg.status_code == 200:
+                    p = float(cg.json().get(cg_id, {}).get('usd', 0) or 0)
+                    if p > 0:
+                        price = p
+            except Exception as e:
+                logger.debug(f"CoinGecko price {sym} err: {e}")
+
+    if price and price > 0:
+        _coin_price_cache[sym] = (price, now)
+        return price
+    return None
+
+
+def _binance_tx_currency(tx):
+    """يستخرج عملة معاملة Binance (top-level currency/coin أو من fundsDetail)."""
+    if not isinstance(tx, dict):
+        return None
+    cur = tx.get('currency') or tx.get('coin') or tx.get('_coin')
+    if cur:
+        return str(cur).upper()
+    fd = tx.get('fundsDetail') or []
+    if isinstance(fd, list):
+        for item in fd:
+            if isinstance(item, dict) and item.get('currency'):
+                return str(item['currency']).upper()
+    return None
+
+
+def binance_amount_to_usd(amount, currency):
+    """يحوّل مبلغ Binance (بعملته) إلى دولار.
+    يرجّع (usd_value, price_used) أو (None, None) لو تعذّر تحديد السعر.
+    ملاحظة: المبالغ السالبة (حوالات صادرة) ترجّع None فتُتجاهَل تلقائياً."""
+    try:
+        amt = float(amount or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if amt <= 0:   # <=0 يعني صادرة أو صفر → نتجاهلها
+        return None, None
+    cur = str(currency or 'USDT').strip().upper()
+    if cur in USD_STABLECOINS:
+        return round(amt, 6), 1.0
+    price = get_coin_price_usd(cur)
+    if price is None or price <= 0:
+        return None, None
+    usd = round(amt * price, 6)
+    # تحذير لو المبلغ ضخم بشكل غير معتاد (احتياط ضد سعر شاذ)
+    if usd > 20000:
+        logger.warning(f"⚠️ تحويل Binance كبير: {amt} {cur} = ${usd:.2f} (price ${price})")
+    return usd, price
+
+
 def _binance_pay_request():
     """
     يجلب آخر معاملات Binance Pay باستخدام REST API مباشرة.
@@ -7872,16 +8011,27 @@ def _binance_pay_request():
         return False  # False = جرب بروكسي ثاني
 
     # نجرب مع بروكسيات أولاً
+    global LAST_GOOD_PROXY
     if not VERIFIED_PROXIES:
         refresh_proxies(force=True)
 
-    for proxy in list(VERIFIED_PROXIES[:10]) if VERIFIED_PROXIES else []:
+    # 🚀 نرتّب القائمة بحيث آخر بروكسي نجح يكون أول واحد نجرّبه
+    _proxy_list = list(VERIFIED_PROXIES[:10]) if VERIFIED_PROXIES else []
+    if LAST_GOOD_PROXY and LAST_GOOD_PROXY in _proxy_list:
+        _proxy_list.remove(LAST_GOOD_PROXY)
+        _proxy_list.insert(0, LAST_GOOD_PROXY)
+
+    _pay_start = time.time()
+    for proxy in _proxy_list:
+        if (time.time() - _pay_start) > 20:  # سقف زمني إجمالي
+            break
         try:
             params = _make_signed_params()
             resp = requests.get(url, params=params, headers={'X-MBX-APIKEY': api_key},
-                                timeout=12, proxies={'http': proxy, 'https': proxy})
+                                timeout=6, proxies={'http': proxy, 'https': proxy})  # ⏱ كان 12
             result = _parse_response(resp)
             if result is not False:
+                LAST_GOOD_PROXY = proxy   # ✅ نحفظ الناجح
                 return result
             # 400/403 = بروكسي يعدّل الطلب، نجرب غيره
             _remove_dead_proxy(proxy)
@@ -7892,7 +8042,7 @@ def _binance_pay_request():
     # آخر محاولة بدون بروكسي
     try:
         params = _make_signed_params()
-        resp = requests.get(url, params=params, headers={'X-MBX-APIKEY': api_key}, timeout=15)
+        resp = requests.get(url, params=params, headers={'X-MBX-APIKEY': api_key}, timeout=10)
         result = _parse_response(resp)
         if result is not False:
             return result
@@ -7945,8 +8095,11 @@ def check_binance_pay_auto():
                 if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
                     continue
 
-                amount = float(tx.get('amount') or tx.get('totalFee') or 0)
-                if amount <= 0:
+                # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
+                _raw_amount = float(tx.get('amount') or tx.get('totalFee') or 0)
+                _tx_cur = _binance_tx_currency(tx) or 'USDT'
+                amount, _price_used = binance_amount_to_usd(_raw_amount, _tx_cur)
+                if amount is None or amount <= 0:
                     continue
 
                 # ─── 1️⃣ المسار الأول: مطابقة بحقل `note` (الأولوية الأعلى) ───
@@ -8673,7 +8826,7 @@ def verify_binance_pay(message, lang):
         
         pay_h = pay_response.get('data', [])
 
-        found = False; amt = 0.0
+        found = False; amt_raw = 0.0; amt_currency = 'USDT'
         current_time_ms = int(time.time() * 1000)
         
         for d in pay_h:
@@ -8683,11 +8836,25 @@ def verify_binance_pay(message, lang):
                     bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
                     return
                 found = True
-                amt = float(d.get('amount', 0.0))
+                amt_raw = float(d.get('amount', 0.0))
+                amt_currency = _binance_tx_currency(d) or 'USDT'
                 break
                 
-        if found: credit_user(uid, amt, tx_id_normalized, lang, "Binance Pay")
-        else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
+        if found:
+            # نحوّل المبلغ للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
+            amt_usd, _pu = binance_amount_to_usd(amt_raw, amt_currency)
+            if amt_usd is None or amt_usd <= 0:
+                bot.send_message(
+                    uid,
+                    f"⚠️ <b>استلمنا حوالتك بعملة {html.escape(amt_currency)} لكن تعذّر تحديد قيمتها بالدولار الآن.</b>\n\n"
+                    f"💡 انتظر دقيقة وحاول مرة ثانية، أو تواصل مع الإدارة وأعطهم رقم العملية.",
+                    parse_mode="HTML"
+                )
+            else:
+                method_lbl = "Binance Pay" if amt_currency in USD_STABLECOINS else f"Binance Pay ({amt_currency}→USD)"
+                credit_user(uid, amt_usd, tx_id_normalized, lang, method_lbl)
+        else:
+            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
         logger.debug(f"Unexpected error in verify_binance_tx: {e}")
         bot.send_message(
@@ -11160,10 +11327,8 @@ def ad_check_tx_handle(message):
         return
     
     if not found:
-        # 🆕 ما لقينا في DB — نفحص في Binance Pay مباشرة
+        # 🆕 ما لقينا في DB — نفحص في Binance مباشرة
         # ممكن المعاملة وصلت لـ Binance لكن لسه ما عُولجت
-        bot.send_message(uid, "🔍 لم تُسجَّل في النظام... جاري الفحص في Binance Pay مباشرة...")
-
         binance_match = None
         binance_source = None  # 'pay' أو 'deposit'
         try:
@@ -11171,44 +11336,90 @@ def ad_check_tx_handle(message):
             safe_b = _re_b.escape(query[-15:] if len(query) > 15 else query)
             pattern = _re_b.compile(safe_b, _re_b.IGNORECASE)
 
-            # 1) Binance Pay (Order ID / Transaction ID)
-            transactions = _binance_pay_request()
-            if transactions:
-                for tx in transactions:
-                    tx_id_fields = [
-                        str(tx.get('orderId', '') or ''),
-                        str(tx.get('transactionId', '') or ''),
-                        str(tx.get('bizOrderNo', '') or ''),
-                    ]
-                    if any(pattern.search(f) for f in tx_id_fields):
-                        binance_match = tx
-                        binance_source = 'pay'
-                        break
+            # ⚡ تحسين السرعة: لو البحث هاش on-chain كامل (64 hex أو 66 مع 0x)،
+            #    نتخطى فحص Binance Pay (لأنه يستخدم Order IDs مو هاشات) ونروح للإيداعات
+            #    مباشرة. هذا يوفّر استدعاء بروكسي بطيء بلا فائدة.
+            _q_hex = query.lower()[2:] if query.lower().startswith('0x') else query.lower()
+            _is_onchain_hash = len(_q_hex) == 64 and all(c in '0123456789abcdef' for c in _q_hex)
 
-            # 2) Binance Deposits (TX Hash للكريبتو USDT/BNB/etc)
-            #    🔧 رفعنا عدد المحاولات والنافذة عشان مشكلة "ما يلقى إلا بعد ٣-٤ مرات"
-            #    (كانت max_retries=2 و res[:50] فقط، فلو البروكسي فشل تُتخطى بصمت)
-            if not binance_match:
-                for coin in ('USDT', 'BNB', 'BTC', 'ETH', 'TRX', 'LTC', 'TON'):
-                    try:
-                        res = execute_binance_call(
-                            lambda c, _coin=coin: c.get_deposit_history(coin=_coin),
-                            max_retries=5
-                        )
-                        if not res:
-                            continue
-                        for d in res[:200]:
-                            tx_hash = str(d.get('txId', '') or '')
-                            # مطابقة قوية: نصياً (regex) أو bytes (hex/base64)
-                            if tx_hash and (pattern.search(tx_hash) or _tx_hash_matches(query, tx_hash)):
-                                # نضيف معلومات الـ coin
-                                d['_coin'] = coin
-                                binance_match = d
-                                binance_source = 'deposit'
-                                break
-                        if binance_match:
+            # 1) Binance Pay (Order ID / Transaction ID) — نتخطاه للهاش الكامل
+            if not _is_onchain_hash:
+                bot.send_message(uid, "🔍 لم تُسجَّل في النظام... جاري الفحص في Binance Pay مباشرة...")
+                transactions = _binance_pay_request()
+                if transactions:
+                    for tx in transactions:
+                        tx_id_fields = [
+                            str(tx.get('orderId', '') or ''),
+                            str(tx.get('transactionId', '') or ''),
+                            str(tx.get('bizOrderNo', '') or ''),
+                        ]
+                        if any(pattern.search(f) for f in tx_id_fields):
+                            binance_match = tx
+                            binance_source = 'pay'
                             break
-                    except Exception: continue
+            else:
+                bot.send_message(uid, "🔍 لم تُسجَّل في النظام... جاري الفحص في إيداعات Binance مباشرة...")
+
+            # 2) Binance Deposits (TX Hash للكريبتو)
+            #    🔧 بحث إيداعات متين يعالج أسباب "موجودة في بينانس لكن ما تُلقى":
+            #      • كان يلفّ على قائمة عملات ثابتة (SOL/XRP/... خارجها تُفقد)
+            #      • كان يفحص أول 50 سجل فقط (لو فيه إيداعات كثيرة، القديم يُفقد)
+            #      • كان max_retries=2 (لو فشل البروكسي مرتين → يتخطى بصمت)
+            #      • النافذة الزمنية الافتراضية قد تكون قصيرة (لو الإيداع أقدم يُفقد)
+            #    الحل: استدعاء واحد لكل العملات + نافذة 90 يوم + صفحات (offset) + احتياطيات.
+            if not binance_match:
+                _now_ms = int(time.time() * 1000)
+                _start_ms = _now_ms - (90 * 24 * 60 * 60 * 1000) + 120000  # 90 يوم ناقص دقيقتين
+
+                def _fetch_deposits(with_window=True, coin=None, retries=5):
+                    """يجلب سجلات الإيداع (كل العملات لو coin=None) عبر صفحات متعددة."""
+                    out = []
+                    offset = 0
+                    for _pg in range(5):  # حتى 5000 سجل
+                        kw = {'offset': offset, 'limit': 1000}
+                        if with_window:
+                            kw['startTime'] = _start_ms
+                        if coin:
+                            kw['coin'] = coin
+                        try:
+                            page = execute_binance_call(
+                                lambda c, _k=dict(kw): c.get_deposit_history(**_k),
+                                max_retries=retries
+                            )
+                        except Exception:
+                            page = None
+                        if not page:
+                            break
+                        if coin:
+                            for _d in page:
+                                _d.setdefault('_coin', coin)
+                        out.extend(page)
+                        if len(page) < 1000:
+                            break  # آخر صفحة
+                        offset += 1000
+                    return out
+
+                # (أ) الأساسي: كل العملات + نافذة 90 يوم
+                all_deposits = _fetch_deposits(with_window=True, coin=None)
+                # (ب) لو رجع فاضي: كل العملات بالنافذة الافتراضية
+                if not all_deposits:
+                    all_deposits = _fetch_deposits(with_window=False, coin=None)
+                # (ج) آخر احتياطي: أهم العملات فرادى (لو الاستدعاء الشامل فشل تماماً)
+                if not all_deposits:
+                    for coin in ('USDT', 'BTC', 'ETH', 'BNB', 'TRX', 'LTC', 'SOL', 'XRP', 'DOGE', 'TON'):
+                        part = _fetch_deposits(with_window=True, coin=coin, retries=2)
+                        if part:
+                            all_deposits.extend(part)
+
+                if all_deposits:
+                    for d in all_deposits:
+                        tx_hash = str(d.get('txId', '') or '')
+                        # مطابقة قوية: نصياً (regex) أو bytes (hex/base64)
+                        if tx_hash and (pattern.search(tx_hash) or _tx_hash_matches(query, tx_hash)):
+                            d['_coin'] = d.get('_coin') or d.get('coin', 'CRYPTO')
+                            binance_match = d
+                            binance_source = 'deposit'
+                            break
         except Exception as be:
             logger.debug(f"Binance direct check err: {be}")
 
@@ -11216,18 +11427,27 @@ def ad_check_tx_handle(message):
             # ✅ موجودة في Binance لكن غير معالجة
             if binance_source == 'pay':
                 order_id = str(binance_match.get('orderId') or binance_match.get('transactionId') or '?')
-                amount_b = float(binance_match.get('amount') or 0)
+                # نحوّل للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
+                _pay_cur = _binance_tx_currency(binance_match) or 'USDT'
+                _pay_usd, _ = binance_amount_to_usd(binance_match.get('amount') or 0, _pay_cur)
+                amount_b = _pay_usd if (_pay_usd is not None) else 0.0
                 note_b = str(binance_match.get('note') or '').strip()
+                if _pay_cur not in USD_STABLECOINS:
+                    note_b = (note_b + f" | أصل: {binance_match.get('amount')} {_pay_cur}").strip(' |')
                 payer = binance_match.get('payerInfo') or {}
                 payer_name = payer.get('name', '') if isinstance(payer, dict) else ''
                 tx_time = int(binance_match.get('transactionTime') or 0)
                 time_str = datetime.datetime.fromtimestamp(tx_time / 1000).strftime('%Y-%m-%d %H:%M') if tx_time else '?'
-                source_label = "🟡 Binance Pay"
+                source_label = "🟡 Binance Pay" if _pay_cur in USD_STABLECOINS else f"🟡 Binance Pay ({_pay_cur}→USD)"
             else:  # deposit
                 order_id = str(binance_match.get('txId') or '?')
-                amount_b = float(binance_match.get('amount') or 0)
                 coin_name = binance_match.get('_coin', 'CRYPTO')
+                # نحوّل للدولار حسب عملة الإيداع
+                _dep_usd, _ = binance_amount_to_usd(binance_match.get('amount') or 0, coin_name)
+                amount_b = _dep_usd if (_dep_usd is not None) else 0.0
                 note_b = ''
+                if coin_name not in USD_STABLECOINS:
+                    note_b = f"أصل: {binance_match.get('amount')} {coin_name}"
                 payer_name = binance_match.get('address', '')[:20] + '...' if binance_match.get('address') else ''
                 tx_time = int(binance_match.get('insertTime') or 0)
                 time_str = datetime.datetime.fromtimestamp(tx_time / 1000).strftime('%Y-%m-%d %H:%M') if tx_time else '?'
