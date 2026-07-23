@@ -1,5 +1,6 @@
 import sys
 import os
+import functools
 import time
 import datetime
 import re
@@ -1039,6 +1040,25 @@ class APIHandler(BaseHTTPRequestHandler):
                     'store_price': base_price,         # سعر المتجر الحالي (يتغير)
                     'your_price': your_price,          # سعرك المقفول (لا يتغير بتغيير المتجر)
                     'price_locked': your_price is not None,
+                    # 🔔 تنبيه: سعر المتجر تغيّر بعد ما قفل المطوّر سعره
+                    # (بدونه يبيع بسعر قديم وقد يبيع بخسارة لأن الخصم يتم بسعر المتجر الحالي)
+                    'price_alert': (
+                        {
+                            'type': 'below_cost' if your_price < base_price else 'store_price_changed',
+                            'message': (
+                                'Your selling price is now BELOW the store price — you would sell at a loss. Update it.'
+                                if your_price < base_price else
+                                'Store price changed since you locked your price. Review your price.'
+                            ),
+                            'old_store_price': float(cp.get('base_price_snapshot')),
+                            'new_store_price': base_price,
+                            'your_price': your_price,
+                        }
+                        if (your_price is not None
+                            and cp.get('base_price_snapshot') is not None
+                            and float(cp.get('base_price_snapshot')) != base_price)
+                        else None
+                    ),
                     'stock': 'unlimited' if manual else get_product_stock_count(pid),
                     'is_manual': manual,
                     'discount_tiers': pr.get('discount_tiers', []),
@@ -3924,14 +3944,17 @@ def _translate_single_line(line, target_lang='en'):
     الاستراتيجية: نفصل كل عنصر محمي ونضعه في قاموس بـ UUID ثابت لا يتغير بالترجمة.
     """
     try:
-        import uuid as _uuid
-        
-        # نستخدم UUIDs ثابتة بدل @@N@@ لأن Google لا يلمسها
-        vault = {}  # uuid → original
-        
-        def protect_item(text_to_protect):
-            key = f"XPROTX{_uuid.uuid4().hex[:8].upper()}XPROTX"
-            vault[key] = text_to_protect
+        # 🔑 رموز حماية قصيرة ومرقّمة (XQ0QX) بدل UUID عشوائي طويل (XPROTX+8):
+        #    المترجم يمزّق الرموز الطويلة العشوائية كثيراً → يضيع العنصر المحمي،
+        #    وأشهر عرض لهذا: اختفاء <tg-emoji> ثم إلغاء الترجمة بالكامل
+        #    (تحذير: tg-emoji count mismatch → returning original).
+        vault = {}          # key → (نوع العنصر، النص الأصلي)
+        _seq = [0]
+
+        def protect_item(text_to_protect, kind='other'):
+            idx = _seq[0]; _seq[0] += 1
+            key = f"XQ{idx}QX"
+            vault[key] = (kind, text_to_protect)
             return f" {key} "
         
         temp = line
@@ -3939,36 +3962,36 @@ def _translate_single_line(line, target_lang='en'):
         # 1. Premium Emojis — أعلى أولوية (قبل أي شيء)
         temp = re.sub(
             r'<tg-emoji[^>]*>.*?</tg-emoji>',
-            lambda m: protect_item(m.group(0)),
+            lambda m: protect_item(m.group(0), 'tg_emoji'),
             temp,
             flags=re.DOTALL
         )
         
         # 2. Code/Pre blocks
-        temp = re.sub(r'<code>.*?</code>', lambda m: protect_item(m.group(0)), temp, flags=re.DOTALL)
-        temp = re.sub(r'<pre>.*?</pre>', lambda m: protect_item(m.group(0)), temp, flags=re.DOTALL)
+        temp = re.sub(r'<code>.*?</code>', lambda m: protect_item(m.group(0), 'html'), temp, flags=re.DOTALL)
+        temp = re.sub(r'<pre>.*?</pre>', lambda m: protect_item(m.group(0), 'html'), temp, flags=re.DOTALL)
         
         # 3. URLs
-        temp = re.sub(r'https?://[^\s<>"]+', lambda m: protect_item(m.group(0)), temp)
+        temp = re.sub(r'https?://[^\s<>"]+', lambda m: protect_item(m.group(0), 'url'), temp)
         
         # 4. Placeholders
-        temp = re.sub(r'\{[^}]*\}', lambda m: protect_item(m.group(0)), temp)
+        temp = re.sub(r'\{[^}]*\}', lambda m: protect_item(m.group(0), 'placeholder'), temp)
         
         # 5. فواصل بصرية
-        temp = re.sub(r'[━─═]{2,}', lambda m: protect_item(m.group(0)), temp)
+        temp = re.sub(r'[━─═]{2,}', lambda m: protect_item(m.group(0), 'deco'), temp)
         
         # 6. HTML tags (نحمي فقط الـ tags، محتواها يُترجم)
-        temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0)), temp)
+        temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0), 'html'), temp)
         
         # 7. إيموجي عادية
         emoji_pat = re.compile(
             r"[\u2600-\u27BF\U0001F000-\U0001F9FF\U0001FA00-\U0001FAFF\u200d\ufe0f]+",
             flags=re.UNICODE
         )
-        temp = emoji_pat.sub(lambda m: protect_item(m.group(0)), temp)
+        temp = emoji_pat.sub(lambda m: protect_item(m.group(0), 'emoji'), temp)
         
         # تحقق: لو ما بقي نص حقيقي
-        clean_check = re.sub(r'XPROTX[A-F0-9]{8}XPROTX', '', temp).strip()
+        clean_check = re.sub(r'(?i)XQ\d{1,3}QX', '', temp).strip()
         if not clean_check or len(clean_check) < 2:
             return line
         
@@ -4009,20 +4032,59 @@ def _translate_single_line(line, target_lang='en'):
         if not translated:
             return line
         
-        # 🔁 معالجة أي مشاكل في المسافات أو حالة الأحرف قد يكون المترجم أدخلها على المفاتيح الخاصة بنا
-        def normalize_key(match):
-            hex_part = re.sub(r'\s+', '', match.group(1)).upper()
-            return f"XPROTX{hex_part}XPROTX"
-        translated = re.sub(r'(?i)x\s*p\s*r\s*o\s*t\s*x\s*([a-f0-9\s]{8,20})\s*x\s*p\s*r\s*o\s*t\s*x', normalize_key, translated)
+        # 🔁 تطبيع المفاتيح: المترجم قد يضيف مسافات أو يغيّر حالة الأحرف (x q 0 q x)
+        translated = re.sub(
+            r'(?i)x\s*q\s*(\d{1,3})\s*q\s*x',
+            lambda m: f"XQ{m.group(1)}QX",
+            translated
+        )
         
-        # 🔁 استرجاع العناصر المحمية — UUIDs ثابتة، مع دعم عدم حساسية حالة الأحرف كأمان إضافي
-        for key, original in vault.items():
-            translated = re.sub(re.escape(key), lambda m: original, translated, flags=re.IGNORECASE)
+        # 🔁 استرجاع العناصر المحمية
+        for key, (_kind, original) in vault.items():
+            translated = re.sub(re.escape(key), lambda m, _o=original: _o, translated, flags=re.IGNORECASE)
         
-        # 🛡 فحص: لو بقي أي UUID لم يُسترجع → رجوع للأصل
-        if re.search(r'(?i)XPROTX[A-F0-9]{8}XPROTX', translated):
-            logger.warning("UUID leak in translation - returning original line")
+        # 🧹 نظّف أي مفتاح مشوّه لم يُسترجع (نعالج فقدان محتواه بالأسفل)
+        translated = re.sub(r'(?i)X\s*Q\s*\d{1,3}\s*Q\s*X', '', translated)
+        
+        # 🛠 استرجاع ذكي: بدل إلغاء الترجمة كلياً عند ضياع عنصر،
+        #    نعيد إدراج ما يمكن إدراجه بأمان (الأيقونات)، ونلغي فقط عند ضياع
+        #    عنصر لا يجوز تخمين مكانه (وسم HTML / رابط / placeholder).
+        missing_critical = False
+        missing_tg = []
+        missing_emoji = []
+        for _key, (_kind, _orig) in vault.items():
+            if not _orig or _orig in translated:
+                continue
+            if _kind == 'tg_emoji':
+                missing_tg.append(_orig)
+            elif _kind == 'emoji':
+                missing_emoji.append(_orig)
+            elif _kind == 'deco':
+                pass  # فواصل بصرية: فقدانها غير مؤثر
+            else:
+                missing_critical = True
+        
+        if missing_critical:
+            logger.warning("protected tag/url lost in translation - returning original line")
             return line
+        
+        # نعيد الأيقونات المفقودة: tg-emoji للبداية (مكانها الطبيعي)، والعادية للنهاية
+        if missing_tg or missing_emoji:
+            _body = translated.strip()
+            if missing_tg:
+                _body = ''.join(missing_tg) + (' ' + _body if _body else '')
+            if missing_emoji:
+                _body = (_body + ' ' if _body else '') + ''.join(missing_emoji)
+            translated = _body
+            logger.info(
+                f"recovered lost icons after translation "
+                f"(tg-emoji: {len(missing_tg)}, emoji: {len(missing_emoji)})"
+            )
+        
+        # 🧽 تنظيف المسافات الزائدة الناتجة عن حشو الرموز (" KEY ")
+        translated = re.sub(r'[ \t]{2,}', ' ', translated)
+        translated = re.sub(r'(<[a-zA-Z][^>]*>) +', r'\1', translated)   # <b> نص  →  <b>نص
+        translated = re.sub(r' +(</[a-zA-Z][^>]*>)', r'\1', translated)  # نص </b>  →  نص</b>
         
         # 🛡 فحص نهائي: عدد tg-emoji لازم يكون نفسه
         orig_tg = len(re.findall(r'<tg-emoji', line))
@@ -5145,7 +5207,20 @@ def process_gh_step_2fa(message):
     secure_wipe(data)
     del two_factor_encrypted
     
-    db.users.update_one({'user_id': uid}, {'$inc': {'balance': -price}})
+    # 🛡 خصم atomic مع إعادة فحص الرصيد — يمنع الرصيد السالب / الشراء المزدوج.
+    # (كان $inc بسيط بدون فحص؛ والرصيد فُحص فقط في البداية قبل دقائق —
+    #  ثغرة TOCTOU لأن إدخال 2FA قد يتجاوز قفل الـ60 ثانية.)
+    _gh_updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}},
+        return_document=True
+    )
+    if _gh_updated is None:
+        _release_purchase_lock(uid)
+        try: bot.clear_step_handler_by_chat_id(chat_id=uid)
+        except: pass
+        send_no_balance(uid)
+        return
     status_msg = bot.send_message(uid, get_text(uid, 'gh_deducted'), parse_mode="HTML")
     
     def api_worker():
@@ -6810,6 +6885,7 @@ def _do_purchase(uid, pid, qty, lang):
                 notify_admins(f"⚠️ <b>تنبيه!</b>\nفشل تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}")
 
             # إرسال الأكواد كملف
+            _delivery_ok = False
             try:
                 p_name = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
                 file_content = f"=== {clean_name(p_name)} ===\nQty: {qty} | Total: ${total_price:.2f}\nDate: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*40}\n\n"
@@ -6830,12 +6906,43 @@ def _do_purchase(uid, pid, qty, lang):
                     success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 {clean_name(p.get('name_en', p.get('name_ar')))}\n🔢 Qty: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 Codes in the file below 👇"
 
                 bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+                _delivery_ok = True
             except Exception as file_err:
                 logger.error(f"Failed to send file: {file_err}")
+                # محاولة احتياطية: إرسال الأكواد كنص
                 try:
                     bot.send_message(uid, "✅ Done!\n\n" + "\n".join(delivered_codes))
-                except:
-                    notify_admins(f"🚨 فشل تسليم أكواد للمستخدم <code>{uid}</code>!")
+                    _delivery_ok = True
+                except Exception:
+                    _delivery_ok = False
+
+            # 🛡 لو فشل إيصال الأكواد نهائياً → نسترجع الرصيد ونعيد المخزون (وإلا العميل يخسر فلوسه بلا مقابل)
+            if not _delivery_ok and delivered_codes:
+                try:
+                    # 1) إرجاع الرصيد
+                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                    # 2) إعادة الأكواد للمخزون (نلغي is_sold)
+                    for item in reserved_items:
+                        db.product_stock.update_one(
+                            {'_id': item['_id']},
+                            {'$set': {'is_sold': False}, '$unset': {'reservation_id': "", 'reserved_at': ""}}
+                        )
+                    # 3) حذف سجلات الطلب التي أُنشئت لهذه العملية
+                    try:
+                        db.orders.delete_many({'user_id': uid, 'product_id': str(pid),
+                                               'code_delivered': {'$in': delivered_codes}})
+                    except Exception: pass
+                    # 4) إبلاغ المستخدم والإدارة
+                    try:
+                        bot.send_message(uid, bil(uid,
+                            "⚠️ <b>تعذّر تسليم الأكواد وتم إرجاع رصيدك بالكامل.</b>\nحاول مرة ثانية.",
+                            "⚠️ <b>Could not deliver the codes — your balance was fully refunded.</b>\nPlease try again."),
+                            parse_mode="HTML")
+                    except Exception: pass
+                    notify_admins(f"🚨 <b>فشل تسليم أكواد + تم الاسترجاع تلقائياً</b>\n👤 <code>{uid}</code>\n📦 {clean_name(p.get('name_ar'))}\n💰 ${total_price:.2f} (رجّعناه)")
+                except Exception as refund_err:
+                    logger.error(f"Refund-on-delivery-fail error: {refund_err}")
+                    notify_admins(f"🚨🚨 <b>فشل تسليم وفشل الاسترجاع!</b> راجع يدوياً فوراً!\n👤 <code>{uid}</code>\n💰 ${total_price:.2f}\nالأكواد: {delivered_codes}")
 
             notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}")
 
@@ -7347,6 +7454,8 @@ def binance_check_payment(call):
                     
                     # ✅ وجدنا الحوالة!
                     credit_user(uid, amount, tx_id_norm, l, "Binance Pay")
+                    # 🔓 نُغلق الإيداع المعلّق ونفكّ القفل (وإلا يظل "لديك عملية دفع معلقة")
+                    close_user_pending_and_unlock(uid, tx_id_norm, via='binance_check_button')
                     found = True
                     
                     try:
@@ -7503,6 +7612,32 @@ def is_deposit_locked(uid):
         return True
     except Exception:
         return False
+
+
+def close_user_pending_and_unlock(uid, tx_id_detected=None, via='payment'):
+    """🔓 يُغلق أي إيداع معلّق للمستخدم ويفكّ قفل الإيداع.
+
+    ⚠️ مهم جداً: بدون هذا، المستخدم يُضاف له الرصيد ويشوف "تم إضافة المبلغ"
+    لكنه يظل عالقاً في "⚠️ لديك عملية دفع معلقة" وما يقدر يستخدم البوت إطلاقاً
+    (لأن deposit_locked يظل مفعّلاً في users).
+
+    وكمان يسدّ ثغرة: الإيداع المعلّق المفتوح يحجز "مبلغ فريد"، فلو ظل مفتوحاً
+    ممكن تُطابَق معه حوالة ثانية لاحقاً → إضافة رصيد مرتين لنفس الإيداع.
+    """
+    try:
+        upd = {'status': 'completed', 'completed_at': int(time.time()), 'completed_via': via}
+        if tx_id_detected:
+            upd['tx_id_detected'] = tx_id_detected
+        db.pending_deposits.update_many(
+            {'user_id': uid, 'status': 'pending'},
+            {'$set': upd}
+        )
+    except Exception as e:
+        logger.debug(f"close_user_pending_and_unlock (pending) err: {e}")
+    try:
+        unlock_deposit(uid)
+    except Exception as e:
+        logger.debug(f"close_user_pending_and_unlock (unlock) err: {e}")
 
 
 _ambiguous_alert_cache = {}
@@ -7887,10 +8022,11 @@ _COIN_PRICE_TTL = 30     # ثانية
 
 
 def get_coin_price_usd(symbol):
-    """يجلب سعر أي عملة بالدولار (USDT).
+    """يجلب سعر أي عملة بالدولار (USDT) من عدة مصادر مباشرة موثوقة.
     - العملات المستقرة ترجّع 1.0
-    - غيرها: Binance ticker (SYMBOLUSDT) ثم CoinGecko احتياطي
-    - يرجّع None لو تعذّر تحديد السعر (فلا نضيف رصيداً خاطئاً)."""
+    - يجرّب: Coinbase → CryptoCompare → CoinGecko → Binance مباشر → Binance عبر بروكسي
+      (المصادر المباشرة أولاً لأنها أسرع وأوثق ولا تعتمد على البروكسي المتعثّر)
+    - يرجّع None فقط لو فشلت كل المصادر."""
     if not symbol:
         return None
     sym = str(symbol).strip().upper()
@@ -7903,34 +8039,74 @@ def get_coin_price_usd(symbol):
         return c[0]
 
     price = None
-    # 1) Binance ticker: SYMBOLUSDT
+
+    # 1) Coinbase (مباشر، موثوق للعملات الرئيسية) — BTC-USD إلخ
     try:
-        ticker = execute_binance_call(
-            lambda cl: cl.get_symbol_ticker(symbol=f"{sym}USDT"),
-            fast_mode=True, total_timeout=5
-        )
-        if ticker:
-            p = float(ticker.get('price', 0) or 0)
+        r = requests.get(f"https://api.coinbase.com/v2/prices/{sym}-USD/spot", timeout=8)
+        if r.status_code == 200:
+            p = float(r.json().get('data', {}).get('amount', 0) or 0)
             if p > 0:
                 price = p
     except Exception as e:
-        logger.debug(f"Binance price {sym} err: {e}")
+        logger.debug(f"Coinbase price {sym} err: {e}")
 
-    # 2) CoinGecko احتياطي (للعملات المعروفة)
+    # 2) CryptoCompare (مباشر، يدعم رموزاً كثيرة، بدون مفتاح)
+    if price is None:
+        try:
+            r = requests.get(
+                "https://min-api.cryptocompare.com/data/price",
+                params={"fsym": sym, "tsyms": "USD"}, timeout=8
+            )
+            if r.status_code == 200:
+                p = float(r.json().get('USD', 0) or 0)
+                if p > 0:
+                    price = p
+        except Exception as e:
+            logger.debug(f"CryptoCompare price {sym} err: {e}")
+
+    # 3) CoinGecko (مباشر، للعملات المعروفة)
     if price is None:
         cg_id = _CG_IDS.get(sym)
         if cg_id:
             try:
-                cg = requests.get(
+                r = requests.get(
                     "https://api.coingecko.com/api/v3/simple/price",
                     params={"ids": cg_id, "vs_currencies": "usd"}, timeout=8
                 )
-                if cg.status_code == 200:
-                    p = float(cg.json().get(cg_id, {}).get('usd', 0) or 0)
+                if r.status_code == 200:
+                    p = float(r.json().get(cg_id, {}).get('usd', 0) or 0)
                     if p > 0:
                         price = p
             except Exception as e:
                 logger.debug(f"CoinGecko price {sym} err: {e}")
+
+    # 4) Binance عام مباشر (قد يكون محظوراً جغرافياً، لكن نجرّب)
+    if price is None:
+        try:
+            r = requests.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": f"{sym}USDT"}, timeout=6
+            )
+            if r.status_code == 200:
+                p = float(r.json().get('price', 0) or 0)
+                if p > 0:
+                    price = p
+        except Exception as e:
+            logger.debug(f"Binance direct price {sym} err: {e}")
+
+    # 5) Binance عبر بروكسي (آخر حل)
+    if price is None:
+        try:
+            ticker = execute_binance_call(
+                lambda cl: cl.get_symbol_ticker(symbol=f"{sym}USDT"),
+                fast_mode=True, total_timeout=8
+            )
+            if ticker:
+                p = float(ticker.get('price', 0) or 0)
+                if p > 0:
+                    price = p
+        except Exception as e:
+            logger.debug(f"Binance proxy price {sym} err: {e}")
 
     if price and price > 0:
         _coin_price_cache[sym] = (price, now)
@@ -8153,6 +8329,13 @@ def check_binance_pay_auto():
                     try:
                         credit_user(target_uid_from_note, amount, tx_id_norm, user_lang, "Binance Pay (Auto Note)")
                         
+                        # 🔓 الإصلاح: نُغلق أي إيداع معلّق للمستخدم ونفكّ القفل.
+                        # بدونه: يُضاف الرصيد لكن يظل عالقاً في "لديك عملية دفع معلقة"
+                        # (لأنه سوّى deposit flow ثم دفع بالـ note بدل المبلغ الفريد).
+                        close_user_pending_and_unlock(
+                            target_uid_from_note, tx_id_norm, via='binance_note'
+                        )
+                        
                         # بعد النجاح، نضيف معلومات الـ note للسجل (مش للحجز)
                         try:
                             db.used_transactions.update_one(
@@ -8275,14 +8458,21 @@ def cmd_binance_debug(message):
 
 
 def mark_pending_deposit_used(pending_id):
-    """يعلّم إيداع معلق كـ مستخدم"""
+    """يعلّم إيداع معلق كـ مستخدم + 🔓 يفكّ قفل الإيداع عن صاحبه.
+
+    ⚠️ كان يُغلق السجل فقط بدون فك القفل، فيظل المستخدم عالقاً في
+    "لديك عملية دفع معلقة" رغم إضافة رصيده."""
     try:
+        doc = db.pending_deposits.find_one({'pending_id': pending_id})
         db.pending_deposits.update_one(
             {'pending_id': pending_id},
             {'$set': {'status': 'completed', 'completed_at': int(time.time())}}
         )
-    except Exception:
-        pass
+        # 🔓 فك القفل عن صاحب الإيداع
+        if doc and doc.get('user_id'):
+            unlock_deposit(doc['user_id'])
+    except Exception as e:
+        logger.debug(f"mark_pending_deposit_used err: {e}")
 
 
 def cleanup_expired_pending_deposits():
@@ -8853,6 +9043,8 @@ def verify_binance_pay(message, lang):
             else:
                 method_lbl = "Binance Pay" if amt_currency in USD_STABLECOINS else f"Binance Pay ({amt_currency}→USD)"
                 credit_user(uid, amt_usd, tx_id_normalized, lang, method_lbl)
+                # 🔓 نُغلق الإيداع المعلّق ونفكّ القفل
+                close_user_pending_and_unlock(uid, tx_id_normalized, via='binance_pay_manual')
         else:
             bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
@@ -11454,10 +11646,23 @@ def ad_check_tx_handle(message):
                 source_label = f"💎 Crypto Deposit ({coin_name})"
 
             pending_credit_id = f"pc_{int(time.time())}_{order_id[-10:]}"
+            # نحفظ المبلغ بالكريبتو والعملة عشان لو فشل السعر نعيد الحساب وقت الإضافة
+            try:
+                _crypto_amount = float(binance_match.get('amount') or 0)
+            except Exception:
+                _crypto_amount = 0.0
+            _crypto_amount = abs(_crypto_amount)
+            if binance_source == 'pay':
+                _crypto_currency = _binance_tx_currency(binance_match) or 'USDT'
+            else:
+                _crypto_currency = binance_match.get('_coin') or binance_match.get('coin') or 'CRYPTO'
+
             db.pending_admin_credits.insert_one({
                 '_id': pending_credit_id,
                 'tx_id': normalize_tx_id(order_id),
                 'amount': amount_b,
+                'crypto_amount': _crypto_amount,
+                'crypto_currency': _crypto_currency,
                 'note': note_b,
                 'payer_name': payer_name,
                 'source': binance_source,
@@ -11469,8 +11674,15 @@ def ad_check_tx_handle(message):
                 f"⚠️ <b>المعاملة موجودة لكن غير مُعالَجَة!</b>\n\n"
                 f"📡 <b>المصدر:</b> {source_label}\n"
                 f"🆔 <b>ID/Hash:</b> <code>{html.escape(order_id[:60])}</code>\n"
-                f"💰 <b>المبلغ:</b> <b>${amount_b:.4f}</b>\n"
             )
+            if amount_b and amount_b > 0:
+                text += f"💰 <b>المبلغ:</b> <b>${amount_b:.4f}</b>\n"
+            else:
+                # فشل جلب السعر — نعرض الكريبتو بوضوح بدل $0.00
+                text += (
+                    f"💰 <b>المبلغ:</b> <code>{_crypto_amount:.8f} {html.escape(str(_crypto_currency))}</code>\n"
+                    f"⚠️ <i>تعذّر تحويله للدولار الآن — سيُعاد حسابه عند الإضافة، أو أدخله يدوياً.</i>\n"
+                )
             if payer_name:
                 text += f"👤 <b>المرسل:</b> <code>{html.escape(payer_name)}</code>\n"
             text += f"📅 <b>الوقت:</b> {time_str}\n"
@@ -11479,8 +11691,11 @@ def ad_check_tx_handle(message):
             text += "\n💡 <i>المبلغ متاح للإضافة لمستخدم.</i>"
 
             markup = InlineKeyboardMarkup()
+            _btn_label = (f"💰 إضافة ${amount_b:.2f} لمستخدم"
+                          if (amount_b and amount_b > 0)
+                          else "💵 إضافة لمستخدم (تحديد المبلغ)")
             markup.add(InlineKeyboardButton(
-                f"💰 إضافة ${amount_b:.2f} لمستخدم",
+                _btn_label,
                 callback_data=f"credit_pending_{pending_credit_id}"
             ))
             bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
@@ -11755,6 +11970,34 @@ def credit_pending_exec(message, pending_id):
     note = pending.get('note', '')
     user_lang = target_user.get('language', 'ar')
 
+    # 💱 لو المبلغ صفر (فشل جلب السعر وقت البحث) → نعيد التحويل الآن من الكريبتو
+    if amount <= 0:
+        _c_amt = float(pending.get('crypto_amount') or 0)
+        _c_cur = str(pending.get('crypto_currency') or '').upper()
+        if _c_amt > 0 and _c_cur:
+            _usd, _ = binance_amount_to_usd(_c_amt, _c_cur)
+            if _usd and _usd > 0:
+                amount = _usd
+                try:
+                    db.pending_admin_credits.update_one(
+                        {'_id': pending['_id']}, {'$set': {'amount': amount}}
+                    )
+                except Exception: pass
+
+    # لو ما زال صفراً → نوقف بدل ما نضيف $0.00 للمستخدم
+    if amount <= 0:
+        _c_amt = float(pending.get('crypto_amount') or 0)
+        _c_cur = str(pending.get('crypto_currency') or 'CRYPTO').upper()
+        bot.send_message(
+            uid,
+            f"⚠️ <b>ما قدرت أحدد قيمة الحوالة بالدولار.</b>\n\n"
+            f"💰 <b>الأصل:</b> <code>{_c_amt:.8f} {html.escape(_c_cur)}</code>\n\n"
+            f"<i>تعذّر جلب سعر العملة الآن. جرّب بعد دقيقة، أو أضف المبلغ يدوياً "
+            f"للمستخدم من (شحن رصيد) بعد ما تحسب قيمته.</i>",
+            parse_mode="HTML"
+        )
+        return
+
     # 🔖 نحدد اسم الطريقة حسب مصدر المعاملة (عشان ما نسمّي إيداع TON "Binance Pay")
     _src = pending.get('source', '')
     if _src == 'onchain_ton':
@@ -11768,6 +12011,8 @@ def credit_pending_exec(message, pending_id):
 
     try:
         credit_user(target_uid, amount, tx_id, user_lang, method_label)
+        # 🔓 نُغلق أي إيداع معلّق للمستخدم ونفكّ قفله (الأدمن حل دفعته)
+        close_user_pending_and_unlock(target_uid, tx_id, via='admin_manual_match')
         try:
             db.used_transactions.update_one(
                 {'transaction_id': tx_id},
@@ -13987,7 +14232,68 @@ def admin_edit_prompt(call):
     msg = bot.send_message(call.message.chat.id, prompt_msg, parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_save_edit, field, pid, cat_id_back)
 
+# ============================================================
+# 🔄 مزامنة تعديلات المنتج مع مشتركي الـ API
+# ============================================================
+def _emit_product_updated_after_edit(func):
+    """Decorator: يبثّ حدث product.updated تلقائياً بعد أي تعديل ناجح للمنتج.
+
+    ⚠️ المشكلة التي يحلّها: admin_save_edit كان يحدّث db.products لكن ما يبثّ
+    أي حدث، فمشتركو الـ API (والـ webhooks) يظلون على البيانات القديمة —
+    السعر والاسم والوصف ما تتحدث عندهم أبداً.
+
+    نستخدم decorator بدل إضافة _emit_event في كل مسار داخل الدالة، لأن الدالة
+    فيها مسارات خروج كثيرة (سعر/اسم/وصف/إيموجي) وسهل نسيان واحد.
+    نقارن المنتج قبل وبعد، ونبثّ الحقول التي تغيّرت فعلاً فقط.
+    """
+    @functools.wraps(func)
+    def wrapper(message, field, pid, cat_id_back=None, *a, **kw):
+        _watch = ('price', 'name_ar', 'name_en', 'desc_ar', 'desc_en',
+                  'custom_emoji_id', 'is_hidden', 'discount_tiers')
+        # لقطة "قبل"
+        before = {}
+        try:
+            _p = find_product(pid)
+            if _p:
+                before = {k: _p.get(k) for k in _watch}
+        except Exception:
+            pass
+
+        result = func(message, field, pid, cat_id_back, *a, **kw)
+
+        # لقطة "بعد" + بثّ التغييرات
+        try:
+            _p2 = find_product(pid)
+            if _p2:
+                after = {k: _p2.get(k) for k in _watch}
+                changes = {k: after[k] for k in _watch if before.get(k) != after[k]}
+                if changes:
+                    pid_e = str(_p2.get('id', str(_p2.get('_id', ''))))
+                    _emit_event('product.updated', {
+                        'product_id': pid_e,
+                        'changes': changes,
+                        'product': {
+                            'id': pid_e,
+                            'name_ar': _p2.get('name_ar', ''),
+                            'name_en': _p2.get('name_en', ''),
+                            'desc_ar': _p2.get('desc_ar', ''),
+                            'desc_en': _p2.get('desc_en', ''),
+                            'store_price': float(_p2.get('price', 0) or 0),
+                            'is_hidden': bool(_p2.get('is_hidden', False)),
+                            'custom_emoji_id': _p2.get('custom_emoji_id'),
+                            'discount_tiers': _p2.get('discount_tiers', []),
+                        }
+                    }, product_id=pid_e)
+                    logger.info(f"🔄 product.updated بُثّ للمطورين: {pid_e} → {list(changes.keys())}")
+        except Exception as _e:
+            logger.debug(f"emit product.updated err: {_e}")
+
+        return result
+    return wrapper
+
+
 # ----------- حفظ تعديل المنتج + إشعار تخفيض السعر -----------
+@_emit_product_updated_after_edit
 def admin_save_edit(message, field, pid, cat_id_back=None):
     val = message.text or ""
     
@@ -14061,11 +14367,26 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
             # برودكاست فقط لو السعر نزل
             if new_price < old_price:
                 def broadcast_price_drop(admin_id):
+                    # 🔘 زر الانتقال للمنتج (كان الإشعار يُرسل بلا زر إطلاقاً!)
+                    # نطبّع الـ pid بنفس طريقة أزرار المتجر (نشيل بادئة cgpt_main_)
+                    # وإلا الزر ينكسر مع منتجات ChatGPT.
+                    _raw_pid = str(p.get('id', str(p.get('_id', ''))))
+                    _pid_btn = _raw_pid.replace("cgpt_main_", "") if _raw_pid.startswith("cgpt_main_") else _raw_pid
+
+                    # لو المنتج مخفي، ما فيه فائدة من الإشعار أصلاً
+                    if p.get('is_hidden'):
+                        bot.send_message(admin_id, "⚠️ المنتج مخفي — لم يُرسل إشعار التخفيض.")
+                        return
+
                     users = list(db.users.find())
                     success = 0
                     fail = 0
                     for u in users:
                         try:
+                            # نتخطى المحظورين (ما ينفع نرسل لهم عرضاً ما يقدرون يشترونه)
+                            if u.get('is_banned') == 1:
+                                continue
+
                             u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                             if u_lang not in ['ar', 'en']: u_lang = 'en'
                             
@@ -14074,7 +14395,15 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
                             p_name = icon_html + clean_name(p.get(f'name_{u_lang}', p.get('name_en')))
                             
                             alert_msg = get_text(u['user_id'], 'price_drop', p_name, old_price, new_price)
-                            bot.send_message(u['user_id'], alert_msg, parse_mode="HTML")
+
+                            # 🔘 نبني الزر بلغة المستخدم
+                            _mk = InlineKeyboardMarkup()
+                            _btn_txt = (f"🛒 شراء الآن — ${new_price:.2f}"
+                                        if u_lang == 'ar' else
+                                        f"🛒 Buy Now — ${new_price:.2f}")
+                            _mk.add(InlineKeyboardButton(_btn_txt, callback_data=f"vi_p_{_pid_btn}"))
+
+                            bot.send_message(u['user_id'], alert_msg, parse_mode="HTML", reply_markup=_mk)
                             success += 1
                             time.sleep(0.05)
                         except: 
