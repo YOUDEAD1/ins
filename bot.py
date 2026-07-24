@@ -7205,16 +7205,16 @@ def dep_init_ui(call):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(create_btn(uid, 'btn_stars', callback_data="dep_stars"))
     markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
-    markup.add(create_btn(uid, 'btn_usdt_trc20', callback_data="dep_crypto_USDT"))
-    markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
-    markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
-    markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
-    # 🟠 Bybit — زر واحد يفتح قائمة فرعية (يظهر فقط لو فيه طريقة مفعّلة)
+    # 🟠 Bybit — تحت Binance مباشرة (تظهر فقط لو فيه طريقة مفعّلة)
     try:
         if bybit_available_methods():
             markup.add(create_btn(uid, 'btn_bybit', callback_data="dep_bybit"))
     except Exception:
         pass
+    markup.add(create_btn(uid, 'btn_usdt_trc20', callback_data="dep_crypto_USDT"))
+    markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
+    markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
+    markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
     markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
     
     try:
