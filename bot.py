@@ -4013,19 +4013,53 @@ _PRESERVE_RE = re.compile(
 )
 
 
-def _translate_text_raw(text, target_lang, tries=2):
-    """يترجم نصاً خالصاً (بلا وسوم) — مباشرةً ثم عبر البروكسيات."""
+# علامات تدل أن "الترجمة" في الحقيقة صفحة خطأ من الخادم
+_BAD_TR_MARKERS = (
+    "error 500", "error 502", "error 503", "server error",
+    "that's an error", "that\u2019s an error",
+    "that's all we know", "that\u2019s all we know",
+    "please try again later", "bad gateway", "service unavailable",
+    "<html", "<!doctype", "429 (too many requests", "404 (not found",
+)
+
+
+def _is_bad_translation(src_text, result):
+    """يكشف الردود الفاسدة (صفحات خطأ / محتوى غريب) قبل إدخالها في نص المستخدم.
+
+    ⚠️ سبب وجودها: مكتبة الترجمة قد ترجع محتوى صفحة خطأ HTTP كأنه ترجمة،
+    فيظهر للمستخدم نص مثل "Error 500 (Server Error)!!1..." داخل رسالته.
+    """
+    if not result or not str(result).strip():
+        return True
+    r = str(result)
+    low = r.lower()
+    if any(m in low for m in _BAD_TR_MARKERS):
+        return True
+    # رد أطول بشكل غير معقول من المصدر ⇒ شبه مؤكد صفحة خطأ
+    if len(r) > max(len(src_text) * 6, len(src_text) + 120):
+        return True
+    return False
+
+
+def _translate_text_raw(text, target_lang, tries=3):
+    """يترجم نصاً خالصاً (بلا وسوم) مع رفض الردود الفاسدة.
+    يرجّع الترجمة أو None (فيبقى النص الأصلي بدل نص مشوّه)."""
     if not text or not text.strip():
         return None
-    # مباشر
+
+    # 1) محاولات مباشرة
     for _ in range(tries):
         try:
             r = GoogleTranslator(source='auto', target=target_lang).translate(text)
-            if r and str(r).strip():
+            if r and not _is_bad_translation(text, r):
                 return str(r)
+            if r:
+                logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
         except Exception as e:
             logger.debug(f"translate direct err: {e}")
-    # عبر بروكسي
+        time.sleep(0.4)   # مهلة صغيرة تتجاوز الحظر المؤقت
+
+    # 2) عبر البروكسيات
     try:
         pool = list(VERIFIED_PROXIES)[:4]
         random.shuffle(pool)
@@ -4033,7 +4067,7 @@ def _translate_text_raw(text, target_lang, tries=2):
             try:
                 r = GoogleTranslator(source='auto', target=target_lang,
                                      proxies={'http': proxy, 'https': proxy}).translate(text)
-                if r and str(r).strip():
+                if r and not _is_bad_translation(text, r):
                     return str(r)
             except Exception:
                 continue
@@ -4067,6 +4101,11 @@ def _translate_single_line(line, target_lang='en'):
             tr = _translate_text_raw(core, target_lang)
             out.append(lead + (tr if tr else core) + trail)
         result = ''.join(out)
+
+        # 🛡 حارس أخير: لو تسلّل محتوى صفحة خطأ إلى الناتج، نرفضه كلياً
+        if any(m in result.lower() for m in _BAD_TR_MARKERS):
+            logger.warning("segment translate: error-page content detected — keeping original")
+            return line
 
         # 🛡 تحقق نهائي: الوسوم والمتغيّرات لازم تبقى كما هي بالضبط
         if len(re.findall(r'\{[^}]*\}', result)) != len(re.findall(r'\{[^}]*\}', line)):
@@ -13679,6 +13718,18 @@ def ad_save_custom_text(message, key):
             parse_mode="HTML"
         )
             
+    # 🛡 حارس الحفظ: لا نخزّن نصاً فيه محتوى صفحة خطأ إطلاقاً
+    for _lbl, _val in (('ar', final_text_ar), ('en', final_text_en)):
+        if any(m in str(_val).lower() for m in _BAD_TR_MARKERS):
+            logger.error(f"refusing to save corrupted {_lbl} text for '{key}'")
+            bot.send_message(
+                message.chat.id,
+                "❌ <b>لم أحفظ — خدمة الترجمة أرجعت رداً فاسداً</b> (صفحة خطأ).\n\n"
+                "💡 <i>جرّب بعد دقيقة، أو أرسل النص بالإنجليزية مباشرة.</i>",
+                parse_mode="HTML"
+            )
+            return
+
     # حفظ النصين
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
