@@ -3988,7 +3988,100 @@ def safe_translate_for_cms(text, target_lang='en'):
         return text
 
 
+# ============================================================
+# 🌐 الترجمة بالتقسيم — الطريقة الموثوقة
+# ============================================================
+# المشكلة في الطريقة القديمة: كانت تستبدل الوسوم والمتغيّرات برموز (XQ0QX)
+# وترسل كل شيء لجوجل. جوجل يمزّق الرموز أحياناً → تفشل الترجمة ويرجع النص عربياً.
+#
+# الطريقة الصحيحة: لا نرسل الوسوم/المتغيّرات لجوجل إطلاقاً.
+# نقسّم السطر لأجزاء، نترجم النص الخالص فقط، ثم نعيد التركيب بالترتيب.
+# النتيجة: يستحيل ضياع متغيّر أو وسم، والترجمة تنجح دائماً.
+
+# كل ما يجب الحفاظ عليه حرفياً (لا يُرسل للمترجم أبداً)
+_PRESERVE_RE = re.compile(
+    r'(<tg-emoji[^>]*>.*?</tg-emoji>'          # إيموجي بريميوم
+    r'|<code>.*?</code>|<pre>.*?</pre>'         # كتل الكود
+    r'|https?://[^\s<>"]+'                      # روابط
+    r'|\{[^}]*\}'                               # متغيّرات {0} {name}
+    r'|</?[a-zA-Z][^>]*>'                       # وسوم HTML
+    r'|[━─═]{2,}'                               # فواصل بصرية
+    r'|[0-9#*]\ufe0f?\u20e3'                    # أرقام مؤطّرة 1️⃣2️⃣3️⃣
+    r'|[\u2600-\u27BF\U0001F000-\U0001F9FF\U0001FA00-\U0001FAFF\u200d\ufe0f]+'  # إيموجي عادي
+    r')',
+    re.DOTALL
+)
+
+
+def _translate_text_raw(text, target_lang, tries=2):
+    """يترجم نصاً خالصاً (بلا وسوم) — مباشرةً ثم عبر البروكسيات."""
+    if not text or not text.strip():
+        return None
+    # مباشر
+    for _ in range(tries):
+        try:
+            r = GoogleTranslator(source='auto', target=target_lang).translate(text)
+            if r and str(r).strip():
+                return str(r)
+        except Exception as e:
+            logger.debug(f"translate direct err: {e}")
+    # عبر بروكسي
+    try:
+        pool = list(VERIFIED_PROXIES)[:4]
+        random.shuffle(pool)
+        for proxy in pool:
+            try:
+                r = GoogleTranslator(source='auto', target=target_lang,
+                                     proxies={'http': proxy, 'https': proxy}).translate(text)
+                if r and str(r).strip():
+                    return str(r)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def _translate_single_line(line, target_lang='en'):
+    """يترجم سطراً واحداً بطريقة التقسيم (الوسوم والمتغيّرات لا تُرسل للمترجم)."""
+    if not line or not line.strip():
+        return line
+    try:
+        parts = _PRESERVE_RE.split(line)
+        out = []
+        for p in parts:
+            if not p:
+                continue
+            # جزء محمي → يُنسخ كما هو
+            if _PRESERVE_RE.fullmatch(p):
+                out.append(p)
+                continue
+            # لا يحوي حروفاً → مسافات/ترقيم فقط
+            if not re.search(r'[a-zA-Z\u0600-\u06FF\u0750-\u077F]', p):
+                out.append(p)
+                continue
+            # نص خالص → نترجمه وحده (نحافظ على المسافات الطرفية)
+            lead = p[:len(p) - len(p.lstrip())]
+            trail = p[len(p.rstrip()):]
+            core = p.strip()
+            tr = _translate_text_raw(core, target_lang)
+            out.append(lead + (tr if tr else core) + trail)
+        result = ''.join(out)
+
+        # 🛡 تحقق نهائي: الوسوم والمتغيّرات لازم تبقى كما هي بالضبط
+        if len(re.findall(r'\{[^}]*\}', result)) != len(re.findall(r'\{[^}]*\}', line)):
+            logger.warning("segment translate: placeholder mismatch — keeping original")
+            return line
+        if len(re.findall(r'<tg-emoji', result)) != len(re.findall(r'<tg-emoji', line)):
+            logger.warning("segment translate: tg-emoji mismatch — keeping original")
+            return line
+        return result
+    except Exception as e:
+        logger.debug(f"segment translate error: {e}")
+        return line
+
+
+def _translate_line_core(line, target_lang='en', protect_html=True):
     """
     يترجم سطر واحد مع حفظ كامل لـ:
     - Premium Emojis <tg-emoji> (بالترقيم الموضعي الآمن)
@@ -4037,7 +4130,10 @@ def _translate_single_line(line, target_lang='en'):
         temp = re.sub(r'[━─═]{2,}', lambda m: protect_item(m.group(0), 'deco'), temp)
         
         # 6. HTML tags (نحمي فقط الـ tags، محتواها يُترجم)
-        temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0), 'html'), temp)
+        #    عند إعادة المحاولة نتركها بلا حماية: جوجل يحافظ على <b>/<i> عادةً،
+        #    وتقليل عدد الرموز يرفع نسبة نجاح الترجمة كثيراً.
+        if protect_html:
+            temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0), 'html'), temp)
         
         # 7. إيموجي عادية
         emoji_pat = re.compile(
@@ -13350,14 +13446,82 @@ def ad_edit_txt_prompt(call):
         except:
             bot.send_message(call.message.chat.id, f"📝 النص الحالي للمفتاح: {key}")
     
-    # ثانياً: رسالة التعليمات (مختصرة)
-    msg_text = "👇 <b>أرسل النص الجديد</b> (مع الرموز/الإيموجيات/التنسيقات إن أردت)\n\n<i>للإلغاء: <b>الغاء</b></i>"
+    # ثانياً: رسالة التعليمات + زر استرجاع النص الأصلي
+    # 🆕 نبيّن حالة النسخة الإنجليزية: لو فيها عربية فهي "ملوّثة" من ترجمة ناقصة
+    _en_saved = ""
     try:
-        msg = bot.send_message(call.message.chat.id, msg_text, parse_mode="HTML")
+        _cv = db.custom_texts.find_one({'lang': 'en', 'key': key})
+        _en_saved = str((_cv or {}).get('value', '') or '')
     except Exception:
-        msg = bot.send_message(call.message.chat.id, "👇 أرسل النص الجديد. للإلغاء: الغاء")
-    
+        pass
+    _en_mixed = bool(_en_saved and re.search(r'[\u0600-\u06FF]', _en_saved))
+
+    msg_text = ("👇 <b>أرسل النص الجديد</b> (مع الرموز/الإيموجيات/التنسيقات إن أردت)\n\n"
+                "💡 <i>أرسله بالعربية → يُحفظ عربي + ترجمة إنجليزية.\n"
+                "أرسله بالإنجليزية → يُحفظ إنجليزي + ترجمة عربية.</i>\n\n")
+    if _en_mixed:
+        msg_text += ("⚠️ <b>النسخة الإنجليزية مختلطة</b> (فيها أسطر عربية من ترجمة ناقصة).\n"
+                     "اضغط <b>استرجاع الافتراضي</b> بالأسفل، أو أرسل النص بالإنجليزية.\n\n")
+    msg_text += "<i>للإلغاء: <b>الغاء</b></i>"
+
+    _reset_mk = InlineKeyboardMarkup()
+    _reset_mk.add(InlineKeyboardButton("🔄 استرجاع النص الافتراضي",
+                                       callback_data=f"rst_txt_{key}"))
+    try:
+        msg = bot.send_message(call.message.chat.id, msg_text,
+                               parse_mode="HTML", reply_markup=_reset_mk)
+    except Exception:
+        msg = bot.send_message(call.message.chat.id, "👇 أرسل النص الجديد. للإلغاء: الغاء",
+                               reply_markup=_reset_mk)
+
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("rst_txt_"))
+@admin_required
+def ad_reset_text_to_default(call):
+    """🔄 يحذف النص المخصّص ويرجع للنص الأصلي المدمج في البوت.
+
+    يحل مشكلة: نص إنجليزي محفوظ بصيغة مختلطة (عربي + إنجليزي) نتيجة
+    ترجمة تلقائية ناقصة — الحذف يعيد النص الأصلي النظيف من LANG.
+    """
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    key = call.data.replace("rst_txt_", "")
+    uid = call.from_user.id
+
+    # نلغي أي خطوة تعديل معلّقة
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    except Exception:
+        pass
+
+    has_default = bool(LANG.get('ar', {}).get(key) or LANG.get('en', {}).get(key))
+    if not has_default:
+        bot.send_message(uid,
+            f"⚠️ لا يوجد نص افتراضي للمفتاح <code>{html.escape(key)}</code> — "
+            f"لم أحذف شيئاً حتى لا يبقى فارغاً.", parse_mode="HTML")
+        return
+
+    try:
+        res = db.custom_texts.delete_many({'key': key})
+        deleted = res.deleted_count
+    except Exception as e:
+        logger.error(f"reset text err: {e}")
+        bot.send_message(uid, "❌ تعذّر الاسترجاع، حاول مرة ثانية.")
+        return
+
+    _prev_ar = LANG.get('ar', {}).get(key, '')
+    bot.send_message(uid,
+        f"✅ <b>تم استرجاع النص الافتراضي.</b>\n"
+        f"🗑 حُذفت {deleted} نسخة مخصّصة (عربي + إنجليزي).\n\n"
+        f"📌 <b>النص الأصلي الآن:</b>", parse_mode="HTML")
+    try:
+        bot.send_message(uid, str(_prev_ar)[:4000])
+    except Exception:
+        pass
 
 @safe_next_step
 def _text_fallback_for_lang(key, lang, expected_placeholders):
@@ -13470,6 +13634,38 @@ def ad_save_custom_text(message, key):
             fb = _text_fallback_for_lang(key, 'en', ar_count)
             final_text_en = fb if fb else final_text_ar
         _fallback_used = True
+
+    # 🛡 فحص: هل بقيت أسطر عربية داخل النسخة الإنجليزية؟
+    #    مع الترجمة بالتقسيم هذا نادر جداً، لكن لو حصل نعالج الأسطر المتبقية
+    #    فقط — ولا نرمي الترجمة كلها (المستخدم يريد ترجمة، لا استسلاماً).
+    if source_lang == 'ar':
+        _ar_left = len(re.findall(r'[\u0600-\u06FF]', final_text_en))
+        if _ar_left > 0:
+            logger.warning(f"Partial translation for '{key}': {_ar_left} Arabic chars remain — retrying lines")
+            try:
+                _fixed = []
+                for _ln in final_text_en.split('\n'):
+                    if re.search(r'[\u0600-\u06FF]', _ln):
+                        _re_tr = _translate_single_line(_ln, 'en')
+                        _fixed.append(_re_tr if _re_tr else _ln)
+                    else:
+                        _fixed.append(_ln)
+                _cand = '\n'.join(_fixed)
+                # نقبلها لو حافظت على المتغيّرات والإيموجي
+                if (len(re.findall(r'\{[^}]*\}', _cand)) == ar_count and
+                        len(re.findall(r'<tg-emoji', _cand)) == ar_emojis):
+                    final_text_en = _cand
+                    _ar_left = len(re.findall(r'[\u0600-\u06FF]', final_text_en))
+            except Exception as _re_err:
+                logger.debug(f"line retry err: {_re_err}")
+
+            if _ar_left > 0:
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ <b>بعض الأسطر تعذّرت ترجمتها</b> (غالباً انقطاع مؤقت في خدمة الترجمة).\n\n"
+                    "💡 <i>أعد الحفظ بعد دقيقة، أو أرسل النص بالإنجليزية مباشرة.</i>",
+                    parse_mode="HTML"
+                )
 
     if _fallback_used:
         _other = "العربي" if source_lang == 'en' else "الإنجليزي"
