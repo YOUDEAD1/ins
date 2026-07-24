@@ -3525,6 +3525,12 @@ LANG = {
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
         # أزرار الدفع
+        'bybit_ask_uid': (
+            "🆔 <b>أدخل رقم UID الخاص بك في Bybit</b>\n\n"
+            "تجده في: تطبيق Bybit ← ملفك الشخصي (بجانب اسمك).\n"
+            "أرقام فقط، مثال: <code>543120799</code>\n\n"
+            "<i>نحتاجه للتعرّف على تحويلك تلقائياً.</i>"
+        ),
         'bybit_choose': (
             "🟠 <b>الدفع عبر Bybit</b>\n\n"
             "اختر طريقة التحويل المناسبة لك:"
@@ -3665,6 +3671,12 @@ LANG = {
             "✨ <i>Balance added automatically</i>"
         ),
         # Payment buttons
+        'bybit_ask_uid': (
+            "🆔 <b>Enter your Bybit UID</b>\n\n"
+            "Find it in: Bybit app → your Profile (next to your name).\n"
+            "Digits only, e.g. <code>543120799</code>\n\n"
+            "<i>We need it to detect your transfer automatically.</i>"
+        ),
         'bybit_choose': (
             "🟠 <b>Pay with Bybit</b>\n\n"
             "Choose your preferred transfer method:"
@@ -7750,9 +7762,10 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     return round(base + random.randint(100, 99999) / 1000000.0, 6)
 
 
-def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
+def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin, sender_uid=None):
     """
     يسجّل عملية إيداع متوقعة ويقفل المستخدم حتى يكتمل أو يُلغى.
+    sender_uid: (اختياري) رقم UID المرسِل في Bybit — للمطابقة المزدوجة (UID + المبلغ).
     """
     try:
         db.pending_deposits.delete_many({'user_id': uid, 'coin': coin, 'status': 'pending'})
@@ -7769,6 +7782,8 @@ def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin):
             'created_at': int(time.time()),
             'expires_at': expires
         }
+        if sender_uid:
+            record['sender_uid'] = str(sender_uid).strip()
         db.pending_deposits.insert_one(record)
         
         # 🔒 قفل المستخدم أثناء الإيداع
@@ -8755,27 +8770,69 @@ def get_bybit_deposits(kind='internal', coin=None, limit=50):
 
 
 def _bybit_row_txid(row):
-    for k in ('txID', 'txId', 'id', 'transactionId'):
-        if row.get(k):
-            return str(row[k])
+    """يستخرج معرّف العملية.
+    🔧 لا نعتمد على أسماء ثابتة (Bybit قد يستخدم txID/orderId/depositId...).
+    نجرّب الأسماء المعروفة، وإلا نبحث في كل الحقول عن قيمة تشبه المعرّف."""
+    if not isinstance(row, dict):
+        return ''
+    # 1) الأسماء المعروفة
+    for k in ('txID', 'txId', 'id', 'transactionId', 'orderId', 'depositId',
+              'internalId', 'transferId', 'orderNo', 'bizId'):
+        v = row.get(k)
+        if v not in (None, '', 0, '0'):
+            return str(v)
+    # 2) بحث ذكي: أي مفتاح فيه id/tx/order + قيمة طويلة تشبه معرّفاً
+    for k, v in row.items():
+        if v in (None, '', 0, '0'):
+            continue
+        kl = str(k).lower()
+        if any(t in kl for t in ('id', 'tx', 'order', 'hash', 'no')):
+            sv = str(v)
+            if len(sv) >= 8 and re.match(r'^[A-Za-z0-9_\-]+$', sv):
+                return sv
     return ''
 
 
+def _bybit_all_ids(row):
+    """يرجّع كل القيم التي قد تكون معرّفات في السجل (للمطابقة الشاملة)."""
+    ids = []
+    if not isinstance(row, dict):
+        return ids
+    for k, v in row.items():
+        if v in (None, '', 0, '0'):
+            continue
+        sv = str(v)
+        if 8 <= len(sv) <= 80 and re.match(r'^[A-Za-z0-9_\-]+$', sv):
+            ids.append(sv)
+    return ids
+
+
 def _bybit_row_note(row):
-    for k in ('remark', 'note', 'memo', 'tag', 'comment', 'description'):
+    for k in ('remark', 'note', 'memo', 'tag', 'comment', 'description', 'message'):
         if row.get(k):
             return str(row[k])
     return ''
 
 
 def _bybit_row_time_ms(row):
-    for k in ('successAt', 'createdTime', 'updatedTime', 'timestamp'):
+    """يرجّع وقت العملية بالملّي ثانية.
+    🔧 مهم: Bybit يرجّع createdTime بالثواني (10 خانات مثل 1705393280)،
+    والكود يقارنه بوقت بالملّي. بدون التطبيع يظنّ كل العمليات من 1970
+    فيتخطّاها كلها ⇒ لا يصل أي إيداع! نطبّع الثواني إلى ملّي."""
+    for k in ('successAt', 'createdTime', 'updatedTime', 'timestamp', 'createTime'):
         v = row.get(k)
-        if v:
-            try:
-                return int(float(v))
-            except Exception:
-                continue
+        if not v:
+            continue
+        try:
+            t = int(float(v))
+        except Exception:
+            continue
+        if t <= 0:
+            continue
+        # < 1e12 يعني ثوانٍ (10 خانات) → نحوّلها ملّي
+        if t < 1_000_000_000_000:
+            t *= 1000
+        return t
     return 0
 
 
@@ -8811,13 +8868,63 @@ def _bybit_row_usd(row):
 
 
 def _bybit_coin_key_for_chain(chain_raw):
-    """يحدد أي شبكة (TRC20/BEP20) حسب حقل chain القادم من Bybit."""
+    """يحدد أي شبكة (TRC20/BEP20) حسب حقل السلسلة من Bybit.
+    🔧 نقرأ عدة أسماء محتملة للحقل (chain/chainType/network...)."""
     c = str(chain_raw or '').upper().replace('-', '').replace('_', '')
+    if not c:
+        return None
     for net_key, cfg in BYBIT_NETWORKS.items():
         for ch in cfg['chains']:
             if ch.replace('-', '').replace('_', '') in c:
                 return cfg['coin']
     return None
+
+
+def _bybit_row_chain(row):
+    """يستخرج اسم الشبكة من أي حقل محتمل."""
+    for k in ('chain', 'chainType', 'network', 'depositChain', 'chainName'):
+        v = row.get(k)
+        if v:
+            return str(v)
+    return ''
+
+
+def _bybit_match_by_sender(sender_uid, usd, tolerance=0.01):
+    """يطابق تحويل Bybit الداخلي بـ UID المرسِل + المبلغ الفريد معاً.
+
+    الأمان: UID وحده لا يكفي (يمكن انتحال UID شخص آخر)، والمبلغ وحده قد
+    يتكرر. اجتماعهما يجعل الانتحال شبه مستحيل.
+
+    - نبحث عن إيداع معلّق لـ BYBIT_UID مسجّل عليه نفس sender_uid وقريب من المبلغ.
+    - لو تعدّدت المطابقات (غموض) → لا نرجّع أحداً (أأمن من الخطأ).
+    """
+    sender_uid = str(sender_uid).strip()
+    if not sender_uid:
+        return None
+    try:
+        usd = float(usd)
+        recs = list(db.pending_deposits.find({
+            'coin': 'BYBIT_UID',
+            'status': 'pending',
+            'sender_uid': sender_uid,
+            'expires_at': {'$gt': int(time.time())},
+            'unique_amount_usd': {'$gte': usd - tolerance, '$lte': usd + tolerance}
+        }))
+        if not recs:
+            return None
+        if len(recs) == 1:
+            return recs[0]
+        # غموض: نأخذ الأقرب للمبلغ بالضبط، ولو تساوى اثنان نرفض
+        recs.sort(key=lambda r: abs(float(r.get('unique_amount_usd', 0)) - usd))
+        d0 = abs(float(recs[0].get('unique_amount_usd', 0)) - usd)
+        d1 = abs(float(recs[1].get('unique_amount_usd', 0)) - usd)
+        if abs(d0 - d1) < 1e-9:
+            logger.warning(f"[BYBIT] غموض في مطابقة UID {sender_uid} بمبلغ ${usd} — رُفض للأمان")
+            return None
+        return recs[0]
+    except Exception as e:
+        logger.debug(f"_bybit_match_by_sender err: {e}")
+        return None
 
 
 def check_bybit_auto():
@@ -8870,9 +8977,26 @@ def check_bybit_auto():
                     if kind == 'internal':
                         coin_keys = ['BYBIT_UID']
                     else:
-                        ck = _bybit_coin_key_for_chain(row.get('chain') or row.get('network'))
-                        # لو ما عرفنا الشبكة، نجرّب كل شبكات Bybit
-                        coin_keys = [ck] if ck else [c['coin'] for c in BYBIT_NETWORKS.values()]
+                        ck = _bybit_coin_key_for_chain(_bybit_row_chain(row))
+                        # 🔧 دائماً نجرّب كل شبكات Bybit أيضاً (حتى لو عرفنا الشبكة)
+                        #    حتى لا نفوّت إيداعاً بسبب اختلاف اسم حقل الشبكة.
+                        all_nets = [c['coin'] for c in BYBIT_NETWORKS.values()]
+                        coin_keys = ([ck] + [c for c in all_nets if c != ck]) if ck else all_nets
+
+                    # 🆔 للتحويل الداخلي (UID): نطابق بـ UID المرسِل + المبلغ الفريد معاً
+                    #    fromMemberId = رقم مرسِل التحويل في Bybit
+                    if kind == 'internal':
+                        sender = str(row.get('fromMemberId') or row.get('fromUid') or '').strip()
+                        if sender:
+                            _p = _bybit_match_by_sender(sender, usd)
+                            if _p:
+                                if auto_credit_from_pending(_p, tx_norm, label + " (UID)"):
+                                    logger.info(f"✅ BYBIT UID+amount match: user {_p['user_id']} "
+                                                f"← sender {sender} → ${_p['base_amount_usd']:.2f}")
+                                continue
+                            # وصل من UID لكن ما طابق — تشخيص
+                            logger.warning(f"[BYBIT] تحويل داخلي من UID {sender} بمبلغ ${usd} "
+                                           f"بلا مطابقة (UID أو المبلغ غير مسجّل) | tx={raw_tx[:16]}")
 
                     # 1️⃣ مطابقة بالمبلغ الفريد (الأساس والأأمن)
                     matched = False
@@ -8886,6 +9010,21 @@ def check_bybit_auto():
                             break
                     if matched:
                         continue
+
+                    # 🔍 تشخيص: وصل مبلغ لكن ما لقينا إيداعاً معلّقاً مطابقاً
+                    #    نسجّل أقرب الإيداعات المعلّقة لنعرف سبب عدم المطابقة
+                    try:
+                        _near = list(db.pending_deposits.find({
+                            'coin': {'$in': coin_keys}, 'status': 'pending'
+                        }).limit(5))
+                        _near_amts = [round(float(p.get('unique_amount_usd', 0)), 6) for p in _near]
+                        logger.warning(
+                            f"[BYBIT] وصل ${usd} ({kind}) بلا مطابقة. "
+                            f"المعلّقة {coin_keys}: {_near_amts or 'لا يوجد'} "
+                            f"| tx={raw_tx[:16]}"
+                        )
+                    except Exception:
+                        pass
 
                     # 2️⃣ مطابقة بالملاحظة (آيدي تيليجرام) — للتحويل الداخلي فقط
                     #    🛡 نشترط: مستخدم موجود + غير محظور + عنده إيداع معلّق لـ Bybit
@@ -8981,11 +9120,52 @@ def dep_bybit_method(call):
     except Exception:
         pass
 
+    # 🆔 طريقة UID: نطلب أولاً رقم UID الخاص بالمستخدم في Bybit (للمطابقة المزدوجة)
+    if method == 'UID':
+        markup = InlineKeyboardMarkup()
+        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+        msg = bot.send_message(uid, get_text(uid, 'bybit_ask_uid'),
+                               parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(msg, ask_bybit_sender_uid, method)
+        return
+
     msg_text = get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method))
     markup = InlineKeyboardMarkup()
     markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
     msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
-    bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method)
+    bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method, None)
+
+
+@safe_next_step
+def ask_bybit_sender_uid(message, method):
+    """يستلم UID المستخدم في Bybit، يتحقق من صيغته، ثم يطلب المبلغ."""
+    uid = message.from_user.id
+    if is_user_banned(uid):
+        return
+    l = get_lang(uid)
+
+    def _retry(err=None):
+        send_payment_lock_warning(uid, l)
+        markup = InlineKeyboardMarkup()
+        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+        txt = (err + "\n\n" if err else "") + get_text(uid, 'bybit_ask_uid')
+        m = bot.send_message(uid, txt, parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(m, ask_bybit_sender_uid, method)
+
+    if not message.text or message.text.startswith('/'):
+        _retry(); return
+    sender_uid = message.text.strip()
+    # UID في Bybit أرقام فقط (عادة 6-12 خانة)
+    if not re.fullmatch(r'\d{5,15}', sender_uid):
+        _retry(bil(uid, "❌ UID غير صالح — أرقام فقط (من ملفك في Bybit).",
+                        "❌ Invalid UID — digits only (from your Bybit profile).")); return
+
+    # ننتقل لطلب المبلغ حاملين الـ sender_uid
+    markup = InlineKeyboardMarkup()
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    msg = bot.send_message(uid, get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method)),
+                           parse_mode="HTML", reply_markup=markup)
+    bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method, sender_uid)
 
 
 def _bybit_method_label(uid, method):
@@ -9003,7 +9183,7 @@ def _bybit_coin_of(method):
 
 
 @safe_next_step
-def ask_bybit_deposit_amount(message, method):
+def ask_bybit_deposit_amount(message, method, sender_uid=None):
     """يستلم المبلغ ويعرض شاشة Bybit مع المبلغ الفريد."""
     uid = message.from_user.id
     if is_user_banned(uid):
@@ -9018,7 +9198,7 @@ def ask_bybit_deposit_amount(message, method):
         m = bot.send_message(uid, get_text(uid, 'dep_prompt_amount',
                                            _bybit_method_label(uid, method)),
                              parse_mode="HTML", reply_markup=markup)
-        bot.register_next_step_handler(m, ask_bybit_deposit_amount, method)
+        bot.register_next_step_handler(m, ask_bybit_deposit_amount, method, sender_uid)
 
     if not message.text or message.text.startswith('/'):
         _retry(); return
@@ -9033,7 +9213,7 @@ def ask_bybit_deposit_amount(message, method):
         bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML"); _retry(); return
 
     unique_amount = generate_unique_amount_for_user(base_amount, uid, coin)
-    pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
+    pending = register_pending_deposit(uid, base_amount, unique_amount, coin, sender_uid=sender_uid)
     if not pending:
         bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
         return
@@ -9157,7 +9337,7 @@ def bybit_check_payment(call):
 # 🔎 أدوات الأدمن
 # ------------------------------------------------------------
 def admin_search_bybit_tx(query):
-    """يبحث عن معاملة Bybit بالـ TxID/ID (لفحص المعاملات)."""
+    """يبحث عن معاملة Bybit بأي معرّف (TxID/OrderId/...) لفحص المعاملات."""
     if not bybit_is_configured():
         return None
     q = str(query).strip().lower()
@@ -9165,22 +9345,26 @@ def admin_search_bybit_tx(query):
         return None
     for kind, label in (('internal', 'Bybit (UID Transfer)'), ('onchain', 'Bybit (Network)')):
         try:
-            rows = get_bybit_deposits(kind=kind, limit=50)
+            rows = get_bybit_deposits(kind=kind, limit=200)   # وسّعنا من 50
         except Exception:
             continue
         for row in rows or []:
-            tx = _bybit_row_txid(row)
-            if not tx:
-                continue
-            t = tx.strip().lower()
-            # 🛡 مطابقة دقيقة أو احتواء بطول كافٍ فقط (تجنّب مطابقة عشوائية خاطئة)
-            ok = (q == t) or (len(q) >= 12 and q in t) or (len(t) >= 12 and t in q) \
-                 or _tx_hash_matches(query, tx)
-            if not ok:
+            # 🔧 نطابق ضد كل المعرّفات المحتملة في السجل، مو حقلاً واحداً
+            candidates = _bybit_all_ids(row)
+            main_tx = _bybit_row_txid(row) or (candidates[0] if candidates else '')
+            matched = False
+            for cand in candidates:
+                t = cand.strip().lower()
+                if (q == t) or (len(q) >= 12 and q in t) or (len(t) >= 12 and t in q) \
+                   or _tx_hash_matches(query, cand):
+                    matched = True
+                    main_tx = cand
+                    break
+            if not matched:
                 continue
             usd, coin_name = _bybit_row_usd(row)
             return {
-                'hash': tx, 'label': f"🟠 {label}", 'coin': coin_name,
+                'hash': main_tx, 'label': f"🟠 {label}", 'coin': coin_name,
                 'amount_usd': usd, 'crypto_amount': float(row.get('amount') or 0),
                 'when': _bybit_row_time_ms(row), 'note': _bybit_row_note(row), 'kind': kind,
             }
