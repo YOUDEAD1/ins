@@ -9736,7 +9736,10 @@ def verify_binance_pay(message, lang):
             if tx_id.lower() == str(d.get('orderId', '')).lower():
                 tx_time = int(d.get('transactionTime', 0))
                 if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
-                    bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+                    bot.send_message(uid, bil(uid,
+                        "❌ <b>مرفوض:</b> الحوالة قديمة جداً.",
+                        "❌ <b>Rejected:</b> This transaction is too old."),
+                        parse_mode="HTML")
                     return
                 found = True
                 amt_raw = float(d.get('amount', 0.0))
@@ -9803,7 +9806,10 @@ def verify_crypto_tx(message, lang, coin):
     
     with tx_lock:
         if tx_id_normalized in PROCESSING_TXS:
-            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            bot.send_message(uid, bil(uid,
+                "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>",
+                "⏳ <b>This transaction is already being processed, please do not repeat.</b>"),
+                parse_mode="HTML")
             return
         if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
@@ -9883,7 +9889,10 @@ def verify_crypto_tx(message, lang, coin):
             if tx_id in api_txid:
                 tx_time = int(d.get('insertTime', 0))
                 if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
-                    bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+                    bot.send_message(uid, bil(uid,
+                        "❌ <b>مرفوض:</b> الحوالة قديمة جداً.",
+                        "❌ <b>Rejected:</b> This transaction is too old."),
+                        parse_mode="HTML")
                     return
                 found = True
                 status = int(d.get('status', -1))
@@ -10096,7 +10105,10 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
     
     with tx_lock:
         if tx_track_key in PROCESSING_TXS:
-            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            bot.send_message(uid, bil(uid,
+                "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>",
+                "⏳ <b>This transaction is already being processed, please do not repeat.</b>"),
+                parse_mode="HTML")
             return
         if db.used_transactions.find_one({'transaction_id': tx_track_key}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
@@ -10376,7 +10388,10 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     
     with tx_lock:
         if tx_id_normalized in PROCESSING_TXS:
-            bot.send_message(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", parse_mode="HTML")
+            bot.send_message(uid, bil(uid,
+                "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>",
+                "⏳ <b>This transaction is already being processed, please do not repeat.</b>"),
+                parse_mode="HTML")
             return
         if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
             bot.reply_to(message, get_text(uid, 'tx_used')); return
@@ -10486,10 +10501,16 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                 logger.error(f"LTC API 2 error: {e}")
 
         if is_old:
-            bot.send_message(uid, "❌ <b>مرفوض:</b> الحوالة قديمة جداً.", parse_mode="HTML")
+            bot.send_message(uid, bil(uid,
+                        "❌ <b>مرفوض:</b> الحوالة قديمة جداً.",
+                        "❌ <b>Rejected:</b> This transaction is too old."),
+                        parse_mode="HTML")
             return
         if is_sender:
-            bot.send_message(uid, "❌ <b>مرفوض:</b> هذه الحوالة صادرة من محفظتنا وليست إيداعاً.", parse_mode="HTML")
+            bot.send_message(uid, bil(uid,
+                        "❌ <b>مرفوض:</b> هذه الحوالة صادرة من محفظتنا وليست إيداعاً.",
+                        "❌ <b>Rejected:</b> This is an outgoing transfer from our wallet, not a deposit."),
+                        parse_mode="HTML")
             return
 
         if received_ltc > 0:
@@ -13339,6 +13360,35 @@ def ad_edit_txt_prompt(call):
     bot.register_next_step_handler(msg, ad_save_custom_text, key)
 
 @safe_next_step
+def _text_fallback_for_lang(key, lang, expected_placeholders):
+    """يرجّع أفضل نص متاح للغة المطلوبة عند فشل الترجمة.
+
+    الترتيب: النص المخصّص المحفوظ حالياً ← النص الافتراضي من LANG.
+    يشترط تطابق عدد المتغيّرات ({0},{1}...) حتى لا ينكسر التنسيق عند العرض.
+    يرجّع None لو ما فيه بديل صالح.
+
+    ⚠️ سبب وجوده: كان الكود ينسخ النص العربي مكان الإنجليزي عند فشل الترجمة،
+    فيرى مستخدمو الإنجليزية نصاً عربياً.
+    """
+    candidates = []
+    try:
+        cv = db.custom_texts.find_one({'lang': lang, 'key': key})
+        if cv and cv.get('value') and str(cv['value']).strip():
+            candidates.append(str(cv['value']))
+    except Exception:
+        pass
+    try:
+        d = LANG.get(lang, {}).get(key, '')
+        if d and str(d).strip():
+            candidates.append(str(d))
+    except Exception:
+        pass
+    for c in candidates:
+        if len(re.findall(r'\{[^}]*\}', c)) == expected_placeholders:
+            return c
+    return None
+
+
 def ad_save_custom_text(message, key):
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
@@ -13392,31 +13442,46 @@ def ad_save_custom_text(message, key):
     # 🛡 فحص: عدد placeholders في النسختين لازم يكون متطابق
     ar_count = len(re.findall(r'\{[^}]*\}', final_text_ar))
     en_count = len(re.findall(r'\{[^}]*\}', final_text_en))
-    
+
+    _fallback_used = False
+
     if ar_count != en_count:
         logger.warning(f"Translation lost placeholders for '{key}': ar={ar_count}, en={en_count}")
-        # نخلي النسختين متطابقتين
+        # 🔧 الإصلاح: ما ننسخ لغة مكان الأخرى (كان يعرض العربي لمستخدمي الإنجليزي!)
+        #    بدلها نُبقي النص الموجود/الافتراضي للغة الثانية.
         if source_lang == 'en':
-            final_text_ar = final_text_en
+            fb = _text_fallback_for_lang(key, 'ar', en_count)
+            final_text_ar = fb if fb else final_text_en
         else:
-            final_text_en = final_text_ar
-        bot.send_message(
-            message.chat.id,
-            "⚠️ <b>ملاحظة:</b> تم حفظ النص بدون ترجمة لحماية المتغيرات والتنسيقات.",
-            parse_mode="HTML"
-        )
-    
+            fb = _text_fallback_for_lang(key, 'en', ar_count)
+            final_text_en = fb if fb else final_text_ar
+        _fallback_used = True
+
     # 🛡 فحص: عدد Premium Emojis في النسختين
     ar_emojis = len(re.findall(r'<tg-emoji', final_text_ar))
     en_emojis = len(re.findall(r'<tg-emoji', final_text_en))
-    
+
     if ar_emojis != en_emojis:
         logger.warning(f"Translation lost premium emojis: ar={ar_emojis}, en={en_emojis}")
-        # نخلي النسختين متطابقتين
         if source_lang == 'en':
-            final_text_ar = final_text_en
+            fb = _text_fallback_for_lang(key, 'ar', en_count)
+            final_text_ar = fb if fb else final_text_en
         else:
-            final_text_en = final_text_ar
+            fb = _text_fallback_for_lang(key, 'en', ar_count)
+            final_text_en = fb if fb else final_text_ar
+        _fallback_used = True
+
+    if _fallback_used:
+        _other = "العربي" if source_lang == 'en' else "الإنجليزي"
+        _lbl = "بالعربية" if source_lang == 'en' else "بالإنجليزية"
+        bot.send_message(
+            message.chat.id,
+            f"⚠️ <b>تعذّرت الترجمة التلقائية</b> (لحماية المتغيّرات والإيموجي).\n\n"
+            f"✅ حُفظ النص الذي أرسلته.\n"
+            f"📌 النص <b>{_other}</b> بقي كما كان — <b>لم يُستبدل بلغة أخرى</b>.\n\n"
+            f"💡 <i>لتحديثه، أعد التعديل وأرسل النص {_lbl}.</i>",
+            parse_mode="HTML"
+        )
             
     # حفظ النصين
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
