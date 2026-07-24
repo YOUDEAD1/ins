@@ -16920,26 +16920,140 @@ def admin_shop_settings(call):
 def admin_set_inputs(call):
     bot.answer_callback_query(call.id)
     mode = call.data
-    msg = bot.send_message(call.from_user.id, "Send new value:")
+    uid = call.from_user.id
+
+    # اسم الإعداد + هل هو سرّي؟
+    _labels = {
+        "set_v_log": ("📢 قناة السجلات", False),
+        "set_v_usdt": ("🟢 عنوان USDT (TRC20)", False),
+        "set_v_ltc": ("🔵 عنوان LTC", False),
+        "set_v_wallet": ("💳 Binance Pay ID", False),
+        "set_v_usdt_bep20": ("🟡 عنوان USDT (BEP20)", False),
+        "set_v_ton": ("💎 عنوان TON", False),
+        "set_v_bybit_key": ("🟠 Bybit — مفتاح API", True),
+        "set_v_bybit_secret": ("🟠 Bybit — السر (Secret)", True),
+        "set_v_bybit_uid": ("🟠 Bybit — الـ UID", False),
+        "set_v_bybit_trc20": ("🟠 Bybit — عنوان USDT على TRC20", False),
+        "set_v_bybit_bep20": ("🟠 Bybit — عنوان USDT على BEP20", False),
+    }
+    label, is_secret = _labels.get(mode, ("الإعداد", False))
+    db_key = _SETTING_KEYS.get(mode)
+
+    # القيمة الحالية (نخفي الأسرار)
+    cur_txt = "—"
+    try:
+        if db_key:
+            cur = get_setting(db_key, '')
+            if cur and cur != 'Not Set':
+                cur_txt = ("••••••" + str(cur)[-4:]) if is_secret else html.escape(str(cur))
+    except Exception:
+        pass
+
+    # تلميح عن الصيغة المتوقعة (يمنع خلط الشبكات)
+    hints = {
+        "set_v_bybit_trc20": "⚠️ عنوان TRC20 يبدأ بحرف <b>T</b> وطوله 34 خانة.",
+        "set_v_bybit_bep20": "⚠️ عنوان BEP20 يبدأ بـ <b>0x</b> وطوله 42 خانة.",
+        "set_v_usdt": "⚠️ عنوان TRC20 يبدأ بحرف <b>T</b> وطوله 34 خانة.",
+        "set_v_usdt_bep20": "⚠️ عنوان BEP20 يبدأ بـ <b>0x</b> وطوله 42 خانة.",
+        "set_v_bybit_uid": "💡 الـ UID أرقام فقط (من صفحة ملفك في Bybit).",
+    }
+    hint = hints.get(mode, "")
+
+    txt = (f"✏️ <b>تعديل: {label}</b>\n\n"
+           f"📌 <b>القيمة الحالية:</b> <code>{cur_txt}</code>\n\n")
+    if hint:
+        txt += hint + "\n\n"
+    txt += "👇 أرسل القيمة الجديدة (أو <b>الغاء</b> للإلغاء)"
+
+    msg = bot.send_message(uid, txt, parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_save_setting, mode)
 
+
+# خريطة أزرار الإعدادات → مفاتيح قاعدة البيانات
+_SETTING_KEYS = {
+    "set_v_log": "log_channel",
+    "set_v_usdt": "usdt_address",
+    "set_v_ltc": "ltc_address",
+    "set_v_wallet": "wallet_address",
+    "set_v_usdt_bep20": "usdt_bep20_address",
+    "set_v_ton": "ton_address",
+    "set_v_bybit_key": "bybit_api_key",
+    "set_v_bybit_secret": "bybit_api_secret",
+    "set_v_bybit_uid": "bybit_uid",
+    "set_v_bybit_trc20": "bybit_addr_trc20",
+    "set_v_bybit_bep20": "bybit_addr_bep20",
+}
+
+
+def _validate_setting_value(mode, val):
+    """يتحقق من صيغة القيمة. يرجّع (سليم؟، رسالة الخطأ).
+    🛡 الأهم: يمنع وضع عنوان شبكة في خانة شبكة أخرى — خطأ يضيّع أموال المستخدمين."""
+    v = (val or '').strip()
+    if not v:
+        return False, "❌ القيمة فارغة."
+
+    # عناوين TRC20 (ترون): تبدأ بـ T وطولها 34
+    if mode in ("set_v_bybit_trc20", "set_v_usdt"):
+        if v.startswith('0x'):
+            return False, ("❌ <b>هذا عنوان BEP20 وليس TRC20!</b>\n\n"
+                           "عنوان TRC20 يبدأ بحرف <b>T</b>.\n"
+                           "<i>وضعه هنا يضيّع أموال المستخدمين.</i>")
+        if not (v.startswith('T') and len(v) == 34):
+            return False, "❌ عنوان TRC20 غير صالح — يبدأ بحرف <b>T</b> وطوله 34 خانة."
+
+    # عناوين BEP20 (BSC): تبدأ بـ 0x وطولها 42
+    if mode in ("set_v_bybit_bep20", "set_v_usdt_bep20"):
+        if v.startswith('T') and len(v) == 34:
+            return False, ("❌ <b>هذا عنوان TRC20 وليس BEP20!</b>\n\n"
+                           "عنوان BEP20 يبدأ بـ <b>0x</b>.\n"
+                           "<i>وضعه هنا يضيّع أموال المستخدمين.</i>")
+        if not (v.lower().startswith('0x') and len(v) == 42):
+            return False, "❌ عنوان BEP20 غير صالح — يبدأ بـ <b>0x</b> وطوله 42 خانة."
+
+    # الـ UID: أرقام فقط
+    if mode == "set_v_bybit_uid":
+        if not v.isdigit():
+            return False, "❌ الـ UID لازم يكون أرقاماً فقط."
+
+    # مفاتيح Bybit: طول معقول ولا تحوي مسافات
+    if mode in ("set_v_bybit_key", "set_v_bybit_secret"):
+        if ' ' in v:
+            return False, "❌ المفتاح يحتوي مسافة — تأكد من النسخ الصحيح."
+        if len(v) < 10:
+            return False, "❌ القيمة قصيرة جداً — تأكد من نسخها كاملة."
+
+    return True, ""
+
+
 def admin_save_setting(message, mode):
+    # 🛡 لو أرسل الأدمن صورة أو ملف بدل نص
+    if not message.text:
+        bot.send_message(message.chat.id, "❌ أرسل نصاً فقط. أعد المحاولة.")
+        return
     val = message.text.strip()
-    keys = {
-        "set_v_log": "log_channel", 
-        "set_v_usdt": "usdt_address", 
-        "set_v_ltc": "ltc_address", 
-        "set_v_wallet": "wallet_address",
-        "set_v_usdt_bep20": "usdt_bep20_address",
-        "set_v_ton": "ton_address",
-        "set_v_bybit_key": "bybit_api_key",
-        "set_v_bybit_secret": "bybit_api_secret",
-        "set_v_bybit_uid": "bybit_uid",
-        "set_v_bybit_trc20": "bybit_addr_trc20",
-        "set_v_bybit_bep20": "bybit_addr_bep20"
-    }
-    db.settings.update_one({'key': keys[mode]}, {'$set': {'value': val}}, upsert=True)
-    bot.send_message(message.chat.id, "✅ Updated.")
+
+    if val in ("الغاء", "إلغاء", "/cancel"):
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+
+    db_key = _SETTING_KEYS.get(mode)
+    if not db_key:
+        bot.send_message(message.chat.id, "❌ إعداد غير معروف.")
+        return
+
+    ok, err = _validate_setting_value(mode, val)
+    if not ok:
+        bot.send_message(message.chat.id, err + "\n\n<i>لم يُحفظ شيء. جرّب مرة ثانية.</i>",
+                         parse_mode="HTML")
+        return
+
+    db.settings.update_one({'key': db_key}, {'$set': {'value': val}}, upsert=True)
+
+    # تأكيد يخفي الأسرار
+    shown = ("••••••" + val[-4:]) if mode in ("set_v_bybit_key", "set_v_bybit_secret") else val
+    bot.send_message(message.chat.id,
+                     f"✅ <b>تم الحفظ.</b>\n<code>{html.escape(str(shown))}</code>",
+                     parse_mode="HTML")
 
 # ============================================================
 # 📂 14.6 نظام الكتالوجات (التصنيفات) — إدارة الأدمن
