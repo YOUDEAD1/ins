@@ -8941,7 +8941,8 @@ def check_bybit_auto():
         }) == 0:
             return
 
-        cutoff_ms = int(time.time() * 1000) - (45 * 60 * 1000)
+        # نافذة أوسع من عمر الإيداع المعلّق (30 دقيقة) + هامش، تحسّباً لتأخّر المستخدم
+        cutoff_ms = int(time.time() * 1000) - (90 * 60 * 1000)  # آخر 90 دقيقة
 
         for kind, label in (('internal', 'Bybit (UID Transfer)'),
                             ('onchain', 'Bybit (Network)')):
@@ -9407,6 +9408,78 @@ def cmd_bybit_debug(message):
                 bot.send_message(uid, "\n".join(lines)[:3800], parse_mode="HTML")
             except Exception:
                 continue
+
+
+@bot.message_handler(commands=['bybit_match'])
+def cmd_bybit_match(message):
+    """🔍 يفحص Bybit الآن ويشرح لكل تحويل: هل طُوبق؟ ولماذا لا؟ (للأدمن)."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+    if not bybit_is_configured():
+        bot.send_message(uid, "❌ مفاتيح Bybit غير مضبوطة.")
+        return
+
+    bot.send_message(uid, "🔍 جاري الفحص وتحليل المطابقة...")
+    now = int(time.time())
+    report = []
+
+    for kind, label in (('internal', 'داخلي/UID'), ('onchain', 'شبكة')):
+        try:
+            rows = get_bybit_deposits(kind=kind, limit=50)
+        except Exception as e:
+            report.append(f"❌ {label}: خطأ {str(e)[:80]}")
+            continue
+        report.append(f"\n<b>━━ {label} ({len(rows or [])}) ━━</b>")
+        for row in (rows or [])[:8]:
+            tx = _bybit_row_txid(row)
+            usd, coin_name = _bybit_row_usd(row)
+            t_ms = _bybit_row_time_ms(row)
+            age_min = int((now * 1000 - t_ms) / 60000) if t_ms else -1
+            already = bool(db.used_transactions.find_one({'transaction_id': normalize_tx_id(tx)})) if tx else False
+
+            line = f"• <code>{str(tx)[:14]}</code> ${usd} قبل {age_min}د"
+            if already:
+                line += " → ✅ مُعالَج سابقاً"
+            elif not _bybit_row_is_success(row, kind):
+                line += " → ⏳ غير مكتمل"
+            else:
+                # نبحث عن مطابقة
+                if kind == 'internal':
+                    sender = str(row.get('fromMemberId') or '').strip()
+                    p = _bybit_match_by_sender(sender, usd) if sender else None
+                    if p:
+                        line += f" → 🎯 يطابق user {p['user_id']}"
+                    else:
+                        # هل فيه إيداع معلّق بنفس UID؟ أو نفس المبلغ؟
+                        by_uid = db.pending_deposits.count_documents(
+                            {'coin': 'BYBIT_UID', 'status': 'pending', 'sender_uid': sender})
+                        line += f" → ❌ (UID {sender}: {by_uid} معلّق بنفس UID)"
+                else:
+                    nets = [c['coin'] for c in BYBIT_NETWORKS.values()]
+                    p = None
+                    for ck in nets:
+                        p = find_pending_deposit_for_amount(usd, ck, tolerance=0.001)
+                        if p:
+                            break
+                    line += f" → 🎯 user {p['user_id']}" if p else " → ❌ لا إيداع معلّق بهذا المبلغ"
+            report.append(line)
+
+    # الإيداعات المعلّقة حالياً
+    pend = list(db.pending_deposits.find({'coin': {'$in': BYBIT_COINS}, 'status': 'pending',
+                                          'expires_at': {'$gt': now}}))
+    report.append(f"\n<b>━━ معلّقة الآن ({len(pend)}) ━━</b>")
+    for p in pend[:8]:
+        su = p.get('sender_uid', '—')
+        report.append(f"• user {p['user_id']} ينتظر <code>{p['unique_amount_usd']:.4f}</code> "
+                      f"[{p['coin']}] UID:{su}")
+
+    txt = "\n".join(report)
+    for i in range(0, len(txt), 3800):
+        bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
 def auto_deposit_monitor_thread():
