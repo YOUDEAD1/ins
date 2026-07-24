@@ -3350,6 +3350,10 @@ DEFAULT_BUTTONS = {
         'btn_usdt_bep20': '🟡 USDT (BEP-20)',
         'btn_ton': '💎 Toncoin (TON)',
         'btn_ltc': '🔵 Litecoin (LTC)',
+        'btn_bybit': '🟠 Bybit',
+        'btn_bybit_uid': '👤 تحويل داخلي (UID)',
+        'btn_bybit_trc20': '🟢 USDT — شبكة TRC-20',
+        'btn_bybit_bep20': '🟡 USDT — شبكة BEP-20',
         'btn_buy_hist': '🛍 المشتريات',
         'btn_dep_hist': '💳 الإيداعات',
         'btn_dl_buy': '📄 تحميل المشتريات',
@@ -3378,6 +3382,10 @@ DEFAULT_BUTTONS = {
         'btn_usdt_bep20': '🟡 USDT (BEP-20)',
         'btn_ton': '💎 Toncoin (TON)',
         'btn_ltc': '🔵 Litecoin (LTC)',
+        'btn_bybit': '🟠 Bybit',
+        'btn_bybit_uid': '👤 Internal Transfer (UID)',
+        'btn_bybit_trc20': '🟢 USDT — TRC-20',
+        'btn_bybit_bep20': '🟡 USDT — BEP-20',
         'btn_buy_hist': '🛍 Purchases',
         'btn_dep_hist': '💳 Deposits',
         'btn_dl_buy': '📄 Download Purchases',
@@ -3517,7 +3525,32 @@ LANG = {
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
         # أزرار الدفع
+        'bybit_choose': (
+            "🟠 <b>الدفع عبر Bybit</b>\n\n"
+            "اختر طريقة التحويل المناسبة لك:"
+        ),
+        # {0}=UID  {1}=المبلغ الفريد  {2}=آيدي المستخدم
+        'bybit_msg_uid': (
+            "🟠 <b>Bybit — تحويل داخلي (UID)</b>\n\n"
+            "1️⃣ افتح تطبيق Bybit ← <b>Bybit Pay</b> ← <b>إرسال</b>\n"
+            "2️⃣ أرسل إلى الـ UID:\n<code>{0}</code>\n\n"
+            "3️⃣ أرسل <b>USDT</b> بهذا المبلغ <b>بالضبط</b>:\n<code>{1}</code>\n\n"
+            "📝 <i>يُفضّل كتابة رقمك في الملاحظة:</i> <code>{2}</code>\n\n"
+            "⚠️ <b>المبلغ لازم يكون مطابقاً تماماً</b> — هكذا نتعرّف على تحويلك.\n"
+            "⏰ صلاحية: <b>30 دقيقة</b>\n"
+            "✨ <i>الرصيد يُضاف تلقائياً</i>"
+        ),
+        # {0}=اسم الشبكة  {1}=العنوان  {2}=المبلغ الفريد
+        'bybit_msg_net': (
+            "🟠 <b>Bybit — {0}</b>\n\n"
+            "📬 <b>العنوان:</b>\n<code>{1}</code>\n\n"
+            "💰 <b>المبلغ (بالضبط):</b>\n<code>{2}</code>\n\n"
+            "⚠️ <b>تأكد من الشبكة الصحيحة</b> — الإرسال على شبكة خاطئة يفقد المبلغ.\n"
+            "⏰ صلاحية: <b>30 دقيقة</b>\n"
+            "✨ <i>الرصيد يُضاف تلقائياً بعد التأكيد</i>"
+        ),
         'dep_btn_copy_amount': "📋 نسخ المبلغ",
+        'bybit_btn_copy_uid': "📋 نسخ الـ UID",
         'dep_btn_copy_wallet': "📋 نسخ العنوان",
         'dep_btn_copy_id': "📋 نسخ الآيدي",
         'dep_btn_check': "🔍 فحص الدفع",
@@ -3632,7 +3665,30 @@ LANG = {
             "✨ <i>Balance added automatically</i>"
         ),
         # Payment buttons
+        'bybit_choose': (
+            "🟠 <b>Pay with Bybit</b>\n\n"
+            "Choose your preferred transfer method:"
+        ),
+        'bybit_msg_uid': (
+            "🟠 <b>Bybit — Internal Transfer (UID)</b>\n\n"
+            "1️⃣ Open Bybit app → <b>Bybit Pay</b> → <b>Send</b>\n"
+            "2️⃣ Send to this UID:\n<code>{0}</code>\n\n"
+            "3️⃣ Send <b>USDT</b>, exactly this amount:\n<code>{1}</code>\n\n"
+            "📝 <i>Optionally add your ID in the note:</i> <code>{2}</code>\n\n"
+            "⚠️ <b>The amount must match exactly</b> — that's how we identify you.\n"
+            "⏰ Valid for: <b>30 minutes</b>\n"
+            "✨ <i>Credited automatically</i>"
+        ),
+        'bybit_msg_net': (
+            "🟠 <b>Bybit — {0}</b>\n\n"
+            "📬 <b>Address:</b>\n<code>{1}</code>\n\n"
+            "💰 <b>Exact amount:</b>\n<code>{2}</code>\n\n"
+            "⚠️ <b>Use the correct network</b> — wrong network means lost funds.\n"
+            "⏰ Valid for: <b>30 minutes</b>\n"
+            "✨ <i>Credited automatically after confirmation</i>"
+        ),
         'dep_btn_copy_amount': "📋 Copy Amount",
+        'bybit_btn_copy_uid': "📋 Copy UID",
         'dep_btn_copy_wallet': "📋 Copy Address",
         'dep_btn_copy_id': "📋 Copy ID",
         'dep_btn_check': "🔍 Check Payment",
@@ -7153,6 +7209,12 @@ def dep_init_ui(call):
     markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
     markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
     markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
+    # 🟠 Bybit — زر واحد يفتح قائمة فرعية (يظهر فقط لو فيه طريقة مفعّلة)
+    try:
+        if bybit_available_methods():
+            markup.add(create_btn(uid, 'btn_bybit', callback_data="dep_bybit"))
+    except Exception:
+        pass
     markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
     
     try:
@@ -8379,6 +8441,655 @@ def check_binance_pay_auto():
         logger.error(f"check_binance_pay_auto error: {e}")
 
 
+# ============================================================
+# 🟠 Bybit — طريقة دفع (تحويل داخلي UID + شبكات USDT)
+# ============================================================
+# التوثيق الرسمي (V5):
+#   • on-chain : GET /v5/asset/deposit/query-record
+#   • داخلي     : GET /v5/asset/deposit/query-internal-record
+#   • المصادقة  : X-BAPI-API-KEY / X-BAPI-TIMESTAMP / X-BAPI-SIGN / X-BAPI-RECV-WINDOW
+#                 توقيع HMAC-SHA256 على: timestamp + apiKey + recvWindow + queryString
+#
+# ⚠️ Bybit Pay للتجّار (QR + webhook) واجهة منفصلة تتطلب اعتماداً كشريك — غير مفعّلة.
+
+# شبكات الإيداع المدعومة (يسهل إضافة غيرها لاحقاً)
+BYBIT_NETWORKS = {
+    'TRC20': {
+        'coin': 'BYBIT_TRC20',
+        'setting': 'bybit_addr_trc20',
+        'btn_key': 'btn_bybit_trc20',
+        'label_ar': 'USDT — شبكة TRC-20',
+        'label_en': 'USDT — TRC-20 Network',
+        'chains': ('TRX', 'TRC20', 'TRON', 'TRC-20'),
+    },
+    'BEP20': {
+        'coin': 'BYBIT_BEP20',
+        'setting': 'bybit_addr_bep20',
+        'btn_key': 'btn_bybit_bep20',
+        'label_ar': 'USDT — شبكة BEP-20',
+        'label_en': 'USDT — BEP-20 Network',
+        'chains': ('BSC', 'BEP20', 'BSC_BNB', 'BEP-20', 'BNB'),
+    },
+}
+
+BYBIT_COINS = ['BYBIT_UID'] + [n['coin'] for n in BYBIT_NETWORKS.values()]
+
+# تهدئة زر "فحص الدفع" (يمنع الضغط المتكرر واستنزاف حصة الـ API)
+_BYBIT_CHECK_COOLDOWN = {}
+
+# حالات النجاح حسب توثيق Bybit
+_BYBIT_ONCHAIN_OK = {3}      # 3 = success
+_BYBIT_INTERNAL_OK = {2}     # 2 = success
+
+
+def _bybit_creds():
+    """يرجّع (api_key, api_secret, uid, base_url). الأولوية للإعدادات ثم البيئة."""
+    def _s(key, env, default=''):
+        v = get_setting(key, '')
+        if not v or v == 'Not Set':
+            v = os.getenv(env, default)
+        return (v or '').strip()
+
+    return (
+        _s('bybit_api_key', 'BYBIT_API_KEY'),
+        _s('bybit_api_secret', 'BYBIT_API_SECRET'),
+        _s('bybit_uid', 'BYBIT_UID'),
+        _s('bybit_base_url', 'BYBIT_BASE_URL') or 'https://api.bybit.com',
+    )
+
+
+def _bybit_net_address(net_key):
+    """عنوان الإيداع لشبكة معيّنة (TRC20 / BEP20)."""
+    cfg = BYBIT_NETWORKS.get(net_key)
+    if not cfg:
+        return ''
+    v = get_setting(cfg['setting'], '')
+    if not v or v == 'Not Set':
+        v = os.getenv(cfg['setting'].upper(), '')
+    return (v or '').strip()
+
+
+def bybit_is_configured():
+    k, s, _u, _b = _bybit_creds()
+    return bool(k and s)
+
+
+def bybit_available_methods():
+    """يرجّع قائمة الطرق المفعّلة فعلياً (حتى لا نعرض زراً بلا إعداد)."""
+    if not bybit_is_configured():
+        return []
+    out = []
+    _k, _s, uid_set, _b = _bybit_creds()
+    if uid_set:
+        out.append('UID')
+    for net in BYBIT_NETWORKS:
+        if _bybit_net_address(net):
+            out.append(net)
+    return out
+
+
+def _bybit_signed_request(path, params=None, timeout=8):
+    """طلب موقّع لـ Bybit V5. يجرّب المباشر أولاً ثم البروكسيات."""
+    api_key, api_secret, _uid, base = _bybit_creds()
+    if not api_key or not api_secret:
+        return None
+
+    params = params or {}
+    query = urllib.parse.urlencode(params)
+    ts = str(int(time.time() * 1000))
+    recv = '20000'
+    try:
+        sign = _hmac.new(api_secret.encode('utf-8'),
+                         f"{ts}{api_key}{recv}{query}".encode('utf-8'),
+                         _hashlib.sha256).hexdigest()
+    except Exception as e:
+        logger.error(f"[BYBIT] sign error: {e}")
+        return None
+
+    headers = {
+        'X-BAPI-API-KEY': api_key,
+        'X-BAPI-TIMESTAMP': ts,
+        'X-BAPI-RECV-WINDOW': recv,
+        'X-BAPI-SIGN': sign,
+    }
+    url = f"{base.rstrip('/')}{path}" + (f"?{query}" if query else "")
+
+    def _parse(resp):
+        """result عند النجاح، None عند خطأ شبكة، False عند رفض Bybit."""
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        if data.get('retCode') == 0:
+            return data.get('result') or {}
+        logger.error(f"[BYBIT] retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+        return False
+
+    # 1) اتصال مباشر
+    try:
+        out = _parse(requests.get(url, headers=headers, timeout=timeout))
+        if out is False:
+            return None
+        if out is not None:
+            return out
+    except Exception as e:
+        logger.debug(f"[BYBIT] direct failed: {e}")
+
+    # 2) عبر البروكسيات (تفضيل آخر بروكسي ناجح)
+    global LAST_GOOD_PROXY
+    try:
+        if not VERIFIED_PROXIES:
+            refresh_proxies(force=True)
+        plist = list(VERIFIED_PROXIES[:8]) if VERIFIED_PROXIES else []
+        if LAST_GOOD_PROXY and LAST_GOOD_PROXY in plist:
+            plist.remove(LAST_GOOD_PROXY)
+            plist.insert(0, LAST_GOOD_PROXY)
+        started = time.time()
+        for proxy in plist:
+            if (time.time() - started) > 20:
+                break
+            try:
+                out = _parse(requests.get(url, headers=headers, timeout=6,
+                                          proxies={'http': proxy, 'https': proxy}))
+                if out is False:
+                    return None
+                if out is not None:
+                    LAST_GOOD_PROXY = proxy
+                    return out
+            except Exception:
+                _remove_dead_proxy(proxy)
+                continue
+    except Exception as e:
+        logger.debug(f"[BYBIT] proxy stage failed: {e}")
+
+    return None
+
+
+def get_bybit_deposits(kind='internal', coin=None, limit=50):
+    """kind='internal' → داخل Bybit | kind='onchain' → على البلوكشين"""
+    path = ('/v5/asset/deposit/query-internal-record' if kind == 'internal'
+            else '/v5/asset/deposit/query-record')
+    params = {'limit': int(limit)}
+    if coin:
+        params['coin'] = coin
+    res = _bybit_signed_request(path, params)
+    if not res:
+        return []
+    rows = res.get('rows') or []
+    return rows if isinstance(rows, list) else []
+
+
+def _bybit_row_txid(row):
+    for k in ('txID', 'txId', 'id', 'transactionId'):
+        if row.get(k):
+            return str(row[k])
+    return ''
+
+
+def _bybit_row_note(row):
+    for k in ('remark', 'note', 'memo', 'tag', 'comment', 'description'):
+        if row.get(k):
+            return str(row[k])
+    return ''
+
+
+def _bybit_row_time_ms(row):
+    for k in ('successAt', 'createdTime', 'updatedTime', 'timestamp'):
+        v = row.get(k)
+        if v:
+            try:
+                return int(float(v))
+            except Exception:
+                continue
+    return 0
+
+
+def _bybit_row_is_success(row, kind):
+    """هل العملية مكتملة؟
+    🛡 للإيداع on-chain نتشدّد: لو الحالة مفقودة نرفض (قد تكون غير مؤكدة وتُعكس).
+       للتحويل الداخلي نتساهل (فوري داخل المنصة)."""
+    st = row.get('status', None)
+    if st is None:
+        return kind == 'internal'
+    try:
+        st = int(st)
+    except Exception:
+        return False
+    return st in (_BYBIT_INTERNAL_OK if kind == 'internal' else _BYBIT_ONCHAIN_OK)
+
+
+def _bybit_row_usd(row):
+    """يحوّل مبلغ السجل للدولار. يرجّع (usd|None, coin)."""
+    coin = str(row.get('coin') or row.get('currency') or 'USDT').upper()
+    try:
+        amt = float(row.get('amount') or 0)
+    except Exception:
+        return None, coin
+    if amt <= 0:
+        return None, coin
+    if coin in USD_STABLECOINS:
+        return round(amt, 6), coin
+    price = get_coin_price_usd(coin)
+    if not price or price <= 0:
+        return None, coin
+    return round(amt * price, 6), coin
+
+
+def _bybit_coin_key_for_chain(chain_raw):
+    """يحدد أي شبكة (TRC20/BEP20) حسب حقل chain القادم من Bybit."""
+    c = str(chain_raw or '').upper().replace('-', '').replace('_', '')
+    for net_key, cfg in BYBIT_NETWORKS.items():
+        for ch in cfg['chains']:
+            if ch.replace('-', '').replace('_', '') in c:
+                return cfg['coin']
+    return None
+
+
+def check_bybit_auto():
+    """🔍 يفحص إيداعات Bybit تلقائياً (داخلي + شبكات) ويضيف الرصيد."""
+    try:
+        if not bybit_is_configured():
+            return
+
+        now = int(time.time())
+        if db.pending_deposits.count_documents({
+            'coin': {'$in': BYBIT_COINS},
+            'status': 'pending',
+            'expires_at': {'$gt': now}
+        }) == 0:
+            return
+
+        cutoff_ms = int(time.time() * 1000) - (45 * 60 * 1000)
+
+        for kind, label in (('internal', 'Bybit (UID Transfer)'),
+                            ('onchain', 'Bybit (Network)')):
+            try:
+                rows = get_bybit_deposits(kind=kind, limit=50)
+            except Exception as e:
+                logger.debug(f"[BYBIT] fetch {kind} err: {e}")
+                continue
+
+            for row in rows or []:
+                try:
+                    if not _bybit_row_is_success(row, kind):
+                        continue
+
+                    tx_time = _bybit_row_time_ms(row)
+                    if tx_time and tx_time < cutoff_ms:
+                        continue
+
+                    raw_tx = _bybit_row_txid(row)
+                    if not raw_tx:
+                        continue
+                    tx_norm = normalize_tx_id(raw_tx)
+
+                    if db.used_transactions.find_one({'transaction_id': tx_norm}):
+                        continue
+
+                    usd, coin_name = _bybit_row_usd(row)
+                    if usd is None or usd <= 0:
+                        logger.warning(f"[BYBIT] تعذّر تسعير {coin_name} — تخطّي {raw_tx[:20]}")
+                        continue
+
+                    # أي "عملة داخلية" نطابق عليها
+                    if kind == 'internal':
+                        coin_keys = ['BYBIT_UID']
+                    else:
+                        ck = _bybit_coin_key_for_chain(row.get('chain') or row.get('network'))
+                        # لو ما عرفنا الشبكة، نجرّب كل شبكات Bybit
+                        coin_keys = [ck] if ck else [c['coin'] for c in BYBIT_NETWORKS.values()]
+
+                    # 1️⃣ مطابقة بالمبلغ الفريد (الأساس والأأمن)
+                    matched = False
+                    for ckey in coin_keys:
+                        pending = find_pending_deposit_for_amount(usd, ckey, tolerance=0.001)
+                        if pending:
+                            if auto_credit_from_pending(pending, tx_norm, label):
+                                logger.info(f"✅ BYBIT auto-credit ({kind}): "
+                                            f"user {pending['user_id']} → ${pending['base_amount_usd']:.2f}")
+                            matched = True
+                            break
+                    if matched:
+                        continue
+
+                    # 2️⃣ مطابقة بالملاحظة (آيدي تيليجرام) — للتحويل الداخلي فقط
+                    #    🛡 نشترط: مستخدم موجود + غير محظور + عنده إيداع معلّق لـ Bybit
+                    #    (بدون هذه الشروط يمكن إرسال مبلغ صغير بملاحظة تحمل آيدي أي شخص)
+                    if kind != 'internal':
+                        continue
+                    note = _bybit_row_note(row)
+                    if not note:
+                        continue
+                    m = re.search(r'(?<!\d)(\d{6,12})(?!\d)', note)
+                    if not m:
+                        continue
+                    note_uid = int(m.group(1))
+                    u = db.users.find_one({'user_id': note_uid})
+                    if not u or u.get('is_banned') == 1:
+                        continue
+                    has_pending = db.pending_deposits.find_one({
+                        'user_id': note_uid,
+                        'coin': {'$in': BYBIT_COINS},
+                        'status': 'pending',
+                        'expires_at': {'$gt': int(time.time())}
+                    })
+                    if not has_pending:
+                        logger.info(f"[BYBIT] تخطّي مطابقة الملاحظة لـ {note_uid}: لا إيداع معلّق")
+                        continue
+                    try:
+                        credit_user(note_uid, usd, tx_norm, u.get('language', 'ar'),
+                                    f"{label} (Auto Note)")
+                        close_user_pending_and_unlock(note_uid, tx_norm, via='bybit_note')
+                        logger.info(f"✅ BYBIT note-match: {note_uid} → ${usd:.2f}")
+                    except Exception as ce:
+                        logger.error(f"[BYBIT] note credit fail: {ce}")
+                except Exception as row_err:
+                    logger.debug(f"[BYBIT] row err: {row_err}")
+                    continue
+    except Exception as e:
+        logger.error(f"check_bybit_auto error: {e}")
+
+
+# ------------------------------------------------------------
+# 🖥 واجهة المستخدم — قائمة Bybit الفرعية
+# ------------------------------------------------------------
+@bot.callback_query_handler(func=lambda call: call.data == "dep_bybit")
+def dep_bybit_menu(call):
+    """القائمة الفرعية: تحويل داخلي (UID) أو اختيار شبكة USDT."""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        return
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+
+    methods = bybit_available_methods()
+    if not methods:
+        bot.send_message(uid, bil(uid,
+            "⚠️ طريقة Bybit غير مفعّلة حالياً. جرّب طريقة أخرى.",
+            "⚠️ Bybit is not available right now. Please use another method."),
+            parse_mode="HTML")
+        return
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    if 'UID' in methods:
+        markup.add(create_btn(uid, 'btn_bybit_uid', callback_data="dep_bybit_m_UID"))
+    for net_key, cfg in BYBIT_NETWORKS.items():
+        if net_key in methods:
+            markup.add(create_btn(uid, cfg['btn_key'], callback_data=f"dep_bybit_m_{net_key}"))
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+
+    bot.send_message(uid, get_text(uid, 'bybit_choose'), parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_m_"))
+def dep_bybit_method(call):
+    """اختار المستخدم طريقة Bybit → نطلب المبلغ."""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        return
+    method = call.data.replace("dep_bybit_m_", "")
+    if method not in bybit_available_methods():
+        bot.send_message(uid, bil(uid,
+            "⚠️ هذه الطريقة غير متاحة حالياً.",
+            "⚠️ This method is not available right now."), parse_mode="HTML")
+        return
+
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+    try:
+        db.users.update_one(
+            {'user_id': uid},
+            {'$set': {'deposit_locked': True,
+                      'deposit_lock_expires': int(time.time()) + 30 * 60}},
+            upsert=True
+        )
+    except Exception:
+        pass
+
+    msg_text = get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method))
+    markup = InlineKeyboardMarkup()
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+    bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method)
+
+
+def _bybit_method_label(uid, method):
+    l = get_lang(uid)
+    if method == 'UID':
+        return 'Bybit — UID' if l == 'en' else 'Bybit — تحويل داخلي'
+    cfg = BYBIT_NETWORKS.get(method, {})
+    return cfg.get('label_en' if l == 'en' else 'label_ar', f"Bybit {method}")
+
+
+def _bybit_coin_of(method):
+    if method == 'UID':
+        return 'BYBIT_UID'
+    return BYBIT_NETWORKS.get(method, {}).get('coin', 'BYBIT_UID')
+
+
+@safe_next_step
+def ask_bybit_deposit_amount(message, method):
+    """يستلم المبلغ ويعرض شاشة Bybit مع المبلغ الفريد."""
+    uid = message.from_user.id
+    if is_user_banned(uid):
+        return
+    l = get_lang(uid)
+    coin = _bybit_coin_of(method)
+
+    def _retry():
+        send_payment_lock_warning(uid, l)
+        markup = InlineKeyboardMarkup()
+        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+        m = bot.send_message(uid, get_text(uid, 'dep_prompt_amount',
+                                           _bybit_method_label(uid, method)),
+                             parse_mode="HTML", reply_markup=markup)
+        bot.register_next_step_handler(m, ask_bybit_deposit_amount, method)
+
+    if not message.text or message.text.startswith('/'):
+        _retry(); return
+    try:
+        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
+    except ValueError:
+        _retry(); return
+
+    if base_amount < 1:
+        bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML"); _retry(); return
+    if base_amount > 10000:
+        bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML"); _retry(); return
+
+    unique_amount = generate_unique_amount_for_user(base_amount, uid, coin)
+    pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
+    if not pending:
+        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
+        return
+
+    markup = InlineKeyboardMarkup(row_width=2)
+
+    if method == 'UID':
+        _k, _s, bybit_uid, _b = _bybit_creds()
+        # نص قابل للتعديل: {0}=UID  {1}=المبلغ الفريد  {2}=آيدي المستخدم
+        msg_text = get_text(uid, 'bybit_msg_uid', html.escape(bybit_uid),
+                            f"{unique_amount:.6f}", str(uid))
+        # صف 1: المبلغ + الـ UID (اللي يحوّل له)
+        markup.add(
+            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+            _copy_button(get_text(uid, 'bybit_btn_copy_uid'), bybit_uid)
+        )
+    else:
+        addr = _bybit_net_address(method)
+        # نص قابل للتعديل: {0}=اسم الشبكة  {1}=العنوان  {2}=المبلغ الفريد
+        msg_text = get_text(uid, 'bybit_msg_net', _bybit_method_label(uid, method),
+                            html.escape(addr), f"{unique_amount:.6f}")
+        # صف 1: المبلغ + العنوان
+        markup.add(
+            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+            _copy_button(get_text(uid, 'dep_btn_copy_wallet'), addr)
+        )
+
+    # صف 2: نسخ آيدي المستخدم (يُكتب في الملاحظة) — في الطريقتين
+    markup.add(_copy_button(get_text(uid, 'dep_btn_copy_id'), str(uid)))
+    # صف 3: فحص الدفع فوراً (بدل انتظار الفحص التلقائي)
+    markup.add(_make_btn(get_text(uid, 'dep_btn_check'),
+                         callback_data=f"bybit_check_{uid}"))
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("bybit_check_"))
+def bybit_check_payment(call):
+    """🔍 يفحص Bybit فوراً لما المستخدم يضغط زر (فحص الدفع)."""
+    uid = call.from_user.id
+    try:
+        bot.answer_callback_query(
+            call.id,
+            "⏳ جاري الفحص..." if get_lang(uid) == 'ar' else "⏳ Checking..."
+        )
+    except Exception:
+        pass
+    if is_user_banned(uid):
+        return
+
+    # 🛡 المستخدم يفحص إيداعه هو فقط
+    try:
+        target = int(call.data.replace("bybit_check_", ""))
+        if target != uid:
+            return
+    except Exception:
+        return
+
+    # 🛡 حد بسيط لمنع الضغط المتكرر (كل 10 ثوانٍ)
+    try:
+        last = _BYBIT_CHECK_COOLDOWN.get(uid, 0)
+        if time.time() - last < 10:
+            bot.answer_callback_query(
+                call.id,
+                "⏳ انتظر قليلاً..." if get_lang(uid) == 'ar' else "⏳ Please wait...",
+                show_alert=False
+            )
+            return
+        _BYBIT_CHECK_COOLDOWN[uid] = time.time()
+    except Exception:
+        pass
+
+    checking = bot.send_message(
+        uid,
+        bil(uid, "🔍 <b>جاري فحص Bybit...</b>\nانتظر ثوانٍ.",
+                 "🔍 <b>Checking Bybit...</b>\nPlease wait."),
+        parse_mode="HTML"
+    )
+
+    # نلتقط الرصيد قبل الفحص لنعرف هل أُضيف شيء
+    try:
+        before = float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
+    except Exception:
+        before = 0.0
+
+    try:
+        check_bybit_auto()
+    except Exception as e:
+        logger.error(f"bybit manual check err: {e}")
+
+    try:
+        after = float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
+    except Exception:
+        after = before
+
+    try:
+        bot.delete_message(uid, checking.message_id)
+    except Exception:
+        pass
+
+    if after > before:
+        # نجح — رسالة التأكيد وصلت أصلاً من auto_credit_from_pending
+        return
+
+    bot.send_message(
+        uid,
+        bil(uid,
+            "⏳ <b>لم نستلم تحويلك بعد.</b>\n\n"
+            "• تأكد أن المبلغ <b>مطابق تماماً</b> للمبلغ المعروض\n"
+            "• التحويل الداخلي فوري، وإيداع الشبكة يحتاج تأكيدات\n\n"
+            "<i>سيُضاف الرصيد تلقائياً فور وصوله.</i>",
+            "⏳ <b>Your transfer hasn't arrived yet.</b>\n\n"
+            "• Make sure the amount matches <b>exactly</b>\n"
+            "• Internal transfers are instant; network deposits need confirmations\n\n"
+            "<i>Your balance will be credited automatically once received.</i>"),
+        parse_mode="HTML"
+    )
+
+
+# ------------------------------------------------------------
+# 🔎 أدوات الأدمن
+# ------------------------------------------------------------
+def admin_search_bybit_tx(query):
+    """يبحث عن معاملة Bybit بالـ TxID/ID (لفحص المعاملات)."""
+    if not bybit_is_configured():
+        return None
+    q = str(query).strip().lower()
+    if len(q) < 6:          # 🛡 استعلام قصير جداً يطابق أي شيء — نرفضه
+        return None
+    for kind, label in (('internal', 'Bybit (UID Transfer)'), ('onchain', 'Bybit (Network)')):
+        try:
+            rows = get_bybit_deposits(kind=kind, limit=50)
+        except Exception:
+            continue
+        for row in rows or []:
+            tx = _bybit_row_txid(row)
+            if not tx:
+                continue
+            t = tx.strip().lower()
+            # 🛡 مطابقة دقيقة أو احتواء بطول كافٍ فقط (تجنّب مطابقة عشوائية خاطئة)
+            ok = (q == t) or (len(q) >= 12 and q in t) or (len(t) >= 12 and t in q) \
+                 or _tx_hash_matches(query, tx)
+            if not ok:
+                continue
+            usd, coin_name = _bybit_row_usd(row)
+            return {
+                'hash': tx, 'label': f"🟠 {label}", 'coin': coin_name,
+                'amount_usd': usd, 'crypto_amount': float(row.get('amount') or 0),
+                'when': _bybit_row_time_ms(row), 'note': _bybit_row_note(row), 'kind': kind,
+            }
+    return None
+
+
+@bot.message_handler(commands=['bybit_debug'])
+def cmd_bybit_debug(message):
+    """🔍 يعرض آخر سجلات Bybit بكل حقولها — للأدمن فقط."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+
+    if not bybit_is_configured():
+        bot.send_message(uid, "❌ مفاتيح Bybit غير مضبوطة.\nاضبطها من: الإعدادات ← Bybit.")
+        return
+
+    bot.send_message(uid, "🔍 جاري جلب سجلات Bybit...")
+    for kind in ('internal', 'onchain'):
+        try:
+            rows = get_bybit_deposits(kind=kind, limit=5)
+        except Exception as e:
+            bot.send_message(uid, f"❌ {kind}: خطأ — {html.escape(str(e)[:200])}")
+            continue
+        if not rows:
+            bot.send_message(uid, f"📭 {kind}: لا توجد سجلات (أو فشل الاتصال).")
+            continue
+        bot.send_message(uid, f"✅ <b>{kind}</b> — {len(rows)} سجل:", parse_mode="HTML")
+        for i, row in enumerate(rows[:3], 1):
+            try:
+                lines = [f"━━━ {kind} #{i} ━━━"]
+                for k, v in row.items():
+                    vs = str(v)
+                    if len(vs) > 150:
+                        vs = vs[:150] + "..."
+                    lines.append(f"<b>{html.escape(str(k))}</b>: <code>{html.escape(vs)}</code>")
+                bot.send_message(uid, "\n".join(lines)[:3800], parse_mode="HTML")
+            except Exception:
+                continue
+
+
 def auto_deposit_monitor_thread():
     """Thread خلفي يفحص كل طرق الإيداع تلقائياً كل 10 ثواني"""
     time.sleep(30)  # ننتظر شوي قبل البداية
@@ -8391,6 +9102,8 @@ def auto_deposit_monitor_thread():
             check_usdt_blockchain_auto()
             time.sleep(1)
             check_binance_pay_auto()
+            time.sleep(1)
+            check_bybit_auto()
             time.sleep(10)  # كل 10 ثواني
         except Exception as e:
             logger.error(f"Auto deposit monitor error: {e}")
@@ -11767,6 +12480,32 @@ def ad_check_tx_handle(message):
                                 parse_mode="HTML"
                             )
                             return
+
+            # --- 🟠 Bybit (سجلات داخلية + on-chain) ---
+            if not onchain_match and not onchain_is_sender and bybit_is_configured():
+                by_r = admin_search_bybit_tx(query)
+                if by_r:
+                    if by_r.get('amount_usd'):
+                        onchain_match = {
+                            'coin': by_r.get('coin', 'USDT'),
+                            'label': by_r.get('label', '🟠 Bybit'),
+                            'amount_usd': by_r['amount_usd'],
+                            'crypto_amount': by_r.get('crypto_amount', 0),
+                            'hash': by_r.get('hash', query),
+                            'when': int(by_r.get('when', 0) or 0) // 1000,
+                            'source_addr': by_r.get('note', '') or '',
+                        }
+                    else:
+                        bot.send_message(
+                            uid,
+                            f"⚠️ <b>لقيت العملية في Bybit</b> "
+                            f"({by_r.get('crypto_amount', 0)} {html.escape(str(by_r.get('coin','')))}) "
+                            f"لكن تعذّر تحويلها للدولار الآن.\n"
+                            f"🆔 <code>{html.escape(str(by_r.get('hash', query))[:70])}</code>\n\n"
+                            f"<i>جرّب بعد دقيقة، أو أضف الرصيد يدوياً من (شحن رصيد).</i>",
+                            parse_mode="HTML"
+                        )
+                        return
         except Exception as oe:
             logger.debug(f"[CHECK_TX] on-chain search err: {oe}")
 
@@ -12211,6 +12950,10 @@ def ad_cms_msgs_ui(call):
     # 🆕 رسائل وأزرار الدفع الجديدة
     markup.add(InlineKeyboardButton("🟡 رسالة Binance Pay", callback_data="edit_txt_dep_msg_binance"))
     markup.add(InlineKeyboardButton("💎 رسالة العملات (USDT/TON/LTC)", callback_data="edit_txt_dep_msg_crypto"))
+    markup.add(InlineKeyboardButton("🟠 Bybit: قائمة الاختيار", callback_data="edit_txt_bybit_choose"))
+    markup.add(InlineKeyboardButton("🟠 Bybit: رسالة UID", callback_data="edit_txt_bybit_msg_uid"))
+    markup.add(InlineKeyboardButton("🟠 Bybit: رسالة الشبكات", callback_data="edit_txt_bybit_msg_net"))
+    markup.add(InlineKeyboardButton("📋 Bybit: زر نسخ الـ UID", callback_data="edit_txt_bybit_btn_copy_uid"))
     markup.add(InlineKeyboardButton("📋 زر: نسخ المبلغ", callback_data="edit_txt_dep_btn_copy_amount"))
     markup.add(InlineKeyboardButton("📋 زر: نسخ العنوان", callback_data="edit_txt_dep_btn_copy_wallet"))
     markup.add(InlineKeyboardButton("📋 زر: نسخ الآيدي", callback_data="edit_txt_dep_btn_copy_id"))
@@ -12297,7 +13040,8 @@ def ad_cms_btns_list(call):
     
     btn_categories = {
         'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin', 'btn_api', 'btn_check_sub'],
-        'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc'],
+        'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc',
+                'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'],
         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy'],
         'shop': ['btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
     }
@@ -16162,6 +16906,11 @@ def admin_shop_settings(call):
                InlineKeyboardButton("🟡 USDT (BEP20)", callback_data="set_v_usdt_bep20"))
     markup.add(InlineKeyboardButton("💎 TON Address", callback_data="set_v_ton"),
                InlineKeyboardButton("🔵 LTC Address", callback_data="set_v_ltc"))
+    markup.add(InlineKeyboardButton("🟠 Bybit API Key", callback_data="set_v_bybit_key"),
+               InlineKeyboardButton("🟠 Bybit Secret", callback_data="set_v_bybit_secret"))
+    markup.add(InlineKeyboardButton("🟠 Bybit UID", callback_data="set_v_bybit_uid"))
+    markup.add(InlineKeyboardButton("🟠 Bybit TRC20", callback_data="set_v_bybit_trc20"),
+               InlineKeyboardButton("🟠 Bybit BEP20", callback_data="set_v_bybit_bep20"))
     markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
     try: bot.edit_message_text("⚙️ <b>Settings:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
@@ -16182,7 +16931,12 @@ def admin_save_setting(message, mode):
         "set_v_ltc": "ltc_address", 
         "set_v_wallet": "wallet_address",
         "set_v_usdt_bep20": "usdt_bep20_address",
-        "set_v_ton": "ton_address"
+        "set_v_ton": "ton_address",
+        "set_v_bybit_key": "bybit_api_key",
+        "set_v_bybit_secret": "bybit_api_secret",
+        "set_v_bybit_uid": "bybit_uid",
+        "set_v_bybit_trc20": "bybit_addr_trc20",
+        "set_v_bybit_bep20": "bybit_addr_bep20"
     }
     db.settings.update_one({'key': keys[mode]}, {'$set': {'value': val}}, upsert=True)
     bot.send_message(message.chat.id, "✅ Updated.")
