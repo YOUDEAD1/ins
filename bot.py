@@ -3525,6 +3525,33 @@ LANG = {
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
         # أزرار الدفع
+        'pay_alert_popup': (
+            "⚠️ مهم جداً!\n\n"
+            "انسخ المبلغ كاملاً بكل فواصله، وحوّل نفس المبلغ بالضبط.\n\n"
+            "أي اختلاف في الأرقام بعد الفاصلة = لن نتعرّف على تحويلك."
+        ),
+        'pay_warn_exact': (
+            "⚠️ <b>قبل أن تحوّل — اقرأ بعناية</b>\n\n"
+            "🔢 <b>انسخ المبلغ كاملاً بكل فواصله</b> (مثال: <code>5.0087</code>)\n"
+            "💯 حوّل <b>نفس المبلغ بالضبط</b> كما هو معروض\n"
+            "🧾 المبلغ الذي يصلنا يجب أن يطابق تماماً — بالفاصلة والكسور\n\n"
+            "❗️ <b>أي اختلاف بسيط في الأرقام بعد الفاصلة = لن يتعرّف البوت على تحويلك.</b>\n\n"
+            "اضغط <b>موافق</b> للمتابعة."
+        ),
+        'bybit_alert_popup': (
+            "⚠️ مهم جداً!\n\n"
+            "انسخ المبلغ كاملاً بكل فواصله، وحوّل نفس المبلغ بالضبط كما يظهر في منصة Bybit.\n\n"
+            "أي اختلاف في الفواصل = لن نتعرّف على تحويلك."
+        ),
+        'bybit_warn_exact': (
+            "⚠️ <b>قبل أن تحوّل — اقرأ بعناية</b>\n\n"
+            "🔢 <b>انسخ المبلغ كاملاً بكل فواصله</b> (مثال: <code>5.0087</code>)\n"
+            "💯 حوّل <b>نفس المبلغ بالضبط</b> كما يظهر في تطبيق Bybit\n"
+            "🧾 المبلغ الذي يصلنا يجب أن يطابق تماماً — بالفاصلة والكسور\n\n"
+            "❗️ <b>أي اختلاف بسيط في الأرقام بعد الفاصلة = لن يتعرّف البوت على تحويلك.</b>\n\n"
+            "اضغط <b>موافق</b> للمتابعة."
+        ),
+        'bybit_btn_understood': "✅ موافق، فهمت",
         'bybit_ask_uid': (
             "🆔 <b>أدخل رقم UID الخاص بك في Bybit</b>\n\n"
             "تجده في: تطبيق Bybit ← ملفك الشخصي (بجانب اسمك).\n"
@@ -3671,6 +3698,33 @@ LANG = {
             "✨ <i>Balance added automatically</i>"
         ),
         # Payment buttons
+        'pay_alert_popup': (
+            "⚠️ Very important!\n\n"
+            "Copy the full amount with all its decimals, and send the exact same amount.\n\n"
+            "Any difference in the decimals = we won't detect your transfer."
+        ),
+        'pay_warn_exact': (
+            "⚠️ <b>Before you transfer — read carefully</b>\n\n"
+            "🔢 <b>Copy the full amount with all decimals</b> (e.g. <code>5.0087</code>)\n"
+            "💯 Send the <b>exact same amount</b> shown\n"
+            "🧾 The amount we receive must match exactly — decimals included\n\n"
+            "❗️ <b>Any small difference in the decimals = the bot won't detect your transfer.</b>\n\n"
+            "Tap <b>OK</b> to continue."
+        ),
+        'bybit_alert_popup': (
+            "⚠️ Very important!\n\n"
+            "Copy the full amount with all its decimals, and send the exact same amount shown in Bybit.\n\n"
+            "Any difference in decimals = we won't detect your transfer."
+        ),
+        'bybit_warn_exact': (
+            "⚠️ <b>Before you transfer — read carefully</b>\n\n"
+            "🔢 <b>Copy the full amount with all decimals</b> (e.g. <code>5.0087</code>)\n"
+            "💯 Send the <b>exact same amount</b> shown in the Bybit app\n"
+            "🧾 The amount we receive must match exactly — decimals included\n\n"
+            "❗️ <b>Any small difference in the decimals = the bot won't detect your transfer.</b>\n\n"
+            "Tap <b>OK</b> to continue."
+        ),
+        'bybit_btn_understood': "✅ OK, understood",
         'bybit_ask_uid': (
             "🆔 <b>Enter your Bybit UID</b>\n\n"
             "Find it in: Bybit app → your Profile (next to your name).\n"
@@ -7477,8 +7531,84 @@ def got_payment(message):
         l = get_lang(uid)
         credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
 
+# ============================================================
+# ⚠️ تنبيه المبلغ الدقيق — لكل طرق الدفع عدا نجوم تيليجرام
+# ============================================================
+def _needs_exact_warning(uid, dest):
+    """هل نعرض تنبيه المبلغ الدقيق؟ (كل الطرق التي تعتمد المبلغ الفريد).
+    النجوم مستثناة لأنها لا تعتمد على مبلغ فريد."""
+    try:
+        if is_user_banned(uid):
+            return False
+        # فقط عند تفعيل حماية المبلغ الفريد (وإلا لا معنى للتحذير)
+        if not is_amount_protection_enabled():
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _show_exact_amount_warning(call, dest):
+    """يعرض نافذة منبثقة إجبارية + رسالة تحذير مع زر (موافق) قبل المتابعة.
+    dest: الوجهة بعد الموافقة (binance / crypto_USDT / crypto_TON / ...)."""
+    uid = call.from_user.id
+    try:
+        bot.answer_callback_query(uid_call_id(call), get_text(uid, 'pay_alert_popup'),
+                                  show_alert=True)
+    except Exception:
+        try:
+            bot.answer_callback_query(call.id, get_text(uid, 'pay_alert_popup'), show_alert=True)
+        except Exception:
+            pass
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
+                         callback_data=f"pay_go_{dest}"))
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    bot.send_message(uid, get_text(uid, 'pay_warn_exact'),
+                     parse_mode="HTML", reply_markup=markup)
+
+
+def uid_call_id(call):
+    return call.id
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_go_"))
+def pay_exact_confirm(call):
+    """بعد تأكيد قراءة تنبيه المبلغ → نوجّه للطريقة الأصلية."""
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        bot.answer_callback_query(call.id)
+        return
+    dest = call.data.replace("pay_go_", "")
+
+    # نُنشئ نداءً وهمياً بنفس المستخدم لكن ببيانات الوجهة الأصلية
+    class _C:
+        pass
+    c = _C()
+    c.id = call.id
+    c.from_user = call.from_user
+    c.message = call.message
+
+    if dest == 'binance':
+        c.data = "dep_binance"
+        _dep_binance_real(c)
+    elif dest.startswith('crypto_'):
+        c.data = "dep_" + dest   # dep_crypto_USDT ...
+        _dep_crypto_real(c)
+    else:
+        bot.answer_callback_query(call.id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
+    # ⚠️ تنبيه المبلغ الدقيق أولاً (كل الطرق عدا نجوم تيليجرام)
+    if _needs_exact_warning(call.from_user.id, 'binance'):
+        _show_exact_amount_warning(call, 'binance')
+        return
+    _dep_binance_real(call)
+
+
+def _dep_binance_real(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
@@ -7716,19 +7846,32 @@ def binance_check_payment(call):
 
 def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     """
-    🛡 يولّد مبلغ فريد عشوائي 100% لكل عملية إيداع.
-    
-    النطاق الجديد: 4-9 خانات عشرية = ملايين الاحتمالات
-    مستحيل التكرار بين أي مستخدمين.
-    
+    🛡 يولّد مبلغ فريد عشوائي لكل عملية إيداع.
+
+    ⚠️ مهم: Bybit يعرض/يسجّل المبالغ بـ 4 خانات عشرية فقط (مثل 5.0018).
+    لو ولّدنا 6 خانات (5.001847)، المستخدم قد لا يقدر إدخالها بدقة،
+    وBybit يقصّها لـ 4 خانات → قد تفشل المطابقة أو تقترب من إيداع آخر.
+    الحل: لعملات Bybit نولّد 4 خانات بالضبط = ما يراه المستخدم = ما يصل.
+
     أمثلة:
-    - $5 → $5.001847
-    - $5 → $5.009274
-    - $5 → $5.003521
+    - Bybit:  $5 → $5.0018 (4 خانات، مطابق تماماً)
+    - غيرها:  $5 → $5.001847 (6 خانات)
     """
     base = float(base_amount_usd)
-    # 🛡 مسافة أمان: لازم تكون أكبر من نطاق المطابقة (±0.0001) عشان ما يتقارب إيداعان أبداً
-    MIN_SPACING = 0.0002
+    is_bybit = str(coin).startswith('BYBIT')
+
+    # عدد الخانات ومسافة الأمان حسب العملة
+    if is_bybit:
+        decimals = 4
+        MIN_SPACING = 0.0002   # أكبر من خطوة الـ 4 خانات (0.0001)
+        # الكسور بوحدات 0.0001: من 0.0010 إلى 0.0099 (سنتات فرعية)
+        lo, hi, div = 10, 99, 10000.0
+        lo2, hi2 = 10, 299          # مدى أوسع عند الازدحام
+    else:
+        decimals = 6
+        MIN_SPACING = 0.0002
+        lo, hi, div = 100, 9999, 1000000.0
+        lo2, hi2 = 100, 29999
 
     def _is_free(amount):
         """يتأكد ما فيه إيداع معلّق قريب من هذا المبلغ (داخل مسافة الأمان)."""
@@ -7746,20 +7889,20 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
         except Exception:
             return True
 
-    # المحاولة 1: مدى السنت (0.000100 - 0.009999) مع مسافة أمان
+    # المحاولة 1: المدى الأساسي
     for _ in range(400):
-        unique_amount = round(base + random.randint(100, 9999) / 1000000.0, 6)
+        unique_amount = round(base + random.randint(lo, hi) / div, decimals)
         if _is_free(unique_amount):
             return unique_amount
 
-    # المحاولة 2: مدى أوسع شوي (لين ~0.03) لو ازدحمت الإيداعات بنفس المبلغ
+    # المحاولة 2: مدى أوسع لو ازدحمت الإيداعات بنفس المبلغ
     for _ in range(400):
-        unique_amount = round(base + random.randint(100, 29999) / 1000000.0, 6)
+        unique_amount = round(base + random.randint(lo2, hi2) / div, decimals)
         if _is_free(unique_amount):
             return unique_amount
 
-    # احتياط أخير (نادر جداً): نرجّع مبلغ حتى لو ما لقينا مسافة مثالية
-    return round(base + random.randint(100, 99999) / 1000000.0, 6)
+    # احتياط أخير (نادر جداً)
+    return round(base + random.randint(lo, hi2) / div, decimals)
 
 
 def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin, sender_uid=None):
@@ -7979,7 +8122,10 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
         except Exception: pass
         
         # نضيف الرصيد
-        credit_user(uid, base_amount, tx_id_for_record, get_lang(uid), method_label)
+        # trusted_txid=True: هذا المسار يأتي من فحص تلقائي بـ tx_id فريد
+        # (Bybit txID / hash بلوكشين) — نتخطّى فحص المبلغ+الوقت التقريبي
+        # الذي كان يرفض إيداعات صحيحة بنفس المبلغ في نفس الدقيقة ويحظر أصحابها.
+        credit_user(uid, base_amount, tx_id_for_record, get_lang(uid), method_label, trusted_txid=True)
         return True
     except Exception as e:
         logger.error(f"Error in auto_credit: {e}")
@@ -8927,6 +9073,36 @@ def _bybit_match_by_sender(sender_uid, usd, tolerance=0.01):
         return None
 
 
+def _bybit_match_internal_by_amount(usd, tolerance=0.001):
+    """يطابق تحويل Bybit داخلي بالمبلغ الفريد فقط — للإيداعات المعلّقة على
+    BYBIT_UID التي لا تحمل sender_uid مسجّلاً (توافقية / لم يُدخل المستخدم UID).
+
+    المبلغ الفريد (بكسور ٤ خانات) مميّز بما يكفي. نطبّق نفس حارس الغموض:
+    لو تعدّدت المطابقات بنفس القرب نرفض."""
+    try:
+        usd = float(usd)
+        recs = list(db.pending_deposits.find({
+            'coin': 'BYBIT_UID',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())},
+            'unique_amount_usd': {'$gte': usd - tolerance, '$lte': usd + tolerance}
+        }))
+        if not recs:
+            return None
+        if len(recs) == 1:
+            return recs[0]
+        recs.sort(key=lambda r: abs(float(r.get('unique_amount_usd', 0)) - usd))
+        d0 = abs(float(recs[0].get('unique_amount_usd', 0)) - usd)
+        d1 = abs(float(recs[1].get('unique_amount_usd', 0)) - usd)
+        if abs(d0 - d1) < 1e-9:
+            logger.warning(f"[BYBIT] غموض في مطابقة المبلغ ${usd} (داخلي) — رُفض للأمان")
+            return None
+        return recs[0]
+    except Exception as e:
+        logger.debug(f"_bybit_match_internal_by_amount err: {e}")
+        return None
+
+
 def check_bybit_auto():
     """🔍 يفحص إيداعات Bybit تلقائياً (داخلي + شبكات) ويضيف الرصيد."""
     try:
@@ -8995,9 +9171,29 @@ def check_bybit_auto():
                                     logger.info(f"✅ BYBIT UID+amount match: user {_p['user_id']} "
                                                 f"← sender {sender} → ${_p['base_amount_usd']:.2f}")
                                 continue
-                            # وصل من UID لكن ما طابق — تشخيص
-                            logger.warning(f"[BYBIT] تحويل داخلي من UID {sender} بمبلغ ${usd} "
-                                           f"بلا مطابقة (UID أو المبلغ غير مسجّل) | tx={raw_tx[:16]}")
+
+                        # احتياط: إيداع معلّق بنفس المبلغ الفريد لكن بلا sender_uid مسجّل
+                        #   (إيداعات سُجّلت قبل نظام الـ UID، أو المستخدم لم يُدخل UID).
+                        #   المبلغ الفريد وحده مميّز بما يكفي للمطابقة الآمنة.
+                        _p2 = _bybit_match_internal_by_amount(usd)
+                        if _p2:
+                            # نخزّن UID المرسِل للسجل (للمراجعة)
+                            try:
+                                if sender:
+                                    db.pending_deposits.update_one(
+                                        {'pending_id': _p2.get('pending_id')},
+                                        {'$set': {'sender_uid_detected': sender}})
+                            except Exception:
+                                pass
+                            if auto_credit_from_pending(_p2, tx_norm, label + " (UID/amount)"):
+                                logger.info(f"✅ BYBIT internal amount-match: user {_p2['user_id']} "
+                                            f"→ ${_p2['base_amount_usd']:.2f} (sender {sender or '?'})")
+                            continue
+
+                        # وصل من UID لكن ما طابق — تشخيص
+                        logger.warning(f"[BYBIT] تحويل داخلي من UID {sender} بمبلغ ${usd} "
+                                       f"بلا مطابقة (UID أو المبلغ غير مسجّل) | tx={raw_tx[:16]}")
+                        continue
 
                     # 1️⃣ مطابقة بالمبلغ الفريد (الأساس والأأمن)
                     matched = False
@@ -9098,18 +9294,52 @@ def dep_bybit_menu(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_m_"))
 def dep_bybit_method(call):
-    """اختار المستخدم طريقة Bybit → نطلب المبلغ."""
-    bot.answer_callback_query(call.id)
+    """اختار المستخدم طريقة Bybit → نعرض تنبيهاً إجبارياً قبل طلب المبلغ."""
     uid = call.from_user.id
     if is_user_banned(uid):
         return
     method = call.data.replace("dep_bybit_m_", "")
+    if method not in bybit_available_methods():
+        bot.answer_callback_query(call.id)
+        bot.send_message(uid, bil(uid,
+            "⚠️ هذه الطريقة غير متاحة حالياً.",
+            "⚠️ This method is not available right now."), parse_mode="HTML")
+        return
+
+    # 1️⃣ نافذة منبثقة إجبارية (لازم يضغط "موافق")
+    try:
+        bot.answer_callback_query(call.id, get_text(uid, 'bybit_alert_popup'), show_alert=True)
+    except Exception:
+        bot.answer_callback_query(call.id)
+
+    # 2️⃣ رسالة تحذير مع زر تأكيد قبل المتابعة
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
+                         callback_data=f"dep_bybit_go_{method}"))
+    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    bot.send_message(uid, get_text(uid, 'bybit_warn_exact'),
+                     parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_go_"))
+def dep_bybit_confirm_and_ask(call):
+    """بعد تأكيد المستخدم قراءة التنبيه → نكمل لطلب المبلغ/UID."""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        return
+    method = call.data.replace("dep_bybit_go_", "")
     if method not in bybit_available_methods():
         bot.send_message(uid, bil(uid,
             "⚠️ هذه الطريقة غير متاحة حالياً.",
             "⚠️ This method is not available right now."), parse_mode="HTML")
         return
 
+    _dep_bybit_start_flow(uid, method)
+
+
+def _dep_bybit_start_flow(uid, method):
+    """يبدأ تدفّق الدفع الفعلي (UID أولاً أو المبلغ مباشرة)."""
     bot.clear_step_handler_by_chat_id(chat_id=uid)
     try:
         db.users.update_one(
@@ -9979,6 +10209,15 @@ def ask_deposit_amount(message, coin):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
 def dep_crypto_ui(call):
+    # ⚠️ تنبيه المبلغ الدقيق أولاً (USDT/TON/LTC)
+    coin_for_warn = call.data.replace('dep_crypto_', '')
+    if _needs_exact_warning(call.from_user.id, 'crypto_' + coin_for_warn):
+        _show_exact_amount_warning(call, 'crypto_' + coin_for_warn)
+        return
+    _dep_crypto_real(call)
+
+
+def _dep_crypto_real(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
@@ -11002,7 +11241,7 @@ def generate_tx_fingerprint(amount, method, sender_addr=None, receiver_addr=None
     return fingerprint
 
 
-def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None, tx_id_clean=None):
+def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None, tx_id_clean=None, trusted_txid=False):
     """
     🛡 يفحص لو الحوالة مستخدمة بالفعل (حتى لو الـ tx_id مختلف).
     
@@ -11010,6 +11249,11 @@ def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_
     1. tx_id المطبّع (لو موجود)
     2. بصمة الحوالة (fingerprint)
     3. فحص ذكي للحوالات المشابهة (نفس المبلغ + نفس الدقيقة)
+
+    trusted_txid=True: الـ tx_id فريد عالمياً وموثوق (مثل Bybit txID / hash بلوكشين).
+      عندها نتخطّى الطبقتين 2 و3 (المبلغ+الوقت) لأنهما heuristic للعملات بلا
+      معرّف مميّز — ومع مبالغ متقاربة في نفس الدقيقة تعطي إيجابيات كاذبة
+      (ترفض إيداعات صحيحة وتحظر أصحابها ظلماً).
     
     يرجع:
     - None لو الحوالة جديدة
@@ -11026,7 +11270,11 @@ def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_
                     'original_amount': existing.get('amount', 0),
                     'original_record': existing
                 }
-        
+
+        # 🛡 tx_id موثوق وفريد → طبقة 1 تكفي؛ نتخطّى الـ heuristics
+        if trusted_txid:
+            return None
+
         # الطبقة 2: بصمة الحوالة
         fingerprint = generate_tx_fingerprint(amount, method, sender_addr, receiver_addr, tx_timestamp)
         existing_fp = db.used_transactions.find_one({'fingerprint': fingerprint})
@@ -11490,9 +11738,11 @@ def _cleanup_thread():
 threading.Thread(target=_cleanup_thread, daemon=True).start()
 
 
-def credit_user(uid, amt, tx_id, lang, method):
+def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
     """
     🛡 إضافة رصيد للمستخدم بشكل atomic.
+    trusted_txid: الـ tx_id فريد عالمياً (Bybit txID / hash بلوكشين) →
+      نعتمد عليه وحده ونتخطّى فحص (المبلغ+الوقت) الذي يعطي إيجابيات كاذبة.
     """
     # نحفظ النسخة الأصلية للعرض في الإشعارات
     tx_id_original = str(tx_id).strip() if tx_id else ''
@@ -11556,7 +11806,8 @@ def credit_user(uid, amt, tx_id, lang, method):
         amount=amt,
         method=method,
         tx_timestamp=current_time,
-        tx_id_clean=tx_id_clean
+        tx_id_clean=tx_id_clean,
+        trusted_txid=trusted_txid
     )
     
     if dup_check:
