@@ -3538,6 +3538,21 @@ LANG = {
             "❗️ <b>أي اختلاف بسيط في الأرقام بعد الفاصلة = لن يتعرّف البوت على تحويلك.</b>\n\n"
             "اضغط <b>موافق</b> للمتابعة."
         ),
+        'pay_fee_bep20': (
+            "━━━━━━━━━━━━━━\n"
+            "💸 <b>مهم بخصوص رسوم الشبكة:</b>\n"
+            "المنصة تخصم رسوم شبكة (عادة <b>0.1 – 0.2</b> تقريباً).\n\n"
+            "✅ <b>أضِف الرسوم فوق المبلغ من عندك</b>، بحيث يصلنا المبلغ المطلوب "
+            "<b>كاملاً بلا نقصان</b>.\n"
+            "🚫 نحن <b>لا علاقة لنا برسوم المنصة</b> — هي تُخصم من طرفك.\n\n"
+            "<i>مثال: لو المبلغ المطلوب 5.0087، حوّل ما يكفي ليصلنا 5.0087 صافية بعد الرسوم.</i>"
+        ),
+        'pay_fee_general': (
+            "━━━━━━━━━━━━━━\n"
+            "💸 <b>ملاحظة الرسوم:</b> لو خصمت الشبكة أي رسوم، "
+            "<b>أضِفها فوق المبلغ</b> ليصلنا المبلغ المطلوب كاملاً.\n"
+            "<i>نحن لا علاقة لنا برسوم الشبكة.</i>"
+        ),
         'bybit_alert_popup': (
             "⚠️ مهم جداً!\n\n"
             "انسخ المبلغ كاملاً بكل فواصله، وحوّل نفس المبلغ بالضبط كما يظهر في منصة Bybit.\n\n"
@@ -3710,6 +3725,21 @@ LANG = {
             "🧾 The amount we receive must match exactly — decimals included\n\n"
             "❗️ <b>Any small difference in the decimals = the bot won't detect your transfer.</b>\n\n"
             "Tap <b>OK</b> to continue."
+        ),
+        'pay_fee_bep20': (
+            "━━━━━━━━━━━━━━\n"
+            "💸 <b>Important about network fees:</b>\n"
+            "The platform deducts a network fee (usually about <b>0.1 – 0.2</b>).\n\n"
+            "✅ <b>Add the fee on top of the amount yourself</b>, so we receive the required "
+            "amount <b>in full, with no shortfall</b>.\n"
+            "🚫 We have <b>nothing to do with the platform's fees</b> — they're on your side.\n\n"
+            "<i>Example: if the required amount is 5.0087, send enough so 5.0087 net arrives after fees.</i>"
+        ),
+        'pay_fee_general': (
+            "━━━━━━━━━━━━━━\n"
+            "💸 <b>Fee note:</b> if the network deducts any fee, "
+            "<b>add it on top</b> so the full required amount reaches us.\n"
+            "<i>We are not responsible for network fees.</i>"
         ),
         'bybit_alert_popup': (
             "⚠️ Very important!\n\n"
@@ -7560,12 +7590,31 @@ def _show_exact_amount_warning(call, dest):
             bot.answer_callback_query(call.id, get_text(uid, 'pay_alert_popup'), show_alert=True)
         except Exception:
             pass
+
+    # نص التحذير الأساسي + فقرة الرسوم المناسبة للشبكة
+    warn = get_text(uid, 'pay_warn_exact')
+    fee_note = _fee_note_for_dest(uid, dest)
+    if fee_note:
+        warn = warn + "\n\n" + fee_note
+
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
                          callback_data=f"pay_go_{dest}"))
     markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
-    bot.send_message(uid, get_text(uid, 'pay_warn_exact'),
-                     parse_mode="HTML", reply_markup=markup)
+    bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
+
+
+def _fee_note_for_dest(uid, dest):
+    """فقرة تنبيه الرسوم حسب الوجهة/الشبكة.
+    الرسوم مسؤولية المستخدم: يضيفها فوق المبلغ ليصلنا المبلغ المطلوب كاملاً."""
+    d = str(dest).upper()
+    # شبكات BEP20 (رسوم المنصة أعلى نسبياً)
+    if 'BEP20' in d or dest == 'binance':
+        return get_text(uid, 'pay_fee_bep20')
+    # شبكات أخرى (رسوم بسيطة لكن ننبّه عموماً)
+    if 'TON' in d or 'LTC' in d or 'USDT' in d:
+        return get_text(uid, 'pay_fee_general')
+    return get_text(uid, 'pay_fee_general')
 
 
 def uid_call_id(call):
@@ -9317,8 +9366,13 @@ def dep_bybit_method(call):
     markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
                          callback_data=f"dep_bybit_go_{method}"))
     markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
-    bot.send_message(uid, get_text(uid, 'bybit_warn_exact'),
-                     parse_mode="HTML", reply_markup=markup)
+
+    # فقرة الرسوم: للشبكات (BEP20/TRC20) لا للـ UID (تحويل داخلي بلا رسوم شبكة)
+    warn = get_text(uid, 'bybit_warn_exact')
+    if method != 'UID':
+        warn = warn + "\n\n" + _fee_note_for_dest(uid, method)
+
+    bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_go_"))
