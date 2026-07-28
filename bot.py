@@ -3407,7 +3407,10 @@ def _parse_btn_label(text):
     """
     ينظف HTML من نص الزر ويستخرج Premium Emoji كأيقونة منفصلة.
     تيليجرام ما يدعم HTML داخل label الزر — لازم نص عادي.
-    
+
+    مهم: لو صار الإيموجي البريميوم أيقونة الزر، نحذف الإيموجي العادي
+    اللي جوّاه من النص — وإلا يظهر إيموجيان (بريميوم كأيقونة + عادي بالنص).
+
     Returns: (clean_text, emoji_id_or_None)
     """
     if not text:
@@ -3418,10 +3421,18 @@ def _parse_btn_label(text):
     m = _re_lbl.search(r'<tg-emoji\s+emoji-id="(\d+)"\s*>([^<]*)</tg-emoji>', text)
     if m:
         emoji_id = m.group(1)
-    # نظّف tg-emoji: احتفظ بالإيموجي العادي اللي جواه
-    text = _re_lbl.sub(r'<tg-emoji[^>]*>([^<]*)</tg-emoji>', r'\1', text)
+
+    if emoji_id:
+        # الإيموجي البريميوم صار أيقونة → احذف الوسم ومحتواه (الإيموجي العادي) كلياً
+        text = _re_lbl.sub(r'<tg-emoji[^>]*>[^<]*</tg-emoji>', '', text)
+    else:
+        # لا يوجد بريميوم → احتفظ بالإيموجي العادي اللي جوّا الوسم
+        text = _re_lbl.sub(r'<tg-emoji[^>]*>([^<]*)</tg-emoji>', r'\1', text)
+
     # شيل أي HTML tags باقية
     text = _re_lbl.sub(r'<[^>]+>', '', text)
+    # نظّف المسافات المزدوجة الناتجة عن الحذف
+    text = _re_lbl.sub(r'\s{2,}', ' ', text)
     return text.strip(), emoji_id
 
 
@@ -3518,9 +3529,9 @@ LANG = {
         # {0}=emoji، {1}=اسم العملة الكامل، {2}=المبلغ بالدولار، {3}=رمز العملة القصير (USDT/TON/LTC)، {4}=المبلغ بالعملة، {5}=العنوان
         'dep_msg_crypto': (
             "{0} <b>{1}</b>\n\n"
-            "💰 <b>المبلغ بالدولار:</b>\n<code>${2}</code>\n\n"
-            "💎 <b>المبلغ بـ {3}:</b>\n<code>{4}</code> {3}\n\n"
+            "💰 <b>حوّل هذا المبلغ بالضبط:</b>\n<code>{4}</code> {3}\n\n"
             "📬 <b>العنوان:</b>\n<code>{5}</code>\n\n"
+            "⚠️ <b>انسخ المبلغ كاملاً بفاصلته</b> — أي اختلاف لن يُطابَق.\n"
             "⏰ صلاحية: <b>30 دقيقة</b>\n"
             "✨ <i>الرصيد يُضاف تلقائياً</i>"
         ),
@@ -3706,9 +3717,9 @@ LANG = {
         # {0}=emoji, {1}=full coin name, {2}=USD amount, {3}=short coin (USDT/TON/LTC), {4}=crypto amount, {5}=wallet
         'dep_msg_crypto': (
             "{0} <b>{1}</b>\n\n"
-            "💰 <b>Amount in USD:</b>\n<code>${2}</code>\n\n"
-            "💎 <b>Amount in {3}:</b>\n<code>{4}</code> {3}\n\n"
+            "💰 <b>Send this exact amount:</b>\n<code>{4}</code> {3}\n\n"
             "📬 <b>Address:</b>\n<code>{5}</code>\n\n"
+            "⚠️ <b>Copy the full amount with its decimals</b> — any difference won't match.\n"
             "⏰ Valid: <b>30 minutes</b>\n"
             "✨ <i>Balance added automatically</i>"
         ),
@@ -7897,25 +7908,24 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     """
     🛡 يولّد مبلغ فريد عشوائي لكل عملية إيداع.
 
-    ⚠️ مهم: Bybit يعرض/يسجّل المبالغ بـ 4 خانات عشرية فقط (مثل 5.0018).
-    لو ولّدنا 6 خانات (5.001847)، المستخدم قد لا يقدر إدخالها بدقة،
-    وBybit يقصّها لـ 4 خانات → قد تفشل المطابقة أو تقترب من إيداع آخر.
-    الحل: لعملات Bybit نولّد 4 خانات بالضبط = ما يراه المستخدم = ما يصل.
+    ⚠️ مهم: Bybit أحياناً لا تقرأ كل الخانات العشرية عند الإدخال.
+    لذا لعملات Bybit نولّد خانتين فقط (مثل 5.37) — قصيرة، سهلة النسخ،
+    وتُقرأ بموثوقية على كل واجهات Bybit. المسافة بينها 0.01 تكفي للتمييز.
 
     أمثلة:
-    - Bybit:  $5 → $5.0018 (4 خانات، مطابق تماماً)
-    - غيرها:  $5 → $5.001847 (6 خانات)
+    - Bybit:  $5 → $5.37 / $5.42 / $5.08 (خانتان)
+    - غيرها:  $5 → $5.001847 (6 خانات، دقة أعلى للشبكات الأخرى)
     """
     base = float(base_amount_usd)
     is_bybit = str(coin).startswith('BYBIT')
 
     # عدد الخانات ومسافة الأمان حسب العملة
     if is_bybit:
-        decimals = 4
-        MIN_SPACING = 0.0002   # أكبر من خطوة الـ 4 خانات (0.0001)
-        # الكسور بوحدات 0.0001: من 0.0010 إلى 0.0099 (سنتات فرعية)
-        lo, hi, div = 10, 99, 10000.0
-        lo2, hi2 = 10, 299          # مدى أوسع عند الازدحام
+        decimals = 2
+        MIN_SPACING = 0.02     # أكبر من خطوة الخانتين (0.01)
+        # الكسور بوحدات 0.01: من 0.05 إلى 0.99 (نبدأ من 5 لتجنّب الأصفار المربكة)
+        lo, hi, div = 5, 99, 100.0
+        lo2, hi2 = 5, 99            # نفس المدى (خانتان محدودتان أصلاً)
     else:
         decimals = 6
         MIN_SPACING = 0.0002
@@ -9122,7 +9132,7 @@ def _bybit_match_by_sender(sender_uid, usd, tolerance=0.01):
         return None
 
 
-def _bybit_match_internal_by_amount(usd, tolerance=0.001):
+def _bybit_match_internal_by_amount(usd, tolerance=0.004):
     """يطابق تحويل Bybit داخلي بالمبلغ الفريد فقط — للإيداعات المعلّقة على
     BYBIT_UID التي لا تحمل sender_uid مسجّلاً (توافقية / لم يُدخل المستخدم UID).
 
@@ -9247,7 +9257,7 @@ def check_bybit_auto():
                     # 1️⃣ مطابقة بالمبلغ الفريد (الأساس والأأمن)
                     matched = False
                     for ckey in coin_keys:
-                        pending = find_pending_deposit_for_amount(usd, ckey, tolerance=0.001)
+                        pending = find_pending_deposit_for_amount(usd, ckey, tolerance=0.004)
                         if pending:
                             if auto_credit_from_pending(pending, tx_norm, label):
                                 logger.info(f"✅ BYBIT auto-credit ({kind}): "
@@ -9746,7 +9756,7 @@ def cmd_bybit_match(message):
                     nets = [c['coin'] for c in BYBIT_NETWORKS.values()]
                     p = None
                     for ck in nets:
-                        p = find_pending_deposit_for_amount(usd, ck, tolerance=0.001)
+                        p = find_pending_deposit_for_amount(usd, ck, tolerance=0.004)
                         if p:
                             break
                     line += f" → 🎯 user {p['user_id']}" if p else " → ❌ لا إيداع معلّق بهذا المبلغ"
