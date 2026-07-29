@@ -2696,8 +2696,88 @@ def mark_referral_status(invited_id, new_status):
                 send_progress_log_notification(referrer_id)
             except Exception as prog_err:
                 logger.debug(f"Progress notification failed: {prog_err}")
+
+            # 🔔 إشعار الأدمن كل ما بلغ المُحيل مضاعفات العتبة (10, 20, ...)
+            try:
+                _notify_admin_referral_milestone(referrer_id)
+            except Exception as ms_err:
+                logger.debug(f"Referral milestone notify failed: {ms_err}")
     except Exception as e:
         logger.error(f"Error marking referral status: {e}")
+
+
+def _notify_admin_referral_milestone(referrer_id):
+    """يرسل للأدمن إشعاراً عند بلوغ المُحيل عتبة إحالات (10 مثلاً) مع أزرار:
+    ✅ منح المكافأة | 👁 عرض الإحالات | ❌ إلغاء.
+    المكافأة يدوية — لا تُمنح إلا بضغط الأدمن."""
+    threshold = get_referral_threshold()
+    active_count = db.referrals_v2.count_documents({
+        'referrer_id': referrer_id, 'status': 'active'
+    })
+    if active_count == 0 or threshold <= 0:
+        return
+    # فقط عند بلوغ مضاعف تام للعتبة (10, 20, 30...)
+    if active_count % threshold != 0:
+        return
+
+    # تجنّب تكرار الإشعار لنفس الدفعة
+    batch_no = active_count // threshold
+    already = db.referral_milestones.find_one({
+        'referrer_id': referrer_id, 'batch_no': batch_no
+    }) if 'referral_milestones' in db.list_collection_names() else None
+    try:
+        if db.referral_milestones.find_one({'referrer_id': referrer_id, 'batch_no': batch_no}):
+            return
+    except Exception:
+        pass
+
+    reward = get_referral_reward()
+    u = db.users.find_one({'user_id': referrer_id}) or {}
+    uname = u.get('username', '')
+    name = u.get('first_name', '') or 'مستخدم'
+    uname_txt = f"@{uname}" if uname else "—"
+
+    txt = (
+        f"🎯 <b>إنجاز إحالات!</b>\n\n"
+        f"👤 <b>المستخدم:</b> {html.escape(str(name))} ({uname_txt})\n"
+        f"🆔 <code>{referrer_id}</code>\n"
+        f"✅ <b>أكمل {active_count} إحالة ناجحة</b> (الدفعة #{batch_no})\n"
+        f"💰 <b>المكافأة المقترحة:</b> ${reward:.2f}\n\n"
+        f"<i>المكافأة تُمنح فقط بضغطك على زر المنح.</i>"
+    )
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{referrer_id}_{batch_no}"),
+        InlineKeyboardButton("👁 عرض الإحالات", callback_data=f"refwd_view_{referrer_id}")
+    )
+    markup.add(InlineKeyboardButton("❌ إلغاء", callback_data=f"refwd_no_{referrer_id}_{batch_no}"))
+
+    # نسجّل الدفعة كـ "بانتظار" حتى لا يتكرر الإشعار
+    try:
+        db.referral_milestones.insert_one({
+            'referrer_id': referrer_id, 'batch_no': batch_no,
+            'active_count': active_count, 'status': 'pending',
+            'created_at': int(time.time())
+        })
+    except Exception:
+        pass
+
+    # نرسل لكل الأدمن (نمط موجود: is_admin=1)
+    sent = False
+    try:
+        for admin in db.users.find({'is_admin': 1}):
+            try:
+                bot.send_message(admin['user_id'], txt, parse_mode="HTML", reply_markup=markup)
+                sent = True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not sent:
+        try:
+            bot.send_message(OWNER_ID, txt, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
 
 
 def send_progress_log_notification(referrer_id):
@@ -2769,6 +2849,100 @@ def send_progress_log_notification(referrer_id):
 
     except Exception as e:
         logger.error(f"send_progress_log_notification error: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_ok_"))
+@admin_required
+def ref_milestone_approve(call):
+    """✅ الأدمن يمنح مكافأة إنجاز الإحالات يدوياً."""
+    bot.answer_callback_query(call.id)
+    try:
+        rest = call.data.replace("refwd_ok_", "")
+        referrer_id, batch_no = rest.rsplit("_", 1)
+        referrer_id = int(referrer_id); batch_no = int(batch_no)
+    except Exception:
+        bot.send_message(call.message.chat.id, "❌ بيانات غير صالحة.")
+        return
+
+    # 🛡 منع الصرف المزدوج: نعلّم الدفعة كـ paid ذرياً
+    res = db.referral_milestones.find_one_and_update(
+        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$ne': 'paid'}},
+        {'$set': {'status': 'paid', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
+        return_document=False
+    )
+    if res is None:
+        bot.send_message(call.message.chat.id, "⚠️ هذه الدفعة مصروفة سابقاً أو غير موجودة.")
+        return
+
+    reward = get_referral_reward()
+    db.users.update_one({'user_id': referrer_id}, {'$inc': {'balance': reward}})
+    # إشعار المستخدم
+    try:
+        rl = (db.users.find_one({'user_id': referrer_id}) or {}).get('lang', 'ar')
+        msg = (f"🎉 <b>مكافأة الإحالات!</b>\n\nتمت إضافة <b>${reward:.2f}</b> لرصيدك "
+               f"مقابل إكمال {batch_no * get_referral_threshold()} إحالة ناجحة. شكراً لك!") if rl == 'ar' else \
+              (f"🎉 <b>Referral reward!</b>\n\n<b>${reward:.2f}</b> has been added to your balance "
+               f"for completing {batch_no * get_referral_threshold()} successful referrals. Thank you!")
+        bot.send_message(referrer_id, msg, parse_mode="HTML")
+    except Exception:
+        pass
+
+    try:
+        bot.edit_message_text(
+            call.message.text + f"\n\n✅ <b>مُنحت المكافأة (${reward:.2f}) بواسطة {call.from_user.id}</b>",
+            call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, f"✅ مُنحت المكافأة ${reward:.2f} للمستخدم {referrer_id}.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_no_"))
+@admin_required
+def ref_milestone_cancel(call):
+    """❌ الأدمن يلغي إشعار إنجاز الإحالات (بلا صرف)."""
+    bot.answer_callback_query(call.id)
+    try:
+        rest = call.data.replace("refwd_no_", "")
+        referrer_id, batch_no = rest.rsplit("_", 1)
+        referrer_id = int(referrer_id); batch_no = int(batch_no)
+    except Exception:
+        return
+    try:
+        db.referral_milestones.update_one(
+            {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'},
+            {'$set': {'status': 'cancelled', 'cancelled_by': call.from_user.id}})
+    except Exception:
+        pass
+    try:
+        bot.edit_message_text(call.message.text + "\n\n❌ <b>أُلغي (بلا صرف).</b>",
+                              call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, "❌ أُلغي.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_view_"))
+@admin_required
+def ref_milestone_view(call):
+    """👁 يعرض قائمة الإحالات النشطة للمُحيل."""
+    bot.answer_callback_query(call.id)
+    try:
+        referrer_id = int(call.data.replace("refwd_view_", ""))
+    except Exception:
+        return
+    refs = list(db.referrals_v2.find({'referrer_id': referrer_id, 'status': 'active'}).limit(30))
+    if not refs:
+        bot.send_message(call.message.chat.id, "لا توجد إحالات نشطة.")
+        return
+    lines = [f"👁 <b>إحالات {referrer_id} النشطة ({len(refs)}):</b>\n"]
+    for i, r in enumerate(refs, 1):
+        iid = r.get('invited_id')
+        iu = db.users.find_one({'user_id': iid}) or {}
+        un = f"@{iu.get('username')}" if iu.get('username') else '—'
+        when = r.get('updated_at', 0)
+        dt = time.strftime('%Y-%m-%d', time.gmtime(when)) if when else '—'
+        lines.append(f"{i}. <code>{iid}</code> {un} — {dt}")
+    txt = "\n".join(lines)
+    for i in range(0, len(txt), 3800):
+        bot.send_message(call.message.chat.id, txt[i:i+3800], parse_mode="HTML")
 
 
 def update_referrer_balance(referrer_id):
@@ -8079,6 +8253,49 @@ def _alert_ambiguous_deposit(coin, amount_usd, records):
         pass
 
 
+def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.05, down_max=None):
+    """يطابق إيداعاً معلّقاً حتى لو وصل مبلغ أقل بقليل من المطلوب.
+
+    ⚠️ ملاحظة مهمة: لو الرسوم تُخصم فعلاً فهي تغيّر الكسور المميّزة نفسها،
+    فلا يمكن الاعتماد على تطابق الكسور. لذا نطابق على **قرب المبلغ الكلي**
+    ضمن نطاق ضيّق، مع حارس غموض صارم: لا نطابق إلا إذا كان هناك إيداع
+    واحد فقط ضمن النطاق (وإلا نرفض — أأمن من إعطاء الشخص الخطأ).
+
+    - up_tol: أقصى زيادة فوق المطلوب (0.05).
+    - down_max: أقصى نقص مسموح (افتراضي: أصغر من 0.5$ أو 10% من المبلغ).
+    """
+    try:
+        amount_usd = float(amount_usd)
+        records = list(db.pending_deposits.find({
+            'coin': coin,
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        }))
+        if not records:
+            return None
+
+        in_band = []
+        for r in records:
+            req = float(r.get('unique_amount_usd', 0))
+            if req <= 0:
+                continue
+            # نقص محدود جداً: أصغر من 0.5$ أو 10% (أيهما أصغر) — يمنع خلط مبالغ متباعدة
+            dmax = down_max if down_max is not None else min(0.5, req * 0.10)
+            if req - dmax <= amount_usd <= req + up_tol:
+                in_band.append((abs(req - amount_usd), r))
+
+        if not in_band:
+            return None
+        # 🛡 حارس صارم: لا نطابق إلا إذا كان هناك مرشّح وحيد ضمن النطاق
+        if len(in_band) > 1:
+            logger.warning(f"[SHORTFALL] {len(in_band)} إيداعات ضمن نطاق ${amount_usd} ({coin}) — رُفض للأمان")
+            return None
+        return in_band[0][1]
+    except Exception as e:
+        logger.debug(f"find_pending_allowing_shortfall err: {e}")
+        return None
+
+
 def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
     """
     🛡 يبحث عن إيداع معلّق مطابق للمبلغ المُستلَم.
@@ -8130,20 +8347,34 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
 # 🤖 نظام Auto-Detect: يفحص blockchain تلقائياً ويضيف الرصيد
 # ============================================================
 
-def auto_credit_from_pending(pending, tx_id_for_record, method_label):
+def auto_credit_from_pending(pending, tx_id_for_record, method_label, actual_usd=None):
     """
     يضيف رصيد للمستخدم تلقائياً من pending deposit (بدون ما يرسل tx_id).
+
+    actual_usd: (اختياري) المبلغ الفعلي الذي وصل بالدولار.
+      لو المستخدم حوّل أقل من المطلوب، نضيف له الواصل فعلاً — لا المطلوب.
+      لو حوّل أكثر، نضيف الواصل أيضاً (يستفيد المستخدم).
     """
     try:
         uid = pending['user_id']
-        base_amount = float(pending.get('base_amount_usd', 0))
+        requested_amount = float(pending.get('base_amount_usd', 0))
         unique_amount = float(pending.get('unique_amount_usd', 0))
         pending_id = pending.get('pending_id', '')
-        
+
+        # 💵 المبلغ الذي سيُضاف = الواصل فعلاً إن توفّر، وإلا المطلوب
+        if actual_usd is not None and float(actual_usd) > 0:
+            base_amount = round(float(actual_usd), 2)
+        else:
+            base_amount = requested_amount
+        # هل الواصل يختلف عن المطلوب؟ (لإخبار المستخدم)
+        shortfall = (actual_usd is not None and round(float(actual_usd), 2) < requested_amount - 0.01)
+
         # نعلم الـ pending كـ completed
         result = db.pending_deposits.update_one(
             {'pending_id': pending_id, 'status': 'pending'},
-            {'$set': {'status': 'completed', 'completed_at': int(time.time()), 'tx_id_detected': tx_id_for_record}}
+            {'$set': {'status': 'completed', 'completed_at': int(time.time()),
+                      'tx_id_detected': tx_id_for_record,
+                      'credited_usd': base_amount}}
         )
         
         if result.modified_count == 0:
@@ -8157,11 +8388,17 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
             lang = get_lang(uid)
             # نعرض الـ tx_id مختصراً
             tx_short = tx_id_for_record[:20] + "..." if len(tx_id_for_record) > 20 else tx_id_for_record
+            # سطر تنبيه لو وصل أقل من المطلوب
+            note_ar = (f"\n⚠️ <i>وصل مبلغ أقل من المطلوب (${requested_amount:.2f})، "
+                       f"أُضيف لك الواصل فعلاً.</i>\n") if shortfall else ""
+            note_en = (f"\n⚠️ <i>Less than requested (${requested_amount:.2f}) arrived; "
+                       f"we credited the actual amount received.</i>\n") if shortfall else ""
             if lang == 'ar':
                 msg = (
                     f"✅ <b>تم استلام إيداعك تلقائياً!</b> 🎉\n\n"
                     f"━━━━━━━━━━━━━━\n"
-                    f"💰 <b>المبلغ:</b> <b>${base_amount:.2f}</b>\n"
+                    f"💰 <b>المبلغ المُضاف:</b> <b>${base_amount:.2f}</b>\n"
+                    f"{note_ar}"
                     f"💳 <b>الطريقة:</b> {method_label}\n"
                     f"🆔 <b>رقم العملية:</b>\n<code>{tx_id_for_record}</code>\n"
                     f"━━━━━━━━━━━━━━\n\n"
@@ -8171,7 +8408,8 @@ def auto_credit_from_pending(pending, tx_id_for_record, method_label):
                 msg = (
                     f"✅ <b>Deposit auto-detected!</b> 🎉\n\n"
                     f"━━━━━━━━━━━━━━\n"
-                    f"💰 <b>Amount:</b> <b>${base_amount:.2f}</b>\n"
+                    f"💰 <b>Amount credited:</b> <b>${base_amount:.2f}</b>\n"
+                    f"{note_en}"
                     f"💳 <b>Method:</b> {method_label}\n"
                     f"🆔 <b>Transaction ID:</b>\n<code>{tx_id_for_record}</code>\n"
                     f"━━━━━━━━━━━━━━\n\n"
@@ -9245,7 +9483,7 @@ def check_bybit_auto():
                         if sender:
                             _p = _bybit_match_by_sender(sender, usd)
                             if _p:
-                                if auto_credit_from_pending(_p, tx_norm, label + " (UID)"):
+                                if auto_credit_from_pending(_p, tx_norm, label + " (UID)", actual_usd=usd):
                                     logger.info(f"✅ BYBIT UID+amount match: user {_p['user_id']} "
                                                 f"← sender {sender} → ${_p['base_amount_usd']:.2f}")
                                 continue
@@ -9263,7 +9501,7 @@ def check_bybit_auto():
                                         {'$set': {'sender_uid_detected': sender}})
                             except Exception:
                                 pass
-                            if auto_credit_from_pending(_p2, tx_norm, label + " (UID/amount)"):
+                            if auto_credit_from_pending(_p2, tx_norm, label + " (UID/amount)", actual_usd=usd):
                                 logger.info(f"✅ BYBIT internal amount-match: user {_p2['user_id']} "
                                             f"→ ${_p2['base_amount_usd']:.2f} (sender {sender or '?'})")
                             continue
@@ -9278,9 +9516,23 @@ def check_bybit_auto():
                     for ckey in coin_keys:
                         pending = find_pending_deposit_for_amount(usd, ckey, tolerance=0.004)
                         if pending:
-                            if auto_credit_from_pending(pending, tx_norm, label):
+                            if auto_credit_from_pending(pending, tx_norm, label, actual_usd=usd):
                                 logger.info(f"✅ BYBIT auto-credit ({kind}): "
                                             f"user {pending['user_id']} → ${pending['base_amount_usd']:.2f}")
+                            matched = True
+                            break
+                    if matched:
+                        continue
+
+                    # 1️⃣.5 مطابقة مع السماح بنقص المبلغ (رسوم/نقص بسيط)
+                    #     يطابق على الكسور المميّزة ويُضيف الواصل فعلاً
+                    for ckey in coin_keys:
+                        pend_sf = find_pending_allowing_shortfall(usd, ckey)
+                        if pend_sf:
+                            if auto_credit_from_pending(pend_sf, tx_norm, label, actual_usd=usd):
+                                logger.info(f"✅ BYBIT shortfall-credit ({kind}): "
+                                            f"user {pend_sf['user_id']} طلب "
+                                            f"${pend_sf.get('unique_amount_usd',0):.4f} ← وصل ${usd:.2f}")
                             matched = True
                             break
                     if matched:
