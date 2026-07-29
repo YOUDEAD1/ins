@@ -9163,14 +9163,22 @@ def _bybit_match_internal_by_amount(usd, tolerance=0.004):
 
 
 def check_bybit_auto():
-    """🔍 يفحص إيداعات Bybit تلقائياً (داخلي + شبكات) ويضيف الرصيد."""
+    """🔍 يفحص إيداعات Bybit تلقائياً (داخلي + شبكات) ويضيف الرصيد.
+
+    ملاحظة: بما أن عناوين USDT (TRC20/BEP20) قد تكون على Bybit أيضاً،
+    نفحص كذلك الإيداعات المعلّقة بعملات USDT العادية ونطابقها ضد سجلّ
+    Bybit on-chain — وإلا تحويلات زر USDT العادي لا تُفحص أبداً."""
     try:
         if not bybit_is_configured():
             return
 
+        # كل العملات التي قد تصل عبر Bybit (Bybit الأصلية + USDT العادية على شبكاتها)
+        onchain_match_coins = [c['coin'] for c in BYBIT_NETWORKS.values()] + ['USDT', 'USDT_BEP20']
+        all_watch_coins = BYBIT_COINS + ['USDT', 'USDT_BEP20']
+
         now = int(time.time())
         if db.pending_deposits.count_documents({
-            'coin': {'$in': BYBIT_COINS},
+            'coin': {'$in': all_watch_coins},
             'status': 'pending',
             'expires_at': {'$gt': now}
         }) == 0:
@@ -9217,7 +9225,18 @@ def check_bybit_auto():
                         # 🔧 دائماً نجرّب كل شبكات Bybit أيضاً (حتى لو عرفنا الشبكة)
                         #    حتى لا نفوّت إيداعاً بسبب اختلاف اسم حقل الشبكة.
                         all_nets = [c['coin'] for c in BYBIT_NETWORKS.values()]
-                        coin_keys = ([ck] + [c for c in all_nets if c != ck]) if ck else all_nets
+                        coin_keys = ([ck] + [c for c in all_nets if c != ck]) if ck else list(all_nets)
+
+                        # 🔧 مهم: نضيف عملات USDT العادية حسب الشبكة المكتشفة
+                        #    (المستخدم قد يدفع عبر زر USDT العادي لعنوان على Bybit)
+                        chain_raw = _bybit_row_chain(row)
+                        if ck == 'BYBIT_BEP20' or 'BSC' in str(chain_raw).upper() or 'BEP' in str(chain_raw).upper():
+                            coin_keys.append('USDT_BEP20')
+                        elif ck == 'BYBIT_TRC20' or 'TR' in str(chain_raw).upper():
+                            coin_keys.append('USDT')
+                        else:
+                            # شبكة غير مؤكدة → جرّب الاثنتين
+                            coin_keys.extend(['USDT_BEP20', 'USDT'])
 
                     # 🆔 للتحويل الداخلي (UID): نطابق بـ UID المرسِل + المبلغ الفريد معاً
                     #    fromMemberId = رقم مرسِل التحويل في Bybit
@@ -15623,7 +15642,7 @@ def ep_dosetcat_handler(call):
         try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
         except: pass
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_disc_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_disc_") and not call.data.startswith("ep_disc_clr_"))
 @admin_required
 def ep_disc_ui(call):
     """إدارة خصومات الكمية للمنتج"""
@@ -15666,9 +15685,34 @@ def ep_disc_ui(call):
     )
 
     markup = InlineKeyboardMarkup()
+    if tiers_sorted:
+        markup.add(InlineKeyboardButton("🗑 حذف كل الخصومات", callback_data=f"ep_disc_clr_{pid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_p_{pid}"))
     msg = bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, _save_discount_tier, pid)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ep_disc_clr_"))
+@admin_required
+def ep_disc_clear(call):
+    """زر مباشر لحذف كل خصومات المنتج."""
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("ep_disc_clr_", "")
+    p = find_product(pid)
+    if not p:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
+    res = db.products.update_one({'_id': p['_id']}, {'$set': {'discount_tiers': []}})
+    try:
+        pid_e = str(p.get('id', str(p.get('_id', ''))))
+        _emit_event('product.updated', {'product_id': pid_e,
+                                        'changes': {'discount_tiers': []}}, product_id=pid_e)
+    except Exception:
+        pass
+    if res.modified_count > 0:
+        bot.send_message(call.message.chat.id, "✅ تم حذف كل الخصومات.")
+    else:
+        bot.send_message(call.message.chat.id, "ℹ️ لا توجد خصومات لحذفها.")
 
 
 def _save_discount_tier(message, pid):
@@ -15680,10 +15724,27 @@ def _save_discount_tier(message, pid):
     text = message.text.strip()
 
     if text.lower() == 'clear':
-        db.products.update_one({'id': pid}, {'$set': {'discount_tiers': []}})
-        db.products.update_one({'id': int(pid)} if str(pid).isdigit() else {'id': pid},
-                               {'$set': {'discount_tiers': []}})
-        bot.send_message(uid, "✅ تم حذف كل الخصومات.")
+        # 🔧 نستخدم نفس طريقة البحث الموثوقة (find_product ثم _id)
+        #    الطريقة القديمة {'id': pid} كانت تفشل في إيجاد المنتج فلا تمسح شيئاً.
+        p = find_product(pid)
+        if not p:
+            bot.send_message(uid, "❌ المنتج غير موجود.")
+            return
+        res = db.products.update_one({'_id': p['_id']},
+                                     {'$set': {'discount_tiers': []}})
+        # بثّ التحديث للمزامنة
+        try:
+            pid_e = str(p.get('id', str(p.get('_id', ''))))
+            _emit_event('product.updated', {
+                'product_id': pid_e,
+                'changes': {'discount_tiers': []}
+            }, product_id=pid_e)
+        except Exception:
+            pass
+        if res.modified_count > 0:
+            bot.send_message(uid, "✅ تم حذف كل الخصومات.")
+        else:
+            bot.send_message(uid, "ℹ️ لا توجد خصومات لحذفها (أو كانت محذوفة أصلاً).")
         return
 
     try:
