@@ -7574,6 +7574,78 @@ def cancel_deposit_handler(call):
     bot.send_message(uid, msg, parse_mode="HTML")
 
 
+def is_coin_hidden(coin_key):
+    """هل هذه العملة/الطريقة مخفية من قائمة الإيداع؟ (تبقى في لوحة الأدمن)."""
+    try:
+        v = get_setting(f'hide_coin_{coin_key}', '')
+        return str(v) == '1'
+    except Exception:
+        return False
+
+
+def set_coin_hidden(coin_key, hidden):
+    """يخفي أو يُظهر عملة في قائمة الإيداع."""
+    try:
+        db.settings.update_one({'key': f'hide_coin_{coin_key}'},
+                               {'$set': {'value': '1' if hidden else '0'}}, upsert=True)
+        return True
+    except Exception:
+        return False
+
+
+# قائمة العملات القابلة للإخفاء (المفتاح: الاسم المعروض)
+_HIDEABLE_COINS = [
+    ('stars', '⭐ نجوم تيليجرام'),
+    ('binance', '💳 Binance Pay'),
+    ('bybit', '🟠 Bybit'),
+    ('USDT', '🟢 USDT (TRC20)'),
+    ('USDT_BEP20', '🟡 USDT (BEP20)'),
+    ('TON', '💎 TON'),
+    ('LTC', '🔵 LTC'),
+]
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "hide_coins_menu")
+@admin_required
+def hide_coins_menu(call):
+    """قائمة إخفاء/إظهار العملات — كل عملة معها حالتها."""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    markup = InlineKeyboardMarkup(row_width=1)
+    for key, label in _HIDEABLE_COINS:
+        hidden = is_coin_hidden(key)
+        state = "🚫 مخفية" if hidden else "✅ ظاهرة"
+        markup.add(InlineKeyboardButton(f"{label} — {state}",
+                                        callback_data=f"togglecoin_{key}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_shop_settings"))
+    txt = ("👁 <b>إخفاء/إظهار العملات</b>\n\n"
+           "اضغط على أي عملة لتبديل حالتها.\n"
+           "<i>المخفية تختفي من قائمة الإيداع للمستخدمين، وتبقى هنا في لوحتك.</i>")
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("togglecoin_"))
+@admin_required
+def toggle_coin_visibility(call):
+    """يبدّل إخفاء/إظهار عملة، ويحدّث القائمة."""
+    key = call.data.replace("togglecoin_", "")
+    now_hidden = is_coin_hidden(key)
+    set_coin_hidden(key, not now_hidden)
+    try:
+        bot.answer_callback_query(call.id,
+            "🚫 أُخفيت" if not now_hidden else "✅ أُظهرت", show_alert=False)
+    except Exception:
+        pass
+    # نعيد عرض القائمة محدّثة
+    hide_coins_menu(call)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
     bot.answer_callback_query(call.id)
@@ -7619,18 +7691,24 @@ def dep_init_ui(call):
         )
     
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(create_btn(uid, 'btn_stars', callback_data="dep_stars"))
-    markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
-    # 🟠 Bybit — تحت Binance مباشرة (تظهر فقط لو فيه طريقة مفعّلة)
+    if not is_coin_hidden('stars'):
+        markup.add(create_btn(uid, 'btn_stars', callback_data="dep_stars"))
+    if not is_coin_hidden('binance'):
+        markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
+    # 🟠 Bybit — تحت Binance مباشرة (تظهر فقط لو فيه طريقة مفعّلة وغير مخفية)
     try:
-        if bybit_available_methods():
+        if bybit_available_methods() and not is_coin_hidden('bybit'):
             markup.add(create_btn(uid, 'btn_bybit', callback_data="dep_bybit"))
     except Exception:
         pass
-    markup.add(create_btn(uid, 'btn_usdt_trc20', callback_data="dep_crypto_USDT"))
-    markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
-    markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
-    markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
+    if not is_coin_hidden('USDT'):
+        markup.add(create_btn(uid, 'btn_usdt_trc20', callback_data="dep_crypto_USDT"))
+    if not is_coin_hidden('USDT_BEP20'):
+        markup.add(create_btn(uid, 'btn_usdt_bep20', callback_data="dep_crypto_USDT_BEP20"))
+    if not is_coin_hidden('TON'):
+        markup.add(create_btn(uid, 'btn_ton', callback_data="dep_crypto_TON"))
+    if not is_coin_hidden('LTC'):
+        markup.add(create_btn(uid, 'btn_ltc', callback_data="dep_crypto_LTC"))
     markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
     
     try:
@@ -8107,10 +8185,21 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
         lo2, hi2 = 100, 29999
 
     def _is_free(amount):
-        """يتأكد ما فيه إيداع معلّق قريب من هذا المبلغ (داخل مسافة الأمان)."""
+        """يتأكد ما فيه إيداع معلّق قريب من هذا المبلغ (داخل مسافة الأمان).
+
+        🛡 مهم: نفحص عبر كل العملات التي قد تصل لنفس المحفظة (Bybit).
+        وإلا: شخص على USDT_BEP20 وآخر على BYBIT_BEP20 قد يأخذان نفس
+        المبلغ الفريد، فيصل التحويل ويُطابق مع الشخص الخطأ."""
         try:
+            # كل العملات التي تصل فعلياً لنفس محفظة الوجهة
+            if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
+                check_coins = list(set(
+                    ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
+                ))
+            else:
+                check_coins = [coin]
             clash = db.pending_deposits.find_one({
-                'coin': coin,
+                'coin': {'$in': check_coins},
                 'status': 'pending',
                 'expires_at': {'$gt': int(time.time())},
                 'unique_amount_usd': {
@@ -8253,21 +8342,25 @@ def _alert_ambiguous_deposit(coin, amount_usd, records):
         pass
 
 
-def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.05, down_max=None):
-    """يطابق إيداعاً معلّقاً حتى لو وصل مبلغ أقل بقليل من المطلوب.
+def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.03, down_max=None):
+    """يطابق إيداعاً معلّقاً عند نقص ضئيل جداً (رسوم شبكة فقط).
 
-    ⚠️ ملاحظة مهمة: لو الرسوم تُخصم فعلاً فهي تغيّر الكسور المميّزة نفسها،
-    فلا يمكن الاعتماد على تطابق الكسور. لذا نطابق على **قرب المبلغ الكلي**
-    ضمن نطاق ضيّق، مع حارس غموض صارم: لا نطابق إلا إذا كان هناك إيداع
-    واحد فقط ضمن النطاق (وإلا نرفض — أأمن من إعطاء الشخص الخطأ).
-
-    - up_tol: أقصى زيادة فوق المطلوب (0.05).
-    - down_max: أقصى نقص مسموح (افتراضي: أصغر من 0.5$ أو 10% من المبلغ).
+    ⚠️ خطر أمني حقيقي: لو وسّعنا النقص، قد يُنسب تحويل شخصٍ دفع فعلاً إلى
+    شخصٍ آخر "جرّب فقط" وله إيداع معلّق بمبلغ قريب. لذا:
+    - النقص المسموح ≤ 0.03$ فقط (رسوم نموذجية).
+    - حارس 1: مرشّح وحيد ضمن النطاق الضيّق، وإلا رفض.
+    - حارس 2: لا يوجد أي إيداع آخر قريب (±0.15$) من الواصل، وإلا رفض.
+    - عند أي التباس: لا نعطي أحداً (أأمن من الخطأ).
     """
     try:
         amount_usd = float(amount_usd)
+        # 🛡 نفحص عبر كل العملات التي تصل لنفس المحفظة (Bybit)
+        if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
+            match_coins = ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
+        else:
+            match_coins = [coin]
         records = list(db.pending_deposits.find({
-            'coin': coin,
+            'coin': {'$in': match_coins},
             'status': 'pending',
             'expires_at': {'$gt': int(time.time())}
         }))
@@ -8279,18 +8372,29 @@ def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.05, down_max=None
             req = float(r.get('unique_amount_usd', 0))
             if req <= 0:
                 continue
-            # نقص محدود جداً: أصغر من 0.5$ أو 10% (أيهما أصغر) — يمنع خلط مبالغ متباعدة
-            dmax = down_max if down_max is not None else min(0.5, req * 0.10)
+            # 🛡 نقص ضئيل جداً فقط (رسوم شبكة): 0.03$ كحد أقصى
+            #    توسيعه يسبب نسب تحويل شخص دفع إلى شخص "جرّب فقط" بمبلغ قريب.
+            dmax = down_max if down_max is not None else 0.03
             if req - dmax <= amount_usd <= req + up_tol:
                 in_band.append((abs(req - amount_usd), r))
 
         if not in_band:
             return None
-        # 🛡 حارس صارم: لا نطابق إلا إذا كان هناك مرشّح وحيد ضمن النطاق
+        # 🛡 حارس 1: أكثر من مرشّح ضمن النطاق → رفض
         if len(in_band) > 1:
             logger.warning(f"[SHORTFALL] {len(in_band)} إيداعات ضمن نطاق ${amount_usd} ({coin}) — رُفض للأمان")
             return None
-        return in_band[0][1]
+        # 🛡 حارس 2: أي إيداع آخر قريب (±0.15$) من الواصل → الوضع ملتبس → رفض
+        #    يمنع إعطاء تحويل شخصٍ دفع لشخصٍ آخر جرّب بمبلغ مشابه.
+        winner = in_band[0][1]
+        for r in records:
+            if r.get('pending_id') == winner.get('pending_id'):
+                continue
+            other = float(r.get('unique_amount_usd', 0))
+            if abs(other - amount_usd) <= 0.15:
+                logger.warning(f"[SHORTFALL] إيداع آخر قريب (${other}) من ${amount_usd} — رُفض للأمان")
+                return None
+        return winner
     except Exception as e:
         logger.debug(f"find_pending_allowing_shortfall err: {e}")
         return None
@@ -8307,8 +8411,13 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
     """
     try:
         amount_usd = float(amount_usd)
+        # 🛡 نفحص الغموض عبر كل العملات التي تصل لنفس المحفظة (Bybit)
+        if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
+            match_coins = ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
+        else:
+            match_coins = [coin]
         records = list(db.pending_deposits.find({
-            'coin': coin,
+            'coin': {'$in': match_coins},
             'status': 'pending',
             'unique_amount_usd': {
                 '$gte': amount_usd - tolerance,
@@ -9524,19 +9633,27 @@ def check_bybit_auto():
                     if matched:
                         continue
 
-                    # 1️⃣.5 مطابقة مع السماح بنقص المبلغ (رسوم/نقص بسيط)
-                    #     يطابق على الكسور المميّزة ويُضيف الواصل فعلاً
-                    for ckey in coin_keys:
-                        pend_sf = find_pending_allowing_shortfall(usd, ckey)
-                        if pend_sf:
-                            if auto_credit_from_pending(pend_sf, tx_norm, label, actual_usd=usd):
-                                logger.info(f"✅ BYBIT shortfall-credit ({kind}): "
-                                            f"user {pend_sf['user_id']} طلب "
-                                            f"${pend_sf.get('unique_amount_usd',0):.4f} ← وصل ${usd:.2f}")
-                            matched = True
-                            break
-                    if matched:
-                        continue
+                    # ⛔ مطابقة النقص مُلغاة عمداً (كانت تعطي الرصيد للشخص الخطأ).
+                    #    on-chain لا يحمل هوية المُرسِل، فأي مبلغ ناقص لا يمكن نسبته
+                    #    بيقين. بدل التخمين: نسجّل تنبيهاً فقط، والأدمن يضيف يدوياً.
+                    try:
+                        _sf_near = None
+                        for ckey in coin_keys:
+                            _cand = db.pending_deposits.find_one({
+                                'coin': ckey, 'status': 'pending',
+                                'expires_at': {'$gt': int(time.time())},
+                                'unique_amount_usd': {'$gte': usd - 0.5, '$lte': usd + 0.05}
+                            })
+                            if _cand:
+                                _sf_near = _cand
+                                break
+                        if _sf_near:
+                            logger.warning(
+                                f"[BYBIT] ⚠️ وصل ${usd:.2f} قريب من إيداع "
+                                f"user {_sf_near['user_id']} (${_sf_near.get('unique_amount_usd',0):.4f}) "
+                                f"لكن ليس مطابقاً تماماً — لم يُصرف (راجع يدوياً) | tx={raw_tx[:16]}")
+                    except Exception:
+                        pass
 
                     # 🔍 تشخيص: وصل مبلغ لكن ما لقينا إيداعاً معلّقاً مطابقاً
                     #    نسجّل أقرب الإيداعات المعلّقة لنعرف سبب عدم المطابقة
@@ -16446,10 +16563,37 @@ def admin_del_list(call):
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
     bot.edit_message_text("👇 Select Product to Delete:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_"))
-def admin_del_exec(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_") and not call.data.startswith("del_p_ok_"))
+@admin_required
+def admin_del_confirm(call):
+    """يطلب تأكيد الحذف بدل الحذف الفوري."""
     bot.answer_callback_query(call.id)
     pid = call.data.replace("del_p_", "")
+    p = find_product(pid)
+    if not p:
+        bot.answer_callback_query(call.id, "❌ المنتج غير موجود", show_alert=True)
+        return
+    name = p.get('name', p.get('name_ar', p.get('title', 'المنتج')))
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ نعم، احذف", callback_data=f"del_p_ok_{pid}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data="ad_s_list")
+    )
+    txt = (f"🗑 <b>تأكيد الحذف</b>\n\n"
+           f"هل تريد حذف <b>{html.escape(str(name)[:40])}</b> وكل مخزونه نهائياً؟\n\n"
+           f"<i>لا يمكن التراجع.</i>")
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_p_ok_"))
+@admin_required
+def admin_del_exec(call):
+    bot.answer_callback_query(call.id)
+    pid = call.data.replace("del_p_ok_", "")
     try:
         p = find_product(pid)
         if not p: return
@@ -16532,11 +16676,41 @@ def admin_stock_opts_ui(call):
 def admin_stock_input(call):
     bot.answer_callback_query(call.id)
     pid = call.data.replace("stk_add_", "")
-    msg = bot.send_message(call.from_user.id, "📥 <b>أرسل الأكواد (كود في كل سطر) أو قم برفع ملف (.txt) يحتوي على الأكواد:</b>", parse_mode="HTML")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ إلغاء", callback_data=f"stk_cancel_{pid}"))
+    msg = bot.send_message(
+        call.from_user.id,
+        "📥 <b>أرسل الأكواد (كود في كل سطر) أو ارفع ملف (.txt):</b>\n\n"
+        "<i>للإلغاء: اكتب <b>الغاء</b> أو اضغط الزر.</i>",
+        parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, admin_stock_save, pid)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("stk_cancel_"))
+@admin_required
+def admin_stock_cancel(call):
+    """يلغي إضافة الأكواد لو ضغط الأدمن بالغلط."""
+    try:
+        bot.answer_callback_query(call.id, "❌ أُلغيت الإضافة", show_alert=False)
+    except Exception:
+        pass
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    except Exception:
+        pass
+    try:
+        bot.edit_message_text("❌ أُلغيت إضافة الأكواد.", call.message.chat.id,
+                              call.message.message_id)
+    except Exception:
+        bot.send_message(call.message.chat.id, "❌ أُلغيت إضافة الأكواد.")
+
 
 # ----------- إشعار إضافة أكواد (ستوك) بتقرير -----------
 def admin_stock_save(message, pid):
+    # 🛑 دعم الإلغاء بالكتابة
+    if message.text and message.text.strip() in ("الغاء", "إلغاء", "/cancel", "cancel"):
+        bot.send_message(message.chat.id, "❌ أُلغيت إضافة الأكواد.")
+        return
     lines = []
     if message.document:
         try:
@@ -18108,6 +18282,8 @@ def admin_shop_settings(call):
     markup.add(InlineKeyboardButton("🟠 Bybit UID", callback_data="set_v_bybit_uid"))
     markup.add(InlineKeyboardButton("🟠 Bybit TRC20", callback_data="set_v_bybit_trc20"),
                InlineKeyboardButton("🟠 Bybit BEP20", callback_data="set_v_bybit_bep20"))
+    # 👁 إخفاء/إظهار العملات من قائمة الإيداع
+    markup.add(InlineKeyboardButton("👁 إخفاء/إظهار العملات", callback_data="hide_coins_menu"))
     markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
     try: bot.edit_message_text("⚙️ <b>Settings:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
