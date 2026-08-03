@@ -8688,8 +8688,165 @@ def check_ton_blockchain_auto():
         logger.error(f"check_ton_blockchain_auto error: {e}")
 
 
+# ============================================================
+# 🔗 التحقق المباشر من USDT على البلوكشين (Trust Wallet — بلا منصة)
+# ============================================================
+# العقود الرسمية لـ USDT (الحماية من التوكنات المزيفة: نقبل هذا العقد فقط)
+USDT_CONTRACT_TRC20 = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
+USDT_CONTRACT_BEP20 = '0x55d398326f99059ff775485246999027b3197955'
+
+
+def _http_json(url, params=None, headers=None, timeout=10):
+    """طلب GET يرجّع JSON، مباشرةً ثم عبر البروكسيات."""
+    try:
+        r = requests.get(url, params=params, headers=headers or {}, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    try:
+        pool = list(VERIFIED_PROXIES)[:4]
+        random.shuffle(pool)
+        for proxy in pool:
+            try:
+                r = requests.get(url, params=params, headers=headers or {}, timeout=8,
+                                 proxies={'http': proxy, 'https': proxy})
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_trc20_usdt_deposits(address, limit=30):
+    """يجلب تحويلات USDT (TRC20) الواردة لعنوان عبر TronGrid."""
+    out = []
+    url = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20"
+    data = _http_json(url, params={'limit': limit, 'contract_address': USDT_CONTRACT_TRC20,
+                                   'only_confirmed': 'true'})
+    if not data or 'data' not in data:
+        return out
+    for tx in data['data']:
+        try:
+            token = (tx.get('token_info') or {}).get('address', '')
+            if token.lower() != USDT_CONTRACT_TRC20.lower():
+                continue  # 🛡 عقد غير رسمي (توكن مزيف) → رفض
+            if str(tx.get('to', '')).lower() != address.lower():
+                continue  # وارد فقط
+            # 🛡 ضد Flash USDT: نقبل المؤكّد الناجح فقط
+            #    (only_confirmed في الطلب + فحص أي حقل حالة متاح)
+            _st = str(tx.get('type', 'Transfer'))
+            if _st and _st.lower() not in ('transfer', ''):
+                continue
+            raw = int(tx.get('value', 0))
+            decimals = int((tx.get('token_info') or {}).get('decimals', 6))
+            amount = raw / (10 ** decimals)
+            tx_id = str(tx.get('transaction_id', ''))
+            t_ms = int(tx.get('block_timestamp', 0))
+            if tx_id and amount > 0:
+                out.append((tx_id, round(amount, 6), t_ms))
+        except Exception:
+            continue
+    return out
+
+
+def _fetch_bep20_usdt_deposits(address, limit=30):
+    """يجلب تحويلات USDT (BEP20) الواردة لعنوان عبر BscScan."""
+    out = []
+    api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
+    url = "https://api.bscscan.com/api"
+    params = {
+        'module': 'account', 'action': 'tokentx',
+        'contractaddress': USDT_CONTRACT_BEP20,
+        'address': address, 'page': 1, 'offset': limit, 'sort': 'desc',
+    }
+    if api_key:
+        params['apikey'] = api_key
+    data = _http_json(url, params=params)
+    if not data or data.get('status') != '1' or 'result' not in data:
+        return out
+    for tx in data['result']:
+        try:
+            if str(tx.get('contractAddress', '')).lower() != USDT_CONTRACT_BEP20.lower():
+                continue  # 🛡 عقد غير رسمي → رفض
+            if str(tx.get('to', '')).lower() != address.lower():
+                continue
+            # 🛡 ضد Flash USDT: نشترط تأكيدات كافية (يرفض المعلّق/غير المؤكد)
+            try:
+                confs = int(tx.get('confirmations', 0))
+                if confs < 15:
+                    continue
+            except Exception:
+                continue
+            decimals = int(tx.get('tokenDecimal', 18))
+            amount = int(tx.get('value', 0)) / (10 ** decimals)
+            tx_id = str(tx.get('hash', ''))
+            t_ms = int(tx.get('timeStamp', 0)) * 1000
+            if tx_id and amount > 0:
+                out.append((tx_id, round(amount, 6), t_ms))
+        except Exception:
+            continue
+    return out
+
+
 def check_usdt_blockchain_auto():
-    """🔍 يفحص USDT (TRC-20 و BEP-20) تلقائياً عبر Binance API"""
+    """🔗 يفحص USDT (TRC20 + BEP20) مباشرةً من البلوكشين (Trust Wallet).
+    يتحقق من العقد الرسمي فقط — يرفض التوكنات المزيفة."""
+    try:
+        now = int(time.time())
+        if db.pending_deposits.count_documents({
+            'coin': {'$in': ['USDT', 'USDT_BEP20']},
+            'status': 'pending', 'expires_at': {'$gt': now}
+        }) == 0:
+            return
+
+        cutoff_ms = int(time.time() * 1000) - (90 * 60 * 1000)
+
+        # ── TRC20 عبر TronGrid ──
+        addr_trc = get_setting('usdt_address', '')
+        if addr_trc and addr_trc != 'Not Set':
+            for tx_id, amount, t_ms in _fetch_trc20_usdt_deposits(addr_trc):
+                try:
+                    if t_ms and t_ms < cutoff_ms:
+                        continue
+                    tx_norm = normalize_tx_id(tx_id)
+                    if db.used_transactions.find_one({'transaction_id': tx_norm}):
+                        continue
+                    pending = find_pending_deposit_for_amount(amount, 'USDT', tolerance=0.001)
+                    if pending:
+                        if auto_credit_from_pending(pending, tx_norm, "USDT (TRC20) On-chain",
+                                                    actual_usd=amount):
+                            logger.info(f"✅ USDT TRC20 on-chain: user {pending['user_id']} → ${amount:.2f}")
+                except Exception as e:
+                    logger.debug(f"trc20 tx err: {e}")
+                    continue
+
+        # ── BEP20 عبر BscScan ──
+        addr_bep = get_setting('usdt_bep20_address', '')
+        if addr_bep and addr_bep != 'Not Set':
+            for tx_id, amount, t_ms in _fetch_bep20_usdt_deposits(addr_bep):
+                try:
+                    if t_ms and t_ms < cutoff_ms:
+                        continue
+                    tx_norm = normalize_tx_id(tx_id)
+                    if db.used_transactions.find_one({'transaction_id': tx_norm}):
+                        continue
+                    pending = find_pending_deposit_for_amount(amount, 'USDT_BEP20', tolerance=0.001)
+                    if pending:
+                        if auto_credit_from_pending(pending, tx_norm, "USDT (BEP20) On-chain",
+                                                    actual_usd=amount):
+                            logger.info(f"✅ USDT BEP20 on-chain: user {pending['user_id']} → ${amount:.2f}")
+                except Exception as e:
+                    logger.debug(f"bep20 tx err: {e}")
+                    continue
+    except Exception as e:
+        logger.error(f"check_usdt_blockchain_auto error: {e}")
+
+
+def _check_usdt_binance_legacy():
+    """🔍 (احتياطي) يفحص USDT عبر Binance API — للعناوين على Binance"""
     try:
         # نشيك إن في pending
         pending_count = db.pending_deposits.count_documents({
@@ -9509,6 +9666,50 @@ def _bybit_match_internal_by_amount(usd, tolerance=0.004):
         return None
 
 
+# ============================================================
+# 🛡 التحقق من شرعية إيداع Bybit (رفض العملات/الشبكات المزيفة)
+# ============================================================
+# العملات المسموح قبولها فقط (كلها مستقرة أو معروفة). أي شيء آخر يُرفض.
+BYBIT_ALLOWED_COINS = {'USDT', 'USDC', 'USDD', 'TON', 'ETH', 'LTC', 'TRX', 'BNB'}
+# الشبكات المسموحة لكل إيداع on-chain
+BYBIT_ALLOWED_CHAINS = {
+    'BSC', 'BEP20', 'BNB', 'TRX', 'TRC20', 'TRON', 'ETH', 'ERC20',
+    'TON', 'LTC', 'ARBITRUM', 'ARB', 'MATIC', 'POLYGON',
+}
+
+
+def _bybit_verify_legit(row, kind):
+    """يتحقق أن الإيداع بعملة وشبكة معتمدتين وحالته ناجحة.
+    يرجّع (سليم؟, سبب الرفض).
+
+    الحماية من العملات المزيفة: Bybit نفسه لا يودع توكنات مزيفة (يتحقق من
+    العقد الرسمي قبل الإيداع)، لكن هذه طبقة ثانية ترفض أي عملة/شبكة خارج
+    القائمة البيضاء — حتى لو تغيّر سلوك Bybit مستقبلاً."""
+    # 1) العملة ضمن المسموح
+    coin = str(row.get('coin') or row.get('currency') or '').upper().strip()
+    if not coin:
+        return False, "عملة فارغة"
+    if coin not in BYBIT_ALLOWED_COINS:
+        return False, f"عملة غير معتمدة: {coin}"
+
+    # 2) الشبكة ضمن المسموح (لإيداعات on-chain فقط؛ الداخلي بلا شبكة)
+    if kind == 'onchain':
+        chain = str(_bybit_row_chain(row)).upper().replace('-', '').replace('_', '').strip()
+        if chain:
+            ok_chain = any(
+                allowed.replace('-', '').replace('_', '') in chain
+                for allowed in BYBIT_ALLOWED_CHAINS
+            )
+            if not ok_chain:
+                return False, f"شبكة غير معتمدة: {chain}"
+
+    # 3) الحالة ناجحة (يمنع قبول المعلّق/الملغى)
+    if not _bybit_row_is_success(row, kind):
+        return False, "حالة غير مكتملة"
+
+    return True, ""
+
+
 def check_bybit_auto():
     """🔍 يفحص إيداعات Bybit تلقائياً (داخلي + شبكات) ويضيف الرصيد.
 
@@ -9557,6 +9758,13 @@ def check_bybit_auto():
                     tx_norm = normalize_tx_id(raw_tx)
 
                     if db.used_transactions.find_one({'transaction_id': tx_norm}):
+                        continue
+
+                    # 🛡 تحقق صارم من العملة والشبكة (رفض العملات/الشبكات غير المعتمدة)
+                    #    Bybit أصلاً لا يودع العملات المزيفة، ونضيف هذه كطبقة ثانية.
+                    _ok_coin, _reason = _bybit_verify_legit(row, kind)
+                    if not _ok_coin:
+                        logger.warning(f"[BYBIT] 🚫 رُفض إيداع غير معتمد: {_reason} | tx={raw_tx[:20]}")
                         continue
 
                     usd, coin_name = _bybit_row_usd(row)
@@ -18282,6 +18490,8 @@ def admin_shop_settings(call):
     markup.add(InlineKeyboardButton("🟠 Bybit UID", callback_data="set_v_bybit_uid"))
     markup.add(InlineKeyboardButton("🟠 Bybit TRC20", callback_data="set_v_bybit_trc20"),
                InlineKeyboardButton("🟠 Bybit BEP20", callback_data="set_v_bybit_bep20"))
+    # 🔑 مفتاح BscScan (لفحص USDT BEP20 على البلوكشين)
+    markup.add(InlineKeyboardButton("🔑 BscScan API Key", callback_data="set_v_bscscan"))
     # 👁 إخفاء/إظهار العملات من قائمة الإيداع
     markup.add(InlineKeyboardButton("👁 إخفاء/إظهار العملات", callback_data="hide_coins_menu"))
     markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
@@ -18308,6 +18518,7 @@ def admin_set_inputs(call):
         "set_v_bybit_uid": ("🟠 Bybit — الـ UID", False),
         "set_v_bybit_trc20": ("🟠 Bybit — عنوان USDT على TRC20", False),
         "set_v_bybit_bep20": ("🟠 Bybit — عنوان USDT على BEP20", False),
+        "set_v_bscscan": ("🔑 BscScan API Key", True),
     }
     label, is_secret = _labels.get(mode, ("الإعداد", False))
     db_key = _SETTING_KEYS.get(mode)
@@ -18355,6 +18566,7 @@ _SETTING_KEYS = {
     "set_v_bybit_uid": "bybit_uid",
     "set_v_bybit_trc20": "bybit_addr_trc20",
     "set_v_bybit_bep20": "bybit_addr_bep20",
+    "set_v_bscscan": "bscscan_api_key",
 }
 
 
