@@ -13417,21 +13417,22 @@ def _lookup_trc20_tx_by_hash(txid):
 
 
 def _lookup_bep20_tx_by_hash(txid):
-    """يستعلم عن معاملة BSC بهاشها مباشرة عبر BscScan (tokentx بالهاش)."""
+    """يستعلم عن معاملة BSC بهاشها مباشرة عبر BscScan (tokentx بالهاش).
+    يرجّع dict فيه (amount, to) أو None، أو {'_conn_fail': True} لو فشل الاتصال."""
     txid = str(txid).strip()
     if not txid.startswith('0x'):
         txid = '0x' + txid
     api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    # نستخدم eth_getTransactionReceipt للتأكد أنها موجودة ومؤكدة
     params = {'module': 'proxy', 'action': 'eth_getTransactionReceipt', 'txhash': txid}
     if api_key:
         params['apikey'] = api_key
     receipt = _http_json("https://api.bscscan.com/api", params=params)
-    if not receipt or not receipt.get('result'):
-        return None
+    if receipt is None:
+        return {'_conn_fail': True}   # فشل الاتصال (لا رد)
+    if not receipt.get('result'):
+        return None   # رد لكن المعاملة غير موجودة
     try:
         logs = receipt['result'].get('logs', [])
-        # Transfer event للعقد الرسمي
         TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
         for log in logs:
             if str(log.get('address', '')).lower() != USDT_CONTRACT_BEP20.lower():
@@ -13439,7 +13440,6 @@ def _lookup_bep20_tx_by_hash(txid):
             topics = log.get('topics', [])
             if not topics or topics[0].lower() != TRANSFER_SIG:
                 continue
-            # المستلم = آخر 40 حرف من topics[2]
             to_addr = '0x' + topics[2][-40:] if len(topics) >= 3 else ''
             amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
             return {'amount': round(amount, 6), 'to': to_addr, 'confirmed': True}
@@ -13461,6 +13461,7 @@ def _admin_search_usdt_onchain(query):
     q_clean = _strip0x(q).lower()
     if len(q_clean) >= 40:
         # جرّب TRON
+        conn_ok = False
         try:
             r = _lookup_trc20_tx_by_hash(q)
             if r and r.get('amount', 0) > 0:
@@ -13469,12 +13470,18 @@ def _admin_search_usdt_onchain(query):
                     'amount_usd': round(r['amount'], 4), 'crypto_amount': r['amount'],
                     'hash': q, 'when': 0, 'source_addr': r.get('to', ''),
                 }
+            if r is not None:
+                conn_ok = True
         except Exception as e:
             logger.debug(f"trc20 direct err: {e}")
         # جرّب BSC
         try:
             r = _lookup_bep20_tx_by_hash(q)
-            if r and r.get('amount', 0) > 0:
+            if isinstance(r, dict) and r.get('_conn_fail'):
+                # فشل اتصال BscScan
+                if not conn_ok:
+                    return {'_conn_fail': True}
+            elif r and r.get('amount', 0) > 0:
                 return {
                     'coin': 'USDT_BEP20', 'label': '🟡 USDT (BEP20)',
                     'amount_usd': round(r['amount'], 4), 'crypto_amount': r['amount'],
@@ -14044,6 +14051,18 @@ def ad_check_tx_handle(message):
             # --- 🔗 USDT على البلوكشين (TRC20 + BEP20) — لعناوين Trust Wallet ---
             if not onchain_match and not onchain_is_sender:
                 usdt_r = _admin_search_usdt_onchain(query)
+                if isinstance(usdt_r, dict) and usdt_r.get('_conn_fail'):
+                    bot.send_message(
+                        uid,
+                        "⚠️ <b>تعذّر الاتصال بمستكشفات البلوكشين (TronScan/BscScan).</b>\n\n"
+                        "السيرفر لا يصل إليها حالياً — لذلك لا يمكن البحث عن USDT.\n"
+                        "الحلول:\n"
+                        "• فعّل البروكسي في السيرفر\n"
+                        "• تأكد أن السيرفر يصل الإنترنت الخارجي\n"
+                        "• جرّب مرة أخرى بعد قليل\n\n"
+                        "<i>هذه أيضاً سبب عدم وصول إيداعات USDT تلقائياً.</i>",
+                        parse_mode="HTML")
+                    return
                 if usdt_r:
                     onchain_match = usdt_r
 
