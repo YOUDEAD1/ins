@@ -8744,7 +8744,7 @@ def _bsc_rpc_call(method, params):
 
 def _lookup_bep20_via_rpc(txid):
     """يستعلم عن معاملة USDT على BSC بهاشها عبر RPC العام (بلا مفتاح).
-    يرجّع dict فيه (amount, to) أو None، أو {'_conn_fail': True} لو فشلت كل العقد."""
+    يرجّع dict فيه (amount, to, time_ms) أو None، أو {'_conn_fail': True}."""
     txid = str(txid).strip()
     if not txid.startswith('0x'):
         txid = '0x' + txid
@@ -8752,9 +8752,18 @@ def _lookup_bep20_via_rpc(txid):
     if receipt is None:
         return {'_conn_fail': True}
     try:
-        # لو status = 0x0 المعاملة فشلت
         if str(receipt.get('status', '0x1')).lower() == '0x0':
             return None
+        # نجلب وقت البلوك
+        time_ms = 0
+        blk = receipt.get('blockNumber')
+        if blk:
+            binfo = _bsc_rpc_call("eth_getBlockByNumber", [blk, False])
+            if binfo and binfo.get('timestamp'):
+                try:
+                    time_ms = int(binfo['timestamp'], 16) * 1000
+                except Exception:
+                    time_ms = 0
         logs = receipt.get('logs', [])
         TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
         for log in logs:
@@ -8763,9 +8772,11 @@ def _lookup_bep20_via_rpc(txid):
             topics = log.get('topics', [])
             if not topics or str(topics[0]).lower() != TRANSFER_SIG:
                 continue
+            from_addr = '0x' + topics[1][-40:] if len(topics) >= 2 else ''
             to_addr = '0x' + topics[2][-40:] if len(topics) >= 3 else ''
             amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
-            return {'amount': round(amount, 6), 'to': to_addr, 'confirmed': True}
+            return {'amount': round(amount, 6), 'to': to_addr,
+                    'from': from_addr, 'time_ms': time_ms, 'confirmed': True}
     except Exception as e:
         logger.debug(f"bsc rpc lookup parse err: {e}")
     return None
@@ -8827,45 +8838,93 @@ def _fetch_trc20_usdt_deposits(address, limit=30):
     return out
 
 
-def _fetch_bep20_usdt_deposits(address, limit=30):
-    """يجلب تحويلات USDT (BEP20) الواردة لعنوان عبر Etherscan API V2.
-    ⚠️ BscScan V1 (api.bscscan.com) أُلغيت في 2025 — نستخدم V2 الموحّدة (chainid=56)."""
+def _fetch_bep20_via_rpc(address, blocks_back=28800):
+    """يجلب تحويلات USDT الواردة لعنوان عبر RPC العام (بلا مفتاح) باستخدام eth_getLogs.
+    blocks_back: كم بلوك للخلف نمسح (28800 ≈ 24 ساعة على BSC بـ 3ث/بلوك).
+    يرجّع قائمة (tx_id, amount, time_ms)."""
     out = []
-    api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    # Etherscan V2 الموحّدة — BSC = chainid 56
-    url = "https://api.etherscan.io/v2/api"
-    params = {
-        'chainid': 56,
-        'module': 'account', 'action': 'tokentx',
-        'contractaddress': USDT_CONTRACT_BEP20,
-        'address': address, 'page': 1, 'offset': limit, 'sort': 'desc',
-    }
-    if api_key:
-        params['apikey'] = api_key
-    data = _http_json(url, params=params)
-    if not data or data.get('status') != '1' or 'result' not in data:
+    # آخر رقم بلوك
+    latest_hex = _bsc_rpc_call("eth_blockNumber", [])
+    if not latest_hex:
         return out
-    for tx in data['result']:
+    try:
+        latest = int(latest_hex, 16)
+    except Exception:
+        return out
+    from_block = max(0, latest - blocks_back)
+
+    # topic للمستلم = عنواننا (مبطّن لـ 32 بايت)
+    addr_clean = address.lower().replace('0x', '')
+    to_topic = '0x' + '0' * 24 + addr_clean
+    TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+
+    params = [{
+        'fromBlock': hex(from_block),
+        'toBlock': 'latest',
+        'address': USDT_CONTRACT_BEP20,
+        'topics': [TRANSFER_SIG, None, to_topic],  # [event, from(any), to=us]
+    }]
+    logs = _bsc_rpc_call("eth_getLogs", params)
+    if not isinstance(logs, list):
+        return out
+    for log in logs:
         try:
-            if str(tx.get('contractAddress', '')).lower() != USDT_CONTRACT_BEP20.lower():
-                continue  # 🛡 عقد غير رسمي → رفض
-            if str(tx.get('to', '')).lower() != address.lower():
-                continue
-            # 🛡 ضد Flash USDT: نشترط تأكيدات كافية (يرفض المعلّق/غير المؤكد)
-            try:
-                confs = int(tx.get('confirmations', 0))
-                if confs < 15:
-                    continue
-            except Exception:
-                continue
-            decimals = int(tx.get('tokenDecimal', 18))
-            amount = int(tx.get('value', 0)) / (10 ** decimals)
-            tx_id = str(tx.get('hash', ''))
-            t_ms = int(tx.get('timeStamp', 0)) * 1000
+            amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
+            tx_id = str(log.get('transactionHash', ''))
+            # الوقت: نحتاج بلوك؛ نتركه 0 (المطابقة تعتمد المبلغ لا الوقت الدقيق)
             if tx_id and amount > 0:
-                out.append((tx_id, round(amount, 6), t_ms))
+                out.append((tx_id, round(amount, 6), 0))
         except Exception:
             continue
+    return out
+
+
+def _fetch_bep20_usdt_deposits(address, limit=30):
+    """يجلب تحويلات USDT (BEP20) الواردة لعنوان.
+    يجرّب Etherscan V2 (بمفتاح، سريع) ثم RPC العام (بلا مفتاح) كبديل."""
+    out = []
+    api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
+    # V2 أولاً (بمفتاح)
+    if api_key:
+        url = "https://api.etherscan.io/v2/api"
+        params = {
+            'chainid': 56, 'module': 'account', 'action': 'tokentx',
+            'contractaddress': USDT_CONTRACT_BEP20,
+            'address': address, 'page': 1, 'offset': limit, 'sort': 'desc',
+        }
+        params['apikey'] = api_key
+        data = _http_json(url, params=params)
+        if data and data.get('status') == '1' and isinstance(data.get('result'), list):
+            for tx in data['result']:
+                try:
+                    if str(tx.get('contractAddress', '')).lower() != USDT_CONTRACT_BEP20.lower():
+                        continue
+                    if str(tx.get('to', '')).lower() != address.lower():
+                        continue
+                    try:
+                        confs = int(tx.get('confirmations', 0))
+                        if confs < 15:
+                            continue
+                    except Exception:
+                        continue
+                    decimals = int(tx.get('tokenDecimal', 18))
+                    amount = int(tx.get('value', 0)) / (10 ** decimals)
+                    tx_id = str(tx.get('hash', ''))
+                    t_ms = int(tx.get('timeStamp', 0)) * 1000
+                    if tx_id and amount > 0:
+                        out.append((tx_id, round(amount, 6), t_ms))
+                except Exception:
+                    continue
+            if out:
+                return out
+
+    # RPC العام (بلا مفتاح) — بديل لو V2 فشل أو بلا مفتاح
+    try:
+        rpc_out = _fetch_bep20_via_rpc(address)
+        if rpc_out:
+            return rpc_out
+    except Exception as e:
+        logger.debug(f"bep20 rpc fetch err: {e}")
     return out
 
 
@@ -13637,7 +13696,9 @@ def _admin_search_usdt_onchain(query):
                 return {
                     'coin': 'USDT_BEP20', 'label': '🟡 USDT (BEP20)',
                     'amount_usd': round(r['amount'], 4), 'crypto_amount': r['amount'],
-                    'hash': q, 'when': 0, 'source_addr': r.get('to', ''),
+                    'hash': q,
+                    'when': (r.get('time_ms', 0) // 1000) if r.get('time_ms') else 0,
+                    'source_addr': r.get('from', '') or r.get('to', ''),
                 }
         except Exception as e:
             logger.debug(f"bep20 direct err: {e}")
@@ -14276,21 +14337,27 @@ def ad_check_tx_handle(message):
                 'admin_id': uid
             })
 
-            when_str = '?'
+            when_str = '؟ (غير متوفر)'
             if onchain_match.get('when'):
                 try:
-                    when_str = datetime.datetime.fromtimestamp(int(onchain_match['when'])).strftime('%Y-%m-%d %H:%M')
+                    _dt = datetime.datetime.fromtimestamp(int(onchain_match['when']))
+                    when_str = _dt.strftime('%Y-%m-%d %H:%M:%S') + ' UTC'
                 except Exception:
                     pass
 
+            src = onchain_match.get('source_addr', '') or ''
+            src_line = f"👤 <b>المُرسِل:</b> <code>{html.escape(str(src)[:50])}</code>\n" if src else ""
+
             text = (
-                f"⚠️ <b>المعاملة موجودة على الشبكة لكن غير مُعالَجَة!</b>\n\n"
+                f"✅ <b>المعاملة موجودة على الشبكة</b>\n"
+                f"<i>(غير مُعالَجة بعد — متاحة للإضافة)</i>\n\n"
                 f"📡 <b>المصدر:</b> {onchain_match['label']}\n"
-                f"🆔 <b>Hash:</b> <code>{html.escape(str(_hash)[:70])}</code>\n"
                 f"💰 <b>المبلغ:</b> <b>${amt_usd:.4f}</b>  "
                 f"(<code>{onchain_match['crypto_amount']:.6f} {_coin}</code>)\n"
-                f"📅 <b>الوقت:</b> {when_str}\n\n"
-                f"💡 <i>المبلغ متاح للإضافة لمستخدم.</i>"
+                f"📅 <b>التاريخ والوقت:</b> {when_str}\n"
+                f"{src_line}"
+                f"🆔 <b>Hash:</b>\n<code>{html.escape(str(_hash)[:70])}</code>\n\n"
+                f"💡 <i>اضغط الزر لإضافة المبلغ لمستخدم.</i>"
             )
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(
