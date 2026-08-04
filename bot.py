@@ -8696,6 +8696,81 @@ USDT_CONTRACT_TRC20 = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
 USDT_CONTRACT_BEP20 = '0x55d398326f99059ff775485246999027b3197955'
 
 
+def _http_post_json(url, payload, timeout=10):
+    """طلب POST (JSON-RPC) يرجّع JSON، مباشرةً ثم عبر البروكسيات."""
+    try:
+        r = requests.post(url, json=payload, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    try:
+        pool = list(VERIFIED_PROXIES)[:4]
+        random.shuffle(pool)
+        for proxy in pool:
+            try:
+                r = requests.post(url, json=payload, timeout=8,
+                                  proxies={'http': proxy, 'https': proxy})
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+# عقد RPC عامة لـ BSC (بلا مفتاح — مثل مستكشفات TON/LTC)
+BSC_PUBLIC_RPCS = [
+    "https://bsc-dataseed.bnbchain.org",
+    "https://bsc-dataseed1.defibit.io",
+    "https://bsc-dataseed1.ninicoin.io",
+    "https://bsc.publicnode.com",
+    "https://binance.llamarpc.com",
+]
+
+
+def _bsc_rpc_call(method, params):
+    """ينادي BSC RPC عام (يجرّب عدة عقد) — بلا مفتاح."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    nodes = list(BSC_PUBLIC_RPCS)
+    random.shuffle(nodes)
+    for node in nodes:
+        res = _http_post_json(node, payload, timeout=8)
+        if res and 'result' in res and res['result'] is not None:
+            return res['result']
+    return None
+
+
+def _lookup_bep20_via_rpc(txid):
+    """يستعلم عن معاملة USDT على BSC بهاشها عبر RPC العام (بلا مفتاح).
+    يرجّع dict فيه (amount, to) أو None، أو {'_conn_fail': True} لو فشلت كل العقد."""
+    txid = str(txid).strip()
+    if not txid.startswith('0x'):
+        txid = '0x' + txid
+    receipt = _bsc_rpc_call("eth_getTransactionReceipt", [txid])
+    if receipt is None:
+        return {'_conn_fail': True}
+    try:
+        # لو status = 0x0 المعاملة فشلت
+        if str(receipt.get('status', '0x1')).lower() == '0x0':
+            return None
+        logs = receipt.get('logs', [])
+        TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+        for log in logs:
+            if str(log.get('address', '')).lower() != USDT_CONTRACT_BEP20.lower():
+                continue
+            topics = log.get('topics', [])
+            if not topics or str(topics[0]).lower() != TRANSFER_SIG:
+                continue
+            to_addr = '0x' + topics[2][-40:] if len(topics) >= 3 else ''
+            amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
+            return {'amount': round(amount, 6), 'to': to_addr, 'confirmed': True}
+    except Exception as e:
+        logger.debug(f"bsc rpc lookup parse err: {e}")
+    return None
+
+
 def _http_json(url, params=None, headers=None, timeout=10):
     """طلب GET يرجّع JSON، مباشرةً ثم عبر البروكسيات."""
     try:
@@ -10378,7 +10453,32 @@ def cmd_usdt_debug(message):
         except Exception as e:
             bot.send_message(uid, f"❌ TRC20 خطأ: {html.escape(str(e)[:200])}")
 
-    # BEP20
+    # 🌐 اختبار خام لـ BscScan V2 (نعرض رسالة الرد الحقيقية)
+    if addr_bep and addr_bep != 'Not Set':
+        try:
+            _k = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
+            _p = {'chainid': 56, 'module': 'account', 'action': 'tokentx',
+                  'contractaddress': USDT_CONTRACT_BEP20, 'address': addr_bep,
+                  'page': 1, 'offset': 3, 'sort': 'desc'}
+            if _k:
+                _p['apikey'] = _k
+            _raw = _http_json("https://api.etherscan.io/v2/api", params=_p)
+            if _raw is None:
+                bot.send_message(uid, "🌐 <b>BscScan V2:</b> ❌ لا اتصال (السيرفر لا يصله).",
+                                 parse_mode="HTML")
+            else:
+                st = _raw.get('status')
+                msg_r = str(_raw.get('message', ''))
+                res = _raw.get('result')
+                n = len(res) if isinstance(res, list) else 0
+                extra = f" — {html.escape(str(res)[:120])}" if not isinstance(res, list) else ""
+                bot.send_message(uid,
+                    f"🌐 <b>BscScan V2:</b> status={st}, message={html.escape(msg_r)}, "
+                    f"نتائج={n}{extra}", parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(uid, f"🌐 BscScan V2 خطأ: {html.escape(str(e)[:200])}")
+
+    # BEP20 (المفلتر)
     if addr_bep and addr_bep != 'Not Set':
         try:
             rows = _fetch_bep20_usdt_deposits(addr_bep, limit=5)
@@ -13460,35 +13560,43 @@ def _lookup_trc20_tx_by_hash(txid):
 
 
 def _lookup_bep20_tx_by_hash(txid):
-    """يستعلم عن معاملة BSC بهاشها مباشرة عبر BscScan (tokentx بالهاش).
-    يرجّع dict فيه (amount, to) أو None، أو {'_conn_fail': True} لو فشل الاتصال."""
+    """يستعلم عن معاملة USDT على BSC بهاشها.
+    أولاً عبر RPC العام (بلا مفتاح — مثل TON/LTC)، ثم Etherscan V2 احتياطاً."""
+    # 1️⃣ RPC العام (بلا مفتاح)
+    r = _lookup_bep20_via_rpc(txid)
+    if isinstance(r, dict) and not r.get('_conn_fail'):
+        if r.get('amount', 0) > 0:
+            return r
+        # RPC رد لكن ما فيه تحويل USDT مطابق → غير موجودة
+        return None
+    # لو RPC فشل اتصالاً، نجرّب V2 قبل ما نستسلم
     txid = str(txid).strip()
     if not txid.startswith('0x'):
         txid = '0x' + txid
+    txid_l = txid.lower()
     api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    params = {'chainid': 56, 'module': 'proxy',
-              'action': 'eth_getTransactionReceipt', 'txhash': txid}
-    if api_key:
-        params['apikey'] = api_key
-    receipt = _http_json("https://api.etherscan.io/v2/api", params=params)
-    if receipt is None:
-        return {'_conn_fail': True}   # فشل الاتصال (لا رد)
-    if not receipt.get('result'):
-        return None   # رد لكن المعاملة غير موجودة
-    try:
-        logs = receipt['result'].get('logs', [])
-        TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-        for log in logs:
-            if str(log.get('address', '')).lower() != USDT_CONTRACT_BEP20.lower():
-                continue
-            topics = log.get('topics', [])
-            if not topics or topics[0].lower() != TRANSFER_SIG:
-                continue
-            to_addr = '0x' + topics[2][-40:] if len(topics) >= 3 else ''
-            amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
-            return {'amount': round(amount, 6), 'to': to_addr, 'confirmed': True}
-    except Exception as e:
-        logger.debug(f"bep20 hash lookup parse err: {e}")
+
+    addr = get_setting('usdt_bep20_address', '')
+    if addr and addr != 'Not Set':
+        params = {
+            'chainid': 56, 'module': 'account', 'action': 'tokentx',
+            'contractaddress': USDT_CONTRACT_BEP20,
+            'address': addr, 'page': 1, 'offset': 100, 'sort': 'desc',
+        }
+        if api_key:
+            params['apikey'] = api_key
+        data = _http_json("https://api.etherscan.io/v2/api", params=params)
+        if data is None:
+            return {'_conn_fail': True}
+        if data.get('status') == '1' and isinstance(data.get('result'), list):
+            for tx in data['result']:
+                if str(tx.get('hash', '')).lower() != txid_l:
+                    continue
+                if str(tx.get('contractAddress', '')).lower() != USDT_CONTRACT_BEP20.lower():
+                    continue
+                dec = int(tx.get('tokenDecimal', 18))
+                amt = int(tx.get('value', 0)) / (10 ** dec)
+                return {'amount': round(amt, 6), 'to': str(tx.get('to', '')), 'confirmed': True}
     return None
 
 
