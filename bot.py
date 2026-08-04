@@ -10262,6 +10262,87 @@ def admin_search_bybit_tx(query):
     return None
 
 
+@bot.message_handler(commands=['ping'])
+def cmd_ping(message):
+    """اختبار بسيط: لو رد بـ PONG فالملف المنشور حديث."""
+    try:
+        bot.reply_to(message, "🏓 PONG — النسخة الحديثة تعمل ✅\n"
+                              "الأوامر المتاحة: /usdt_debug /bybit_debug /bybit_match")
+    except Exception:
+        try:
+            bot.send_message(message.from_user.id, "🏓 PONG")
+        except Exception:
+            pass
+
+
+@bot.message_handler(commands=['usdt_debug'])
+def cmd_usdt_debug(message):
+    """🔍 يفحص اتصال USDT على البلوكشين ويعرض آخر التحويلات — للأدمن."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+
+    bot.send_message(uid, "🔍 جاري فحص USDT على البلوكشين...")
+
+    # TRC20
+    addr_trc = get_setting('usdt_address', '')
+    if not addr_trc or addr_trc == 'Not Set':
+        bot.send_message(uid, "⚠️ عنوان USDT TRC20 غير مضبوط في الإعدادات.")
+    else:
+        try:
+            rows = _fetch_trc20_usdt_deposits(addr_trc, limit=5)
+            if rows:
+                lines = [f"✅ <b>TRC20</b> — {len(rows)} تحويل وارد:"]
+                for tx_id, amt, t_ms in rows[:5]:
+                    when = time.strftime('%m-%d %H:%M', time.gmtime(t_ms/1000)) if t_ms else '—'
+                    lines.append(f"• <code>{tx_id[:18]}</code> — {amt} USDT — {when}")
+                bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+            else:
+                bot.send_message(uid, "📭 <b>TRC20</b>: لا تحويلات (أو فشل الاتصال بـ TronGrid).\n"
+                                      "تأكد أن العنوان صحيح وأن السيرفر يصل الإنترنت.", parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(uid, f"❌ TRC20 خطأ: {html.escape(str(e)[:200])}")
+
+    # BEP20
+    addr_bep = get_setting('usdt_bep20_address', '')
+    if not addr_bep or addr_bep == 'Not Set':
+        bot.send_message(uid, "⚠️ عنوان USDT BEP20 غير مضبوط في الإعدادات.")
+    else:
+        key = get_setting('bscscan_api_key', '')
+        if not key or key == 'Not Set':
+            bot.send_message(uid, "⚠️ مفتاح BscScan غير مضبوط — BEP20 قد يفشل. "
+                                  "أضفه من: الإعدادات ← 🔑 BscScan API Key.")
+        try:
+            rows = _fetch_bep20_usdt_deposits(addr_bep, limit=5)
+            if rows:
+                lines = [f"✅ <b>BEP20</b> — {len(rows)} تحويل وارد:"]
+                for tx_id, amt, t_ms in rows[:5]:
+                    when = time.strftime('%m-%d %H:%M', time.gmtime(t_ms/1000)) if t_ms else '—'
+                    lines.append(f"• <code>{tx_id[:18]}</code> — {amt} USDT — {when}")
+                bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+            else:
+                bot.send_message(uid, "📭 <b>BEP20</b>: لا تحويلات (أو فشل BscScan).\n"
+                                      "تأكد من العنوان ومن مفتاح BscScan.", parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(uid, f"❌ BEP20 خطأ: {html.escape(str(e)[:200])}")
+
+    # الإيداعات المعلّقة
+    now = int(time.time())
+    pend = list(db.pending_deposits.find({
+        'coin': {'$in': ['USDT', 'USDT_BEP20']}, 'status': 'pending',
+        'expires_at': {'$gt': now}}))
+    if pend:
+        lines = [f"\n📌 <b>معلّقة الآن ({len(pend)}):</b>"]
+        for p in pend[:8]:
+            lines.append(f"• user {p['user_id']} ينتظر <code>{p['unique_amount_usd']:.4f}</code> [{p['coin']}]")
+        bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+    else:
+        bot.send_message(uid, "📭 لا إيداعات USDT معلّقة حالياً.")
+
+
 @bot.message_handler(commands=['bybit_debug'])
 def cmd_bybit_debug(message):
     """🔍 يعرض آخر سجلات Bybit بكل حقولها — للأدمن فقط."""
@@ -13283,6 +13364,50 @@ def _tx_hash_matches(user_hash, api_hash):
     return u == a or u in a or a in u
 
 
+def _admin_search_usdt_onchain(query):
+    """يبحث عن هاش تحويل USDT على البلوكشين (TRC20 + BEP20) لعناوين Trust Wallet.
+    يرجّع dict متوافق مع onchain_match، أو None."""
+    q = str(query).strip().lower().lstrip('0x')
+    if len(q) < 8:
+        return None
+
+    def _match(txid):
+        t = str(txid).strip().lower().lstrip('0x')
+        return t == q or (len(q) >= 16 and (q in t or t in q))
+
+    # TRC20
+    try:
+        addr = get_setting('usdt_address', '')
+        if addr and addr != 'Not Set':
+            for tx_id, amount, t_ms in _fetch_trc20_usdt_deposits(addr, limit=50):
+                if _match(tx_id):
+                    return {
+                        'coin': 'USDT', 'label': '🟢 USDT (TRC20)',
+                        'amount_usd': round(amount, 4), 'crypto_amount': amount,
+                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0,
+                        'source_addr': '',
+                    }
+    except Exception as e:
+        logger.debug(f"admin usdt trc20 search err: {e}")
+
+    # BEP20
+    try:
+        addr = get_setting('usdt_bep20_address', '')
+        if addr and addr != 'Not Set':
+            for tx_id, amount, t_ms in _fetch_bep20_usdt_deposits(addr, limit=50):
+                if _match(tx_id):
+                    return {
+                        'coin': 'USDT_BEP20', 'label': '🟡 USDT (BEP20)',
+                        'amount_usd': round(amount, 4), 'crypto_amount': amount,
+                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0,
+                        'source_addr': '',
+                    }
+    except Exception as e:
+        logger.debug(f"admin usdt bep20 search err: {e}")
+
+    return None
+
+
 def _admin_search_ton_tx(query):
     """يبحث عن هاش TON في شبكة TON (TONCenter ثم TonAPI) مقابل محفظة البوت.
 
@@ -13804,6 +13929,12 @@ def ad_check_tx_handle(message):
                                 parse_mode="HTML"
                             )
                             return
+
+            # --- 🔗 USDT على البلوكشين (TRC20 + BEP20) — لعناوين Trust Wallet ---
+            if not onchain_match and not onchain_is_sender:
+                usdt_r = _admin_search_usdt_onchain(query)
+                if usdt_r:
+                    onchain_match = usdt_r
 
             # --- 🟠 Bybit (سجلات داخلية + on-chain) ---
             if not onchain_match and not onchain_is_sender and bybit_is_configured():
