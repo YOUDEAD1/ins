@@ -8753,11 +8753,14 @@ def _fetch_trc20_usdt_deposits(address, limit=30):
 
 
 def _fetch_bep20_usdt_deposits(address, limit=30):
-    """يجلب تحويلات USDT (BEP20) الواردة لعنوان عبر BscScan."""
+    """يجلب تحويلات USDT (BEP20) الواردة لعنوان عبر Etherscan API V2.
+    ⚠️ BscScan V1 (api.bscscan.com) أُلغيت في 2025 — نستخدم V2 الموحّدة (chainid=56)."""
     out = []
     api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    url = "https://api.bscscan.com/api"
+    # Etherscan V2 الموحّدة — BSC = chainid 56
+    url = "https://api.etherscan.io/v2/api"
     params = {
+        'chainid': 56,
         'module': 'account', 'action': 'tokentx',
         'contractaddress': USDT_CONTRACT_BEP20,
         'address': address, 'page': 1, 'offset': limit, 'sort': 'desc',
@@ -9369,6 +9372,13 @@ def _bybit_net_address(net_key):
 
 
 def bybit_is_configured():
+    # مفتاح تعطيل صريح: لو bybit_disabled=1 نوقف Bybit تماماً
+    #   (مفيد بعد الانتقال لـ Trust Wallet — يوقف أخطاء "API key invalid").
+    try:
+        if str(get_setting('bybit_disabled', '0')) == '1':
+            return False
+    except Exception:
+        pass
     k, s, _u, _b = _bybit_creds()
     return bool(k and s)
 
@@ -10266,13 +10276,46 @@ def admin_search_bybit_tx(query):
 def cmd_ping(message):
     """اختبار بسيط: لو رد بـ PONG فالملف المنشور حديث."""
     try:
-        bot.reply_to(message, "🏓 PONG — النسخة الحديثة تعمل ✅\n"
-                              "الأوامر المتاحة: /usdt_debug /bybit_debug /bybit_match")
+        bot.reply_to(message, "🏓 PONG — النسخة V-USDT-2 تعمل ✅\n"
+                              "مميزات هذه النسخة:\n"
+                              "• بحث USDT على البلوكشين (TronScan/BscScan)\n"
+                              "• تشخيص اتصال البلوكشين\n"
+                              "• /usdt_debug /bybit_off\n\n"
+                              "لو لا ترى «V-USDT-2» فالملف المنشور قديم — أعد رفع آخر نسخة وأعد التشغيل.")
     except Exception:
         try:
-            bot.send_message(message.from_user.id, "🏓 PONG")
+            bot.send_message(message.from_user.id, "🏓 PONG V-USDT-2")
         except Exception:
             pass
+
+
+@bot.message_handler(commands=['bybit_off'])
+def cmd_bybit_off(message):
+    """يوقف Bybit تماماً (يوقف أخطاء API key invalid بعد الانتقال لـ Trust Wallet)."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+    db.settings.update_one({'key': 'bybit_disabled'}, {'$set': {'value': '1'}}, upsert=True)
+    bot.send_message(uid, "🛑 <b>تم إيقاف Bybit تماماً.</b>\n\n"
+                          "لن يحاول الاتصال بعد الآن، وستتوقف أخطاء «API key invalid».\n"
+                          "الاعتماد الآن على USDT عبر البلوكشين (Trust Wallet).\n\n"
+                          "لإعادة تشغيله: /bybit_on", parse_mode="HTML")
+
+
+@bot.message_handler(commands=['bybit_on'])
+def cmd_bybit_on(message):
+    """يعيد تشغيل Bybit."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+    db.settings.update_one({'key': 'bybit_disabled'}, {'$set': {'value': '0'}}, upsert=True)
+    bot.send_message(uid, "✅ تم إعادة تشغيل Bybit (إن كانت المفاتيح صحيحة).", parse_mode="HTML")
 
 
 @bot.message_handler(commands=['usdt_debug'])
@@ -13423,10 +13466,11 @@ def _lookup_bep20_tx_by_hash(txid):
     if not txid.startswith('0x'):
         txid = '0x' + txid
     api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    params = {'module': 'proxy', 'action': 'eth_getTransactionReceipt', 'txhash': txid}
+    params = {'chainid': 56, 'module': 'proxy',
+              'action': 'eth_getTransactionReceipt', 'txhash': txid}
     if api_key:
         params['apikey'] = api_key
-    receipt = _http_json("https://api.bscscan.com/api", params=params)
+    receipt = _http_json("https://api.etherscan.io/v2/api", params=params)
     if receipt is None:
         return {'_conn_fail': True}   # فشل الاتصال (لا رد)
     if not receipt.get('result'):
@@ -14050,6 +14094,7 @@ def ad_check_tx_handle(message):
 
             # --- 🔗 USDT على البلوكشين (TRC20 + BEP20) — لعناوين Trust Wallet ---
             if not onchain_match and not onchain_is_sender:
+                bot.send_message(uid, "🔍 جاري الفحص في USDT على البلوكشين (TronScan + BscScan)...")
                 usdt_r = _admin_search_usdt_onchain(query)
                 if isinstance(usdt_r, dict) and usdt_r.get('_conn_fail'):
                     bot.send_message(
