@@ -10287,34 +10287,56 @@ def cmd_usdt_debug(message):
 
     bot.send_message(uid, "🔍 جاري فحص USDT على البلوكشين...")
 
-    # TRC20
+    # 🔎 أولاً: نعرض العناوين المقروءة وحالة الاتصال الخام
     addr_trc = get_setting('usdt_address', '')
-    if not addr_trc or addr_trc == 'Not Set':
-        bot.send_message(uid, "⚠️ عنوان USDT TRC20 غير مضبوط في الإعدادات.")
-    else:
+    addr_bep = get_setting('usdt_bep20_address', '')
+    key = get_setting('bscscan_api_key', '')
+    diag = ["🔧 <b>تشخيص الإعدادات:</b>"]
+    diag.append(f"• عنوان TRC20: <code>{html.escape(str(addr_trc)[:50]) if addr_trc and addr_trc!='Not Set' else '❌ غير مضبوط'}</code>")
+    diag.append(f"• عنوان BEP20: <code>{html.escape(str(addr_bep)[:50]) if addr_bep and addr_bep!='Not Set' else '❌ غير مضبوط'}</code>")
+    diag.append(f"• مفتاح BscScan: {'✅ موجود' if key and key!='Not Set' else '❌ غير مضبوط'}")
+    bot.send_message(uid, "\n".join(diag), parse_mode="HTML")
+
+    # 🌐 اختبار اتصال خام بـ TronGrid (بلا فلترة) لنعرف: اتصال أم عنوان؟
+    if addr_trc and addr_trc != 'Not Set':
+        try:
+            test = _http_json(
+                f"https://api.trongrid.io/v1/accounts/{addr_trc}/transactions/trc20",
+                params={'limit': 3})
+            if test is None:
+                bot.send_message(uid, "🌐 <b>TronGrid:</b> ❌ لا اتصال (السيرفر لا يصل الإنترنت أو محجوب).",
+                                 parse_mode="HTML")
+            elif 'data' in test:
+                n = len(test['data'])
+                bot.send_message(uid, f"🌐 <b>TronGrid:</b> ✅ الاتصال يعمل — "
+                                      f"العنوان له {n} حركة USDT إجمالاً (واردة/صادرة).\n"
+                                      f"{'⚠️ إن كان 0، فلم يستلم هذا العنوان USDT بعد، أو العنوان خطأ.' if n==0 else ''}",
+                                 parse_mode="HTML")
+            else:
+                bot.send_message(uid, f"🌐 <b>TronGrid:</b> رد غير متوقع: <code>{html.escape(str(test)[:150])}</code>",
+                                 parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(uid, f"🌐 TronGrid خطأ: {html.escape(str(e)[:200])}")
+
+    # TRC20 (المفلتر — الوارد الرسمي فقط)
+    if addr_trc and addr_trc != 'Not Set':
         try:
             rows = _fetch_trc20_usdt_deposits(addr_trc, limit=5)
             if rows:
-                lines = [f"✅ <b>TRC20</b> — {len(rows)} تحويل وارد:"]
+                lines = [f"✅ <b>TRC20</b> — {len(rows)} تحويل وارد (USDT رسمي):"]
                 for tx_id, amt, t_ms in rows[:5]:
                     when = time.strftime('%m-%d %H:%M', time.gmtime(t_ms/1000)) if t_ms else '—'
                     lines.append(f"• <code>{tx_id[:18]}</code> — {amt} USDT — {when}")
                 bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
             else:
-                bot.send_message(uid, "📭 <b>TRC20</b>: لا تحويلات (أو فشل الاتصال بـ TronGrid).\n"
-                                      "تأكد أن العنوان صحيح وأن السيرفر يصل الإنترنت.", parse_mode="HTML")
+                bot.send_message(uid, "📭 <b>TRC20</b>: لا تحويلات USDT واردة رسمية.\n"
+                                      "<i>لو TronGrid يعمل (فوق) والعدد 0، فالعنوان لم يستلم USDT رسمي بعد.</i>",
+                                 parse_mode="HTML")
         except Exception as e:
             bot.send_message(uid, f"❌ TRC20 خطأ: {html.escape(str(e)[:200])}")
 
     # BEP20
-    addr_bep = get_setting('usdt_bep20_address', '')
-    if not addr_bep or addr_bep == 'Not Set':
-        bot.send_message(uid, "⚠️ عنوان USDT BEP20 غير مضبوط في الإعدادات.")
-    else:
-        key = get_setting('bscscan_api_key', '')
-        if not key or key == 'Not Set':
-            bot.send_message(uid, "⚠️ مفتاح BscScan غير مضبوط — BEP20 قد يفشل. "
-                                  "أضفه من: الإعدادات ← 🔑 BscScan API Key.")
+    if addr_bep and addr_bep != 'Not Set':
         try:
             rows = _fetch_bep20_usdt_deposits(addr_bep, limit=5)
             if rows:
@@ -10324,8 +10346,8 @@ def cmd_usdt_debug(message):
                     lines.append(f"• <code>{tx_id[:18]}</code> — {amt} USDT — {when}")
                 bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
             else:
-                bot.send_message(uid, "📭 <b>BEP20</b>: لا تحويلات (أو فشل BscScan).\n"
-                                      "تأكد من العنوان ومن مفتاح BscScan.", parse_mode="HTML")
+                bot.send_message(uid, "📭 <b>BEP20</b>: لا تحويلات واردة (تأكد من العنوان والمفتاح).",
+                                 parse_mode="HTML")
         except Exception as e:
             bot.send_message(uid, f"❌ BEP20 خطأ: {html.escape(str(e)[:200])}")
 
@@ -10335,7 +10357,7 @@ def cmd_usdt_debug(message):
         'coin': {'$in': ['USDT', 'USDT_BEP20']}, 'status': 'pending',
         'expires_at': {'$gt': now}}))
     if pend:
-        lines = [f"\n📌 <b>معلّقة الآن ({len(pend)}):</b>"]
+        lines = [f"📌 <b>معلّقة الآن ({len(pend)}):</b>"]
         for p in pend[:8]:
             lines.append(f"• user {p['user_id']} ينتظر <code>{p['unique_amount_usd']:.4f}</code> [{p['coin']}]")
         bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
