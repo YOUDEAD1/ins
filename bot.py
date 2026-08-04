@@ -8236,7 +8236,9 @@ def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin, send
         db.pending_deposits.delete_many({'user_id': uid, 'coin': coin, 'status': 'pending'})
         
         pending_id = f"PD{uid}{int(time.time())}{random.randint(100, 999)}"
-        expires = int(time.time()) + (60 * 30)
+        # صلاحية أطول (ساعتان) حتى لو تأخّر المستخدم أو تأخّرت التأكيدات،
+        # يبقى الإيداع قابلاً للمطابقة التلقائية. العدّاد المعروض للمستخدم يبقى 30 دقيقة.
+        expires = int(time.time()) + (60 * 120)
         record = {
             'pending_id': pending_id,
             'user_id': uid,
@@ -8838,12 +8840,13 @@ def _fetch_trc20_usdt_deposits(address, limit=30):
     return out
 
 
-def _fetch_bep20_via_rpc(address, blocks_back=28800):
+def _fetch_bep20_via_rpc(address, blocks_back=2400):
     """يجلب تحويلات USDT الواردة لعنوان عبر RPC العام (بلا مفتاح) باستخدام eth_getLogs.
-    blocks_back: كم بلوك للخلف نمسح (28800 ≈ 24 ساعة على BSC بـ 3ث/بلوك).
-    يرجّع قائمة (tx_id, amount, time_ms)."""
+    blocks_back: كم بلوك للخلف نمسح (2400 ≈ ساعتان على BSC بـ 3ث/بلوك).
+
+    مهم: عقد RPC العامة تحدّ نطاق eth_getLogs (غالباً ≤5000 بلوك)، فنمسح
+    على دفعات صغيرة (1000 بلوك) لتجنّب الفشل الصامت."""
     out = []
-    # آخر رقم بلوك
     latest_hex = _bsc_rpc_call("eth_blockNumber", [])
     if not latest_hex:
         return out
@@ -8851,40 +8854,54 @@ def _fetch_bep20_via_rpc(address, blocks_back=28800):
         latest = int(latest_hex, 16)
     except Exception:
         return out
-    from_block = max(0, latest - blocks_back)
 
-    # topic للمستلم = عنواننا (مبطّن لـ 32 بايت)
     addr_clean = address.lower().replace('0x', '')
     to_topic = '0x' + '0' * 24 + addr_clean
     TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
-    params = [{
-        'fromBlock': hex(from_block),
-        'toBlock': 'latest',
-        'address': USDT_CONTRACT_BEP20,
-        'topics': [TRANSFER_SIG, None, to_topic],  # [event, from(any), to=us]
-    }]
-    logs = _bsc_rpc_call("eth_getLogs", params)
-    if not isinstance(logs, list):
-        return out
-    for log in logs:
-        try:
-            amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
-            tx_id = str(log.get('transactionHash', ''))
-            # الوقت: نحتاج بلوك؛ نتركه 0 (المطابقة تعتمد المبلغ لا الوقت الدقيق)
-            if tx_id and amount > 0:
-                out.append((tx_id, round(amount, 6), 0))
-        except Exception:
-            continue
+    CHUNK = 1000
+    start = max(0, latest - blocks_back)
+    seen = set()
+    b = start
+    while b <= latest:
+        end = min(b + CHUNK - 1, latest)
+        params = [{
+            'fromBlock': hex(b),
+            'toBlock': hex(end),
+            'address': USDT_CONTRACT_BEP20,
+            'topics': [TRANSFER_SIG, None, to_topic],
+        }]
+        logs = _bsc_rpc_call("eth_getLogs", params)
+        if isinstance(logs, list):
+            for log in logs:
+                try:
+                    tx_id = str(log.get('transactionHash', ''))
+                    if not tx_id or tx_id in seen:
+                        continue
+                    seen.add(tx_id)
+                    amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
+                    if amount > 0:
+                        out.append((tx_id, round(amount, 6), 0))
+                except Exception:
+                    continue
+        b = end + 1
     return out
 
 
 def _fetch_bep20_usdt_deposits(address, limit=30):
     """يجلب تحويلات USDT (BEP20) الواردة لعنوان.
-    يجرّب Etherscan V2 (بمفتاح، سريع) ثم RPC العام (بلا مفتاح) كبديل."""
+    يجرّب RPC العام أولاً (بلا مفتاح — أثبت نجاحه)، ثم Etherscan V2 كبديل."""
+    # 1️⃣ RPC العام (بلا مفتاح) — يراقب العنوان مباشرة مثل LTC
+    try:
+        rpc_out = _fetch_bep20_via_rpc(address)
+        if rpc_out:
+            return rpc_out
+    except Exception as e:
+        logger.debug(f"bep20 rpc fetch err: {e}")
+
+    # 2️⃣ Etherscan V2 (بمفتاح) — بديل
     out = []
     api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
-    # V2 أولاً (بمفتاح)
     if api_key:
         url = "https://api.etherscan.io/v2/api"
         params = {
@@ -8915,16 +8932,6 @@ def _fetch_bep20_usdt_deposits(address, limit=30):
                         out.append((tx_id, round(amount, 6), t_ms))
                 except Exception:
                     continue
-            if out:
-                return out
-
-    # RPC العام (بلا مفتاح) — بديل لو V2 فشل أو بلا مفتاح
-    try:
-        rpc_out = _fetch_bep20_via_rpc(address)
-        if rpc_out:
-            return rpc_out
-    except Exception as e:
-        logger.debug(f"bep20 rpc fetch err: {e}")
     return out
 
 
@@ -10450,6 +10457,72 @@ def cmd_bybit_on(message):
         return
     db.settings.update_one({'key': 'bybit_disabled'}, {'$set': {'value': '0'}}, upsert=True)
     bot.send_message(uid, "✅ تم إعادة تشغيل Bybit (إن كانت المفاتيح صحيحة).", parse_mode="HTML")
+
+
+@bot.message_handler(commands=['usdt_why'])
+def cmd_usdt_why(message):
+    """🔬 يفحص لماذا لم يُطابَق إيداع معلّق: يعرض ما يراه الفحص فعلاً مقابل المعلّق."""
+    uid = message.from_user.id
+    try:
+        if not _is_admin_check(uid):
+            return
+    except Exception:
+        return
+
+    bot.send_message(uid, "🔬 جاري فحص سبب عدم المطابقة...")
+
+    # الإيداعات المعلّقة
+    now = int(time.time())
+    pend = list(db.pending_deposits.find({
+        'coin': {'$in': ['USDT', 'USDT_BEP20']}, 'status': 'pending',
+        'expires_at': {'$gt': now}}))
+    if not pend:
+        bot.send_message(uid, "📭 لا إيداعات USDT معلّقة الآن.\n"
+                              "<i>لو المستخدم دفع وانتهت صلاحية الإيداع (30 دقيقة)، "
+                              "لن يُطابَق تلقائياً — أضفه يدوياً عبر فحص المعاملة.</i>",
+                         parse_mode="HTML")
+        return
+
+    lines = ["📌 <b>الإيداعات المعلّقة:</b>"]
+    for p in pend[:10]:
+        age_min = (now - int(p.get('created_at', now))) // 60 if p.get('created_at') else '?'
+        lines.append(f"• user {p['user_id']}: <code>{p['unique_amount_usd']:.4f}</code> "
+                     f"[{p['coin']}] — عمره {age_min} دقيقة")
+    bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+
+    # ماذا يرى الفحص فعلاً على البلوكشين؟
+    addr_bep = get_setting('usdt_bep20_address', '')
+    if addr_bep and addr_bep != 'Not Set':
+        rows = _fetch_bep20_usdt_deposits(addr_bep, limit=10)
+        if rows:
+            l2 = [f"🔗 <b>آخر تحويلات BEP20 المرئية ({len(rows)}):</b>"]
+            for tx_id, amt, t_ms in rows[:10]:
+                # هل يطابق أي معلّق؟
+                matched = any(abs(amt - float(p['unique_amount_usd'])) <= 0.001
+                              for p in pend if p['coin'] == 'USDT_BEP20')
+                mark = "✅ يطابق معلّقاً" if matched else "⚠️ لا يطابق"
+                l2.append(f"• {amt} USDT — {mark}")
+            bot.send_message(uid, "\n".join(l2), parse_mode="HTML")
+
+            # تحليل الفروقات
+            l3 = ["🔍 <b>تحليل:</b>"]
+            for p in pend:
+                if p['coin'] != 'USDT_BEP20':
+                    continue
+                want = float(p['unique_amount_usd'])
+                closest = min(rows, key=lambda r: abs(r[1] - want), default=None)
+                if closest:
+                    diff = closest[1] - want
+                    if abs(diff) <= 0.001:
+                        l3.append(f"• {want:.4f}: ✅ يوجد تطابق ({closest[1]})")
+                    else:
+                        l3.append(f"• {want:.4f}: أقرب تحويل {closest[1]:.4f} "
+                                  f"(فرق {diff:+.4f}) — {'وصل أكثر (رسوم فوقه؟)' if diff > 0 else 'وصل أقل (رسوم خُصمت؟)'}")
+            bot.send_message(uid, "\n".join(l3), parse_mode="HTML")
+        else:
+            bot.send_message(uid, "🔗 <b>BEP20:</b> الفحص لا يرى أي تحويل حالياً.\n"
+                                  "<i>لو المستخدم دفع فعلاً، فإما التحويل حديث جداً (تأكيدات<15) "
+                                  "أو الاتصال يفشل. شغّل /usdt_debug.</i>", parse_mode="HTML")
 
 
 @bot.message_handler(commands=['usdt_debug'])
