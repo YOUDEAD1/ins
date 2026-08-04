@@ -13386,18 +13386,108 @@ def _tx_hash_matches(user_hash, api_hash):
     return u == a or u in a or a in u
 
 
-def _admin_search_usdt_onchain(query):
-    """يبحث عن هاش تحويل USDT على البلوكشين (TRC20 + BEP20) لعناوين Trust Wallet.
-    يرجّع dict متوافق مع onchain_match، أو None."""
-    q = str(query).strip().lower().lstrip('0x')
-    if len(q) < 8:
+def _lookup_trc20_tx_by_hash(txid):
+    """يستعلم عن معاملة TRON بهاشها مباشرة عبر TronScan.
+    يرجّع dict فيه (amount, to, confirmed) أو None."""
+    txid = str(txid).strip()
+    if txid.lower().startswith('0x'):
+        txid = txid[2:]
+    data = _http_json("https://apilist.tronscanapi.com/api/transaction-info",
+                      params={'hash': txid})
+    if not data:
         return None
+    try:
+        trc = data.get('trc20TransferInfo') or []
+        if isinstance(trc, dict):
+            trc = [trc]
+        for t in trc:
+            contract = str(t.get('contract_address', '')).lower()
+            if contract != USDT_CONTRACT_TRC20.lower():
+                continue
+            dec = int(t.get('decimals', 6))
+            amt = int(t.get('amount_str', t.get('amount', 0))) / (10 ** dec)
+            return {
+                'amount': round(amt, 6),
+                'to': str(t.get('to_address', '')),
+                'confirmed': data.get('confirmed', True),
+            }
+    except Exception as e:
+        logger.debug(f"trc20 hash lookup parse err: {e}")
+    return None
 
+
+def _lookup_bep20_tx_by_hash(txid):
+    """يستعلم عن معاملة BSC بهاشها مباشرة عبر BscScan (tokentx بالهاش)."""
+    txid = str(txid).strip()
+    if not txid.startswith('0x'):
+        txid = '0x' + txid
+    api_key = get_setting('bscscan_api_key', '') or os.getenv('BSCSCAN_API_KEY', '')
+    # نستخدم eth_getTransactionReceipt للتأكد أنها موجودة ومؤكدة
+    params = {'module': 'proxy', 'action': 'eth_getTransactionReceipt', 'txhash': txid}
+    if api_key:
+        params['apikey'] = api_key
+    receipt = _http_json("https://api.bscscan.com/api", params=params)
+    if not receipt or not receipt.get('result'):
+        return None
+    try:
+        logs = receipt['result'].get('logs', [])
+        # Transfer event للعقد الرسمي
+        TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+        for log in logs:
+            if str(log.get('address', '')).lower() != USDT_CONTRACT_BEP20.lower():
+                continue
+            topics = log.get('topics', [])
+            if not topics or topics[0].lower() != TRANSFER_SIG:
+                continue
+            # المستلم = آخر 40 حرف من topics[2]
+            to_addr = '0x' + topics[2][-40:] if len(topics) >= 3 else ''
+            amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
+            return {'amount': round(amount, 6), 'to': to_addr, 'confirmed': True}
+    except Exception as e:
+        logger.debug(f"bep20 hash lookup parse err: {e}")
+    return None
+
+
+def _admin_search_usdt_onchain(query):
+    """يبحث عن هاش تحويل USDT على البلوكشين (TRC20 + BEP20).
+    أولاً بالبحث المباشر بالهاش (الأضمن)، ثم في قائمة العنوان كاحتياط."""
+    q = str(query).strip()
+
+    # 1️⃣ بحث مباشر بالهاش (يجد المعاملة حتى لو قديمة أو صادرة)
+    #    TRC20: هاش بلا 0x، طوله 64 hex
+    def _strip0x(s):
+        s = str(s).strip()
+        return s[2:] if s.lower().startswith('0x') else s
+    q_clean = _strip0x(q).lower()
+    if len(q_clean) >= 40:
+        # جرّب TRON
+        try:
+            r = _lookup_trc20_tx_by_hash(q)
+            if r and r.get('amount', 0) > 0:
+                return {
+                    'coin': 'USDT', 'label': '🟢 USDT (TRC20)',
+                    'amount_usd': round(r['amount'], 4), 'crypto_amount': r['amount'],
+                    'hash': q, 'when': 0, 'source_addr': r.get('to', ''),
+                }
+        except Exception as e:
+            logger.debug(f"trc20 direct err: {e}")
+        # جرّب BSC
+        try:
+            r = _lookup_bep20_tx_by_hash(q)
+            if r and r.get('amount', 0) > 0:
+                return {
+                    'coin': 'USDT_BEP20', 'label': '🟡 USDT (BEP20)',
+                    'amount_usd': round(r['amount'], 4), 'crypto_amount': r['amount'],
+                    'hash': q, 'when': 0, 'source_addr': r.get('to', ''),
+                }
+        except Exception as e:
+            logger.debug(f"bep20 direct err: {e}")
+
+    # 2️⃣ احتياط: البحث في قائمة العنوان (للهاش الجزئي)
     def _match(txid):
-        t = str(txid).strip().lower().lstrip('0x')
-        return t == q or (len(q) >= 16 and (q in t or t in q))
+        t = _strip0x(str(txid)).lower()
+        return t == q_clean or (len(q_clean) >= 16 and (q_clean in t or t in q_clean))
 
-    # TRC20
     try:
         addr = get_setting('usdt_address', '')
         if addr and addr != 'Not Set':
@@ -13406,13 +13496,11 @@ def _admin_search_usdt_onchain(query):
                     return {
                         'coin': 'USDT', 'label': '🟢 USDT (TRC20)',
                         'amount_usd': round(amount, 4), 'crypto_amount': amount,
-                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0,
-                        'source_addr': '',
+                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0, 'source_addr': '',
                     }
     except Exception as e:
         logger.debug(f"admin usdt trc20 search err: {e}")
 
-    # BEP20
     try:
         addr = get_setting('usdt_bep20_address', '')
         if addr and addr != 'Not Set':
@@ -13421,8 +13509,7 @@ def _admin_search_usdt_onchain(query):
                     return {
                         'coin': 'USDT_BEP20', 'label': '🟡 USDT (BEP20)',
                         'amount_usd': round(amount, 4), 'crypto_amount': amount,
-                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0,
-                        'source_addr': '',
+                        'hash': tx_id, 'when': t_ms // 1000 if t_ms else 0, 'source_addr': '',
                     }
     except Exception as e:
         logger.debug(f"admin usdt bep20 search err: {e}")
@@ -13615,8 +13702,10 @@ def ad_check_tx_prompt(call):
             "2. Binance Pay مباشرة\n"
             "3. Binance Crypto Deposits مباشرة\n"
             "4. شبكة TON مباشرة (TONCenter / TonAPI)\n"
-            "5. شبكة LTC مباشرة (litecoinspace / blockcypher)\n\n"
-            "💡 <i>لـ TON: أرسل الـ TxID الكامل (64 حرف hex) من Tonviewer.</i>\n\n"
+            "5. شبكة LTC مباشرة (litecoinspace / blockcypher)\n"
+            "6. 🟢 USDT على البلوكشين (TRC20 عبر TronScan + BEP20 عبر BscScan)\n\n"
+            "💡 <i>لـ TON: أرسل الـ TxID الكامل (64 حرف hex) من Tonviewer.</i>\n"
+            "💡 <i>لـ USDT: أرسل هاش المعاملة الكامل من TronScan أو BscScan.</i>\n\n"
             "❌ للإلغاء: /cancel"
         )
 
