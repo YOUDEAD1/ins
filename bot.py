@@ -4613,26 +4613,54 @@ def parse_button_input(message):
     text = clean_old_emojis(text)
     return text.strip(), emoji_id
 
+_CUSTOM_TEXTS_CACHE = {}      # {(lang, key): value}
+_CUSTOM_TEXTS_LOADED = [False]
+
+
+def _load_custom_texts_cache():
+    """يحمّل كل النصوص المخصّصة مرة واحدة للذاكرة (بدل استعلام لكل get_text)."""
+    try:
+        cache = {}
+        for row in db.custom_texts.find({}):
+            k = (row.get('lang'), row.get('key'))
+            v = row.get('value')
+            if k[0] and k[1] and v:
+                cache[k] = v
+        _CUSTOM_TEXTS_CACHE.clear()
+        _CUSTOM_TEXTS_CACHE.update(cache)
+        _CUSTOM_TEXTS_LOADED[0] = True
+    except Exception as e:
+        logger.debug(f"load custom_texts cache err: {e}")
+
+
+def _invalidate_custom_texts_cache():
+    """يعيد تحميل النصوص المخصّصة (بعد أي تعديل من الأدمن)."""
+    _CUSTOM_TEXTS_LOADED[0] = False
+
+
 def get_text(uid, key, *args):
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
-    
+
     # نحفظ النص الافتراضي من الكود كـ backup
     default_text = LANG.get(l, LANG['ar']).get(key, "")
-    
+
     base_text = ""
     custom_text_used = False
-    
+
+    # ⚡ نقرأ من الذاكرة بدل استعلام DB لكل نص
+    if not _CUSTOM_TEXTS_LOADED[0]:
+        _load_custom_texts_cache()
     try:
-        custom = db.custom_texts.find_one({'lang': l, 'key': key})
-        if custom and custom.get('value') and custom['value'].strip():
-            base_text = custom['value']
+        cached_val = _CUSTOM_TEXTS_CACHE.get((l, key))
+        if cached_val and cached_val.strip():
+            base_text = cached_val
             custom_text_used = True
         else:
             base_text = default_text
     except Exception as e:
-        logger.error(f"get_text DB error: {e}")
+        logger.debug(f"get_text cache error: {e}")
         base_text = default_text
     
     if not base_text:
@@ -4798,8 +4826,29 @@ def get_product_stock_count(pid):
         return db.product_stock.count_documents({'$or': queries, 'is_sold': False})
     except: return 0
 
-def get_user_data_full(uid):
-    return db.users.find_one({'user_id': uid})
+_USER_CACHE = {}          # {uid: (data, expiry)}
+_USER_CACHE_TTL = 3       # ثوانٍ قليلة — تغطّي عرض قائمة واحد بلا استعلامات مكررة
+
+
+def get_user_data_full(uid, use_cache=True):
+    """يجلب بيانات المستخدم. cache قصير جداً (3ث) لتفادي عشرات الاستعلامات
+    المكررة أثناء عرض قائمة واحدة (كل get_text كان يستعلم من جديد)."""
+    if use_cache:
+        c = _USER_CACHE.get(uid)
+        if c and c[1] > time.time():
+            return c[0]
+    data = db.users.find_one({'user_id': uid})
+    _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
+    return data
+
+
+def _invalidate_user_cache(uid):
+    """يمسح cache المستخدم فوراً (بعد تعديل رصيد/لغة/حظر)."""
+    try:
+        _USER_CACHE.pop(uid, None)
+    except Exception:
+        pass
+
 
 def get_lang(uid):
     u = get_user_data_full(uid)
@@ -5529,6 +5578,7 @@ def toggle_lang(call):
     u = get_user_data_full(uid)
     new_l = 'en' if u.get('lang', 'ar') == 'ar' else 'ar'
     db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l}})
+    _invalidate_user_cache(uid)
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
     call.message.from_user = call.from_user
@@ -5859,7 +5909,8 @@ def profile_ui(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     if check_forced_sub(uid) is False: start_handler(call.message); return
-    
+
+    _invalidate_user_cache(uid)  # نضمن رصيداً محدّثاً في الملف الشخصي
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
     d_res = list(db.used_transactions.find({'user_id': uid}))
@@ -15518,6 +15569,7 @@ def ad_save_custom_text(message, key):
     # حفظ النصين
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
+    _invalidate_custom_texts_cache()
     
     # رسالة تأكيد بسيطة (بدون كود escape عشان يبان شكل النص الحقيقي)
     lang_label = "🇸🇦 عربي" if source_lang == 'ar' else ("🇺🇸 إنجليزي" if source_lang == 'en' else "🌐 مختلط")
