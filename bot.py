@@ -1718,7 +1718,12 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-bot = telebot.TeleBot(TOKEN, use_class_middlewares=False)
+try:
+    bot = telebot.TeleBot(TOKEN, use_class_middlewares=False,
+                          threaded=True, num_threads=8)
+except TypeError:
+    # إصدار telebot قديم لا يدعم num_threads
+    bot = telebot.TeleBot(TOKEN, use_class_middlewares=False)
 
 # 🛡 حماية من خطأ "query is too old" — يصير لما المستخدم يضغط زر قديم
 # بعد إعادة تشغيل البوت أو بعد 10 ثواني من ظهور الزر.
@@ -5397,7 +5402,12 @@ def start_handler(message):
             if current in ['pending', 'left']:
                 mark_referral_status(uid, 'active')
 
-    users_total = db.users.count_documents({})
+    # ⚡ estimated_document_count فوري (يستخدم بيانات وصفية) بدل count_documents
+    #    الذي يمسح كل الـ 18k مستخدم في كل /start → بطء شديد.
+    try:
+        users_total = db.users.estimated_document_count()
+    except Exception:
+        users_total = 0
     markup = InlineKeyboardMarkup(row_width=2)
     
     markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
@@ -10792,24 +10802,35 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
-def auto_deposit_monitor_thread():
-    """Thread خلفي يفحص كل طرق الإيداع تلقائياً كل 10 ثواني"""
-    time.sleep(30)  # ننتظر شوي قبل البداية
+def _run_periodic(check_func, interval, initial_delay, name):
+    """يشغّل دالة فحص واحدة في خيطها المستقل، على فترات ثابتة.
+    لو تعطّلت أو بطُؤت، لا تؤثر على بقية الفحوصات (كل واحد بخيطه)."""
+    time.sleep(initial_delay)
     while True:
         try:
-            check_ltc_blockchain_auto()
-            time.sleep(1)
-            check_ton_blockchain_auto()
-            time.sleep(1)
-            check_usdt_blockchain_auto()
-            time.sleep(1)
-            check_binance_pay_auto()
-            time.sleep(1)
-            check_bybit_auto()
-            time.sleep(10)  # كل 10 ثواني
+            check_func()
         except Exception as e:
-            logger.error(f"Auto deposit monitor error: {e}")
-            time.sleep(30)
+            logger.error(f"[{name}] check error: {e}")
+        time.sleep(interval)
+
+
+def auto_deposit_monitor_thread():
+    """يطلق كل فحص إيداع في خيط مستقل — فلا يعطّل البطيءُ السريعَ.
+    كل طريقة تُفحص على فترتها الخاصة بلا تزاحم."""
+    # كل فحص: (الدالة، الفترة بالثواني، تأخير البداية، الاسم)
+    checks = [
+        (check_ltc_blockchain_auto,  12, 30, "LTC"),
+        (check_ton_blockchain_auto,  12, 32, "TON"),
+        (check_usdt_blockchain_auto, 12, 34, "USDT"),
+        (check_binance_pay_auto,     12, 36, "BinancePay"),
+        (check_bybit_auto,           12, 38, "Bybit"),
+    ]
+    for func, interval, delay, name in checks:
+        threading.Thread(
+            target=_run_periodic, args=(func, interval, delay, name),
+            daemon=True, name=f"deposit_{name}"
+        ).start()
+        logger.info(f"✅ خيط فحص {name} بدأ (كل {interval}ث)")
 
 
 # نشغل الـ monitor في الخلفية
