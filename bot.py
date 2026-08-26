@@ -5254,55 +5254,15 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         markup = InlineKeyboardMarkup(row_width=1)
         prod_ids = cat.get('product_ids') or []
 
-        # ⚡ الأداء: نجلب كل المنتجات + المخزون دفعة واحدة بدل 3 استعلامات لكل منتج
-        prod_ids_str = [str(pid) for pid in prod_ids]
-        products_map = {}
-        try:
-            or_q = []
-            for pid in prod_ids_str:
-                or_q.append({'id': pid})
-                if pid.isdigit():
-                    or_q.append({'id': int(pid)})
-                or_q.append({'_id': pid})
-            if or_q:
-                for p in db.products.find({'$or': or_q}):
-                    products_map[str(p.get('id', ''))] = p
-                    products_map[str(p.get('_id', ''))] = p
-        except Exception as e:
-            logger.debug(f"batch products err: {e}")
-
-        # جلب عدّ المخزون لكل المنتجات دفعة واحدة (aggregate)
-        stock_map = {}
-        try:
-            all_pids = set()
-            for p in products_map.values():
-                all_pids.add(str(p.get('id', str(p.get('_id', '')))))
-            pid_variants = []
-            for pd in all_pids:
-                pid_variants.append(pd)
-                if pd.isdigit():
-                    pid_variants.append(int(pd))
-            if pid_variants:
-                pipeline = [
-                    {'$match': {'product_id': {'$in': pid_variants},
-                                'is_sold': False}},
-                    {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}
-                ]
-                for row in db.product_stock.aggregate(pipeline):
-                    stock_map[str(row['_id'])] = row['c']
-        except Exception as e:
-            logger.debug(f"batch stock err: {e}")
-
         items = []
         for pid in prod_ids:
-            pid_s = str(pid)
-            p = products_map.get(pid_s) or find_product(pid_s)
+            p = find_product(str(pid))
             if not p: continue
             if p.get('is_hidden', False) and not is_admin: continue
             is_manual = p.get('is_manual', False)
             actual_pid = p.get('id', str(p.get('_id', '')))
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = stock_map.get(str(actual_pid), 0)
+            st = get_product_stock_count(actual_pid)
             in_stock = is_manual or st > 0 or is_cgpt
             items.append((p, actual_pid, st, is_manual, in_stock))
         
