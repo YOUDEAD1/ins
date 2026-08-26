@@ -1932,6 +1932,17 @@ try:
     mongo_client.server_info()
     db = mongo_client[MONGO_DB_NAME] 
     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
+    # ⚡ فهارس الأداء الحرجة — تُنشأ في كل إقلاع (idempotent، آمنة للتكرار)
+    #    بدونها كل استعلام يمسح المجموعة كاملة → بطء شديد في عرض القائمة.
+    try:
+        db.products.create_index('id', background=True)
+        db.product_stock.create_index('product_id', background=True)
+        db.product_stock.create_index([('product_id', 1), ('is_sold', 1)], background=True)
+        db.pending_deposits.create_index([('coin', 1), ('status', 1)], background=True)
+        db.catalogs.create_index('order', background=True)
+        logger.info("✅ فهارس الأداء جاهزة")
+    except Exception as _idx_e:
+        logger.debug(f"perf index info: {_idx_e}")
 except Exception as e:
     logger.error(f"❌ خطأ حرج في MongoDB: {e}")
     sys.exit(1)
@@ -4110,18 +4121,22 @@ def get_translated_product_name(p, lang, is_cgpt=False):
         n = p.get('name_en') or p.get('name' if is_cgpt else 'name_ar', '')
         if not n:
             n = "Product"
-        if re.search(r'[\u0600-\u06FF]', n):
+        # لو الاسم عربي ولا يوجد name_en مخزّن: نعرض المتوفّر فوراً (بلا انتظار)
+        # ونترجمه في الخلفية للمرّات القادمة — الترجمة المتزامنة كانت تعلّق القائمة.
+        if re.search(r'[\u0600-\u06FF]', n) and not p.get('_name_en_pending'):
             try:
-                translated = safe_translate_for_cms(n, 'en')
-                if translated and translated != n:
-                    n = translated
+                _pid = p['_id']
+                _coll = 'cgpt_products' if is_cgpt else 'products'
+                def _bg_translate(pid=_pid, coll=_coll, src=n):
                     try:
-                        if is_cgpt:
-                            db.cgpt_products.update_one({'_id': p['_id']}, {'$set': {'name_en': n}})
-                        else:
-                            db.products.update_one({'_id': p['_id']}, {'$set': {'name_en': n}})
-                    except: pass
-            except: pass
+                        tr = safe_translate_for_cms(src, 'en')
+                        if tr and tr != src and not re.search(r'[\u0600-\u06FF]', tr):
+                            db[coll].update_one({'_id': pid}, {'$set': {'name_en': tr}})
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_translate, daemon=True).start()
+            except Exception:
+                pass
         return n
     else:
         n = p.get('name' if is_cgpt else 'name_ar') or p.get('name_en', '')
@@ -4134,18 +4149,21 @@ def get_translated_product_desc(p, lang, is_cgpt=False):
         return ""
     if lang == 'en':
         d = p.get('desc_en') or p.get('desc' if is_cgpt else 'desc_ar', '')
+        # ترجمة في الخلفية (لا تعليق للعرض)
         if d and re.search(r'[\u0600-\u06FF]', d):
             try:
-                translated = safe_translate_for_cms(d, 'en')
-                if translated and translated != d:
-                    d = translated
+                _pid = p['_id']
+                _coll = 'cgpt_products' if is_cgpt else 'products'
+                def _bg_translate_desc(pid=_pid, coll=_coll, src=d):
                     try:
-                        if is_cgpt:
-                            db.cgpt_products.update_one({'_id': p['_id']}, {'$set': {'desc_en': d}})
-                        else:
-                            db.products.update_one({'_id': p['_id']}, {'$set': {'desc_en': d}})
-                    except: pass
-            except: pass
+                        tr = safe_translate_for_cms(src, 'en')
+                        if tr and tr != src and not re.search(r'[\u0600-\u06FF]', tr):
+                            db[coll].update_one({'_id': pid}, {'$set': {'desc_en': tr}})
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_translate_desc, daemon=True).start()
+            except Exception:
+                pass
         return d
     else:
         return p.get('desc' if is_cgpt else 'desc_ar') or p.get('desc_en', '')
@@ -4329,37 +4347,20 @@ def _translate_text_raw(text, target_lang, tries=3):
     if not text or not text.strip():
         return None
 
-    # 1) محاولات مباشرة
+def _translate_text_raw(text, target_lang, tries=1):
+    """يترجم نصاً. مهم: مهلة قصيرة جداً ومحاولة واحدة فقط لتجنّب تعليق الواجهة.
+    لو الترجمة فشلت، نرجّع None فوراً ويُستخدم النص الأصلي — أفضل من تعليق 30 ثانية."""
     _warned = False
-    for _ in range(tries):
-        try:
-            r = GoogleTranslator(source='auto', target=target_lang).translate(text)
-            if r and not _is_bad_translation(text, r):
-                return str(r)
-            if r and not _warned:
-                logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
-                _warned = True
-            # لو رد الخادم خطأ 500 (محظور مؤقتاً)، لا فائدة من التكرار السريع
-            if r and 'Error 500' in str(r):
-                break
-        except Exception as e:
-            logger.debug(f"translate direct err: {e}")
-        time.sleep(0.4)   # مهلة صغيرة تتجاوز الحظر المؤقت
-
-    # 2) عبر البروكسيات
+    # محاولة واحدة سريعة فقط (لا تكرار، لا بروكسيات بطيئة)
     try:
-        pool = list(VERIFIED_PROXIES)[:4]
-        random.shuffle(pool)
-        for proxy in pool:
-            try:
-                r = GoogleTranslator(source='auto', target=target_lang,
-                                     proxies={'http': proxy, 'https': proxy}).translate(text)
-                if r and not _is_bad_translation(text, r):
-                    return str(r)
-            except Exception:
-                continue
-    except Exception:
-        pass
+        r = GoogleTranslator(source='auto', target=target_lang).translate(text)
+        if r and not _is_bad_translation(text, r):
+            return str(r)
+        if r and not _warned:
+            logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
+    except Exception as e:
+        logger.debug(f"translate direct err: {e}")
+    # لا بروكسيات (كانت تعلّق حتى 32 ثانية عند الفشل) — نرجّع None فوراً
     return None
 
 
