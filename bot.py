@@ -87,6 +87,7 @@ PROXY_SOURCES = [
 ]
 
 VERIFIED_PROXIES = []           # قائمة بسيطة من البروكسيات
+_BYBIT_INVALID_KEY_COUNT = 0    # عدّاد أخطاء مفتاح Bybit (للإيقاف التلقائي)
 PROXY_REFRESH_LOCK = threading.Lock()
 LAST_PROXY_REFRESH = 0
 PROXY_REFRESH_INTERVAL = 3600   # ساعة كاملة بين كل refresh (توفير RAM)
@@ -4329,13 +4330,18 @@ def _translate_text_raw(text, target_lang, tries=3):
         return None
 
     # 1) محاولات مباشرة
+    _warned = False
     for _ in range(tries):
         try:
             r = GoogleTranslator(source='auto', target=target_lang).translate(text)
             if r and not _is_bad_translation(text, r):
                 return str(r)
-            if r:
+            if r and not _warned:
                 logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
+                _warned = True
+            # لو رد الخادم خطأ 500 (محظور مؤقتاً)، لا فائدة من التكرار السريع
+            if r and 'Error 500' in str(r):
+                break
         except Exception as e:
             logger.debug(f"translate direct err: {e}")
         time.sleep(0.4)   # مهلة صغيرة تتجاوز الحظر المؤقت
@@ -4840,32 +4846,48 @@ def is_user_banned(uid):
     u = get_user_data_full(uid)
     return True if u and u.get('is_banned') == 1 else False
 
-def check_forced_sub(uid):
+_FORCED_SUB_CACHE = {}          # {uid: (result, expiry_ts)}
+_FORCED_SUB_CACHE_TTL = 300     # 5 دقائق — نتذكّر أن الشخص مشترك فلا نستعلم كل ضغطة
+
+
+def check_forced_sub(uid, use_cache=True):
     """
     يفحص اشتراك المستخدم في كل القنوات الإجبارية.
     لازم يكون مشترك في كل القنوات — لو طلع من واحدة = غير مشترك.
-    يرجع True (مشترك بالكل) / False (طلع من واحدة على الأقل) / None (خطأ اتصال)
+    يرجع True (مشترك بالكل) / False (طلع من واحدة على الأقل) / None (خطأ اتصال).
+
+    ⚡ للسرعة: نخزّن نتيجة "مشترك" مؤقتاً (5 دقائق) فلا نستعلم من تيليجرام
+    في كل ضغطة — التنقّل يصير فورياً. النتيجة False لا تُخزَّن (نعيد الفحص
+    فوراً حتى يشترك). التخزين يُمسح تلقائياً بعد المدة.
     """
     if uid == OWNER_ID: return True
     user_db = get_user_data_full(uid)
     if user_db and user_db.get('is_admin') == 1: return True
     chans = list(db.required_channels.find())
     if not chans: return True
-    
+
+    # ⚡ cache: لو عندنا نتيجة "مشترك" حديثة، نرجّعها فوراً بلا استعلام
+    if use_cache:
+        cached = _FORCED_SUB_CACHE.get(uid)
+        if cached and cached[1] > time.time() and cached[0] is True:
+            return True
+
     had_error = False
     for c in chans:
         try:
             member = bot.get_chat_member(c['channel_id'], uid)
             if member.status in ['left', 'kicked']:
+                # غير مشترك: نمسح أي cache قديم ونرجّع False فوراً
+                _FORCED_SUB_CACHE.pop(uid, None)
                 return False  # طلع من قناة واحدة = مو مشترك أكيد
         except Exception:
             had_error = True
             continue  # نكمّل فحص باقي القنوات
-    
-    # لو كل القنوات نجحت بدون خطأ = مشترك بالكل
-    # لو في خطأ بس ما لقينا أي "left" = مو متأكدين
+
     if had_error:
-        return None
+        return None  # ما نخزّن الغموض
+    # مشترك بالكل → نخزّن للسرعة
+    _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
     return True
 
 def notify_admins(message_text):
@@ -5504,6 +5526,11 @@ def toggle_lang(call):
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_refresh")
 def refresh_main(call):
     bot.answer_callback_query(call.id)
+    # مسح cache الاشتراك حتى لو المستخدم اشترك الآن، يُفحص فوراً
+    try:
+        _FORCED_SUB_CACHE.pop(call.from_user.id, None)
+    except Exception:
+        pass
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
     except: pass
     call.message.from_user = call.from_user
@@ -5820,7 +5847,7 @@ def profile_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if check_forced_sub(uid) is False: start_handler(call.message); return
     
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
@@ -6101,7 +6128,7 @@ def invite_ui(call):
     
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if check_forced_sub(uid) is False: start_handler(call.message); return
     
     u = get_user_data_full(uid)
     l = u.get('lang', 'ar') if u else 'ar'
@@ -6354,7 +6381,7 @@ def shop_list_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if check_forced_sub(uid) is False: start_handler(call.message); return
     
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
@@ -7651,7 +7678,7 @@ def dep_init_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
-    if not check_forced_sub(uid): start_handler(call.message); return
+    if check_forced_sub(uid) is False: start_handler(call.message); return
     
     u = get_user_data_full(uid)
     balance = float(u.get('balance', 0)) if u else 0
@@ -9572,7 +9599,21 @@ def _bybit_signed_request(path, params=None, timeout=8):
             return None
         if data.get('retCode') == 0:
             return data.get('result') or {}
-        logger.error(f"[BYBIT] retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+        _rc = data.get('retCode')
+        logger.error(f"[BYBIT] retCode={_rc} retMsg={data.get('retMsg')}")
+        # 🛑 إيقاف تلقائي: لو المفتاح غير صالح (10003) تكرر، نوقف Bybit
+        #    حتى لا يملأ السجل بالأخطاء (خاصة بعد الانتقال لـ Trust Wallet).
+        if _rc == 10003:
+            try:
+                global _BYBIT_INVALID_KEY_COUNT
+                _BYBIT_INVALID_KEY_COUNT += 1
+                if _BYBIT_INVALID_KEY_COUNT >= 5:
+                    db.settings.update_one({'key': 'bybit_disabled'},
+                                           {'$set': {'value': '1'}}, upsert=True)
+                    logger.warning("[BYBIT] 🛑 أُوقف تلقائياً بعد تكرار خطأ المفتاح. "
+                                   "للتشغيل: /bybit_on بعد إصلاح المفتاح.")
+            except Exception:
+                pass
         return False
 
     # 1) اتصال مباشر
