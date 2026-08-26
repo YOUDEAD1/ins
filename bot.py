@@ -306,13 +306,19 @@ def _get_api_user(api_key):
     except: return None, None
 
 def _json_resp(h, code, data):
-    h.send_response(code)
-    h.send_header('Content-Type', 'application/json; charset=utf-8')
-    h.send_header('Access-Control-Allow-Origin', '*')
-    h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
-    h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    h.end_headers()
-    h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+    try:
+        h.send_response(code)
+        h.send_header('Content-Type', 'application/json; charset=utf-8')
+        h.send_header('Access-Control-Allow-Origin', '*')
+        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        h.end_headers()
+        h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+    except (BrokenPipeError, ConnectionResetError):
+        # العميل قطع الاتصال قبل اكتمال الإرسال — غير ضار، نتجاهله بهدوء
+        pass
+    except Exception as e:
+        logger.debug(f"_json_resp err: {e}")
 
 def _read_body(h):
     """قراءة body آمنة تدعم Content-Length و chunked encoding"""
@@ -1714,7 +1720,17 @@ class APIHandler(BaseHTTPRequestHandler):
 
 def keep_alive():
     port = int(os.environ.get('PORT', 10000))
-    HTTPServer(('0.0.0.0', port), APIHandler).serve_forever()
+    # ThreadingHTTPServer: كل طلب في خيط منفصل — طلب بطيء لا يعلّق الباقي
+    try:
+        from http.server import ThreadingHTTPServer
+        server = ThreadingHTTPServer(('0.0.0.0', port), APIHandler)
+    except Exception:
+        # إصدار قديم: نبني threading يدوياً
+        import socketserver
+        class _ThreadedHTTP(socketserver.ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+        server = _ThreadedHTTP(('0.0.0.0', port), APIHandler)
+    server.serve_forever()
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
@@ -6467,11 +6483,10 @@ def shop_list_ui(call):
             emoji_id = cat.get('emoji_id')
             name = cat.get('name_en', cat.get('name_ar', '')) if l == 'en' else cat.get('name_ar', cat.get('name_en', ''))
             prod_ids = cat.get('product_ids') or []
-            count = 0
-            for pid in prod_ids:
-                p = find_product(pid)
-                if p and (not p.get('is_hidden', False) or is_admin):
-                    count += 1
+            # ⚡ لا نستعلم عن كل منتج (كان 600+ استعلام)! نعرض عدد المنتجات
+            #    المسجّلة في المجلد مباشرةً. العدّ الدقيق (المخفي/الفارغ) يظهر
+            #    عند دخول المجلد نفسه — القائمة الرئيسية يجب أن تفتح فوراً.
+            count = len(prod_ids)
             if count == 0 and not is_admin:
                 continue
             btn_text = f"{name} ({count})" if emoji_id else f"{emoji} {name} ({count})"
@@ -6507,13 +6522,31 @@ def shop_list_ui(call):
         
         # ترتيب المنتجات الغير مصنّفة أبجدياً
         prods_no_cat.sort(key=lambda p: clean_name(p.get('name_en' if l == 'en' else 'name_ar', '')).lower())
-        
+
+        # ⚡ جلب عدد المخزون لكل المنتجات بلا مجلد دفعة واحدة (بدل استعلام لكل منتج)
+        _stock_map = {}
+        try:
+            _pids = []
+            for p in prods_no_cat:
+                _pd = str(p.get('id', str(p.get('_id', ''))))
+                _pids.append(_pd)
+                if _pd.isdigit():
+                    _pids.append(int(_pd))
+            if _pids:
+                for row in db.product_stock.aggregate([
+                    {'$match': {'product_id': {'$in': _pids}, 'is_sold': False}},
+                    {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}
+                ]):
+                    _stock_map[str(row['_id'])] = row['c']
+        except Exception as _e:
+            logger.debug(f"no-cat stock batch err: {_e}")
+
         # عرض المنتجات الغير مصنّفة كأزرار عادية
         for p in prods_no_cat:
             pid = p.get('id', str(p.get('_id', '')))
             is_manual = p.get('is_manual', False)
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = get_product_stock_count(pid)
+            st = _stock_map.get(str(pid), 0)
             in_stock = is_manual or st > 0 or is_cgpt
             db_style = p.get('btn_style')
             btn_style = db_style if (db_style and in_stock) else ("success" if in_stock else "danger")
