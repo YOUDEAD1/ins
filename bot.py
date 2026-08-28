@@ -13896,6 +13896,7 @@ def ext_store_menu(call):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton(f"📦 المنتجات ({n_prod})", callback_data=f"ext_prods_{sid}_0"))
     markup.add(InlineKeyboardButton("🔄 جلب/تحديث المنتجات من API", callback_data=f"ext_sync_{sid}"))
+    markup.add(InlineKeyboardButton("🔬 معاينة رد API الخام", callback_data=f"ext_raw_{sid}"))
     markup.add(InlineKeyboardButton("💰 فحص رصيدي في المتجر", callback_data=f"ext_bal_{sid}"))
     markup.add(InlineKeyboardButton("📡 طلباتي في المتجر (API)", callback_data=f"ext_rorders_{sid}"))
     markup.add(InlineKeyboardButton("🧾 الطلبات المنفّذة (المحلية)", callback_data=f"ext_orders_{sid}"))
@@ -13910,6 +13911,42 @@ def ext_store_menu(call):
                               parse_mode="HTML", reply_markup=markup)
     except Exception:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_raw_"))
+@admin_required
+def ext_raw_preview(call):
+    """يعرض الرد الخام لأول منتج من API — لمعرفة أسماء الحقول الحقيقية."""
+    try: bot.answer_callback_query(call.id, "🔬 جاري الجلب...")
+    except Exception: pass
+    sid = call.data.replace("ext_raw_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/api/v1/products')
+    prods = []
+    if isinstance(data, dict):
+        prods = data.get('products') or data.get('data') or []
+    elif isinstance(data, list):
+        prods = data
+    if not prods:
+        bot.send_message(call.message.chat.id,
+            f"⚠️ لا منتجات. الرد الخام:\n<code>{html.escape(str(data)[:500])}</code>",
+            parse_mode="HTML")
+        return
+    first = prods[0]
+    keys = list(first.keys()) if isinstance(first, dict) else []
+    import json as _json
+    sample = _json.dumps(first, ensure_ascii=False, indent=1)[:1500]
+    bot.send_message(call.message.chat.id,
+        f"🔬 <b>أول منتج من API:</b>\n\n"
+        f"<b>الحقول المتاحة:</b>\n<code>{html.escape(', '.join(keys))}</code>\n\n"
+        f"<b>المحتوى:</b>\n<code>{html.escape(sample)}</code>",
+        parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_sync_"))
@@ -13944,17 +13981,37 @@ def ext_sync_products(call):
             continue
         base_price = p.get('price', p.get('store_price', p.get('your_price', 0)))
         name = p.get('name_en') or p.get('name') or p.get('name_ar') or f"Product {ext_id}"
-        desc = p.get('desc_en') or p.get('desc') or p.get('desc_ar') or ''
-        emoji_id = p.get('custom_emoji_id') or p.get('emoji_id')
+        desc = p.get('desc_en') or p.get('desc') or p.get('desc_ar') or p.get('description') or ''
+        # الرمز المميّز: نبحث في كل الأماكن الممكنة
+        emoji_id = (p.get('custom_emoji_id') or p.get('emoji_id') or p.get('customEmojiId'))
+        # لو موجود داخل emoji_guide أو حقول أخرى
+        if not emoji_id:
+            guide = p.get('emoji_guide') or {}
+            if isinstance(guide, dict):
+                emoji_id = guide.get('custom_emoji_id') or guide.get('emoji_id')
+        # لو ما زال غير موجود، نستخرجه من حقل HTML (tg-emoji emoji-id="...")
+        if not emoji_id:
+            import re as _re
+            for hk in ('name_ar_html', 'name_en_html', 'name_html'):
+                hv = p.get(hk, '')
+                if hv:
+                    m = _re.search(r'emoji-id="(\d+)"', str(hv))
+                    if m:
+                        emoji_id = m.group(1)
+                        break
+        # حقول HTML من emoji_guide لو الجذر ما وفّرها
+        guide = p.get('emoji_guide') if isinstance(p.get('emoji_guide'), dict) else {}
         existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
         doc = {
             'store_id': sid, 'ext_id': ext_id,
             'name': name, 'desc': desc,
             'name_ar': p.get('name_ar', ''), 'name_en': p.get('name_en', ''),
             'desc_ar': p.get('desc_ar', ''), 'desc_en': p.get('desc_en', ''),
-            # حقول HTML الجاهزة (فيها الرموز المميّزة <tg-emoji>) لو وفّرها الـ API
-            'name_ar_html': p.get('name_ar_html', ''), 'name_en_html': p.get('name_en_html', ''),
-            'desc_ar_html': p.get('desc_ar_html', ''), 'desc_en_html': p.get('desc_en_html', ''),
+            # حقول HTML الجاهزة (فيها الرموز المميّزة <tg-emoji>) من الجذر أو emoji_guide
+            'name_ar_html': p.get('name_ar_html') or guide.get('name_ar_html', ''),
+            'name_en_html': p.get('name_en_html') or guide.get('name_en_html', ''),
+            'desc_ar_html': p.get('desc_ar_html') or guide.get('desc_ar_html', ''),
+            'desc_en_html': p.get('desc_en_html') or guide.get('desc_en_html', ''),
             'base_price': float(base_price or 0),
             'emoji_id': emoji_id,
             'raw': p,  # نحفظ الرد الخام (فيه الرموز/الوصف الكامل)
@@ -14183,11 +14240,18 @@ def ext_delete_store(call):
 def ext_delete_store_exec(call):
     sid = call.data.replace("ext_delok_", "")
     try:
-        db.ext_products.delete_many({'store_id': sid})
+        # نحذف المنتجات بكل صيغ store_id الممكنة
+        res = db.ext_products.delete_many({'store_id': sid})
+        deleted = res.deleted_count if res else 0
+        # نحذف أي طلبات مرتبطة أيضاً
+        try:
+            db.ext_orders.delete_many({'store_id': sid})
+        except Exception:
+            pass
         db.ext_stores.delete_one({'_id': ObjectId(sid)})
-        bot.answer_callback_query(call.id, "✅ حُذف المتجر", show_alert=True)
-    except Exception:
-        bot.answer_callback_query(call.id, "❌ خطأ", show_alert=True)
+        bot.answer_callback_query(call.id, f"✅ حُذف المتجر و{deleted} منتج", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ خطأ: {str(e)[:50]}", show_alert=True)
     ext_api_main(call)
 
 
