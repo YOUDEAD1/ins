@@ -1961,6 +1961,9 @@ try:
         db.product_stock.create_index([('product_id', 1), ('is_sold', 1)], background=True)
         db.pending_deposits.create_index([('coin', 1), ('status', 1)], background=True)
         db.catalogs.create_index('order', background=True)
+        db.ext_products.create_index('store_id', background=True)
+        db.ext_products.create_index('hidden', background=True)
+        db.ext_orders.create_index('store_id', background=True)
         logger.info("✅ فهارس الأداء جاهزة")
     except Exception as _idx_e:
         logger.debug(f"perf index info: {_idx_e}")
@@ -5361,7 +5364,21 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
-        
+
+        # 🔌 منتجات API المُسندة لهذا المجلد (الظاهرة فقط)
+        try:
+            for ep in db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}):
+                epid = str(ep['_id'])
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                enm = str(ep.get('name', ''))[:25]
+                bt = f"{enm} | ${price:.2f} | 🔌"
+                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': 'success'}
+                if ep.get('emoji_id'):
+                    bkw['icon_custom_emoji_id'] = ep['emoji_id']
+                markup.add(CustomInlineButton(**bkw))
+        except Exception as _ee:
+            logger.debug(f"ext products in catalog err: {_ee}")
+
         markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
         
         txt = f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji> <b>{name}</b>' if emoji_id else f"{emoji} <b>{name}</b>"
@@ -6505,20 +6522,32 @@ def shop_list_ui(call):
         # المنتجات بدون كتالوج
         all_catalog_pids = set()
         for cat in catalogs:
-            all_catalog_pids.update([str(x) for x in (cat.get('product_ids') or [])])
-        
+            for x in (cat.get('product_ids') or []):
+                # نطبّع كل صيغة ممكنة: ObjectId، نص، رقم
+                all_catalog_pids.add(str(x))
+                # لو مخزّن كـ ObjectId، نضيف صيغته النصية أيضاً (مطابقة مضمونة)
+                try:
+                    all_catalog_pids.add(str(ObjectId(str(x))))
+                except Exception:
+                    pass
+
         prods_no_cat = []
         for p in db.products.find():
-            # نقارن بـ id و _id الاثنين لأن الكتالوج يخزّن _id
-            pid_id  = str(p.get('id', '')) if p.get('id') is not None else ''
-            pid__id = str(p.get('_id', ''))
-            if pid_id in all_catalog_pids or pid__id in all_catalog_pids:
+            # نقارن بكل معرّفات المنتج الممكنة ضد مجموعة المجلدات
+            pid_candidates = set()
+            if p.get('id') is not None:
+                pid_candidates.add(str(p.get('id')))
+            pid_candidates.add(str(p.get('_id', '')))
+            try:
+                pid_candidates.add(str(ObjectId(str(p.get('_id', '')))))
+            except Exception:
+                pass
+            # لو أي معرّف للمنتج موجود في أي مجلد → نتخطّاه (لا نعرضه خارج المجلد)
+            if pid_candidates & all_catalog_pids:
                 continue
-            pid = p.get('id', str(p.get('_id', '')))
-            if True:
-                if p.get('is_hidden', False) and not is_admin:
-                    continue
-                prods_no_cat.append(p)
+            if p.get('is_hidden', False) and not is_admin:
+                continue
+            prods_no_cat.append(p)
         
         # ترتيب المنتجات الغير مصنّفة أبجدياً
         prods_no_cat.sort(key=lambda p: clean_name(p.get('name_en' if l == 'en' else 'name_ar', '')).lower())
@@ -6565,7 +6594,24 @@ def shop_list_ui(call):
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
-        
+
+        # 🔌 منتجات API الخارجية الظاهرة (غير المخفية) وبلا مجلد فقط
+        try:
+            for ep in db.ext_products.find({'hidden': {'$ne': True},
+                                            'catalog_id': {'$in': [None, '']}}):
+                epid = str(ep['_id'])
+                if ep.get('catalog_id'):
+                    continue
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                enm = str(ep.get('name', ''))[:25]
+                bt = f"{enm} | ${price:.2f} | 🔌"
+                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': 'success'}
+                if ep.get('emoji_id'):
+                    bkw['icon_custom_emoji_id'] = ep['emoji_id']
+                markup.add(CustomInlineButton(**bkw))
+        except Exception as _ee:
+            logger.debug(f"ext products in shop err: {_ee}")
+
         markup.add(create_btn(uid, 'btn_refresh', callback_data="open_shop"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
         
@@ -13698,6 +13744,808 @@ def fix_innocent_bans_cmd(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 @admin_required
+# ============================================================
+# 🔌 متاجر API الخارجية (Multi-store) — جلب المنتجات + التسعير + الطلب التلقائي
+# ============================================================
+# كل متجر: {name, base_url, api_key, created_at}
+# منتج مخصّص: ext_products {store_id, ext_id, name, desc, base_price(API),
+#   markup_type('percent'|'fixed'|'manual'), markup_value, sell_price, hidden, emoji_id}
+
+def _ext_api_headers(store):
+    """يبني headers المصادقة لمتجر API خارجي."""
+    key = store.get('api_key', '')
+    return {'Authorization': f'Bearer {key}', 'X-API-Key': key,
+            'Content-Type': 'application/json'}
+
+
+def _ext_api_get(store, path):
+    """GET من متجر API خارجي. يرجّع JSON أو None."""
+    base = str(store.get('base_url', '')).rstrip('/')
+    url = f"{base}{path}"
+    try:
+        r = requests.get(url, headers=_ext_api_headers(store), timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        logger.warning(f"[EXT_API] GET {path} → {r.status_code}")
+    except Exception as e:
+        logger.debug(f"[EXT_API] GET err: {e}")
+    return None
+
+
+def _ext_api_post(store, path, body, idem_key=None):
+    """POST لمتجر API خارجي (طلب). يرجّع (ok, json|error_str)."""
+    base = str(store.get('base_url', '')).rstrip('/')
+    url = f"{base}{path}"
+    headers = _ext_api_headers(store)
+    if idem_key:
+        headers['Idempotency-Key'] = idem_key
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=25)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        if r.status_code in (200, 201):
+            return True, data
+        return False, str(data or r.status_code)
+    except Exception as e:
+        return False, str(e)
+
+
+def _ext_compute_sell_price(base_price, markup_type, markup_value):
+    """يحسب سعر البيع حسب نوع التسعير."""
+    try:
+        bp = float(base_price or 0)
+        mv = float(markup_value or 0)
+        if markup_type == 'percent':
+            return round(bp * (1 + mv / 100.0), 2)
+        if markup_type == 'fixed':
+            return round(bp + mv, 2)
+        if markup_type == 'manual':
+            return round(mv, 2)  # السعر اليدوي هو القيمة نفسها
+    except Exception:
+        pass
+    return round(float(base_price or 0), 2)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ext_api_main")
+@admin_required
+def ext_api_main(call):
+    """القائمة الرئيسية لمتاجر API الخارجية."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    stores = list(db.ext_stores.find().sort('created_at', -1))
+    markup = InlineKeyboardMarkup(row_width=1)
+    for s in stores:
+        sid = str(s['_id'])
+        markup.add(InlineKeyboardButton(f"🏪 {s.get('name','متجر')}", callback_data=f"ext_store_{sid}"))
+    markup.add(InlineKeyboardButton("➕ إضافة متجر API", callback_data="ext_add_store"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    txt = ("🔌 <b>متاجر API الخارجية</b>\n\n"
+           "أضف متجراً بإعطاء اسمه وعنوانه ومفتاحه، ثم اجلب منتجاته وسعّرها.\n\n"
+           f"عدد المتاجر: <b>{len(stores)}</b>")
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ext_add_store")
+@admin_required
+def ext_add_store(call):
+    """يبدأ إضافة متجر: يطلب الاسم ثم URL ثم المفتاح."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    msg = bot.send_message(call.message.chat.id,
+        "🏪 <b>إضافة متجر API</b>\n\n"
+        "أرسل البيانات في 3 أسطر:\n"
+        "<code>الاسم\nBase URL\nAPI Key</code>\n\n"
+        "مثال:\n<code>متجري\nhttps://example.up.railway.app\nsk_abc123</code>\n\n"
+        "للإلغاء: اكتب <b>الغاء</b>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_save_store)
+
+
+def _ext_save_store(message):
+    if not message.text or message.text.strip() in ('الغاء', 'إلغاء', '/cancel'):
+        bot.send_message(message.chat.id, "❌ أُلغيت الإضافة.")
+        return
+    lines = [x.strip() for x in message.text.strip().split('\n') if x.strip()]
+    if len(lines) < 3:
+        bot.send_message(message.chat.id, "❌ لازم 3 أسطر: الاسم، URL، المفتاح. حاول مجدداً.")
+        return
+    name, base_url, api_key = lines[0], lines[1], lines[2]
+    if not base_url.startswith('http'):
+        bot.send_message(message.chat.id, "❌ الـ URL لازم يبدأ بـ http/https.")
+        return
+    store = {'name': name, 'base_url': base_url.rstrip('/'), 'api_key': api_key,
+             'created_at': int(time.time())}
+    # اختبار الاتصال (health)
+    ok_health = _ext_api_get(store, '/api/v1/health') is not None
+    res = db.ext_stores.insert_one(store)
+    sid = str(res.inserted_id)
+    status = "✅ الاتصال يعمل" if ok_health else "⚠️ تعذّر فحص /health (قد يعمل مع ذلك)"
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🏪 فتح المتجر", callback_data=f"ext_store_{sid}"))
+    bot.send_message(message.chat.id,
+        f"✅ <b>أُضيف المتجر:</b> {html.escape(name)}\n{status}",
+        parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_store_"))
+@admin_required
+def ext_store_menu(call):
+    """قائمة متجر واحد: جلب/عرض المنتجات، الطلبات، حذف المتجر."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_store_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    n_prod = db.ext_products.count_documents({'store_id': sid})
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton(f"📦 المنتجات ({n_prod})", callback_data=f"ext_prods_{sid}_0"))
+    markup.add(InlineKeyboardButton("🔄 جلب/تحديث المنتجات من API", callback_data=f"ext_sync_{sid}"))
+    markup.add(InlineKeyboardButton("💰 فحص رصيدي في المتجر", callback_data=f"ext_bal_{sid}"))
+    markup.add(InlineKeyboardButton("📡 طلباتي في المتجر (API)", callback_data=f"ext_rorders_{sid}"))
+    markup.add(InlineKeyboardButton("🧾 الطلبات المنفّذة (المحلية)", callback_data=f"ext_orders_{sid}"))
+    markup.add(InlineKeyboardButton("🩺 فحص الاتصال (health)", callback_data=f"ext_health_{sid}"))
+    markup.add(InlineKeyboardButton("🗑 حذف المتجر", callback_data=f"ext_delstore_{sid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ext_api_main"))
+    txt = (f"🏪 <b>{html.escape(store.get('name',''))}</b>\n\n"
+           f"🌐 <code>{html.escape(store.get('base_url',''))}</code>\n"
+           f"📦 منتجات مسجّلة: <b>{n_prod}</b>")
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_sync_"))
+@admin_required
+def ext_sync_products(call):
+    """يجلب المنتجات من API الخارجي ويسجّلها/يحدّثها."""
+    try: bot.answer_callback_query(call.id, "🔄 جاري الجلب...")
+    except Exception: pass
+    sid = call.data.replace("ext_sync_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/api/v1/products')
+    # الرد قد يكون {'products': [...]} أو قائمة مباشرة
+    prods = []
+    if isinstance(data, dict):
+        prods = data.get('products') or data.get('data') or []
+    elif isinstance(data, list):
+        prods = data
+    if not prods:
+        bot.send_message(call.message.chat.id,
+            "⚠️ لم أجلب منتجات (تأكد من الـ URL والمفتاح، أو أن endpoint /api/v1/products يعمل).")
+        return
+    added, updated = 0, 0
+    for p in prods:
+        ext_id = str(p.get('id', p.get('product_id', '')))
+        if not ext_id:
+            continue
+        base_price = p.get('price', p.get('store_price', p.get('your_price', 0)))
+        name = p.get('name_en') or p.get('name') or p.get('name_ar') or f"Product {ext_id}"
+        desc = p.get('desc_en') or p.get('desc') or p.get('desc_ar') or ''
+        emoji_id = p.get('custom_emoji_id') or p.get('emoji_id')
+        existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+        doc = {
+            'store_id': sid, 'ext_id': ext_id,
+            'name': name, 'desc': desc,
+            'name_ar': p.get('name_ar', ''), 'name_en': p.get('name_en', ''),
+            'desc_ar': p.get('desc_ar', ''), 'desc_en': p.get('desc_en', ''),
+            # حقول HTML الجاهزة (فيها الرموز المميّزة <tg-emoji>) لو وفّرها الـ API
+            'name_ar_html': p.get('name_ar_html', ''), 'name_en_html': p.get('name_en_html', ''),
+            'desc_ar_html': p.get('desc_ar_html', ''), 'desc_en_html': p.get('desc_en_html', ''),
+            'base_price': float(base_price or 0),
+            'emoji_id': emoji_id,
+            'raw': p,  # نحفظ الرد الخام (فيه الرموز/الوصف الكامل)
+        }
+        if existing:
+            # نحدّث السعر الأساسي والبيانات، نُبقي التسعير والإخفاء
+            db.ext_products.update_one({'_id': existing['_id']}, {'$set': doc})
+            # نعيد حساب سعر البيع لو التسعير نسبة/ثابت
+            mt = existing.get('markup_type', 'percent')
+            if mt in ('percent', 'fixed'):
+                sp = _ext_compute_sell_price(doc['base_price'], mt, existing.get('markup_value', 0))
+                db.ext_products.update_one({'_id': existing['_id']}, {'$set': {'sell_price': sp}})
+            updated += 1
+        else:
+            doc.update({'markup_type': 'percent', 'markup_value': 0,
+                        'sell_price': float(base_price or 0), 'hidden': False})
+            db.ext_products.insert_one(doc)
+            added += 1
+    bot.send_message(call.message.chat.id,
+        f"✅ تم الجلب!\n➕ جديد: {added}\n🔄 محدّث: {updated}\n\n"
+        f"افتح «📦 المنتجات» لتسعيرها وإظهارها.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_prods_"))
+@admin_required
+def ext_list_products(call):
+    """يعرض منتجات المتجر (صفحات) مع حالة الإخفاء والسعر."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    raw = call.data.replace("ext_prods_", "")
+    sid, _, page_s = raw.rpartition('_')
+    page = int(page_s) if page_s.isdigit() else 0
+    PER = 8
+    prods = list(db.ext_products.find({'store_id': sid}).skip(page * PER).limit(PER))
+    total = db.ext_products.count_documents({'store_id': sid})
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in prods:
+        pid = str(p['_id'])
+        eye = "👁" if not p.get('hidden') else "🚫"
+        price = p.get('sell_price', p.get('base_price', 0))
+        nm = str(p.get('name', ''))[:22]
+        markup.add(InlineKeyboardButton(f"{eye} {nm} — ${price:.2f}", callback_data=f"ext_p_{pid}"))
+    # تنقّل الصفحات
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"ext_prods_{sid}_{page-1}"))
+    if (page + 1) * PER < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"ext_prods_{sid}_{page+1}"))
+    if nav:
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_store_{sid}"))
+    txt = f"📦 <b>منتجات المتجر</b> ({total})\nصفحة {page+1}"
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_p_") and not call.data.startswith("ext_prods_"))
+@admin_required
+def ext_product_detail(call):
+    """تفاصيل منتج API: الاسم، الوصف، الرمز، السعر، وأزرار التعديل/الإخفاء."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_p_", "")
+    try:
+        p = db.ext_products.find_one({'_id': ObjectId(pid)})
+    except Exception:
+        p = None
+    if not p:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
+    mt = p.get('markup_type', 'percent')
+    mv = p.get('markup_value', 0)
+    mt_label = {'percent': f'نسبة +{mv}%', 'fixed': f'ثابت +${mv}', 'manual': 'سعر يدوي'}.get(mt, mt)
+    emoji_line = f"✨ رمز مميّز: <code>{p.get('emoji_id')}</code>\n" if p.get('emoji_id') else ""
+    hidden = p.get('hidden', False)
+    txt = (
+        f"📦 <b>{html.escape(str(p.get('name','')))}</b>\n\n"
+        f"{emoji_line}"
+        f"📝 {html.escape(str(p.get('desc',''))[:300])}\n\n"
+        f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
+        f"🏷 التسعير: {mt_label}\n"
+        f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
+        f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}"
+    )
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✏️ تعديل السعر", callback_data=f"ext_edit_{pid}"),
+        InlineKeyboardButton("🚫 إخفاء" if not hidden else "👁 إظهار", callback_data=f"ext_hide_{pid}")
+    )
+    markup.add(InlineKeyboardButton("✏️ تعديل الاسم/الوصف", callback_data=f"ext_editxt_{pid}"))
+    markup.add(InlineKeyboardButton("📁 إضافة لمجلد", callback_data=f"ext_setcat_{pid}"))
+    sid = p.get('store_id', '')
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_prods_{sid}_0"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_hide_"))
+@admin_required
+def ext_toggle_hide(call):
+    """يبدّل إخفاء/إظهار منتج API."""
+    pid = call.data.replace("ext_hide_", "")
+    try:
+        p = db.ext_products.find_one({'_id': ObjectId(pid)})
+    except Exception:
+        p = None
+    if not p:
+        return
+    new_hidden = not p.get('hidden', False)
+    db.ext_products.update_one({'_id': p['_id']}, {'$set': {'hidden': new_hidden}})
+    try:
+        bot.answer_callback_query(call.id, "🚫 أُخفي" if new_hidden else "👁 أُظهر")
+    except Exception:
+        pass
+    call.data = f"ext_p_{pid}"
+    ext_product_detail(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_edit_"))
+@admin_required
+def ext_edit_price(call):
+    """يعرض خيارات التسعير: نسبة، ثابت، يدوي."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_edit_", "")
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("📈 نسبة مئوية (%)", callback_data=f"ext_pr_percent_{pid}"))
+    markup.add(InlineKeyboardButton("➕ مبلغ ثابت فوق السعر", callback_data=f"ext_pr_fixed_{pid}"))
+    markup.add(InlineKeyboardButton("✍️ سعر يدوي مباشر", callback_data=f"ext_pr_manual_{pid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_p_{pid}"))
+    bot.send_message(call.message.chat.id, "🏷 <b>اختر طريقة التسعير:</b>",
+                     parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_pr_"))
+@admin_required
+def ext_price_input(call):
+    """يطلب قيمة التسعير حسب النوع."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    raw = call.data.replace("ext_pr_", "")
+    ptype, _, pid = raw.partition('_')
+    prompt = {
+        'percent': "📈 أرسل النسبة المئوية (رقم فقط، مثال: 50 تعني +50%):",
+        'fixed': "➕ أرسل المبلغ الثابت المضاف (مثال: 2.5):",
+        'manual': "✍️ أرسل السعر النهائي مباشرةً (مثال: 9.99):",
+    }.get(ptype, "أرسل القيمة:")
+    msg = bot.send_message(call.message.chat.id, prompt)
+    bot.register_next_step_handler(msg, _ext_save_price, pid, ptype)
+
+
+def _ext_save_price(message, pid, ptype):
+    if not message.text:
+        return
+    try:
+        val = float(message.text.strip().replace('%', '').replace('$', ''))
+    except Exception:
+        bot.send_message(message.chat.id, "❌ قيمة غير صالحة. أرسل رقماً.")
+        return
+    try:
+        p = db.ext_products.find_one({'_id': ObjectId(pid)})
+    except Exception:
+        p = None
+    if not p:
+        bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
+        return
+    sell = _ext_compute_sell_price(p.get('base_price', 0), ptype, val)
+    db.ext_products.update_one({'_id': p['_id']},
+        {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
+    bot.send_message(message.chat.id,
+        f"✅ تم التسعير!\n💵 سعر API: ${float(p.get('base_price',0)):.2f}\n"
+        f"💰 سعر البيع: <b>${sell:.2f}</b>", parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_editxt_"))
+@admin_required
+def ext_edit_text(call):
+    """يعدّل اسم ووصف المنتج."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_editxt_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "✏️ أرسل الاسم والوصف الجديدين في سطرين:\n<code>الاسم\nالوصف</code>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_save_text, pid)
+
+
+def _ext_save_text(message, pid):
+    if not message.text:
+        return
+    parts = message.text.strip().split('\n', 1)
+    name = parts[0].strip()
+    desc = parts[1].strip() if len(parts) > 1 else ''
+    try:
+        db.ext_products.update_one({'_id': ObjectId(pid)},
+            {'$set': {'name': name, 'desc': desc}})
+        bot.send_message(message.chat.id, "✅ تم تعديل الاسم والوصف.")
+    except Exception:
+        bot.send_message(message.chat.id, "❌ فشل التعديل.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_delstore_"))
+@admin_required
+def ext_delete_store(call):
+    """يحذف متجراً ومنتجاته."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_delstore_", "")
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ نعم احذف", callback_data=f"ext_delok_{sid}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data=f"ext_store_{sid}")
+    )
+    bot.send_message(call.message.chat.id, "🗑 حذف المتجر وكل منتجاته؟",
+                     reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_delok_"))
+@admin_required
+def ext_delete_store_exec(call):
+    sid = call.data.replace("ext_delok_", "")
+    try:
+        db.ext_products.delete_many({'store_id': sid})
+        db.ext_stores.delete_one({'_id': ObjectId(sid)})
+        bot.answer_callback_query(call.id, "✅ حُذف المتجر", show_alert=True)
+    except Exception:
+        bot.answer_callback_query(call.id, "❌ خطأ", show_alert=True)
+    ext_api_main(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_orders_"))
+@admin_required
+def ext_view_orders(call):
+    """يعرض الطلبات المنفّذة عبر هذا المتجر."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_orders_", "")
+    orders = list(db.ext_orders.find({'store_id': sid}).sort('created_at', -1).limit(20))
+    if not orders:
+        bot.send_message(call.message.chat.id, "🧾 لا طلبات منفّذة بعد لهذا المتجر.")
+        return
+    lines = ["🧾 <b>آخر الطلبات:</b>\n"]
+    for o in orders:
+        when = time.strftime('%m-%d %H:%M', time.gmtime(o.get('created_at', 0)))
+        st = "✅" if o.get('status') == 'success' else "⚠️"
+        lines.append(f"{st} user {o.get('user_id')} — {o.get('product_name','')[:20]} — "
+                     f"${o.get('price',0):.2f} — {when}")
+    bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("vext_"))
+def ext_customer_view(call):
+    """يعرض منتج API للزبون مع زر الشراء."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    epid = call.data.replace("vext_", "")
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        try: bot.answer_callback_query(call.id, "❌ غير متاح", show_alert=True)
+        except Exception: pass
+        return
+    l = get_lang(uid)
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    # نفضّل حقول HTML الجاهزة (فيها الرموز المميّزة) حسب اللغة
+    if l == 'en':
+        name_html = ep.get('name_en_html') or ep.get('name_en') or ep.get('name', '')
+        desc_html = ep.get('desc_en_html') or ep.get('desc_en') or ep.get('desc', '')
+    else:
+        name_html = ep.get('name_ar_html') or ep.get('name_ar') or ep.get('name', '')
+        desc_html = ep.get('desc_ar_html') or ep.get('desc_ar') or ep.get('desc', '')
+    name = str(name_html) if name_html else str(ep.get('name', ''))
+    desc = str(desc_html) if desc_html else str(ep.get('desc', ''))
+    # لو الحقل HTML جاهز (فيه <tg-emoji> أو وسوم) نعرضه كما هو، وإلا نهرّبه
+    def _is_html(s):
+        return '<tg-emoji' in s or '<b>' in s or '<i>' in s
+    name_out = name if _is_html(name) else html.escape(name)
+    desc_out = desc if _is_html(desc) else html.escape(desc[:500])
+    emoji = ''
+    if ep.get('emoji_id') and '<tg-emoji' not in name:
+        emoji = f'<tg-emoji emoji-id="{ep["emoji_id"]}">✨</tg-emoji> '
+    txt = (
+        f"{emoji}<b>{name_out}</b>\n\n"
+        f"{desc_out}\n\n"
+        f"💰 <b>{'Price' if l=='en' else 'السعر'}:</b> <b>${price:.2f}</b>"
+    )
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton(
+        f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
+        callback_data=f"buyext_{epid}"))
+    markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buyext_"))
+def ext_customer_buy(call):
+    """يشتري الزبون منتج API: يخصم الرصيد، يطلب من API الخارجي، يسلّم الكود."""
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        return
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    epid = call.data.replace("buyext_", "")
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        bot.send_message(uid, "❌ المنتج غير متاح.")
+        return
+    l = get_lang(uid)
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    if price <= 0:
+        bot.send_message(uid, "❌ سعر غير صالح.")
+        return
+
+    # 1) خصم الرصيد ذرياً (يمنع الشراء لو الرصيد غير كافٍ)
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ. اشحن رصيدك أولاً." if l != 'en'
+                         else "❌ Insufficient balance. Please top up.")
+        return
+    _invalidate_user_cache(uid)
+
+    store = None
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
+    except Exception:
+        pass
+    if not store:
+        # نرجّع الرصيد
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ المتجر غير متاح. أُعيد رصيدك.")
+        return
+
+    bot.send_message(uid, "⏳ جاري تنفيذ طلبك..." if l != 'en' else "⏳ Processing your order...")
+
+    # 2) الطلب التلقائي من API الخارجي (مع Idempotency-Key لمنع الشحن المزدوج)
+    idem = f"tg{uid}_{epid}_{int(time.time())}_{random.randint(1000,9999)}"
+    body = {'product_id': _ext_int_or_str(ep.get('ext_id')), 'quantity': 1}
+    ok, resp = _ext_api_post(store, '/api/v1/orders', body, idem_key=idem)
+
+    order_rec = {
+        'store_id': ep.get('store_id', ''), 'ext_product_id': epid,
+        'user_id': uid, 'product_name': ep.get('name', ''),
+        'price': price, 'created_at': int(time.time()),
+        'idempotency_key': idem,
+    }
+
+    if not ok:
+        # فشل الطلب → نرجّع الرصيد
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        order_rec['status'] = 'failed'
+        order_rec['error'] = str(resp)[:300]
+        try: db.ext_orders.insert_one(order_rec)
+        except Exception: pass
+        bot.send_message(uid,
+            ("❌ تعذّر تنفيذ الطلب من المتجر. أُعيد رصيدك بالكامل.\n"
+             "حاول لاحقاً أو تواصل مع الدعم.") if l != 'en' else
+            ("❌ Order failed at the store. Your balance was fully refunded.\n"
+             "Please try again later or contact support."))
+        # ننبّه الأدمن
+        try:
+            for admin in db.users.find({'is_admin': 1}):
+                bot.send_message(admin['user_id'],
+                    f"⚠️ فشل طلب API:\nuser {uid} — {ep.get('name','')}\nالسبب: {str(resp)[:200]}")
+        except Exception:
+            pass
+        return
+
+    # 3) استخراج الأكواد من الرد وتسليمها
+    codes = _ext_extract_codes(resp)
+    order_rec['status'] = 'success'
+    order_rec['ext_order_id'] = str(resp.get('order_id', resp.get('id', ''))) if isinstance(resp, dict) else ''
+    order_rec['codes'] = codes
+    try: db.ext_orders.insert_one(order_rec)
+    except Exception: pass
+
+    if codes:
+        codes_txt = "\n".join(f"<code>{html.escape(str(c))}</code>" for c in codes)
+        bot.send_message(uid,
+            (f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 <b>{html.escape(str(ep.get('name','')))}</b>\n\n"
+             f"🔑 <b>الكود:</b>\n{codes_txt}\n\n💰 خُصم: ${price:.2f}") if l != 'en' else
+            (f"✅ <b>Purchase successful!</b>\n\n📦 <b>{html.escape(str(ep.get('name','')))}</b>\n\n"
+             f"🔑 <b>Code:</b>\n{codes_txt}\n\n💰 Charged: ${price:.2f}"),
+            parse_mode="HTML")
+    else:
+        # نجح الطلب لكن ما استخرجنا كوداً واضحاً — نعرض الرد ونُبقي الخصم
+        bot.send_message(uid,
+            (f"✅ <b>تم تنفيذ الطلب!</b>\n\nرقم الطلب: <code>{order_rec.get('ext_order_id','')}</code>\n"
+             f"إذا لم تصلك التفاصيل، تواصل مع الدعم برقم الطلب.") if l != 'en' else
+            (f"✅ <b>Order placed!</b>\n\nOrder ID: <code>{order_rec.get('ext_order_id','')}</code>\n"
+             f"If you didn't receive details, contact support with this ID."),
+            parse_mode="HTML")
+
+
+def _ext_int_or_str(v):
+    """يحوّل ext_id لرقم لو كان رقمياً (بعض APIs تتطلب int)."""
+    s = str(v)
+    return int(s) if s.isdigit() else s
+
+
+def _ext_extract_codes(resp):
+    """يستخرج الأكواد من رد الطلب (يدعم عدة تنسيقات شائعة)."""
+    codes = []
+    if not isinstance(resp, dict):
+        return codes
+    # تنسيقات محتملة
+    for key in ('codes', 'code', 'items', 'keys', 'delivered', 'data'):
+        v = resp.get(key)
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, str):
+                    codes.append(item)
+                elif isinstance(item, dict):
+                    c = item.get('code') or item.get('key') or item.get('value')
+                    if c:
+                        codes.append(str(c))
+        elif isinstance(v, str) and v.strip():
+            codes.append(v)
+    # داخل order
+    order = resp.get('order')
+    if isinstance(order, dict):
+        codes.extend(_ext_extract_codes(order))
+    return codes
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bal_"))
+@admin_required
+def ext_check_balance(call):
+    """يفحص رصيدك في المتجر الخارجي عبر /api/v1/balance."""
+    try: bot.answer_callback_query(call.id, "💰 جاري الفحص...")
+    except Exception: pass
+    sid = call.data.replace("ext_bal_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/api/v1/balance')
+    if data is None:
+        bot.send_message(call.message.chat.id,
+            "❌ تعذّر جلب الرصيد. تأكد من المفتاح والاتصال.")
+        return
+    # الرصيد قد يكون بمفاتيح مختلفة
+    bal = None
+    if isinstance(data, dict):
+        bal = data.get('balance', data.get('wallet', data.get('amount')))
+    lines = [f"💰 <b>رصيدك في {html.escape(store.get('name',''))}:</b>\n"]
+    if bal is not None:
+        lines.append(f"<b>${float(bal):.2f} USDT</b>\n")
+    # السجل الأخير لو موجود
+    ledger = data.get('ledger') or data.get('recent') or [] if isinstance(data, dict) else []
+    if ledger:
+        lines.append("\n📜 <b>آخر الحركات:</b>")
+        for e in ledger[:8]:
+            if isinstance(e, dict):
+                amt = e.get('amount', e.get('value', ''))
+                desc = e.get('description', e.get('type', e.get('note', '')))
+                lines.append(f"• {amt} — {str(desc)[:30]}")
+    if bal is None and not ledger:
+        lines.append(f"<code>{html.escape(str(data)[:300])}</code>")
+    bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_rorders_"))
+@admin_required
+def ext_remote_orders(call):
+    """يجلب آخر طلباتك من المتجر الخارجي عبر /api/v1/orders."""
+    try: bot.answer_callback_query(call.id, "📡 جاري الجلب...")
+    except Exception: pass
+    sid = call.data.replace("ext_rorders_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/api/v1/orders')
+    orders = []
+    if isinstance(data, dict):
+        orders = data.get('orders') or data.get('data') or []
+    elif isinstance(data, list):
+        orders = data
+    if not orders:
+        bot.send_message(call.message.chat.id,
+            "📡 لا طلبات في المتجر الخارجي (أو تعذّر الجلب).")
+        return
+    lines = [f"📡 <b>آخر طلباتك في {html.escape(store.get('name',''))}:</b>\n"]
+    for o in orders[:15]:
+        if not isinstance(o, dict):
+            continue
+        oid = o.get('order_id', o.get('id', ''))
+        st = o.get('status', '')
+        amt = o.get('total', o.get('amount', o.get('price', '')))
+        when = o.get('created_at', o.get('timestamp', ''))
+        lines.append(f"• #{oid} — {st} — {amt} — {str(when)[:19]}")
+    bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_health_"))
+@admin_required
+def ext_health_check(call):
+    """يفحص صحة اتصال المتجر عبر /api/v1/health."""
+    try: bot.answer_callback_query(call.id, "🩺 جاري الفحص...")
+    except Exception: pass
+    sid = call.data.replace("ext_health_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/api/v1/health')
+    if data is not None:
+        bot.send_message(call.message.chat.id,
+            f"✅ <b>الاتصال يعمل!</b>\n<code>{html.escape(str(data)[:200])}</code>",
+            parse_mode="HTML")
+    else:
+        bot.send_message(call.message.chat.id,
+            "❌ <b>تعذّر الاتصال.</b>\nتأكد من:\n• الـ Base URL صحيح\n"
+            "• المفتاح صحيح\n• المتجر يعمل الآن", parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_setcat_"))
+@admin_required
+def ext_set_catalog(call):
+    """يعرض المجلدات لإسناد منتج API إليها."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_setcat_", "")
+    catalogs = list(db.catalogs.find().sort('order', 1))
+    markup = InlineKeyboardMarkup(row_width=1)
+    for cat in catalogs:
+        cid = str(cat['_id'])
+        name = cat.get('name_ar') or cat.get('name_en') or 'مجلد'
+        emoji = cat.get('emoji', '📁')
+        markup.add(InlineKeyboardButton(f"{emoji} {name}",
+                   callback_data=f"ext_docat_{pid}_{cid}"))
+    markup.add(InlineKeyboardButton("❌ بدون مجلد (إزالة)", callback_data=f"ext_docat_{pid}_none"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_p_{pid}"))
+    bot.send_message(call.message.chat.id, "📁 <b>اختر المجلد:</b>",
+                     parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_docat_"))
+@admin_required
+def ext_do_set_catalog(call):
+    """يسند منتج API لمجلد (أو يزيله)."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    raw = call.data.replace("ext_docat_", "")
+    pid, _, cid = raw.rpartition('_')
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(pid)})
+    except Exception:
+        ep = None
+    if not ep:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
+    if cid == 'none':
+        db.ext_products.update_one({'_id': ObjectId(pid)}, {'$unset': {'catalog_id': ''}})
+        bot.send_message(call.message.chat.id, "✅ أُزيل من المجلد. سيظهر في القائمة الرئيسية.")
+    else:
+        db.ext_products.update_one({'_id': ObjectId(pid)}, {'$set': {'catalog_id': cid}})
+        try:
+            cat = db.catalogs.find_one({'_id': ObjectId(cid)})
+            cname = cat.get('name_ar') or cat.get('name_en') or 'المجلد'
+        except Exception:
+            cname = 'المجلد'
+        bot.send_message(call.message.chat.id, f"✅ أُضيف المنتج إلى: {cname}")
+
+
 def admin_main_ui(call):
     bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
@@ -13714,6 +14562,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ Settings", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 Forced Sub", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 API Settings", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🔌 External API Stores", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 Check Transaction (Hash / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
@@ -13736,6 +14585,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("⚙️ إعدادات المتجر", callback_data="ad_shop_settings"),
                    InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="ad_fsub_list"))
         markup.add(InlineKeyboardButton("🎓 إعدادات التفعيلات", callback_data="ad_api_main"))
+        markup.add(InlineKeyboardButton("🔌 متاجر API الخارجية", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 فحص معاملة (هاش / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
         markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
@@ -19543,30 +20393,60 @@ def ad_cat_addp(call):
         cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
         if not cat: return
         
-        # نجمع كل المنتجات الموجودة في أي كتالوج
+        # نجمع كل المنتجات الموجودة في أي كتالوج (بكل صيغ المعرّفات)
         all_catalog_pids = set()
         for c in db.catalogs.find():
-            all_catalog_pids.update([str(x) for x in (c.get('product_ids') or [])])
-        
+            for x in (c.get('product_ids') or []):
+                all_catalog_pids.add(str(x))
+                try:
+                    all_catalog_pids.add(str(ObjectId(str(x))))
+                except Exception:
+                    pass
+
+        def _in_catalog(p):
+            cands = set()
+            if p.get('id') is not None:
+                cands.add(str(p.get('id')))
+            cands.add(str(p.get('_id', '')))
+            try:
+                cands.add(str(ObjectId(str(p.get('_id', '')))))
+            except Exception:
+                pass
+            return bool(cands & all_catalog_pids)
+
         prods = list(db.products.find())
         prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
-        
+
         markup = InlineKeyboardMarkup(row_width=1)
         found = False
+        # 1) المنتجات العادية بلا مجلد
         for p in prods:
-            pid = str(p.get('id', str(p.get('_id', ''))))
-            if pid in all_catalog_pids:
+            if _in_catalog(p):
                 continue
             found = True
+            pid = str(p.get('id', str(p.get('_id', ''))))
             name = clean_name(p.get('name_en', p.get('name_ar', '')))[:30]
             emoji_id = p.get('custom_emoji_id')
-            
-            # Shorten pid for callback_data
             callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             btn_kwargs = {'text': f"➕ {name}", 'callback_data': f"ad_cat_doadd_{cat_id}_{callback_pid}"}
             if emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
+
+        # 2) منتجات API الخارجية بلا مجلد (تُضاف بنفس آلية المجلد)
+        try:
+            for ep in db.ext_products.find():
+                if ep.get('catalog_id'):
+                    continue
+                found = True
+                epid = str(ep['_id'])
+                name = str(ep.get('name', ''))[:28]
+                bkw = {'text': f"➕ 🔌 {name}", 'callback_data': f"ad_cat_addext_{cat_id}_{epid}"}
+                if ep.get('emoji_id'):
+                    bkw['icon_custom_emoji_id'] = ep['emoji_id']
+                markup.add(CustomInlineButton(**bkw))
+        except Exception as _ee:
+            logger.debug(f"ext in addp err: {_ee}")
         
         markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"ad_cat_edit_{cat_id}"))
         
@@ -19585,6 +20465,27 @@ def ad_cat_addp(call):
         logger.exception("Error in ad_cat_addp:")
         try: bot.send_message(call.message.chat.id, f"❌ Error loading products: {e}")
         except: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_addext_"))
+@admin_required
+def ad_cat_add_ext_product(call):
+    """يضيف منتج API لمجلد من شاشة تعديل المجلد."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    raw = call.data.replace("ad_cat_addext_", "")
+    cat_id, _, epid = raw.rpartition('_')
+    try:
+        db.ext_products.update_one({'_id': ObjectId(epid)},
+                                   {'$set': {'catalog_id': cat_id}})
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+        nm = ep.get('name', '') if ep else ''
+        bot.answer_callback_query(call.id, f"✅ أُضيف: {nm[:30]}", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ {e}", show_alert=True)
+    # نعيد عرض شاشة الإضافة (لتحديث القائمة)
+    call.data = f"ad_cat_addp_{cat_id}"
+    ad_cat_addp(call)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_doadd_"))
