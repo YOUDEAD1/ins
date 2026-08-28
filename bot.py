@@ -13979,27 +13979,28 @@ def ext_sync_products(call):
         ext_id = str(p.get('id', p.get('product_id', '')))
         if not ext_id:
             continue
-        base_price = p.get('price', p.get('store_price', p.get('your_price', 0)))
+        # السعر: نفضّل your_price (المقفول) ثم store_price ثم price
+        base_price = (p.get('your_price') if p.get('your_price') is not None
+                      else p.get('store_price', p.get('price', p.get('store_price', 0))))
         name = p.get('name_en') or p.get('name') or p.get('name_ar') or f"Product {ext_id}"
-        desc = p.get('desc_en') or p.get('desc') or p.get('desc_ar') or p.get('description') or ''
-        # الرمز المميّز: نبحث في كل الأماكن الممكنة
+        # الوصف: نفضّل الإنجليزي ثم العربي ثم أي صيغة
+        desc = (p.get('desc_en') or p.get('desc_ar') or p.get('desc')
+                or p.get('description') or '')
+        # الرمز المميّز
         emoji_id = (p.get('custom_emoji_id') or p.get('emoji_id') or p.get('customEmojiId'))
-        # لو موجود داخل emoji_guide أو حقول أخرى
         if not emoji_id:
             guide = p.get('emoji_guide') or {}
             if isinstance(guide, dict):
                 emoji_id = guide.get('custom_emoji_id') or guide.get('emoji_id')
-        # لو ما زال غير موجود، نستخرجه من حقل HTML (tg-emoji emoji-id="...")
         if not emoji_id:
             import re as _re
-            for hk in ('name_ar_html', 'name_en_html', 'name_html'):
+            for hk in ('name_ar_html', 'name_en_html', 'name_html', 'desc_ar_html', 'desc_en_html'):
                 hv = p.get(hk, '')
                 if hv:
                     m = _re.search(r'emoji-id="(\d+)"', str(hv))
                     if m:
                         emoji_id = m.group(1)
                         break
-        # حقول HTML من emoji_guide لو الجذر ما وفّرها
         guide = p.get('emoji_guide') if isinstance(p.get('emoji_guide'), dict) else {}
         existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
         doc = {
@@ -14007,16 +14008,18 @@ def ext_sync_products(call):
             'name': name, 'desc': desc,
             'name_ar': p.get('name_ar', ''), 'name_en': p.get('name_en', ''),
             'desc_ar': p.get('desc_ar', ''), 'desc_en': p.get('desc_en', ''),
-            # حقول HTML الجاهزة (فيها الرموز المميّزة <tg-emoji>) من الجذر أو emoji_guide
             'name_ar_html': p.get('name_ar_html') or guide.get('name_ar_html', ''),
             'name_en_html': p.get('name_en_html') or guide.get('name_en_html', ''),
             'desc_ar_html': p.get('desc_ar_html') or guide.get('desc_ar_html', ''),
             'desc_en_html': p.get('desc_en_html') or guide.get('desc_en_html', ''),
             'base_price': float(base_price or 0),
             'emoji_id': emoji_id,
-            'raw': p,  # نحفظ الرد الخام (فيه الرموز/الوصف الكامل)
+            'raw': p,
         }
         if existing:
+            # نحافظ على الرمز المعيّن يدوياً لو الـ API لا يعطي رمزاً
+            if not doc.get('emoji_id') and existing.get('emoji_id'):
+                doc['emoji_id'] = existing['emoji_id']
             # نحدّث السعر الأساسي والبيانات، نُبقي التسعير والإخفاء
             db.ext_products.update_one({'_id': existing['_id']}, {'$set': doc})
             # نعيد حساب سعر البيع لو التسعير نسبة/ثابت
@@ -16689,39 +16692,156 @@ def ad_set_btn_style(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_start")
 @admin_required
 def ad_prod_emoji_start(call):
-    bot.answer_callback_query(call.id) 
+    bot.answer_callback_query(call.id)
+    # قائمة أقسام: المنتجات العادية + كل متجر API
+    markup = InlineKeyboardMarkup(row_width=1)
+    n_reg = db.products.count_documents({})
+    markup.add(InlineKeyboardButton(f"📦 المنتجات العادية ({n_reg})",
+               callback_data="emj_reg_0"))
+    # زر لكل متجر API
+    for s in db.ext_stores.find().sort('created_at', -1):
+        sid = str(s['_id'])
+        n = db.ext_products.count_documents({'store_id': sid})
+        markup.add(InlineKeyboardButton(f"🔌 {s.get('name','متجر')} ({n})",
+                   callback_data=f"emj_ext_{sid}_0"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+    try:
+        bot.edit_message_text(
+            "🌟 <b>إضافة الرموز التعبيرية المميّزة</b>\n\n"
+            "اختر القسم: المنتجات العادية، أو أحد متاجر API.",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id,
+            "🌟 <b>إضافة الرموز التعبيرية المميّزة</b>\n\nاختر القسم:",
+            reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("emj_reg_"))
+@admin_required
+def ad_emoji_regular(call):
+    """يعرض المنتجات العادية لتعيين الرموز (مع صفحات)."""
+    bot.answer_callback_query(call.id)
     l = get_lang(call.from_user.id)
+    page = int(call.data.replace("emj_reg_", "")) if call.data.replace("emj_reg_", "").isdigit() else 0
+    PER = 15
     prods = list(db.products.find())
-    
-    # ترتيب أبجدي
     def sort_key(x):
         if l == 'en':
             return str(x.get('name_en', x.get('name_ar', ''))).lower()
         return str(x.get('name_ar', x.get('name_en', ''))).lower()
     prods.sort(key=sort_key)
-    
+    total = len(prods)
+    page_prods = prods[page*PER:(page+1)*PER]
     markup = InlineKeyboardMarkup(row_width=1)
-    
-    for p in prods: 
+    for p in page_prods:
         p_name = p.get('name_en') if l == 'en' else p.get('name_ar')
         if not p_name:
             p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
         p_id = p.get('id', str(p.get('_id', '')))
-        
-        # علامة لو الإيموجي مُعيّن
         has_emoji_mark = " ✅" if p.get('custom_emoji_id') else " ⚪"
         btn_text = f"📦 {clean_name(p_name)}{has_emoji_mark}"
         btn_kwargs = {'text': btn_text, 'callback_data': f"set_pemj_{p_id}"}
-        
-        # عرض الإيموجي الحالي على الزر (لو موجود)
-        custom_emoji_id = p.get('custom_emoji_id')
-        if custom_emoji_id:
-            btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
-        
+        if p.get('custom_emoji_id'):
+            btn_kwargs['icon_custom_emoji_id'] = p['custom_emoji_id']
         markup.add(CustomInlineButton(**btn_kwargs))
-        
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
-    bot.edit_message_text("👇 <b>اختر المنتج الذي تريد تعيين أيقونة له:</b>\n\n✅ = يحتوي على أيقونة | ⚪ = بدون أيقونة", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"emj_reg_{page-1}"))
+    if (page+1)*PER < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"emj_reg_{page+1}"))
+    if nav:
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_prod_emoji_back"))
+    try:
+        bot.edit_message_text(
+            "👇 <b>اختر منتجاً لتعيين رمزه:</b>\n✅ = له رمز | ⚪ = بدون",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, "👇 اختر منتجاً:", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("emj_ext_"))
+@admin_required
+def ad_emoji_ext_store(call):
+    """يعرض منتجات متجر API لتعيين الرموز."""
+    bot.answer_callback_query(call.id)
+    raw = call.data.replace("emj_ext_", "")
+    sid, _, page_s = raw.rpartition('_')
+    page = int(page_s) if page_s.isdigit() else 0
+    PER = 15
+    prods = list(db.ext_products.find({'store_id': sid}).skip(page*PER).limit(PER))
+    total = db.ext_products.count_documents({'store_id': sid})
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in prods:
+        epid = str(p['_id'])
+        nm = str(p.get('name', ''))[:25]
+        mark = " ✅" if p.get('emoji_id') else " ⚪"
+        btn_kwargs = {'text': f"🔌 {nm}{mark}", 'callback_data': f"set_extemj_{epid}"}
+        if p.get('emoji_id'):
+            btn_kwargs['icon_custom_emoji_id'] = p['emoji_id']
+        markup.add(CustomInlineButton(**btn_kwargs))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"emj_ext_{sid}_{page-1}"))
+    if (page+1)*PER < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"emj_ext_{sid}_{page+1}"))
+    if nav:
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_prod_emoji_back"))
+    try:
+        bot.edit_message_text(
+            "👇 <b>اختر منتج API لتعيين رمزه:</b>\n✅ = له رمز | ⚪ = بدون",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, "👇 اختر منتجاً:", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_prod_emoji_back")
+@admin_required
+def ad_prod_emoji_back(call):
+    """رجوع لقائمة أقسام الرموز."""
+    ad_prod_emoji_start(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_extemj_"))
+@admin_required
+def ad_ext_emoji_ask(call):
+    """يطلب رمزاً مميّزاً لمنتج API."""
+    bot.answer_callback_query(call.id)
+    epid = call.data.replace("set_extemj_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "🌟 <b>أرسل الآن الرمز المميّز (Premium Emoji) لهذا المنتج:</b>\n"
+        "(أرسله كرسالة عادية وسألتقطه)", parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ad_ext_emoji_save, epid)
+
+
+def _ad_ext_emoji_save(message, epid):
+    """يلتقط ويحفظ الرمز المميّز لمنتج API."""
+    emoji_id = None
+    try:
+        ents = message.entities or []
+        for e in ents:
+            if e.type == 'custom_emoji':
+                emoji_id = e.custom_emoji_id
+                break
+    except Exception:
+        pass
+    if not emoji_id:
+        bot.send_message(message.chat.id,
+            "❌ لم ألتقط رمزاً مميّزاً. تأكد أنك أرسلت Premium Emoji (يتطلب Telegram Premium).")
+        return
+    try:
+        db.ext_products.update_one({'_id': ObjectId(epid)},
+                                   {'$set': {'emoji_id': emoji_id}})
+        bot.send_message(message.chat.id,
+            f'✅ تم تعيين الرمز! <tg-emoji emoji-id="{emoji_id}">✨</tg-emoji>',
+            parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطأ: {str(e)[:60]}")
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_pemj_"))
 def ad_prod_emoji_ask(call):
