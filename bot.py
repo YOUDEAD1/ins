@@ -13744,6 +13744,11 @@ def fix_innocent_bans_cmd(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel_main")
 @admin_required
+def admin_panel_main_entry(call):
+    """معالج فتح لوحة الأدمن (كان مفصولاً عن دالته بالخطأ)."""
+    return admin_main_ui(call)
+
+
 # ============================================================
 # 🔌 متاجر API الخارجية (Multi-store) — جلب المنتجات + التسعير + الطلب التلقائي
 # ============================================================
@@ -21580,6 +21585,12 @@ def run_bot():
         except Exception as e:
             err = str(e)
             logger.error(f"Polling Error Critical: {err}")
+            # تشخيص: نسجّل الـ traceback الكامل لمعرفة مصدر الخطأ بالضبط
+            try:
+                import traceback as _tb
+                logger.error("TRACEBACK:\n" + _tb.format_exc())
+            except Exception:
+                pass
             if '409' in err or 'Conflict' in err:
                 time.sleep(30)
             else:
