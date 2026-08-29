@@ -6597,15 +6597,20 @@ def shop_list_ui(call):
 
         # 🔌 منتجات API الخارجية الظاهرة (غير المخفية) وبلا مجلد فقط
         try:
-            for ep in db.ext_products.find({'hidden': {'$ne': True},
-                                            'catalog_id': {'$in': [None, '']}}):
-                epid = str(ep['_id'])
+            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}):
                 if ep.get('catalog_id'):
                     continue
+                if ep.get('hidden') and not is_admin:
+                    continue
+                epid = str(ep['_id'])
                 price = float(ep.get('sell_price', ep.get('base_price', 0)))
-                enm = str(ep.get('name', ''))[:25]
-                bt = f"{enm} | ${price:.2f} | 🔌"
-                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': 'success'}
+                stock = ep.get('stock', 0)
+                enm = str(ep.get('name', ''))
+                short_n = enm[:25] + ".." if len(enm) > 25 else enm
+                hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
+                bt = f"{short_n} | ${price:.2f} | 📦 {stock}{hidden_icon}"
+                bstyle = "success" if (stock and stock > 0) else "danger"
+                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': bstyle}
                 if ep.get('emoji_id'):
                     bkw['icon_custom_emoji_id'] = ep['emoji_id']
                 markup.add(CustomInlineButton(**bkw))
@@ -6654,7 +6659,29 @@ def shop_list_ui(call):
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
-            
+
+        # 🔌 منتجات API الخارجية (بنفس شكل المنتجات العادية)
+        try:
+            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}):
+                if ep.get('catalog_id'):
+                    continue
+                if ep.get('hidden') and not is_admin:
+                    continue
+                epid = str(ep['_id'])
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                stock = ep.get('stock', 0)
+                enm = str(ep.get('name', ''))
+                short_n = enm[:25] + ".." if len(enm) > 25 else enm
+                hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
+                bt = f"{short_n} | ${price:.2f} | 📦 {stock}{hidden_icon}"
+                bstyle = "success" if (stock and stock > 0) else "danger"
+                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': bstyle}
+                if ep.get('emoji_id'):
+                    bkw['icon_custom_emoji_id'] = ep['emoji_id']
+                markup.add(CustomInlineButton(**bkw))
+        except Exception as _ee:
+            logger.debug(f"ext products no-cat branch err: {_ee}")
+
         markup.add(create_btn(uid, 'btn_refresh', callback_data="open_shop"))
         markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
         
@@ -13898,6 +13925,7 @@ def ext_store_menu(call):
     markup.add(InlineKeyboardButton("🔄 جلب/تحديث المنتجات من API", callback_data=f"ext_sync_{sid}"))
     markup.add(InlineKeyboardButton("🔬 معاينة رد API الخام", callback_data=f"ext_raw_{sid}"))
     markup.add(InlineKeyboardButton("💰 فحص رصيدي في المتجر", callback_data=f"ext_bal_{sid}"))
+    markup.add(InlineKeyboardButton("📊 تسعير كل المنتجات (نسبة موحّدة)", callback_data=f"ext_bulkprice_{sid}"))
     markup.add(InlineKeyboardButton("📡 طلباتي في المتجر (API)", callback_data=f"ext_rorders_{sid}"))
     markup.add(InlineKeyboardButton("🧾 الطلبات المنفّذة (المحلية)", callback_data=f"ext_orders_{sid}"))
     markup.add(InlineKeyboardButton("🩺 فحص الاتصال (health)", callback_data=f"ext_health_{sid}"))
@@ -13979,41 +14007,31 @@ def ext_sync_products(call):
         ext_id = str(p.get('id', p.get('product_id', '')))
         if not ext_id:
             continue
-        # السعر: نفضّل your_price (المقفول) ثم store_price ثم price
-        base_price = (p.get('your_price') if p.get('your_price') is not None
-                      else p.get('store_price', p.get('price', p.get('store_price', 0))))
-        name = p.get('name_en') or p.get('name') or p.get('name_ar') or f"Product {ext_id}"
-        # الوصف: نفضّل الإنجليزي ثم العربي ثم أي صيغة
-        desc = (p.get('desc_en') or p.get('desc_ar') or p.get('desc')
-                or p.get('description') or '')
-        # الرمز المميّز
-        emoji_id = (p.get('custom_emoji_id') or p.get('emoji_id') or p.get('customEmojiId'))
-        if not emoji_id:
-            guide = p.get('emoji_guide') or {}
-            if isinstance(guide, dict):
-                emoji_id = guide.get('custom_emoji_id') or guide.get('emoji_id')
-        if not emoji_id:
-            import re as _re
-            for hk in ('name_ar_html', 'name_en_html', 'name_html', 'desc_ar_html', 'desc_en_html'):
-                hv = p.get(hk, '')
-                if hv:
-                    m = _re.search(r'emoji-id="(\d+)"', str(hv))
-                    if m:
-                        emoji_id = m.group(1)
-                        break
-        guide = p.get('emoji_guide') if isinstance(p.get('emoji_guide'), dict) else {}
+        # 💰 حسب الدوكس الرسمية:
+        #   price_usdt/price = سعر البيع للزبون (سعري)
+        #   base_price_usdt = التكلفة الفعلية التي تُخصم مني عند الطلب
+        base_price = p.get('price_usdt', p.get('price', 0))       # سعري الحالي في المتجر
+        cost_price = p.get('base_price_usdt', base_price)          # ما يُخصم مني فعلياً
+        name = p.get('name') or p.get('name_en') or p.get('name_ar') or f"Product {ext_id}"
+        # الوصف: description (HTML آمن) أو description_text (نص خام)
+        desc = p.get('description') or p.get('description_text') or ''
+        desc_text = p.get('description_text') or ''
+        # الرمز المميّز: emoji_custom_id (الرسمي) — null لو غير مضبوط
+        emoji_id = p.get('emoji_custom_id') or p.get('custom_emoji_id') or p.get('emoji_id')
+        emoji_char = p.get('emoji', '')  # الرمز العادي (يظهر دائماً)
+        stock = p.get('stock', 0)
         existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
         doc = {
             'store_id': sid, 'ext_id': ext_id,
-            'name': name, 'desc': desc,
-            'name_ar': p.get('name_ar', ''), 'name_en': p.get('name_en', ''),
-            'desc_ar': p.get('desc_ar', ''), 'desc_en': p.get('desc_en', ''),
-            'name_ar_html': p.get('name_ar_html') or guide.get('name_ar_html', ''),
-            'name_en_html': p.get('name_en_html') or guide.get('name_en_html', ''),
-            'desc_ar_html': p.get('desc_ar_html') or guide.get('desc_ar_html', ''),
-            'desc_en_html': p.get('desc_en_html') or guide.get('desc_en_html', ''),
-            'base_price': float(base_price or 0),
-            'emoji_id': emoji_id,
+            'name': name,
+            'desc': desc,                       # HTML آمن (فيه <tg-emoji> و<b>)
+            'desc_text': desc_text,             # نص خام بلا وسوم
+            'desc_en_html': desc, 'desc_ar_html': desc,
+            'base_price': float(base_price or 0),   # سعر البيع (يُعرض للزبون)
+            'cost_price': float(cost_price or 0),   # التكلفة (تُخصم مني عند الطلب)
+            'emoji_id': emoji_id,               # رمز مميّز (premium)
+            'emoji_char': emoji_char,           # رمز عادي (احتياطي)
+            'stock': stock,
             'raw': p,
         }
         if existing:
@@ -14028,11 +14046,31 @@ def ext_sync_products(call):
                 sp = _ext_compute_sell_price(doc['base_price'], mt, existing.get('markup_value', 0))
                 db.ext_products.update_one({'_id': existing['_id']}, {'$set': {'sell_price': sp}})
             updated += 1
+            # 🔔 بثّ حدث تحديث للمطوّرين (كأنه منتج عادي) — للمنتجات الظاهرة فقط
+            if not existing.get('hidden'):
+                try:
+                    _emit_event('product.updated', {
+                        'source': 'external_api', 'store_id': sid,
+                        'name': name, 'price': doc.get('base_price'),
+                        'description': desc, 'stock': stock,
+                    }, product_id=f"ext_{existing['_id']}")
+                except Exception:
+                    pass
         else:
             doc.update({'markup_type': 'percent', 'markup_value': 0,
                         'sell_price': float(base_price or 0), 'hidden': False})
-            db.ext_products.insert_one(doc)
+            res_ins = db.ext_products.insert_one(doc)
             added += 1
+            # 🔔 بثّ حدث "منتج جديد" للمطوّرين (كأنه منتج عادي أنشأته)
+            try:
+                _emit_event('product.created', {
+                    'source': 'external_api', 'store_id': sid,
+                    'name': name, 'price': doc.get('base_price'),
+                    'description': desc, 'stock': stock,
+                    'emoji': emoji_char, 'emoji_custom_id': emoji_id,
+                }, product_id=f"ext_{res_ins.inserted_id}")
+            except Exception:
+                pass
     bot.send_message(call.message.chat.id,
         f"✅ تم الجلب!\n➕ جديد: {added}\n🔄 محدّث: {updated}\n\n"
         f"افتح «📦 المنتجات» لتسعيرها وإظهارها.")
@@ -14131,6 +14169,22 @@ def ext_toggle_hide(call):
         return
     new_hidden = not p.get('hidden', False)
     db.ext_products.update_one({'_id': p['_id']}, {'$set': {'hidden': new_hidden}})
+    # 🔔 بثّ للمطوّرين: إظهار = منتج متاح، إخفاء = حُذف من العرض
+    try:
+        if new_hidden:
+            _emit_event('product.updated', {
+                'source': 'external_api', 'name': p.get('name', ''),
+                'available': False,
+            }, product_id=f"ext_{p['_id']}")
+        else:
+            _emit_event('product.created', {
+                'source': 'external_api', 'name': p.get('name', ''),
+                'price': p.get('sell_price', p.get('base_price')),
+                'description': p.get('desc', ''), 'stock': p.get('stock', 0),
+                'available': True,
+            }, product_id=f"ext_{p['_id']}")
+    except Exception:
+        pass
     try:
         bot.answer_callback_query(call.id, "🚫 أُخفي" if new_hidden else "👁 أُظهر")
     except Exception:
@@ -14187,7 +14241,8 @@ def _ext_save_price(message, pid, ptype):
     if not p:
         bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
         return
-    sell = _ext_compute_sell_price(p.get('base_price', 0), ptype, val)
+    _cost = p.get('cost_price', p.get('base_price', 0))
+    sell = _ext_compute_sell_price(_cost, ptype, val)
     db.ext_products.update_one({'_id': p['_id']},
         {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
     bot.send_message(message.chat.id,
@@ -14296,23 +14351,19 @@ def ext_customer_view(call):
         return
     l = get_lang(uid)
     price = float(ep.get('sell_price', ep.get('base_price', 0)))
-    # نفضّل حقول HTML الجاهزة (فيها الرموز المميّزة) حسب اللغة
-    if l == 'en':
-        name_html = ep.get('name_en_html') or ep.get('name_en') or ep.get('name', '')
-        desc_html = ep.get('desc_en_html') or ep.get('desc_en') or ep.get('desc', '')
-    else:
-        name_html = ep.get('name_ar_html') or ep.get('name_ar') or ep.get('name', '')
-        desc_html = ep.get('desc_ar_html') or ep.get('desc_ar') or ep.get('desc', '')
-    name = str(name_html) if name_html else str(ep.get('name', ''))
-    desc = str(desc_html) if desc_html else str(ep.get('desc', ''))
-    # لو الحقل HTML جاهز (فيه <tg-emoji> أو وسوم) نعرضه كما هو، وإلا نهرّبه
+    name = str(ep.get('name', ''))
+    # الوصف: desc (HTML آمن من الدوكس) — يُعرض كما هو
+    desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
     def _is_html(s):
-        return '<tg-emoji' in s or '<b>' in s or '<i>' in s
+        return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_out = name if _is_html(name) else html.escape(name)
-    desc_out = desc if _is_html(desc) else html.escape(desc[:500])
+    desc_out = desc if _is_html(desc) else html.escape(desc[:600])
+    # الرمز: المميّز أولاً، ثم العادي
     emoji = ''
     if ep.get('emoji_id') and '<tg-emoji' not in name:
-        emoji = f'<tg-emoji emoji-id="{ep["emoji_id"]}">✨</tg-emoji> '
+        emoji = f'<tg-emoji emoji-id="{ep["emoji_id"]}">{ep.get("emoji_char","✨")}</tg-emoji> '
+    elif ep.get('emoji_char') and '<tg-emoji' not in name:
+        emoji = f'{ep["emoji_char"]} '
     txt = (
         f"{emoji}<b>{name_out}</b>\n\n"
         f"{desc_out}\n\n"
@@ -14414,7 +14465,8 @@ def ext_customer_buy(call):
     # 3) استخراج الأكواد من الرد وتسليمها
     codes = _ext_extract_codes(resp)
     order_rec['status'] = 'success'
-    order_rec['ext_order_id'] = str(resp.get('order_id', resp.get('id', ''))) if isinstance(resp, dict) else ''
+    _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
+    order_rec['ext_order_id'] = str(_order_obj.get('id', resp.get('order_id', resp.get('id', '')))) if isinstance(resp, dict) else ''
     order_rec['codes'] = codes
     try: db.ext_orders.insert_one(order_rec)
     except Exception: pass
@@ -14444,12 +14496,28 @@ def _ext_int_or_str(v):
 
 
 def _ext_extract_codes(resp):
-    """يستخرج الأكواد من رد الطلب (يدعم عدة تنسيقات شائعة)."""
+    """يستخرج الأكواد من رد الطلب حسب الدوكس الرسمية:
+    { "order": { "codes": [...], "delivered_codes": [...] } }"""
     codes = []
     if not isinstance(resp, dict):
         return codes
-    # تنسيقات محتملة
-    for key in ('codes', 'code', 'items', 'keys', 'delivered', 'data'):
+    # الرد الرسمي: order.codes / order.delivered_codes
+    order = resp.get('order')
+    if isinstance(order, dict):
+        for k in ('codes', 'delivered_codes', 'coupons'):
+            v = order.get(k)
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, str) and item not in codes:
+                        codes.append(item)
+                    elif isinstance(item, dict):
+                        c = item.get('code') or item.get('key') or item.get('value')
+                        if c and str(c) not in codes:
+                            codes.append(str(c))
+        if codes:
+            return codes
+    # تنسيقات بديلة (احتياط)
+    for key in ('codes', 'delivered_codes', 'code', 'items', 'keys', 'coupons'):
         v = resp.get(key)
         if isinstance(v, list):
             for item in v:
@@ -14461,11 +14529,74 @@ def _ext_extract_codes(resp):
                         codes.append(str(c))
         elif isinstance(v, str) and v.strip():
             codes.append(v)
-    # داخل order
-    order = resp.get('order')
-    if isinstance(order, dict):
-        codes.extend(_ext_extract_codes(order))
     return codes
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bulkprice_"))
+@admin_required
+def ext_bulk_price(call):
+    """يعرض خيارات تسعير كل منتجات المتجر دفعة واحدة."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_bulkprice_", "")
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("📈 نسبة مئوية على الكل (+%)", callback_data=f"ext_bulkpct_{sid}"))
+    markup.add(InlineKeyboardButton("➕ مبلغ ثابت على الكل", callback_data=f"ext_bulkfix_{sid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_store_{sid}"))
+    bot.send_message(call.message.chat.id,
+        "📊 <b>تسعير كل منتجات المتجر دفعة واحدة</b>\n\n"
+        "اختر الطريقة — ستُطبّق على <b>كل</b> منتجات هذا المتجر:",
+        parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bulkpct_"))
+@admin_required
+def ext_bulk_pct_ask(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_bulkpct_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "📈 أرسل النسبة المئوية للربح على كل المنتجات\n"
+        "(مثال: <code>50</code> تعني +50% على سعر التكلفة لكل منتج):",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_bulk_apply, sid, 'percent')
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bulkfix_"))
+@admin_required
+def ext_bulk_fix_ask(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    sid = call.data.replace("ext_bulkfix_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "➕ أرسل المبلغ الثابت المضاف على كل منتج\n(مثال: <code>2</code> يعني +$2 على كل منتج):",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_bulk_apply, sid, 'fixed')
+
+
+def _ext_bulk_apply(message, sid, ptype):
+    """يطبّق التسعير على كل منتجات المتجر."""
+    if not message.text:
+        return
+    try:
+        val = float(message.text.strip().replace('%', '').replace('$', ''))
+    except Exception:
+        bot.send_message(message.chat.id, "❌ قيمة غير صالحة. أرسل رقماً.")
+        return
+    prods = list(db.ext_products.find({'store_id': sid}))
+    count = 0
+    for ep in prods:
+        # نسعّر على أساس التكلفة (cost_price) لضمان الربح فوق ما يُخصم فعلاً
+        cost = float(ep.get('cost_price', ep.get('base_price', 0)))
+        sell = _ext_compute_sell_price(cost, ptype, val)
+        db.ext_products.update_one({'_id': ep['_id']},
+            {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
+        count += 1
+    label = f"+{val}%" if ptype == 'percent' else f"+${val}"
+    bot.send_message(message.chat.id,
+        f"✅ تم تسعير <b>{count}</b> منتج بنسبة موحّدة ({label}) فوق التكلفة.\n\n"
+        f"<i>ملاحظة: التسعير على أساس سعر التكلفة (ما يُخصم منك فعلاً) لضمان الربح.</i>",
+        parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bal_"))
