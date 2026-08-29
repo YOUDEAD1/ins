@@ -6504,6 +6504,12 @@ def shop_list_ui(call):
             #    المسجّلة في المجلد مباشرةً. العدّ الدقيق (المخفي/الفارغ) يظهر
             #    عند دخول المجلد نفسه — القائمة الرئيسية يجب أن تفتح فوراً.
             count = len(prod_ids)
+            # نضيف عدد منتجات API المُسندة لهذا المجلد
+            try:
+                count += db.ext_products.count_documents(
+                    {'catalog_id': cat_id, 'hidden': {'$ne': True}})
+            except Exception:
+                pass
             if count == 0 and not is_admin:
                 continue
             btn_text = f"{name} ({count})" if emoji_id else f"{emoji} {name} ({count})"
@@ -14061,13 +14067,18 @@ def ext_sync_products(call):
                         'sell_price': float(base_price or 0), 'hidden': False})
             res_ins = db.ext_products.insert_one(doc)
             added += 1
-            # 🔔 بثّ حدث "منتج جديد" للمطوّرين (كأنه منتج عادي أنشأته)
+            # 🔔 بثّ حدث "منتج جديد" بنفس تنسيق المنتج العادي تماماً
             try:
                 _emit_event('product.created', {
-                    'source': 'external_api', 'store_id': sid,
-                    'name': name, 'price': doc.get('base_price'),
-                    'description': desc, 'stock': stock,
+                    'product_id': f"ext_{res_ins.inserted_id}",
+                    'name_ar': name, 'name_en': name,
+                    'price': float(doc.get('base_price', 0)),
+                    'is_manual': False,
+                    'is_hidden': False,
+                    'stock': stock,
+                    'description': desc,
                     'emoji': emoji_char, 'emoji_custom_id': emoji_id,
+                    'source': 'external_api',
                 }, product_id=f"ext_{res_ins.inserted_id}")
             except Exception:
                 pass
@@ -14358,17 +14369,24 @@ def ext_customer_view(call):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_out = name if _is_html(name) else html.escape(name)
     desc_out = desc if _is_html(desc) else html.escape(desc[:600])
-    # الرمز: المميّز أولاً، ثم العادي
-    emoji = ''
-    if ep.get('emoji_id') and '<tg-emoji' not in name:
-        emoji = f'<tg-emoji emoji-id="{ep["emoji_id"]}">{ep.get("emoji_char","✨")}</tg-emoji> '
-    elif ep.get('emoji_char') and '<tg-emoji' not in name:
-        emoji = f'{ep["emoji_char"]} '
-    txt = (
-        f"{emoji}<b>{name_out}</b>\n\n"
-        f"{desc_out}\n\n"
-        f"💰 <b>{'Price' if l=='en' else 'السعر'}:</b> <b>${price:.2f}</b>"
-    )
+    icon_html = ''
+    if ep.get('emoji_id'):
+        icon_html = f'<tg-emoji emoji-id="{ep["emoji_id"]}">{ep.get("emoji_char","✨")}</tg-emoji>'
+    elif ep.get('emoji_char'):
+        icon_html = ep['emoji_char']
+    stock = ep.get('stock', 0)
+    if l == 'en':
+        delivery_type = "Auto ⚡ (Instant delivery)"
+        txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
+               f"🚚 <b>Delivery:</b> {delivery_type}\n"
+               f"💰 <b>Price:</b> ${price:.2f}\n"
+               f"📊 <b>Stock:</b> {stock} pcs")
+    else:
+        delivery_type = "تلقائي ⚡ (تسليم فوري)"
+        txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
+               f"🚚 <b>نوع التسليم:</b> {delivery_type}\n"
+               f"💰 <b>السعر:</b> ${price:.2f}\n"
+               f"📊 <b>المتوفر:</b> {stock} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton(
         f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
