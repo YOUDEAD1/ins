@@ -4934,7 +4934,11 @@ def get_user_data_full(uid, use_cache=True):
         if c and c[1] > time.time():
             return c[0]
     data = db.users.find_one({'user_id': uid})
-    _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
+    # لا نخزّن None في الـ cache (يسبب بيانات قديمة بعd إنشاء المستخدم)
+    if data is not None:
+        _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
+    else:
+        _USER_CACHE.pop(uid, None)
     return data
 
 
@@ -5499,7 +5503,8 @@ def start_handler(message):
             'balance': 0.0, 'ref_v2_earned': 0.0,
             'lang_chosen': False, 'lang': 'ar', 'is_admin': 0, 'is_banned': 0
         })
-        user = get_user_data_full(uid)
+        _invalidate_user_cache(uid)
+        user = get_user_data_full(uid, use_cache=False)
         
         # 🎯 تسجيل الإحالة فقط لو المستخدم جديد كلياً
         # المستخدم الموجود مسبقاً لا يُحسب أبداً
@@ -5519,6 +5524,11 @@ def start_handler(message):
         update_referrer_balance(uid)
     except Exception as ref_err:
         logger.debug(f"Retroactive reward check error: {ref_err}")
+
+    # حماية: لو تعذّر جلب/إنشاء المستخدم لأي سبب، نتفادى الانهيار
+    if not user:
+        user = {'lang_chosen': False, 'lang': 'ar', 'balance': 0.0,
+                'is_admin': 0, 'is_banned': 0}
 
     if not user.get('lang_chosen'):
         markup = InlineKeyboardMarkup(row_width=2)
