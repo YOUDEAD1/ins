@@ -2033,6 +2033,7 @@ try:
         db.ext_products.create_index('store_id', background=True)
         db.ext_products.create_index('hidden', background=True)
         db.ext_orders.create_index('store_id', background=True)
+        db.ext_pending_new.create_index([('store_id', 1), ('ext_id', 1)], background=True)
         logger.info("✅ فهارس الأداء جاهزة")
     except Exception as _idx_e:
         logger.debug(f"perf index info: {_idx_e}")
@@ -11265,6 +11266,107 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
+def _auto_sync_ext_stores():
+    """مزامنة تلقائية دورية لكل متاجر API:
+    - منتج جديد في المتجر الخارجي → إشعار الأدمن (هل تريd إضافته؟)
+    - كمية/ستوك تغيّر لمنتج مضاف → تحديث تلقائي + برودكاست توفّر ستوك
+    """
+    try:
+        stores = list(db.ext_stores.find())
+    except Exception:
+        return
+    for store in stores:
+        sid = str(store['_id'])
+        data = _ext_api_get(store, '/api/v1/products')
+        prods = []
+        if isinstance(data, dict):
+            prods = data.get('products') or data.get('data') or []
+        elif isinstance(data, list):
+            prods = data
+        if not prods:
+            continue
+        for p in prods:
+            ext_id = str(p.get('id', p.get('product_id', '')))
+            if not ext_id:
+                continue
+            existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+            new_stock = p.get('stock', 0) or 0
+            p_name = p.get('name') or p.get('name_en') or p.get('name_ar') or f"Product {ext_id}"
+
+            if not existing:
+                # منتج جديd في المتجر الخارجي → نُشعر الأدمن (هل يضيفه؟)
+                # نتفادى تكرار الإشعار: نسجّله كـ "معلّق"
+                already = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
+                if already:
+                    continue
+                try:
+                    db.ext_pending_new.insert_one({
+                        'store_id': sid, 'ext_id': ext_id, 'name': p_name,
+                        'raw': p, 'created_at': int(time.time())
+                    })
+                    _notify_admins_new_ext_product(store, sid, ext_id, p_name, new_stock)
+                except Exception as _ne:
+                    logger.debug(f"notify new ext product err: {_ne}")
+            else:
+                # منتج مضاف: نتحقق من تغيّر الستوك
+                old_stock = existing.get('stock', 0) or 0
+                if new_stock != old_stock:
+                    db.ext_products.update_one({'_id': existing['_id']},
+                                               {'$set': {'stock': new_stock}})
+                    # لو توفّر ستوك جديd (كان 0 وصار متوفر) → برودكاست + إشعار
+                    if old_stock <= 0 and new_stock > 0 and not existing.get('hidden'):
+                        try:
+                            _emit_event('stock.added', {
+                                'source': 'external_api',
+                                'product_id': f"ext_{existing['_id']}",
+                                'name_ar': existing.get('name', p_name),
+                                'name_en': existing.get('name', p_name),
+                                'price': existing.get('sell_price', existing.get('base_price')),
+                                'stock': new_stock, 'added': new_stock,
+                            }, product_id=f"ext_{existing['_id']}")
+                        except Exception:
+                            pass
+                        # إشعار الأدمن بتوفّر الستوك
+                        try:
+                            notify_admins(
+                                f"📦 <b>توفّر ستوك (API)</b>\n"
+                                f"🏪 {html.escape(store.get('name',''))}\n"
+                                f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
+                                f"🔢 المتوفر الآن: <b>{new_stock}</b>"
+                            )
+                        except Exception:
+                            pass
+
+
+def _notify_admins_new_ext_product(store, sid, ext_id, name, stock):
+    """يُشعر كل الأدمن بمنتج جديد في متجر API مع زر إضافة/تجاهل."""
+    try:
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("✅ أضفه", callback_data=f"extadd_{sid}_{ext_id}"),
+            InlineKeyboardButton("🚫 تجاهل", callback_data=f"extign_{sid}_{ext_id}")
+        )
+        txt = (
+            f"🆕 <b>منتج جديد في متجر API</b>\n\n"
+            f"🏪 {html.escape(store.get('name',''))}\n"
+            f"📦 {html.escape(str(name))}\n"
+            f"🔢 المتوفر: {stock}\n\n"
+            f"هل تريد إضافته لبوتك؟"
+        )
+        for admin in db.users.find({'is_admin': 1}):
+            try:
+                bot.send_message(admin['user_id'], txt, parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                pass
+        # OWNER أيضاً
+        try:
+            bot.send_message(OWNER_ID, txt, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
+    except Exception as _e:
+        logger.debug(f"_notify_admins_new_ext_product err: {_e}")
+
+
 def _run_periodic(check_func, interval, initial_delay, name):
     """يشغّل دالة فحص واحدة في خيطها المستقل، على فترات ثابتة.
     لو تعطّلت أو بطُؤت، لا تؤثر على بقية الفحوصات (كل واحد بخيطه)."""
@@ -11287,6 +11389,7 @@ def auto_deposit_monitor_thread():
         (check_usdt_blockchain_auto, 12, 34, "USDT"),
         (check_binance_pay_auto,     12, 36, "BinancePay"),
         (check_bybit_auto,           12, 38, "Bybit"),
+        (_auto_sync_ext_stores,      120, 60, "ExtAPISync"),
     ]
     for func, interval, delay, name in checks:
         threading.Thread(
@@ -14245,6 +14348,95 @@ def ext_store_menu(call):
                               parse_mode="HTML", reply_markup=markup)
     except Exception:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("extadd_"))
+@admin_required
+def ext_add_new_product(call):
+    """يضيف منتج API جديد (بعd إشعار الأدمن) — يجلبه ويسجّله."""
+    try: bot.answer_callback_query(call.id, "⏳ جاري الإضافة...")
+    except Exception: pass
+    raw = call.data.replace("extadd_", "")
+    sid, _, ext_id = raw.partition('_')
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    # نجلب بيانات المنتج من المعلّق أو من API مباشرة
+    pending = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
+    p = None
+    if pending and pending.get('raw'):
+        p = pending['raw']
+    else:
+        data = _ext_api_get(store, '/api/v1/products')
+        prods = data.get('products', []) if isinstance(data, dict) else (data or [])
+        for pr in prods:
+            if str(pr.get('id', pr.get('product_id', ''))) == ext_id:
+                p = pr
+                break
+    if not p:
+        bot.send_message(call.message.chat.id, "❌ لم أجd المنتج في المتجر.")
+        return
+    # نسجّله بنفس منطق المزامنة
+    base_price = p.get('price_usdt', p.get('price', 0))
+    cost_price = p.get('base_price_usdt', base_price)
+    name = p.get('name') or p.get('name_en') or p.get('name_ar') or f"Product {ext_id}"
+    desc = p.get('description') or p.get('description_text') or ''
+    emoji_id = p.get('emoji_custom_id') or p.get('custom_emoji_id') or p.get('emoji_id')
+    emoji_char = p.get('emoji', '')
+    stock = p.get('stock', 0)
+    doc = {
+        'store_id': sid, 'ext_id': ext_id, 'name': name,
+        'desc': desc, 'desc_text': p.get('description_text', ''),
+        'base_price': float(base_price or 0), 'cost_price': float(cost_price or 0),
+        'emoji_id': emoji_id, 'emoji_char': emoji_char, 'stock': stock,
+        'markup_type': 'percent', 'markup_value': 0,
+        'sell_price': float(base_price or 0), 'hidden': False, 'raw': p,
+    }
+    res = db.ext_products.insert_one(doc)
+    db.ext_pending_new.delete_many({'store_id': sid, 'ext_id': ext_id})
+    # برودكاست منتج جديd
+    try:
+        _emit_event('product.created', {
+            'product_id': f"ext_{res.inserted_id}",
+            'name_ar': name, 'name_en': name,
+            'price': float(base_price or 0),
+            'is_manual': False, 'is_hidden': False, 'stock': stock,
+            'description': desc, 'emoji': emoji_char, 'emoji_custom_id': emoji_id,
+            'source': 'external_api',
+        }, product_id=f"ext_{res.inserted_id}")
+    except Exception:
+        pass
+    try:
+        bot.edit_message_text(
+            f"✅ أُضيف المنتج: {html.escape(name)}\nافتح المتجر لتسعيره وإظهاره.",
+            call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, f"✅ أُضيف: {html.escape(name)}", parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("extign_"))
+@admin_required
+def ext_ignore_new_product(call):
+    """يتجاهل منتج API جديد (لا يضيفه، ويمنع تكر1ر الإشعار)."""
+    raw = call.data.replace("extign_", "")
+    sid, _, ext_id = raw.partition('_')
+    try:
+        # نبقيه في المعلّق كـ "متجاهَل" لمنع تكرار الإشعار
+        db.ext_pending_new.update_one(
+            {'store_id': sid, 'ext_id': ext_id},
+            {'$set': {'ignored': True}}, upsert=True)
+    except Exception:
+        pass
+    try:
+        bot.answer_callback_query(call.id, "🚫 تم التجاهل")
+        bot.edit_message_text("🚫 تم تجاهل المنتج.", call.message.chat.id,
+                              call.message.message_id)
+    except Exception:
+        pass
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_raw_"))
