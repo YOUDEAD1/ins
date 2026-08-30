@@ -1088,10 +1088,79 @@ class APIHandler(BaseHTTPRequestHandler):
                     'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
                 }
                 result.append(item)
+
+            # 🔌 نضيف منتجات متاجر API الخارجية (الظاهرة فقط) — تظهر للعملاء
+            #    الذين أخذوا API من بوتك، تماماً مثل منتجاتك العادية.
+            try:
+                for ep in db.ext_products.find({'hidden': {'$ne': True}}):
+                    epid = f"ext_{ep['_id']}"
+                    if epid in hidden_pids:
+                        continue
+                    ep_name = str(ep.get('name', ''))
+                    ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+                    ep_emoji_id = ep.get('emoji_id')
+                    ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                    cp = custom_prices.get(epid, {})
+                    your_price = cp.get('sell_price')
+                    ext_item = {
+                        'id': epid,
+                        'name_ar': ep_name, 'name_en': ep_name,
+                        'desc_ar': ep_desc, 'desc_en': ep_desc,
+                        'store_price': ep_price,
+                        'your_price': your_price,
+                        'price_locked': your_price is not None,
+                        'price_alert': None,
+                        'stock': ep.get('stock', 0),
+                        'is_manual': False,
+                        'discount_tiers': [],
+                        'custom_emoji_id': ep_emoji_id,
+                        'has_premium_emoji': bool(ep_emoji_id),
+                        'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                        'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                        'desc_ar_html': ep_desc,
+                        'desc_en_html': ep_desc,
+                        'source': 'external_api',
+                    }
+                    ext_item['emoji_guide'] = {
+                        'parse_mode': 'HTML',
+                        'name_ar_html': ext_item['name_ar_html'],
+                        'name_en_html': ext_item['name_en_html'],
+                        'desc_ar_html': ep_desc,
+                        'desc_en_html': ep_desc,
+                        'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
+                    }
+                    result.append(ext_item)
+            except Exception as _ext_e:
+                logger.debug(f"ext products in API err: {_ext_e}")
+
             return _json_resp(self, 200, {'success': True, 'products': result})
 
         if route.startswith('/product/'):
             pid = route.split('/product/')[1]
+            # 🔌 منتج API خارجي؟
+            if pid.startswith('ext_'):
+                try:
+                    ep = db.ext_products.find_one({'_id': ObjectId(pid[4:])})
+                except Exception:
+                    ep = None
+                if not ep or ep.get('hidden'):
+                    return _json_resp(self, 404, {'error': 'Product not found'})
+                ep_name = str(ep.get('name', ''))
+                ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+                ep_emoji_id = ep.get('emoji_id')
+                ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                return _json_resp(self, 200, {'success': True, 'product': {
+                    'id': pid, 'name_ar': ep_name, 'name_en': ep_name,
+                    'desc_ar': ep_desc, 'desc_en': ep_desc,
+                    'store_price': ep_price, 'stock': ep.get('stock', 0),
+                    'is_manual': False,
+                    'custom_emoji_id': ep_emoji_id,
+                    'has_premium_emoji': bool(ep_emoji_id),
+                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'desc_ar_html': ep_desc, 'desc_en_html': ep_desc,
+                    'source': 'external_api',
+                }})
             pr = find_product(pid)
             if not pr or pr.get('is_hidden'):
                 return _json_resp(self, 404, {'error': 'Product not found'})
