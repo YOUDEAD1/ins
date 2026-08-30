@@ -14951,6 +14951,41 @@ def _ext_execute_buy(message, epid, lang):
     except Exception: pass
 
     pname = str(ep.get('name', ''))
+
+    # 🔔 إشعار البيع للأدمن + لوق القناة (مثل المنتج العادي تماماً)
+    try:
+        u_data = get_user_data_full(uid) or {}
+        buyer_m = u_data.get('name') or u_data.get('username') or str(uid)
+        notify_admins(
+            f"🛒 <b>بيع منتج (API)</b>\n"
+            f"👤 {html.escape(str(buyer_m))} (<code>{uid}</code>)\n"
+            f"📦 {html.escape(pname)}\n"
+            f"🔢 الكمية: {qty}\n💰 ${total:.2f}\n"
+            f"🆔 <code>{order_rec.get('ext_order_id','')}</code>"
+        )
+    except Exception as _ne:
+        logger.debug(f"ext sale admin notify err: {_ne}")
+    # لوق القناة العامة
+    try:
+        log_ch = get_setting('log_channel')
+        if log_ch and log_ch != "Not Set":
+            obs_user = obscure_text((get_user_data_full(uid) or {}).get('username') or str(uid))
+            p_name_log = f"📦 <b>{html.escape(clean_name(pname))}</b>"
+            pub_msg = LANG['en']['log_purchase'].format(obs_user, p_name_log, qty)
+            custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+            if custom_pub and custom_pub.get('value'):
+                try: pub_msg = custom_pub['value'].format(obs_user, p_name_log, qty)
+                except Exception: pass
+            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+    except Exception as _le:
+        logger.debug(f"ext sale channel log err: {_le}")
+
+    # 🎁 مكافأة الإحالة على الشراء (مثل المنتج العادي)
+    try:
+        award_purchase_referral_reward(uid, pname, total)
+    except Exception:
+        pass
+
     if codes:
         import io
         content = "\n".join(str(c) for c in codes)
