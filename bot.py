@@ -5410,31 +5410,60 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         markup = InlineKeyboardMarkup(row_width=1)
         prod_ids = cat.get('product_ids') or []
 
-        items = []
+        # ⚡ نجمع المنتجات أولاً، ثم نجلب المخزون دفعة واحدة (batch) للسرعة
+        cat_prods = []
+        stock_ids = []
         for pid in prod_ids:
             p = find_product(str(pid))
             if not p: continue
             if p.get('is_hidden', False) and not is_admin: continue
-            is_manual = p.get('is_manual', False)
             actual_pid = p.get('id', str(p.get('_id', '')))
+            cat_prods.append((p, actual_pid))
+            spid = str(actual_pid)
+            stock_ids.append(spid)
+            if spid.isdigit():
+                stock_ids.append(int(spid))
+
+        # جلب المخزون لكل المنتجات دفعة واحدة
+        cat_stock_map = {}
+        try:
+            if stock_ids:
+                for row in db.product_stock.aggregate([
+                    {'$match': {'product_id': {'$in': stock_ids}, 'is_sold': False}},
+                    {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}
+                ]):
+                    cat_stock_map[str(row['_id'])] = row['c']
+        except Exception as _cse:
+            logger.debug(f"catalog stock batch err: {_cse}")
+
+        items = []
+        for p, actual_pid in cat_prods:
+            is_manual = p.get('is_manual', False)
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            # ⚡ لا نجلب المخزون هنا (كان سبب البطء) — يظهر عند فتح المنتج
-            items.append((p, actual_pid, 0, is_manual, True))
-        
+            st = cat_stock_map.get(str(actual_pid), 0)
+            in_stock = is_manual or is_cgpt or st > 0
+            items.append((p, actual_pid, st, is_manual, in_stock))
+
+        # الترتيب: المثبّت أولاً، ثم المتوفر (أخضر)، ثم غير المتوفر (أحمر) في الأسفل
         items.sort(key=lambda x: (
             not x[0].get('cgpt_pinned', False),
             not x[4],
             clean_name(x[0].get('name_en' if lang == 'en' else 'name_ar', '')).lower()
         ))
-        
+
         for p, actual_pid, st, is_manual, in_stock in items:
             db_style = p.get('btn_style')
             btn_style = db_style if db_style and in_stock else ("success" if in_stock else "danger")
             hidden_icon = " 👻" if p.get('is_hidden', False) else ""
             n = clean_name(p.get('name_en') if lang == 'en' else p.get('name_ar'))
-            short_n = n[:30] + ".." if len(n) > 30 else n
-            # ⚡ الاسم فقط (سريع) — السعر والمخزون يظهران عند فتح المنتج
-            btn_text = f"{short_n}{hidden_icon}"
+            short_n = n[:25] + ".." if len(n) > 25 else n
+            is_cgpt_main = p.get('product_type') == 'cgpt_main'
+            # الاسم + العدد (ستوك) — FW للمنتج اليدوي/اللامحدود
+            if is_cgpt_main:
+                st_text = "FW"
+            else:
+                st_text = "FW" if is_manual else str(st)
+            btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             callback_pid = str(actual_pid).replace("cgpt_main_", "") if str(actual_pid).startswith("cgpt_main_") else str(actual_pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}_c_{cat_id}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
@@ -5442,14 +5471,20 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
 
-        # 🔌 منتجات API المُسندة لهذا المجلد (الظاهرة فقط)
+        # 🔌 منتجات API المُسندة لهذا المجلد (الظاهرة فقط) — مع العدد واللون
         try:
-            for ep in db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}):
+            ext_list = list(db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}))
+            # المتوفر أولاً (أبجدياً)، غير المتوفر في الأسفل
+            ext_list.sort(key=lambda e: (not (e.get('stock', 0) > 0),
+                                         str(e.get('name', '')).lower()))
+            for ep in ext_list:
                 epid = str(ep['_id'])
                 enm = str(ep.get('name', ''))
-                short_e = enm[:30] + ".." if len(enm) > 30 else enm
-                bt = short_e  # الاسم فقط (سريع)
-                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': 'success'}
+                short_e = enm[:25] + ".." if len(enm) > 25 else enm
+                st = ep.get('stock', 0)
+                bt = f"{short_e} | 📦 {st}"
+                bstyle = "success" if st > 0 else "danger"
+                bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': bstyle}
                 if ep.get('emoji_id'):
                     bkw['icon_custom_emoji_id'] = ep['emoji_id']
                 markup.add(CustomInlineButton(**bkw))
@@ -6878,24 +6913,53 @@ def shop_list_ui(call):
         except: pass
     else:
         # ═══ بدون كتالوجات — العرض العادي القديم ═══
-        prods = list(db.products.find())
-        prods.sort(key=lambda x: x.get('name_en' if l == 'en' else 'name_ar', '').lower())
-        
-        markup = InlineKeyboardMarkup(row_width=1)
-        
-        for p in prods:
+        all_prods_nc = list(db.products.find())
+        # جلب المخزون دفعة واحدة
+        nc_ids = []
+        for p in all_prods_nc:
+            spid = str(p.get('id', str(p.get('_id', ''))))
+            nc_ids.append(spid)
+            if spid.isdigit():
+                nc_ids.append(int(spid))
+        nc_stock = {}
+        try:
+            if nc_ids:
+                for row in db.product_stock.aggregate([
+                    {'$match': {'product_id': {'$in': nc_ids}, 'is_sold': False}},
+                    {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}
+                ]):
+                    nc_stock[str(row['_id'])] = row['c']
+        except Exception as _nce:
+            logger.debug(f"nocat stock batch err: {_nce}")
+
+        # نبني القائمة مع حالة التوفّر
+        nc_items = []
+        for p in all_prods_nc:
             is_hidden = p.get('is_hidden', False)
             if is_hidden and not is_admin:
                 continue
             is_manual = p.get('is_manual', False)
-            pid = p.get('id', str(p.get('_id', '')))
+            pid = str(p.get('id', str(p.get('_id', ''))))
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            # ⚡ لا نجلب المخزون (سرعة) — يظهر عند فتح المنتج
-            db_style = p.get('btn_style') or "success"
+            st = nc_stock.get(pid, 0)
+            in_stock = is_manual or is_cgpt or st > 0
+            nc_items.append((p, pid, st, is_manual, in_stock))
+
+        # المتوفر أولاً (أبجدياً)، غير المتوفر أحمر في الأسفل
+        nc_items.sort(key=lambda x: (not x[4],
+                      clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
+
+        markup = InlineKeyboardMarkup(row_width=1)
+
+        for p, pid, st, is_manual, in_stock in nc_items:
+            is_hidden = p.get('is_hidden', False)
+            is_cgpt = p.get('product_type') == 'cgpt_main'
+            db_style = p.get('btn_style') if (p.get('btn_style') and in_stock) else ("success" if in_stock else "danger")
             hidden_icon = " 👻(مخفي)" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-            short_n = n[:30] + ".." if len(n) > 30 else n
-            btn_text = f"{short_n}{hidden_icon}"
+            short_n = n[:25] + ".." if len(n) > 25 else n
+            st_text = "FW" if (is_manual or is_cgpt) else str(st)
+            btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': db_style}
             custom_emoji_id = p.get('custom_emoji_id')
