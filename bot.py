@@ -5345,9 +5345,8 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             is_manual = p.get('is_manual', False)
             actual_pid = p.get('id', str(p.get('_id', '')))
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = get_product_stock_count(actual_pid)
-            in_stock = is_manual or st > 0 or is_cgpt
-            items.append((p, actual_pid, st, is_manual, in_stock))
+            # ⚡ لا نجلب المخزون هنا (كان سبب البطء) — يظهر عند فتح المنتج
+            items.append((p, actual_pid, 0, is_manual, True))
         
         items.sort(key=lambda x: (
             not x[0].get('cgpt_pinned', False),
@@ -5360,13 +5359,9 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             btn_style = db_style if db_style and in_stock else ("success" if in_stock else "danger")
             hidden_icon = " 👻" if p.get('is_hidden', False) else ""
             n = clean_name(p.get('name_en') if lang == 'en' else p.get('name_ar'))
-            short_n = n[:25] + ".." if len(n) > 25 else n
-            is_cgpt_main = p.get('product_type') == 'cgpt_main'
-            if is_cgpt_main:
-                btn_text = f"{short_n} | 📦 FW{hidden_icon}"
-            else:
-                st_text = "FW" if is_manual else str(st)
-                btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+            short_n = n[:30] + ".." if len(n) > 30 else n
+            # ⚡ الاسم فقط (سريع) — السعر والمخزون يظهران عند فتح المنتج
+            btn_text = f"{short_n}{hidden_icon}"
             callback_pid = str(actual_pid).replace("cgpt_main_", "") if str(actual_pid).startswith("cgpt_main_") else str(actual_pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}_c_{cat_id}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
@@ -5378,9 +5373,9 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         try:
             for ep in db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}):
                 epid = str(ep['_id'])
-                price = float(ep.get('sell_price', ep.get('base_price', 0)))
-                enm = str(ep.get('name', ''))[:25]
-                bt = f"{enm} | ${price:.2f} | 🔌"
+                enm = str(ep.get('name', ''))
+                short_e = enm[:30] + ".." if len(enm) > 30 else enm
+                bt = short_e  # الاسم فقط (سريع)
                 bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': 'success'}
                 if ep.get('emoji_id'):
                     bkw['icon_custom_emoji_id'] = ep['emoji_id']
@@ -5506,7 +5501,7 @@ def start_handler(message):
     markup.add(create_btn(uid, 'btn_invite', callback_data="open_invite"),
                create_btn(uid, 'btn_support', url=f"https://t.me/{OWNER_USER}"))
     # ⚙️ الإعدادات: يجمع الملف الشخصي واللغة (نص قابل للتعديل من CMS)
-    markup.add(InlineKeyboardButton(get_text(uid, 'btn_settings'), callback_data="open_settings"))
+    markup.add(create_btn(uid, 'btn_settings', callback_data="open_settings"))
 
     # 🆕 زر شروط الاستخدام
     markup.add(create_btn(uid, 'btn_terms', callback_data="open_terms"))
@@ -6727,12 +6722,11 @@ def shop_list_ui(call):
                     continue
                 epid = str(ep['_id'])
                 price = float(ep.get('sell_price', ep.get('base_price', 0)))
-                stock = ep.get('stock', 0)
                 enm = str(ep.get('name', ''))
-                short_n = enm[:25] + ".." if len(enm) > 25 else enm
+                short_n = enm[:30] + ".." if len(enm) > 30 else enm
                 hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
-                bt = f"{short_n} | ${price:.2f} | 📦 {stock}{hidden_icon}"
-                bstyle = "success" if (stock and stock > 0) else "danger"
+                bt = f"{short_n}{hidden_icon}"  # الاسم فقط (سريع)
+                bstyle = "success"
                 bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': bstyle}
                 if ep.get('emoji_id'):
                     bkw['icon_custom_emoji_id'] = ep['emoji_id']
@@ -6764,20 +6758,14 @@ def shop_list_ui(call):
             is_manual = p.get('is_manual', False)
             pid = p.get('id', str(p.get('_id', '')))
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = get_product_stock_count(pid)
-            in_stock = is_manual or st > 0 or is_cgpt
-            db_style = p.get('btn_style')
-            btn_style = db_style if (db_style and in_stock) else ("success" if in_stock else "danger")
+            # ⚡ لا نجلب المخزون (سرعة) — يظهر عند فتح المنتج
+            db_style = p.get('btn_style') or "success"
             hidden_icon = " 👻(مخفي)" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
-            short_n = n[:25] + ".." if len(n) > 25 else n 
-            if is_cgpt:
-                btn_text = f"{short_n} | 📦 FW{hidden_icon}"
-            else:
-                st_text = "FW" if is_manual else str(st)
-                btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
+            short_n = n[:30] + ".." if len(n) > 30 else n
+            btn_text = f"{short_n}{hidden_icon}"
             callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
-            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
+            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': db_style}
             custom_emoji_id = p.get('custom_emoji_id')
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
@@ -6792,12 +6780,11 @@ def shop_list_ui(call):
                     continue
                 epid = str(ep['_id'])
                 price = float(ep.get('sell_price', ep.get('base_price', 0)))
-                stock = ep.get('stock', 0)
                 enm = str(ep.get('name', ''))
-                short_n = enm[:25] + ".." if len(enm) > 25 else enm
+                short_n = enm[:30] + ".." if len(enm) > 30 else enm
                 hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
-                bt = f"{short_n} | ${price:.2f} | 📦 {stock}{hidden_icon}"
-                bstyle = "success" if (stock and stock > 0) else "danger"
+                bt = f"{short_n}{hidden_icon}"  # الاسم فقط (سريع)
+                bstyle = "success"
                 bkw = {'text': bt, 'callback_data': f"vext_{epid}", 'style': bstyle}
                 if ep.get('emoji_id'):
                     bkw['icon_custom_emoji_id'] = ep['emoji_id']
