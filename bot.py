@@ -14599,6 +14599,12 @@ def _ext_send_product_view(chat_id, uid, ep, l):
         text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
         callback_data=f"extqty_{epid}", style='success'))
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
+    try:
+        if _is_admin_check(uid):
+            markup.add(InlineKeyboardButton("⚙️ إعدادات المنتج (أدمن)",
+                       callback_data=f"ext_p_{epid}"))
+    except Exception:
+        pass
     bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
 
 
@@ -14647,6 +14653,13 @@ def ext_customer_view(call):
         text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
         callback_data=f"extqty_{epid}", style='success'))
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
+    # زر الإعدادات للأدمن (يفتح تفاصيل/تعديل المنتج) — مثل المنتج العادي
+    try:
+        if _is_admin_check(uid):
+            markup.add(InlineKeyboardButton("⚙️ إعدادات المنتج (أدمن)",
+                       callback_data=f"ext_p_{epid}"))
+    except Exception:
+        pass
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
                               parse_mode="HTML", reply_markup=markup)
