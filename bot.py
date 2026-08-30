@@ -3548,6 +3548,10 @@ DEFAULT_BUTTONS = {
         'btn_products': '🔵 المنتجات',
         'btn_deposit': '💳 شحن الرصيد',
         'btn_profile': '👤 الملف الشخصي',
+        'btn_settings': '⚙️ الإعدادات',
+        'btn_toggle_folders': '🗂 التبديل بين العرض',
+        'btn_view_flat': '🗂 عرض بدون مجلدات',
+        'btn_view_folders': '📁 عرض بالمجلدات',
         'btn_invite': '👥 الإحالات',
         'btn_support': '👨‍💻 الدعم الفني',
         'btn_lang': '🌐 English',
@@ -3580,6 +3584,10 @@ DEFAULT_BUTTONS = {
         'btn_products': '🔵 Products',
         'btn_deposit': '💳 Deposit',
         'btn_profile': '👤 Profile',
+        'btn_settings': '⚙️ Settings',
+        'btn_toggle_folders': '🗂 Toggle view',
+        'btn_view_flat': '🗂 Show without folders',
+        'btn_view_folders': '📁 Show with folders',
         'btn_invite': '👥 Referrals',
         'btn_support': '👨‍💻 Support',
         'btn_lang': '🌐 العربية',
@@ -5260,7 +5268,8 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
         n = clean_name(get_translated_product_name(p, lang))
         d = get_translated_product_desc(p, lang)
         custom_emoji_id = p.get('custom_emoji_id')
-        icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '📦'
+        # الرمز البريميوم يظهر فقط في الأزرار — في النص نستخدم رمزاً عادياً
+        icon_html = '📦'
 
         discount_tiers = p.get('discount_tiers', [])
         discount_text = ""
@@ -5381,7 +5390,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
 
         markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
         
-        txt = f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji> <b>{name}</b>' if emoji_id else f"{emoji} <b>{name}</b>"
+        txt = f"{emoji} <b>{name}</b>"
         
         if message_id_to_edit:
             try: bot.edit_message_text(txt, chat_id, message_id_to_edit, reply_markup=markup, parse_mode="HTML")
@@ -5494,11 +5503,11 @@ def start_handler(message):
     
     markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
-    markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"),
-               create_btn(uid, 'btn_invite', callback_data="open_invite"))
-    markup.add(create_btn(uid, 'btn_support', url=f"https://t.me/{OWNER_USER}"),
-               create_btn(uid, 'btn_lang', callback_data="toggle_language"))
-    
+    markup.add(create_btn(uid, 'btn_invite', callback_data="open_invite"),
+               create_btn(uid, 'btn_support', url=f"https://t.me/{OWNER_USER}"))
+    # ⚙️ الإعدادات: يجمع الملف الشخصي واللغة (نص قابل للتعديل من CMS)
+    markup.add(InlineKeyboardButton(get_text(uid, 'btn_settings'), callback_data="open_settings"))
+
     # 🆕 زر شروط الاستخدام
     markup.add(create_btn(uid, 'btn_terms', callback_data="open_terms"))
     markup.add(create_btn(uid, 'btn_api', callback_data="open_api"))
@@ -6471,6 +6480,109 @@ def referral_list_page(call):
 
 # 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
+def _shop_flat_view(call, uid, l, is_admin, page=0):
+    """عرض كل المنتجات (عادية + API) بصفحات — اسم فقط للسرعة."""
+    PER = 15
+    # نجمع المنتجات العادية + API في قائمة موحّدة (اسم + معرّف + نوع)
+    items = []
+    for p in db.products.find():
+        if p.get('is_hidden') and not is_admin:
+            continue
+        pid = p.get('id', str(p.get('_id', '')))
+        nm = clean_name(p.get('name_en' if l == 'en' else 'name_ar',
+                              p.get('name_ar', p.get('name_en', '')))) or 'منتج'
+        items.append(('reg', str(pid), nm, p.get('custom_emoji_id')))
+    for ep in db.ext_products.find():
+        if ep.get('hidden') and not is_admin:
+            continue
+        items.append(('ext', str(ep['_id']), str(ep.get('name', '')), ep.get('emoji_id')))
+    # ترتيب أبجدي
+    items.sort(key=lambda x: x[2].lower())
+    total = len(items)
+    start = page * PER
+    page_items = items[start:start + PER]
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    for typ, iid, nm, emoji_id in page_items:
+        short = nm[:35]
+        if typ == 'reg':
+            cb = f"vi_p_{iid}"
+        else:
+            cb = f"vext_{iid}"
+        bkw = {'text': short, 'callback_data': cb, 'style': 'success'}
+        if emoji_id:
+            bkw['icon_custom_emoji_id'] = emoji_id
+        markup.add(CustomInlineButton(**bkw))
+
+    # تنقّل الصفحات
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"shopflat_{page-1}"))
+    total_pages = (total + PER - 1) // PER
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if start + PER < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"shopflat_{page+1}"))
+    if nav:
+        markup.row(*nav)
+
+    # زر التبديل (لكل مستخدم)
+    toggle_lbl = get_text(uid, 'btn_toggle_folders') if l != 'en' else get_text(uid, 'btn_toggle_folders')
+    markup.add(InlineKeyboardButton(toggle_lbl, callback_data="shop_toggle_mode"))
+    markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
+
+    title = ("🛒 <b>كل المنتجات</b>" if l != 'en' else "🛒 <b>All Products</b>")
+    txt = f"{title}\n({total} {'منتج' if l!='en' else 'products'})"
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("shopflat_"))
+def shop_flat_page(call):
+    """تنقّل صفحات العرض المسطّح."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    u = get_user_data_full(uid)
+    is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
+    l = get_lang(uid)
+    page = int(call.data.replace("shopflat_", "")) if call.data.replace("shopflat_", "").isdigit() else 0
+    _shop_flat_view(call, uid, l, is_admin, page=page)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "shop_toggle_mode")
+def shop_toggle_mode(call):
+    """يبدّل وضع العرض لهذا المستخدم فقط (مجلدات ↔ بدون)."""
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    u = get_user_data_full(uid)
+    cur = u.get('shop_display_mode', 'folders')
+    new = 'flat' if cur == 'folders' else 'folders'
+    db.users.update_one({'user_id': uid}, {'$set': {'shop_display_mode': new}})
+    _invalidate_user_cache(uid)
+    l = get_lang(uid)
+    if l == 'en':
+        note = f"✅ Display: {'No folders' if new=='flat' else 'Folders'}"
+    else:
+        note = f"✅ العرض: {'بدون مجلدات' if new=='flat' else 'مجلدات'}"
+    try:
+        bot.answer_callback_query(call.id, note, show_alert=True)
+    except Exception:
+        pass
+    call.data = "open_shop"
+    shop_list_ui(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "noop")
+def _noop_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
     bot.answer_callback_query(call.id)
@@ -6481,7 +6593,12 @@ def shop_list_ui(call):
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
     l = get_lang(uid)
-    
+
+    # وضع العرض لكل مستخدم: folders (مجلدات) أو flat (كل المنتجات بصفحات)
+    display_mode = u.get('shop_display_mode', 'folders')
+    if display_mode == 'flat':
+        return _shop_flat_view(call, uid, l, is_admin, page=0)
+
     # فحص هل في كتالوجات
     catalogs = list(db.catalogs.find().sort('order', 1))
     
@@ -14369,11 +14486,8 @@ def ext_customer_view(call):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_out = name if _is_html(name) else html.escape(name)
     desc_out = desc if _is_html(desc) else html.escape(desc[:600])
-    icon_html = ''
-    if ep.get('emoji_id'):
-        icon_html = f'<tg-emoji emoji-id="{ep["emoji_id"]}">{ep.get("emoji_char","✨")}</tg-emoji>'
-    elif ep.get('emoji_char'):
-        icon_html = ep['emoji_char']
+    # الرمز البريميوم يظهر فقط في الأزرار — في النص رمز عادي
+    icon_html = ep.get('emoji_char') or '📦'
     stock = ep.get('stock', 0)
     if l == 'en':
         delivery_type = "Auto ⚡ (Instant delivery)"
@@ -14388,15 +14502,170 @@ def ext_customer_view(call):
                f"💰 <b>السعر:</b> ${price:.2f}\n"
                f"📊 <b>المتوفر:</b> {stock} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton(
-        f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
-        callback_data=f"buyext_{epid}"))
+    markup.add(CustomInlineButton(
+        text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
+        callback_data=f"extqty_{epid}", style='success'))
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
                               parse_mode="HTML", reply_markup=markup)
     except Exception:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("extqty_"))
+def ext_customer_qty(call):
+    """يطلب الكمية لمنتج API — مثل المنتج العادي."""
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    epid = call.data.replace("extqty_", "")
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        bot.send_message(uid, "❌ غير متاح.")
+        return
+    l = get_lang(uid)
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    stock = ep.get('stock', 0)
+    name = str(ep.get('name', ''))
+    icon_html = ''
+    if ep.get('emoji_id'):
+        icon_html = f'<tg-emoji emoji-id="{ep["emoji_id"]}">{ep.get("emoji_char","✨")}</tg-emoji> '
+    elif ep.get('emoji_char'):
+        icon_html = f'{ep["emoji_char"]} '
+    name_out = name if ('<tg-emoji' in name or '<b>' in name) else html.escape(name)
+    if l == 'ar':
+        qty_msg = (f"{icon_html}<b>{name_out}</b>\n\n━━━━━━━━━━━━━━\n"
+                   f"💰 <b>السعر:</b> ${price:.2f} / قطعة\n"
+                   f"📊 <b>المتوفر:</b> {stock} قطعة\n"
+                   f"━━━━━━━━━━━━━━\n📝 <b>أرسل الكمية المطلوبة:</b>")
+    else:
+        qty_msg = (f"{icon_html}<b>{name_out}</b>\n\n━━━━━━━━━━━━━━\n"
+                   f"💰 <b>Price:</b> ${price:.2f} / unit\n"
+                   f"📊 <b>Stock:</b> {stock} units\n"
+                   f"━━━━━━━━━━━━━━\n📝 <b>Send the quantity:</b>")
+    msg = bot.send_message(uid, qty_msg, parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_execute_buy, epid, l)
+
+
+def _ext_execute_buy(message, epid, lang):
+    """ينفّذ شراء منتج API بالكمية، يخصم الرصيد، يطلب من API، يسلّم ملفاً."""
+    uid = message.from_user.id
+    if is_user_banned(uid):
+        return
+    l = lang
+    try:
+        qty = int(str(message.text).strip())
+        if qty <= 0:
+            raise ValueError()
+    except Exception:
+        bot.send_message(uid, "❌ كمية غير صالحة. أرسل رقماً صحيحاً." if l != 'en'
+                         else "❌ Invalid quantity. Send a whole number.")
+        return
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        bot.send_message(uid, "❌ المنتج لم يعد متاحاً.")
+        return
+
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    stock = ep.get('stock', 0)
+    if stock and qty > stock:
+        bot.send_message(uid, (f"❌ المتوفر فقط {stock} قطعة!" if l != 'en'
+                               else f"❌ Only {stock} in stock!"))
+        return
+    total = round(price * qty, 2)
+
+    # خصم الرصيد ذرّياً
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': total}},
+        {'$inc': {'balance': -total}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ. اشحن رصيدك أولاً." if l != 'en'
+                         else "❌ Insufficient balance. Please top up.")
+        return
+    _invalidate_user_cache(uid)
+
+    store = None
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
+    except Exception:
+        pass
+    if not store:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': total}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ المتجر غير متاح. أُعيد رصيدك.")
+        return
+
+    bot.send_message(uid, "⏳ جاري تنفيذ طلبك..." if l != 'en' else "⏳ Processing your order...")
+
+    idem = f"tg{uid}_{epid}_{int(time.time())}_{random.randint(1000,9999)}"
+    body = {'product_id': _ext_int_or_str(ep.get('ext_id')), 'quantity': qty}
+    ok, resp = _ext_api_post(store, '/api/v1/orders', body, idem_key=idem)
+
+    order_rec = {
+        'store_id': ep.get('store_id', ''), 'ext_product_id': epid,
+        'user_id': uid, 'product_name': ep.get('name', ''),
+        'price': total, 'quantity': qty, 'created_at': int(time.time()),
+        'idempotency_key': idem,
+    }
+
+    if not ok:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': total}})
+        _invalidate_user_cache(uid)
+        order_rec['status'] = 'failed'
+        order_rec['error'] = str(resp)[:300]
+        try: db.ext_orders.insert_one(order_rec)
+        except Exception: pass
+        bot.send_message(uid,
+            ("❌ تعذّر تنفيذ الطلب من المتجر. أُعيد رصيدك بالكامل." if l != 'en' else
+             "❌ Order failed at the store. Your balance was fully refunded."))
+        try:
+            for admin in db.users.find({'is_admin': 1}):
+                bot.send_message(admin['user_id'],
+                    f"⚠️ فشل طلب API:\nuser {uid} — {ep.get('name','')} ×{qty}\nالسبب: {str(resp)[:200]}")
+        except Exception:
+            pass
+        return
+
+    codes = _ext_extract_codes(resp)
+    _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
+    order_rec['status'] = 'success'
+    order_rec['ext_order_id'] = str(_order_obj.get('id', ''))
+    order_rec['codes'] = codes
+    try: db.ext_orders.insert_one(order_rec)
+    except Exception: pass
+
+    pname = str(ep.get('name', ''))
+    if codes:
+        import io
+        content = "\n".join(str(c) for c in codes)
+        f = io.BytesIO(content.encode('utf-8'))
+        f.name = f"order_{qty}x.txt"
+        caption = (
+            (f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 <b>{html.escape(pname)}</b>\n"
+             f"🔢 الكمية: <b>{qty}</b>\n💰 المدفوع: <b>${total:.2f}</b>\n\n"
+             f"🔑 الأكواد في الملف المرفق ⬆️") if l != 'en' else
+            (f"✅ <b>Purchase successful!</b>\n\n📦 <b>{html.escape(pname)}</b>\n"
+             f"🔢 Quantity: <b>{qty}</b>\n💰 Paid: <b>${total:.2f}</b>\n\n"
+             f"🔑 Codes in the attached file ⬆️"))
+        try:
+            bot.send_document(uid, f, caption=caption, parse_mode="HTML")
+        except Exception:
+            codes_txt = "\n".join(f"<code>{html.escape(str(c))}</code>" for c in codes)
+            bot.send_message(uid, f"{caption}\n\n{codes_txt}", parse_mode="HTML")
+    else:
+        bot.send_message(uid,
+            (f"✅ <b>تم تنفيذ الطلب!</b>\n\nرقم الطلب: <code>{order_rec.get('ext_order_id','')}</code>") if l != 'en' else
+            (f"✅ <b>Order placed!</b>\n\nOrder ID: <code>{order_rec.get('ext_order_id','')}</code>"),
+            parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buyext_"))
@@ -14765,6 +15034,36 @@ def ext_do_set_catalog(call):
         except Exception:
             cname = 'المجلد'
         bot.send_message(call.message.chat.id, f"✅ أُضيف المنتج إلى: {cname}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "open_settings")
+def open_settings(call):
+    """شاشة الإعدادات: الملف الشخصي + اللغة."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"))
+    markup.add(create_btn(uid, 'btn_lang', callback_data="toggle_language"))
+    # زر تبديل عرض المتجر (لكل مستخدم)
+    cur_mode = get_user_data_full(uid).get('shop_display_mode', 'folders')
+    if cur_mode == 'flat':
+        tg_lbl = get_text(uid, 'btn_view_folders')
+    else:
+        tg_lbl = get_text(uid, 'btn_view_flat')
+    markup.add(InlineKeyboardButton(tg_lbl, callback_data="shop_toggle_mode"))
+    markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
+    title = "⚙️ <b>الإعدادات</b>" if l != 'en' else "⚙️ <b>Settings</b>"
+    sub = ("اختر ما تريد ضبطه:" if l != 'en' else "Choose what to manage:")
+    try:
+        bot.edit_message_text(f"{title}\n\n{sub}", call.message.chat.id,
+                              call.message.message_id, parse_mode="HTML",
+                              reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, f"{title}\n\n{sub}",
+                         parse_mode="HTML", reply_markup=markup)
 
 
 def admin_main_ui(call):
@@ -16135,7 +16434,7 @@ def ad_cms_btns_list(call):
     cat = call.data.replace("ad_cms_b_", "")
     
     btn_categories = {
-        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin', 'btn_api', 'btn_check_sub'],
+        'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_settings', 'btn_toggle_folders', 'btn_view_flat', 'btn_view_folders', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin', 'btn_api', 'btn_check_sub'],
         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc',
                 'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'],
         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy'],
