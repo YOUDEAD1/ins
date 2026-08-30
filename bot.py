@@ -5538,6 +5538,25 @@ def start_handler(message):
                 logger.info(f"[DEEPLINK] catalog_view_helper returned: {result}")
                 if result:
                     return
+            elif deeplink_param.startswith("vext_"):
+                # فتح منتج API مباشرة عبر الرابط
+                epid = deeplink_param[5:]
+                logger.info(f"[DEEPLINK] External product: epid={epid}")
+                try:
+                    ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+                    if ep and not ep.get('hidden'):
+                        class _FakeCall:
+                            def __init__(s):
+                                s.id = None
+                                s.data = f"vext_{epid}"
+                                s.from_user = from_user
+                                s.message = type('M', (), {'chat': type('C', (), {'id': chat_id})(),
+                                                            'message_id': None})()
+                        # نرسل عرض المنتج كرسالة جديدة
+                        _ext_send_product_view(chat_id, uid, ep, lang)
+                        return
+                except Exception as _ve:
+                    logger.debug(f"vext deeplink err: {_ve}")
         except Exception as dl_err:
             logger.error(f"[DEEPLINK] Error processing deep link '{deeplink_param}': {dl_err}", exc_info=True)
 
@@ -6476,35 +6495,69 @@ def referral_list_page(call):
 # 🛒 12. المتجر والشراء والترتيب الأبجدي للمنتجات 
 # ============================================================
 def _shop_flat_view(call, uid, l, is_admin, page=0):
-    """عرض كل المنتجات (عادية + API) بصفحات — اسم فقط للسرعة."""
+    """عرض كل المنتجات (عادية + API) بصفحات — مع العدد واللون والترتيب."""
     PER = 15
-    # نجمع المنتجات العادية + API في قائمة موحّدة (اسم + معرّف + نوع)
-    items = []
+    # نجمع المنتجات العادية
+    reg_prods = []
+    reg_pids = []
     for p in db.products.find():
         if p.get('is_hidden') and not is_admin:
             continue
-        pid = p.get('id', str(p.get('_id', '')))
+        pid = str(p.get('id', str(p.get('_id', ''))))
+        reg_prods.append(p)
+        reg_pids.append(pid)
+        if pid.isdigit():
+            reg_pids.append(int(pid))
+
+    # ⚡ جلب المخزون لكل المنتجات العادية دفعة واحدة (batch)
+    stock_map = {}
+    try:
+        if reg_pids:
+            for row in db.product_stock.aggregate([
+                {'$match': {'product_id': {'$in': reg_pids}, 'is_sold': False}},
+                {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}
+            ]):
+                stock_map[str(row['_id'])] = row['c']
+    except Exception as _e:
+        logger.debug(f"flat stock batch err: {_e}")
+
+    # نبني القائمة الموحّدة: (نوع, معرّف, اسم, رمز, سعر, ستوك, متوفر؟, يdوي؟)
+    items = []
+    for p in reg_prods:
+        pid = str(p.get('id', str(p.get('_id', ''))))
         nm = clean_name(p.get('name_en' if l == 'en' else 'name_ar',
                               p.get('name_ar', p.get('name_en', '')))) or 'منتج'
-        items.append(('reg', str(pid), nm, p.get('custom_emoji_id')))
+        is_manual = p.get('is_manual', False)
+        is_cgpt = p.get('product_type') == 'cgpt_main'
+        st = stock_map.get(pid, 0)
+        in_stock = is_manual or is_cgpt or st > 0
+        items.append(('reg', pid, nm, p.get('custom_emoji_id'),
+                      float(p.get('price', 0)), st, in_stock, is_manual))
     for ep in db.ext_products.find():
         if ep.get('hidden') and not is_admin:
             continue
-        items.append(('ext', str(ep['_id']), str(ep.get('name', '')), ep.get('emoji_id')))
-    # ترتيب أبجدي
-    items.sort(key=lambda x: x[2].lower())
+        st = ep.get('stock', 0)
+        items.append(('ext', str(ep['_id']), str(ep.get('name', '')),
+                      ep.get('emoji_id'),
+                      float(ep.get('sell_price', ep.get('base_price', 0))),
+                      st, st > 0, False))
+
+    # ترتيب: المتوفر أولاً (أبجدياً)، ثم غير المتوفر (أبجدياً) في الآخر
+    items.sort(key=lambda x: (not x[6], x[2].lower()))
+
     total = len(items)
     start = page * PER
     page_items = items[start:start + PER]
 
     markup = InlineKeyboardMarkup(row_width=1)
-    for typ, iid, nm, emoji_id in page_items:
-        short = nm[:35]
-        if typ == 'reg':
-            cb = f"vi_p_{iid}"
-        else:
-            cb = f"vext_{iid}"
-        bkw = {'text': short, 'callback_data': cb, 'style': 'success'}
+    for typ, iid, nm, emoji_id, price, st, in_stock, is_manual in page_items:
+        short_n = nm[:25] + ".." if len(nm) > 25 else nm
+        st_text = "FW" if is_manual else str(st)
+        btn_text = f"{short_n} | ${price:.2f} | 📦 {st_text}"
+        # أخضر للمتوفر، أحمر لغير المتوفر
+        bstyle = "success" if in_stock else "danger"
+        cb = f"vi_p_{iid}" if typ == 'reg' else f"vext_{iid}"
+        bkw = {'text': btn_text, 'callback_data': cb, 'style': bstyle}
         if emoji_id:
             bkw['icon_custom_emoji_id'] = emoji_id
         markup.add(CustomInlineButton(**bkw))
@@ -6521,8 +6574,8 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
     if nav:
         markup.row(*nav)
 
-    # زر التبديل (لكل مستخدم)
-    toggle_lbl = get_text(uid, 'btn_toggle_folders') if l != 'en' else get_text(uid, 'btn_toggle_folders')
+    # زر التبديل لعرض المجلدات
+    toggle_lbl = "📁 عرض بالمجلدات" if l != 'en' else "📁 Show with folders"
     markup.add(InlineKeyboardButton(toggle_lbl, callback_data="shop_toggle_mode"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
 
@@ -6565,7 +6618,7 @@ def shop_toggle_mode(call):
     else:
         note = f"✅ العرض: {'بدون مجلدات' if new=='flat' else 'مجلدات'}"
     try:
-        bot.answer_callback_query(call.id, note, show_alert=True)
+        bot.answer_callback_query(call.id, note)
     except Exception:
         pass
     call.data = "open_shop"
@@ -14158,12 +14211,26 @@ def ext_sync_products(call):
             updated += 1
             # 🔔 بثّ حدث تحديث للمطوّرين (كأنه منتج عادي) — للمنتجات الظاهرة فقط
             if not existing.get('hidden'):
+                old_stock = existing.get('stock', 0) or 0
+                new_stock = stock or 0
                 try:
                     _emit_event('product.updated', {
                         'source': 'external_api', 'store_id': sid,
-                        'name': name, 'price': doc.get('base_price'),
-                        'description': desc, 'stock': stock,
+                        'product_id': f"ext_{existing['_id']}",
+                        'name_ar': name, 'name_en': name,
+                        'price': doc.get('base_price'),
+                        'description': desc, 'stock': new_stock,
+                        'is_manual': False, 'is_hidden': False,
                     }, product_id=f"ext_{existing['_id']}")
+                    # لو توفّر ستوك جديد (كان 0 وصار أكثر) → بثّ stock.added
+                    if old_stock <= 0 and new_stock > 0:
+                        _emit_event('stock.added', {
+                            'source': 'external_api',
+                            'product_id': f"ext_{existing['_id']}",
+                            'name_ar': name, 'name_en': name,
+                            'price': doc.get('base_price'),
+                            'stock': new_stock, 'added': new_stock,
+                        }, product_id=f"ext_{existing['_id']}")
                 except Exception:
                     pass
         else:
@@ -14246,6 +14313,9 @@ def ext_product_detail(call):
     mt_label = {'percent': f'نسبة +{mv}%', 'fixed': f'ثابت +${mv}', 'manual': 'سعر يدوي'}.get(mt, mt)
     emoji_line = f"✨ رمز مميّز: <code>{p.get('emoji_id')}</code>\n" if p.get('emoji_id') else ""
     hidden = p.get('hidden', False)
+    # رابط المنتج (deep link) — مثل المنتج العادي
+    bot_username = get_bot_username()
+    link = f"https://t.me/{bot_username}?start=vext_{pid}"
     txt = (
         f"📦 <b>{html.escape(str(p.get('name','')))}</b>\n\n"
         f"{emoji_line}"
@@ -14253,14 +14323,19 @@ def ext_product_detail(call):
         f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
         f"🏷 التسعير: {mt_label}\n"
         f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
-        f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}"
+        f"📊 المخزون: <b>{p.get('stock', 0)}</b>\n"
+        f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}\n\n"
+        f"🔗 <b>رابط المنتج:</b>\n<code>{link}</code>"
     )
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("✏️ تعديل السعر", callback_data=f"ext_edit_{pid}"),
         InlineKeyboardButton("🚫 إخفاء" if not hidden else "👁 إظهار", callback_data=f"ext_hide_{pid}")
     )
-    markup.add(InlineKeyboardButton("✏️ تعديل الاسم/الوصف", callback_data=f"ext_editxt_{pid}"))
+    markup.add(
+        InlineKeyboardButton("✏️ تعديل الاسم", callback_data=f"ext_editname_{pid}"),
+        InlineKeyboardButton("📝 تعديل الوصف", callback_data=f"ext_editdesc_{pid}")
+    )
     markup.add(InlineKeyboardButton("📁 إضافة لمجلد", callback_data=f"ext_setcat_{pid}"))
     sid = p.get('store_id', '')
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_prods_{sid}_0"))
@@ -14368,7 +14443,7 @@ def _ext_save_price(message, pid, ptype):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_editxt_"))
 @admin_required
 def ext_edit_text(call):
-    """يعدّل اسم ووصف المنتج."""
+    """(قديم) تعديل الاسم والوصف معاً — يبقى للتوافق."""
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     pid = call.data.replace("ext_editxt_", "")
@@ -14386,8 +14461,59 @@ def _ext_save_text(message, pid):
     desc = parts[1].strip() if len(parts) > 1 else ''
     try:
         db.ext_products.update_one({'_id': ObjectId(pid)},
-            {'$set': {'name': name, 'desc': desc}})
+            {'$set': {'name': name, 'desc': desc,
+                      'name_edited': True, 'desc_edited': True}})
         bot.send_message(message.chat.id, "✅ تم تعديل الاسم والوصف.")
+    except Exception:
+        bot.send_message(message.chat.id, "❌ فشل التعديل.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_editname_"))
+@admin_required
+def ext_edit_name(call):
+    """يعدّل اسم منتج API فقط."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_editname_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "✏️ أرسل الاسم الجديد للمنتج:", parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_save_name, pid)
+
+
+def _ext_save_name(message, pid):
+    if not message.text:
+        return
+    name = message.text.strip()
+    try:
+        db.ext_products.update_one({'_id': ObjectId(pid)},
+            {'$set': {'name': name, 'name_edited': True}})
+        bot.send_message(message.chat.id, f"✅ تم تعديل الاسم إلى: {html.escape(name)}",
+                         parse_mode="HTML")
+    except Exception:
+        bot.send_message(message.chat.id, "❌ فشل التعديل.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ext_editdesc_"))
+@admin_required
+def ext_edit_desc(call):
+    """يعدّل وصف منتج API فقط."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    pid = call.data.replace("ext_editdesc_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "📝 أرسل الوصف الجديد للمنتج:\n<i>(يدعم وسوم HTML مثل &lt;b&gt; و&lt;i&gt;)</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _ext_save_desc, pid)
+
+
+def _ext_save_desc(message, pid):
+    if not message.text:
+        return
+    desc = message.text.strip()
+    try:
+        db.ext_products.update_one({'_id': ObjectId(pid)},
+            {'$set': {'desc': desc, 'desc_edited': True}})
+        bot.send_message(message.chat.id, "✅ تم تعديل الوصف.")
     except Exception:
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
 
@@ -14446,6 +14572,34 @@ def ext_view_orders(call):
         lines.append(f"{st} user {o.get('user_id')} — {o.get('product_name','')[:20]} — "
                      f"${o.get('price',0):.2f} — {when}")
     bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
+
+
+def _ext_send_product_view(chat_id, uid, ep, l):
+    """يعرض منتج API كرسالة جديدة (للـ deeplink)."""
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    name = str(ep.get('name', ''))
+    desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+    def _is_html(s):
+        return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
+    name_out = name if _is_html(name) else html.escape(name)
+    desc_out = desc if _is_html(desc) else html.escape(desc[:600])
+    icon_html = ep.get('emoji_char') or '📦'
+    stock = ep.get('stock', 0)
+    epid = str(ep['_id'])
+    if l == 'en':
+        txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
+               f"🚚 <b>Delivery:</b> Auto ⚡ (Instant delivery)\n"
+               f"💰 <b>Price:</b> ${price:.2f}\n📊 <b>Stock:</b> {stock} pcs")
+    else:
+        txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
+               f"🚚 <b>نوع التسليم:</b> تلقائي ⚡ (تسليم فوري)\n"
+               f"💰 <b>السعر:</b> ${price:.2f}\n📊 <b>المتوفر:</b> {stock} قطعة")
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(CustomInlineButton(
+        text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
+        callback_data=f"extqty_{epid}", style='success'))
+    markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
+    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vext_"))
