@@ -14316,10 +14316,20 @@ def ext_product_detail(call):
     # رابط المنتج (deep link) — مثل المنتج العادي
     bot_username = get_bot_username()
     link = f"https://t.me/{bot_username}?start=vext_{pid}"
+    # نعرض الاسم والوصف بالـ HTML الأصلي (فيه رموز <tg-emoji> البريميوم)
+    _name = str(p.get('name', ''))
+    _desc = str(p.get('desc', ''))
+    def _has_html(s):
+        return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
+    name_disp = _name if _has_html(_name) else html.escape(_name)
+    desc_disp = _desc if _has_html(_desc) else html.escape(_desc[:400])
+    icon_prefix = ""
+    if p.get('emoji_id') and '<tg-emoji' not in _name:
+        icon_prefix = f'<tg-emoji emoji-id="{p["emoji_id"]}">{p.get("emoji_char","✨")}</tg-emoji> '
     txt = (
-        f"📦 <b>{html.escape(str(p.get('name','')))}</b>\n\n"
+        f"{icon_prefix}<b>{name_disp}</b>\n\n"
         f"{emoji_line}"
-        f"📝 {html.escape(str(p.get('desc',''))[:300])}\n\n"
+        f"📝 {desc_disp}\n\n"
         f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
         f"🏷 التسعير: {mt_label}\n"
         f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
