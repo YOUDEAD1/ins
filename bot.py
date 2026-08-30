@@ -15034,13 +15034,16 @@ def open_settings(call):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(create_btn(uid, 'btn_profile', callback_data="open_profile"))
     markup.add(create_btn(uid, 'btn_lang', callback_data="toggle_language"))
-    # زر تبديل عرض المتجر (لكل مستخدم)
-    cur_mode = get_user_data_full(uid).get('shop_display_mode', 'folders')
+    # زر تبديل عرض المتجر (لكل مستخدم على حدة) — نبنيه بأمان
+    try:
+        cur_mode = (get_user_data_full(uid) or {}).get('shop_display_mode', 'folders')
+    except Exception:
+        cur_mode = 'folders'
     if cur_mode == 'flat':
-        tg_lbl = get_text(uid, 'btn_view_folders')
+        toggle_text = "📁 عرض بالمجلدات" if l != 'en' else "📁 Show with folders"
     else:
-        tg_lbl = get_text(uid, 'btn_view_flat')
-    markup.add(InlineKeyboardButton(tg_lbl, callback_data="shop_toggle_mode"))
+        toggle_text = "🗂 عرض بدون مجلدات" if l != 'en' else "🗂 Show without folders"
+    markup.add(InlineKeyboardButton(toggle_text, callback_data="shop_toggle_mode"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
     title = "⚙️ <b>الإعدادات</b>" if l != 'en' else "⚙️ <b>Settings</b>"
     sub = ("اختر ما تريد ضبطه:" if l != 'en' else "Choose what to manage:")
