@@ -972,6 +972,9 @@ def _webhook_worker():
 threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").start()
 
 
+_PRODUCTS_CACHE = None  # cache لرد /products (يقلّل استعلامات DB المتكررة)
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -1012,6 +1015,16 @@ class APIHandler(BaseHTTPRequestHandler):
             return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
 
         if route == '/products':
+            # ⚡ cache 30 ثانية — لو عدة عملاء يطلبون بسرعة، نبني الرد مرة واحdة
+            #    (يقلّل استعلامات MongoDB الصادرة بشدة — سبب رئيسي لاستهلاك النطاق)
+            _now = time.time()
+            global _PRODUCTS_CACHE
+            try:
+                _pc = _PRODUCTS_CACHE
+            except NameError:
+                _pc = None
+            if _pc and _pc.get('exp', 0) > _now and _pc.get('uid') == uid:
+                return _json_resp(self, 200, {'success': True, 'products': _pc['data']})
             # is_hidden=True من الأدمن = محجوب من الجميع بلا استثناء
             prods = list(db.products.find({'is_hidden': {'$ne': True}}))
             # api_hidden = المطور أخفى المنتج من متجره هو فقط
@@ -1133,6 +1146,10 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as _ext_e:
                 logger.debug(f"ext products in API err: {_ext_e}")
 
+            try:
+                _PRODUCTS_CACHE = {'data': result, 'exp': time.time() + 30, 'uid': uid}
+            except Exception:
+                pass
             return _json_resp(self, 200, {'success': True, 'products': result})
 
         if route.startswith('/product/'):
@@ -22750,7 +22767,8 @@ def run_bot():
     except: pass
     time.sleep(5)
     while True:
-        try: bot.polling(non_stop=True, skip_pending=True)
+        try: bot.polling(non_stop=True, skip_pending=True,
+                         timeout=60, long_polling_timeout=60)
         except Exception as e:
             err = str(e)
             logger.error(f"Polling Error Critical: {err}")
