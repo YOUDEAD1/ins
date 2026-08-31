@@ -4861,7 +4861,60 @@ def obscure_text(text):
     """🔒 يخفي النص بـ ** فقط (مو a***d)"""
     return "**"
 
+_PRODUCTS_LIST_CACHE = {'data': None, 'exp': 0}
+_PRODUCTS_BY_ID_CACHE = {'map': {}, 'exp': 0}
+_PRODUCTS_CACHE_TTL = 60  # ثانية
+
+
+def _get_all_products_cached():
+    """يجلب كل المنتجات مرة كل 60 ثانية (بدل استعلام لكل مستخدم)."""
+    now = time.time()
+    if _PRODUCTS_LIST_CACHE['data'] is not None and _PRODUCTS_LIST_CACHE['exp'] > now:
+        return _PRODUCTS_LIST_CACHE['data']
+    try:
+        data = list(db.products.find())
+    except Exception:
+        return _PRODUCTS_LIST_CACHE['data'] or []
+    _PRODUCTS_LIST_CACHE['data'] = data
+    _PRODUCTS_LIST_CACHE['exp'] = now + _PRODUCTS_CACHE_TTL
+    # نبني خريطة id→product للبحث السريع (find_product)
+    idmap = {}
+    for p in data:
+        pid = p.get('id')
+        if pid is not None:
+            idmap[str(pid)] = p
+        idmap[str(p.get('_id'))] = p
+    _PRODUCTS_BY_ID_CACHE['map'] = idmap
+    _PRODUCTS_BY_ID_CACHE['exp'] = now + _PRODUCTS_CACHE_TTL
+    return data
+
+
+def _invalidate_products_cache():
+    """يمسح cache المنتجات (بعد أي إضافة/تعديل/حذف)."""
+    _PRODUCTS_LIST_CACHE['data'] = None
+    _PRODUCTS_LIST_CACHE['exp'] = 0
+    _PRODUCTS_BY_ID_CACHE['map'] = {}
+    _PRODUCTS_BY_ID_CACHE['exp'] = 0
+
+
 def find_product(pid):
+    pid_str = str(pid)
+    # ⚡ نجرّب الـ cache أولاً (يقطع استعلامات MongoDB بشدة)
+    now = time.time()
+    if _PRODUCTS_BY_ID_CACHE['exp'] > now:
+        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+        if cached:
+            return cached
+    else:
+        # نبني الـ cache لو منتهي
+        _get_all_products_cached()
+        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+        if cached:
+            return cached
+    return _find_product_db(pid)
+
+
+def _find_product_db(pid):
     pid_str = str(pid)
     try:
         # ── 1. بحث بـ id field (الأكثر شيوعاً) ──
@@ -6632,7 +6685,7 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
     # نجمع المنتجات العادية
     reg_prods = []
     reg_pids = []
-    for p in db.products.find():
+    for p in _get_all_products_cached():
         if p.get('is_hidden') and not is_admin:
             continue
         pid = str(p.get('id', str(p.get('_id', ''))))
@@ -6835,7 +6888,7 @@ def shop_list_ui(call):
                     pass
 
         prods_no_cat = []
-        for p in db.products.find():
+        for p in _get_all_products_cached():
             # نقارن بكل معرّفات المنتج الممكنة ضد مجموعة المجلدات
             pid_candidates = set()
             if p.get('id') is not None:
@@ -6931,7 +6984,7 @@ def shop_list_ui(call):
         except: pass
     else:
         # ═══ بدون كتالوجات — العرض العادي القديم ═══
-        all_prods_nc = list(db.products.find())
+        all_prods_nc = list(_get_all_products_cached())
         # جلب المخزون دفعة واحدة
         nc_ids = []
         for p in all_prods_nc:
@@ -11283,6 +11336,68 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
+def _ext_broadcast_stock(ep):
+    """يبثّ رسالة 'توفّر ستوك' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    try:
+        epid = str(ep['_id'])
+        stk = ep.get('stock', 0)
+        emoji_id = ep.get('emoji_id')
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                alert_msg = get_text(uid_u, 'new_stock', p_name, stk)
+                alert_msg += f"\n\n💰 <b>{'السعر' if u_lang == 'ar' else 'Price'}:</b> ${price:.2f}"
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_stock err: {_e}")
+
+
+def _ext_broadcast_price_drop(ep, old_price, new_price):
+    """يبثّ رسالة 'تخفيض السعر' لكل مستخدمي البوت لمنتج API."""
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                if u_lang == 'ar':
+                    msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>سارع بالشراء الآن!</i>")
+                else:
+                    msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>Buy now!</i>")
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_price_drop err: {_e}")
+
+
 def _auto_sync_ext_stores():
     """مزامنة تلقائية دورية لكل متاجر API:
     - منتج جديد في المتجر الخارجي → إشعار الأدمن (هل تريd إضافته؟)
@@ -11351,6 +11466,16 @@ def _auto_sync_ext_stores():
                                 f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
                                 f"🔢 المتوفر الآن: <b>{new_stock}</b>"
                             )
+                        except Exception:
+                            pass
+                        # 📢 برودكاست للمستخدمين (مثل المنتج العادي)
+                        try:
+                            _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
+                            threading.Thread(
+                                target=_ext_broadcast_stock,
+                                args=(_updated_ep,),
+                                daemon=True
+                            ).start()
                         except Exception:
                             pass
 
@@ -14794,9 +14919,27 @@ def _ext_save_price(message, pid, ptype):
         bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
         return
     _cost = p.get('cost_price', p.get('base_price', 0))
+    old_sell = float(p.get('sell_price', 0))
     sell = _ext_compute_sell_price(_cost, ptype, val)
     db.ext_products.update_one({'_id': p['_id']},
         {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
+    # 📢 لو انخفض السعر → برودكاست تخفيض للمستخدمين + إشعار المطوّرين
+    if old_sell > 0 and sell < old_sell and not p.get('hidden'):
+        try:
+            threading.Thread(target=_ext_broadcast_price_drop,
+                             args=(p, old_sell, sell), daemon=True).start()
+        except Exception:
+            pass
+        try:
+            _emit_event('product.updated', {
+                'source': 'external_api', 'product_id': f"ext_{pid}",
+                'name_ar': p.get('name', ''), 'name_en': p.get('name', ''),
+                'price': sell, 'old_price': old_sell,
+                'is_manual': False, 'is_hidden': False,
+                'stock': p.get('stock', 0),
+            }, product_id=f"ext_{pid}")
+        except Exception:
+            pass
     bot.send_message(message.chat.id,
         f"✅ تم التسعير!\n💵 سعر API: ${float(p.get('base_price',0)):.2f}\n"
         f"💰 سعر البيع: <b>${sell:.2f}</b>", parse_mode="HTML")
@@ -18502,6 +18645,7 @@ def cgpt_del_confirm(call):
     # نحذف المنتج الرئيسي والمنتجات الفرعية من المتجر
     db.products.delete_many({'cgpt_product_id': pid})
     db.products.delete_one({'_id': f"cgpt_main_{pid}"})
+    _invalidate_products_cache()
     db.cgpt_products.delete_one({'_id': _ObjId2(pid)})
     bot.answer_callback_query(call.id, "\u2705 \u062a\u0645 \u0627\u0644\u062d\u0630\u0641!", show_alert=True)
     _cgpt_show_products_list(call.message.chat.id, call.message.message_id)
@@ -18738,6 +18882,7 @@ def ad_p_cgpt_cat_selected(call):
         'created_at':   _dt_mod.datetime.now().isoformat()
     }
     db.products.insert_one(doc)
+    _invalidate_products_cache()
     
     # 🆕 ربط المنتج بمصفوفة product_ids الخاصة بالمجلد
     if cat_id:
@@ -18773,6 +18918,7 @@ def ad_p_final(call):
         'desc_ar': p['d_ar'], 'desc_en': p['d_en'], 
         'price': p['price'], 'is_manual': is_manual, 'is_hidden': False
     })
+    _invalidate_products_cache()
 
     # 🔄 بث حدث للمزامنة
     try:
@@ -19556,6 +19702,7 @@ def admin_del_exec(call):
         db.product_stock.delete_many({'$or': queries})
         db.orders.delete_many({'$or': queries})
         db.products.delete_one({'_id': p['_id']})
+        _invalidate_products_cache()
         # 🔄 بث حدث للمزامنة
         try:
             _emit_event('product.deleted', {
