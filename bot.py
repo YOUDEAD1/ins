@@ -11336,6 +11336,38 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
+def _ext_broadcast_new_product(ep):
+    """يبثّ رسالة 'منتج جديd' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    if not ep:
+        return
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        price = float(ep.get('sell_price', ep.get('base_price', 0)))
+        stk = ep.get('stock', 0)
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                delivery = "تلقائي ⚡" if u_lang == 'ar' else "Auto ⚡"
+                p_desc = str(ep.get('desc', ''))[:200]
+                alert_msg = get_text(uid_u, 'new_product', p_name, f"{price:.2f}", delivery, p_desc)
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_new_product err: {_e}")
+
+
 def _ext_broadcast_stock(ep):
     """يبثّ رسالة 'توفّر ستوك' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
     try:
@@ -11446,7 +11478,11 @@ def _auto_sync_ext_stores():
                     db.ext_products.update_one({'_id': existing['_id']},
                                                {'$set': {'stock': new_stock}})
                     # لو توفّر ستوك جديd (كان 0 وصار متوفر) → برودكاست + إشعار
-                    if old_stock <= 0 and new_stock > 0 and not existing.get('hidden'):
+                    # نرسل الإشعار عند أي زيادة في الستوك (مثل المنتج العادي)
+                    if new_stock > old_stock and not existing.get('hidden'):
+                        # حماية: لا نكرّر البرودكاست لنفس المنتج خلال 10 دقائق
+                        _last_bc = existing.get('last_stock_broadcast', 0)
+                        _skip_bc = (time.time() - _last_bc) < 600
                         try:
                             _emit_event('stock.added', {
                                 'source': 'external_api',
@@ -11468,16 +11504,19 @@ def _auto_sync_ext_stores():
                             )
                         except Exception:
                             pass
-                        # 📢 برودكاست للمستخدمين (مثل المنتج العادي)
-                        try:
-                            _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
-                            threading.Thread(
-                                target=_ext_broadcast_stock,
-                                args=(_updated_ep,),
-                                daemon=True
-                            ).start()
-                        except Exception:
-                            pass
+                        # 📢 برودكاست للمستخدمين (مثل المنتج العادي) — مع حماية التكرار
+                        if not _skip_bc:
+                            try:
+                                db.ext_products.update_one({'_id': existing['_id']},
+                                    {'$set': {'last_stock_broadcast': time.time()}})
+                                _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
+                                threading.Thread(
+                                    target=_ext_broadcast_stock,
+                                    args=(_updated_ep,),
+                                    daemon=True
+                                ).start()
+                            except Exception:
+                                pass
 
 
 def _notify_admins_new_ext_product(store, sid, ext_id, name, stock):
@@ -14540,7 +14579,7 @@ def ext_add_new_product(call):
     }
     res = db.ext_products.insert_one(doc)
     db.ext_pending_new.delete_many({'store_id': sid, 'ext_id': ext_id})
-    # برودكاست منتج جديd
+    # برودكاست منتج جديد — للعملاء عبر API + لمستخدمي البوت
     try:
         _emit_event('product.created', {
             'product_id': f"ext_{res.inserted_id}",
@@ -14550,6 +14589,13 @@ def ext_add_new_product(call):
             'description': desc, 'emoji': emoji_char, 'emoji_custom_id': emoji_id,
             'source': 'external_api',
         }, product_id=f"ext_{res.inserted_id}")
+    except Exception:
+        pass
+    # 📢 برودكاست للمستخدمين (رسالة "منتج جديد" مثل المنتج العادي)
+    try:
+        _new_ep = db.ext_products.find_one({'_id': res.inserted_id})
+        threading.Thread(target=_ext_broadcast_new_product,
+                         args=(_new_ep,), daemon=True).start()
     except Exception:
         pass
     try:
