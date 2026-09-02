@@ -14553,6 +14553,47 @@ def _ext_api_base(store):
     return base  # سيُكتشف لاحقاً
 
 
+def _ext_api_diagnose(store):
+    """يشخّص الاتصال بالمتجر — يرجّع تقريراً مفصّلاً عن كل محاولة."""
+    base = str(store.get('base_url', '')).rstrip('/')
+    report = [f"🌐 Base URL: {base}"]
+    if not base.startswith('http'):
+        report.append("🚨 الـ URL لا يبدأ بـ http/https!")
+        return "\n".join(report)
+    if '/api/v1' in base or '/shop-api/v1' in base:
+        prefixes = ['']
+    else:
+        prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api', '']
+    key = store.get('api_key', '')
+    report.append(f"🔑 المفتاح: {key[:10]}...{key[-4:] if len(key) > 14 else ''}")
+    report.append("")
+    for prefix in prefixes:
+        url = f"{base}{prefix}/products"
+        try:
+            r = requests.get(url, headers=_ext_api_headers(store), timeout=12)
+            report.append(f"• {prefix or '(بلا)'}/products → HTTP {r.status_code}")
+            if r.status_code == 200:
+                report.append(f"  ✅ نجح! الرد: {str(r.text)[:150]}")
+                return "\n".join(report)
+            elif r.status_code == 401:
+                report.append(f"  🔑 401 = المفتاح خطأ أو معطّل")
+            elif r.status_code == 404:
+                report.append(f"  ❓ 404 = المسار غير موجود (نجرّب غيره)")
+            else:
+                report.append(f"  ⚠️ {str(r.text)[:100]}")
+        except requests.exceptions.Timeout:
+            report.append(f"• {prefix or '(بلا)'}/products → ⏱ انتهى الوقت (المتجر بطيء/متوقف)")
+        except requests.exceptions.ConnectionError as ce:
+            report.append(f"• {prefix or '(بلا)'}/products → 🔌 فشل الاتصال (URL خطأ أو المتجر متوقف)")
+            report.append(f"  {str(ce)[:100]}")
+            break
+        except Exception as e:
+            report.append(f"• {prefix or '(بلا)'}/products → ❌ {str(e)[:100]}")
+    report.append("")
+    report.append("لم ينجح أي مسار. تحقق من الـ URL والمفتاح.")
+    return "\n".join(report)
+
+
 def _ext_api_get(store, path):
     """GET من متجر API خارجي — يكتشف الـ prefix تلقائياً. يرجّع JSON أو None."""
     base = str(store.get('base_url', '')).rstrip('/')
@@ -14856,8 +14897,11 @@ def ext_raw_preview(call):
     data = _ext_api_get(store, '/products')
     prods = _ext_parse_products(data)
     if not prods:
+        # نعرض تشخيصاً مفصّلاً يكشف سبب الفشل
+        diag = _ext_api_diagnose(store)
         bot.send_message(call.message.chat.id,
-            f"⚠️ لا منتجات. الرد الخام:\n<code>{html.escape(str(data)[:500])}</code>",
+            f"⚠️ <b>لم أجلب منتجات — التشخيص:</b>\n\n"
+            f"<code>{html.escape(diag[:3500])}</code>",
             parse_mode="HTML")
         return
     first = prods[0]
@@ -16170,9 +16214,12 @@ def ext_health_check(call):
             f"✅ <b>الاتصال يعمل!</b>\n<code>{html.escape(str(data)[:200])}</code>",
             parse_mode="HTML")
     else:
+        # تشخيص مفصّل
+        diag = _ext_api_diagnose(store)
         bot.send_message(call.message.chat.id,
-            "❌ <b>تعذّر الاتصال.</b>\nتأكد من:\n• الـ Base URL صحيح\n"
-            "• المفتاح صحيح\n• المتجر يعمل الآن", parse_mode="HTML")
+            f"❌ <b>تعذّر الاتصال — التشخيص:</b>\n\n"
+            f"<code>{html.escape(diag[:3500])}</code>",
+            parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_setcat_"))
