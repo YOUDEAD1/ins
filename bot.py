@@ -11447,14 +11447,20 @@ def _auto_sync_ext_stores():
             prods = data.get('products') or data.get('data') or []
         elif isinstance(data, list):
             prods = data
-        if not prods:
+        # لو الرد فشل (None) نتخطّى المتجر — لا نصفّر بالخطأ
+        if data is None:
             continue
+        seen_ext_ids = set()
         for p in prods:
             ext_id = str(p.get('id', p.get('product_id', '')))
             if not ext_id:
                 continue
+            seen_ext_ids.add(ext_id)
             existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
             new_stock = p.get('stock', 0) or 0
+            # لو المتجر يقول available=false → نعتبره صفر مهما كان الرقم
+            if p.get('available') is False:
+                new_stock = 0
             p_name = p.get('name') or p.get('name_en') or p.get('name_ar') or f"Product {ext_id}"
 
             if not existing:
@@ -11472,6 +11478,46 @@ def _auto_sync_ext_stores():
                 except Exception as _ne:
                     logger.debug(f"notify new ext product err: {_ne}")
             else:
+                # منتج مضاف: نتحقق من تغيّر التكلفة (سعر المتجر) أولاً
+                new_cost = p.get('base_price_usdt', p.get('price_usdt', p.get('price', 0))) or 0
+                old_cost = existing.get('cost_price', existing.get('base_price', 0)) or 0
+                if new_cost and abs(float(new_cost) - float(old_cost)) > 0.001:
+                    # المتجر غيّر سعر التكلفة → نعيd حساب سعر البيع بنفس النسبة تلقائياً
+                    mt = existing.get('markup_type', 'percent')
+                    mv = existing.get('markup_value', 0)
+                    new_sell = _ext_compute_sell_price(float(new_cost), mt, mv)
+                    db.ext_products.update_one({'_id': existing['_id']},
+                        {'$set': {'cost_price': float(new_cost),
+                                  'base_price': float(new_cost),
+                                  'sell_price': new_sell}})
+                    # إشعار الأدمن (رفع/خفض سعر من المتجر)
+                    try:
+                        direction = "📈 رفع" if float(new_cost) > float(old_cost) else "📉 خفض"
+                        notify_admins(
+                            f"{direction} <b>سعر من المتجر (API)</b>\n"
+                            f"🏪 {html.escape(store.get('name',''))}\n"
+                            f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
+                            f"💵 التكلفة: ${float(old_cost):.2f} → <b>${float(new_cost):.2f}</b>\n"
+                            f"💰 سعرك الجديد (بالنسبة {mv}{'%' if mt=='percent' else '$'}): "
+                            f"<b>${new_sell:.2f}</b>\n\n"
+                            f"<i>أُعيد حساب سعرك تلقائياً.</i>"
+                        )
+                    except Exception:
+                        pass
+                    # لو ارتفع سعر البيع كثيراً، أو انخفض → نبثّ للعملاء
+                    try:
+                        _emit_event('product.updated', {
+                            'source': 'external_api',
+                            'product_id': f"ext_{existing['_id']}",
+                            'name_ar': existing.get('name', p_name),
+                            'name_en': existing.get('name', p_name),
+                            'price': new_sell,
+                            'is_manual': False, 'is_hidden': False,
+                            'stock': new_stock,
+                        }, product_id=f"ext_{existing['_id']}")
+                    except Exception:
+                        pass
+
                 # منتج مضاف: نتحقق من تغيّر الستوك
                 old_stock = existing.get('stock', 0) or 0
                 if new_stock != old_stock:
@@ -11517,6 +11563,17 @@ def _auto_sync_ext_stores():
                                 ).start()
                             except Exception:
                                 pass
+
+        # 🔴 المنتجات المضافة عندك لكن غير موجودة في رد المتجر = نفدت (out of stock)
+        #    حسب الدوكس: المنتجات النافدة تُحذف من /products. فنصفّر ستوكها.
+        try:
+            for ep in db.ext_products.find({'store_id': sid}):
+                if str(ep.get('ext_id', '')) not in seen_ext_ids:
+                    if (ep.get('stock', 0) or 0) != 0:
+                        db.ext_products.update_one({'_id': ep['_id']},
+                                                   {'$set': {'stock': 0}})
+        except Exception as _ze:
+            logger.debug(f"zero out-of-stock err: {_ze}")
 
 
 def _notify_admins_new_ext_product(store, sid, ext_id, name, stock):
@@ -14569,13 +14626,18 @@ def ext_add_new_product(call):
     emoji_id = p.get('emoji_custom_id') or p.get('custom_emoji_id') or p.get('emoji_id')
     emoji_char = p.get('emoji', '')
     stock = p.get('stock', 0)
+    # 🆕 يرث نسبة المتجر الافتراضية
+    _def_mt = store.get('default_markup_type', 'percent') if isinstance(store, dict) else 'percent'
+    _def_mv = store.get('default_markup_value', 0) if isinstance(store, dict) else 0
+    _cost0 = float(cost_price or base_price or 0)
+    _sell0 = _ext_compute_sell_price(_cost0, _def_mt, _def_mv)
     doc = {
         'store_id': sid, 'ext_id': ext_id, 'name': name,
         'desc': desc, 'desc_text': p.get('description_text', ''),
         'base_price': float(base_price or 0), 'cost_price': float(cost_price or 0),
         'emoji_id': emoji_id, 'emoji_char': emoji_char, 'stock': stock,
-        'markup_type': 'percent', 'markup_value': 0,
-        'sell_price': float(base_price or 0), 'hidden': False, 'raw': p,
+        'markup_type': _def_mt, 'markup_value': _def_mv,
+        'sell_price': _sell0, 'hidden': False, 'raw': p,
     }
     res = db.ext_products.insert_one(doc)
     db.ext_pending_new.delete_many({'store_id': sid, 'ext_id': ext_id})
@@ -14689,10 +14751,12 @@ def ext_sync_products(call):
             "⚠️ لم أجلب منتجات (تأكد من الـ URL والمفتاح، أو أن endpoint /api/v1/products يعمل).")
         return
     added, updated = 0, 0
+    _seen_manual = set()
     for p in prods:
         ext_id = str(p.get('id', p.get('product_id', '')))
         if not ext_id:
             continue
+        _seen_manual.add(ext_id)
         # 💰 حسب الدوكس الرسمية:
         #   price_usdt/price = سعر البيع للزبون (سعري)
         #   base_price_usdt = التكلفة الفعلية التي تُخصم مني عند الطلب
@@ -14757,8 +14821,13 @@ def ext_sync_products(call):
                 except Exception:
                     pass
         else:
-            doc.update({'markup_type': 'percent', 'markup_value': 0,
-                        'sell_price': float(base_price or 0), 'hidden': False})
+            # 🆕 المنتج الجديد يرث نسبة المتجر الافتراضية (لو مضبوطة)
+            _def_mt = store.get('default_markup_type', 'percent') if isinstance(store, dict) else 'percent'
+            _def_mv = store.get('default_markup_value', 0) if isinstance(store, dict) else 0
+            _cost0 = float(cost_price or base_price or 0)
+            _sell0 = _ext_compute_sell_price(_cost0, _def_mt, _def_mv)
+            doc.update({'markup_type': _def_mt, 'markup_value': _def_mv,
+                        'sell_price': _sell0, 'hidden': False})
             res_ins = db.ext_products.insert_one(doc)
             added += 1
             # 🔔 بثّ حدث "منتج جديد" بنفس تنسيق المنتج العادي تماماً
@@ -14776,8 +14845,20 @@ def ext_sync_products(call):
                 }, product_id=f"ext_{res_ins.inserted_id}")
             except Exception:
                 pass
+
+    # 🔴 المنتجات المضافة لكن غير موجودة في الرد = نفدت → نصفّر ستوكها
+    zeroed = 0
+    try:
+        for ep in db.ext_products.find({'store_id': sid}):
+            if str(ep.get('ext_id', '')) not in _seen_manual:
+                if (ep.get('stock', 0) or 0) != 0:
+                    db.ext_products.update_one({'_id': ep['_id']}, {'$set': {'stock': 0}})
+                    zeroed += 1
+    except Exception:
+        pass
+
     bot.send_message(call.message.chat.id,
-        f"✅ تم الجلب!\n➕ جديد: {added}\n🔄 محدّث: {updated}\n\n"
+        f"✅ تم الجلب!\n➕ جديد: {added}\n🔄 محدّث: {updated}\n🔴 نفد: {zeroed}\n\n"
         f"افتح «📦 المنتجات» لتسعيرها وإظهارها.")
 
 
@@ -15146,9 +15227,13 @@ def _ext_send_product_view(chat_id, uid, ep, l):
                f"🚚 <b>نوع التسليم:</b> تلقائي ⚡ (تسليم فوري)\n"
                f"💰 <b>السعر:</b> ${price:.2f}\n📊 <b>المتوفر:</b> {stock} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(CustomInlineButton(
-        text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
-        callback_data=f"extqty_{epid}", style='success'))
+    # زر الشراء يظهر فقط لو متوفر (مثل المنتج العادي) — لو نفد يختفي
+    if stock and stock > 0:
+        markup.add(CustomInlineButton(
+            text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
+            callback_data=f"extqty_{epid}", style='success'))
+    else:
+        txt = txt + ("\n\n🔴 <b>غير متوفر حالياً</b>" if l != 'en' else "\n\n🔴 <b>Out of stock</b>")
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
     try:
         if _is_admin_check(uid):
@@ -15200,9 +15285,13 @@ def ext_customer_view(call):
                f"💰 <b>السعر:</b> ${price:.2f}\n"
                f"📊 <b>المتوفر:</b> {stock} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(CustomInlineButton(
-        text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
-        callback_data=f"extqty_{epid}", style='success'))
+    # زر الشراء يظهر فقط لو متوفر (مثل المنتج العادي) — لو نفد يختفي
+    if stock and stock > 0:
+        markup.add(CustomInlineButton(
+            text=f"🛒 {'Buy' if l=='en' else 'شراء'} — ${price:.2f}",
+            callback_data=f"extqty_{epid}", style='success'))
+    else:
+        txt = txt + ("\n\n🔴 <b>غير متوفر حالياً</b>" if l != 'en' else "\n\n🔴 <b>Out of stock</b>")
     markup.add(create_btn(uid, 'btn_back', callback_data="open_shop"))
     # زر الإعدادات للأدمن (يفتح تفاصيل/تعديل المنتج) — مثل المنتج العادي
     try:
@@ -15236,6 +15325,11 @@ def ext_customer_qty(call):
     l = get_lang(uid)
     price = float(ep.get('sell_price', ep.get('base_price', 0)))
     stock = ep.get('stock', 0)
+    # لو نفد المنتج، نمنع الشراء (السلوك مثل المنتج العادي)
+    if not stock or stock <= 0:
+        bot.send_message(uid, "🔴 المنتج غير متوفر حالياً." if l != 'en'
+                         else "🔴 This product is out of stock.")
+        return
     name = str(ep.get('name', ''))
     icon_html = ''
     if ep.get('emoji_id'):
@@ -15619,9 +15713,16 @@ def _ext_bulk_apply(message, sid, ptype):
         db.ext_products.update_one({'_id': ep['_id']},
             {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
         count += 1
+    # 🆕 نحفظ النسبة كافتراضي للمتجر — أي منتج جديد يرثها تلقائياً
+    try:
+        db.ext_stores.update_one({'_id': ObjectId(sid)},
+            {'$set': {'default_markup_type': ptype, 'default_markup_value': val}})
+    except Exception:
+        pass
     label = f"+{val}%" if ptype == 'percent' else f"+${val}"
     bot.send_message(message.chat.id,
         f"✅ تم تسعير <b>{count}</b> منتج بنسبة موحّدة ({label}) فوق التكلفة.\n\n"
+        f"🆕 <b>وأي منتج جديد من هذا المتجر سيأخذ نفس النسبة تلقائياً.</b>\n\n"
         f"<i>ملاحظة: التسعير على أساس سعر التكلفة (ما يُخصم منك فعلاً) لضمان الربح.</i>",
         parse_mode="HTML")
 
