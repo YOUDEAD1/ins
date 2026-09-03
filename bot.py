@@ -1671,6 +1671,51 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as _ext_e:
                 logger.debug(f"ext products in API err: {_ext_e}")
 
+            # 🤖 منتجات ChatGPT Business — كل مدة تظهر كمنتج منفصل بسعرها
+            try:
+                for cg in db.cgpt_products.find():
+                    cg_id = str(cg['_id'])
+                    cg_name = cg.get('name', 'ChatGPT Business')
+                    cg_desc = cg.get('desc', '')
+                    cg_emoji = cg.get('custom_emoji_id')
+                    # نحسب المقاعd المتاحة (المخزون)
+                    try:
+                        cg_seats = _cgpt_get_seats_cached()
+                    except Exception:
+                        cg_seats = None
+                    for dur in cg.get('durations', []):
+                        dur_id = dur.get('dur_id', '')
+                        dur_price = float(dur.get('price', 0))
+                        dur_label = dur.get('label', '')
+                        dur_mins = int(dur.get('minutes', 0))
+                        dur_days = round(dur_mins / 1440, 1) if dur_mins else 0
+                        full_name = f"{cg_name} — {dur_label}" if dur_label else cg_name
+                        cgid = f"cgpt_{cg_id}_{dur_id}"
+                        cg_item = {
+                            'id': cgid,
+                            'name_ar': full_name, 'name_en': full_name,
+                            'desc_ar': cg_desc, 'desc_en': cg_desc,
+                            'store_price': dur_price,
+                            'your_price': None,
+                            'price_locked': False,
+                            'price_alert': None,
+                            'stock': cg_seats if cg_seats is not None else 9999,
+                            'is_manual': False,
+                            'duration_label': dur_label,
+                            'duration_minutes': dur_mins,
+                            'duration_days': dur_days,
+                            'custom_emoji_id': cg_emoji,
+                            'has_premium_emoji': bool(cg_emoji),
+                            'name_ar_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+                            'name_en_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+                            'desc_ar_html': cg_desc, 'desc_en_html': cg_desc,
+                            'source': 'chatgpt_business',
+                            'product_type': 'cgpt_main',
+                        }
+                        result.append(cg_item)
+            except Exception as _cg_e:
+                logger.debug(f"cgpt products in API err: {_cg_e}")
+
             try:
                 _PRODUCTS_CACHE = {'data': result, 'exp': time.time() + 30, 'uid': uid}
             except Exception:
@@ -1679,6 +1724,36 @@ class APIHandler(BaseHTTPRequestHandler):
 
         if route.startswith('/product/'):
             pid = route.split('/product/')[1]
+            # 🤖 منتج ChatGPT؟ (cgpt_{id}_{dur_id})
+            if pid.startswith('cgpt_'):
+                try:
+                    _rest = pid[5:]
+                    _cgid, _, _durid = _rest.partition('_')
+                    cg = db.cgpt_products.find_one({'_id': ObjectId(_cgid)})
+                except Exception:
+                    cg = None
+                if not cg:
+                    return _json_resp(self, 404, {'error': 'Product not found'})
+                dur = next((d for d in cg.get('durations', []) if d.get('dur_id') == _durid), None)
+                if not dur:
+                    return _json_resp(self, 404, {'error': 'Duration not found'})
+                cg_emoji = cg.get('custom_emoji_id')
+                full_name = f"{cg.get('name','ChatGPT')} — {dur.get('label','')}"
+                try:
+                    cg_seats = _cgpt_get_seats_cached()
+                except Exception:
+                    cg_seats = None
+                return _json_resp(self, 200, {'success': True, 'product': {
+                    'id': pid, 'name_ar': full_name, 'name_en': full_name,
+                    'desc_ar': cg.get('desc', ''), 'desc_en': cg.get('desc', ''),
+                    'store_price': float(dur.get('price', 0)),
+                    'stock': cg_seats if cg_seats is not None else 9999,
+                    'duration_minutes': int(dur.get('minutes', 0)),
+                    'duration_days': round(int(dur.get('minutes', 0)) / 1440, 1),
+                    'custom_emoji_id': cg_emoji,
+                    'has_premium_emoji': bool(cg_emoji),
+                    'source': 'chatgpt_business',
+                }})
             # 🔌 منتج API خارجي؟
             if pid.startswith('ext_'):
                 try:
@@ -1943,8 +2018,90 @@ class APIHandler(BaseHTTPRequestHandler):
             product_id = str(body.get('product_id', '')).strip()
             qty = body.get('qty', 1)
             buyer_info = str(body.get('buyer_info', ''))[:200]
+            buyer_email = str(body.get('email', '')).strip()  # إيميل المشتري (لمنتج ChatGPT)
 
             if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
+
+            # 🤖 منتج ChatGPT Business؟ (يحتاج معاملة خاصة + إيميل)
+            if product_id.startswith('cgpt_'):
+                # نستخرج معرّف المنتج والمدة
+                _rest = product_id[5:]
+                _cgid, _, _durid = _rest.partition('_')
+                try:
+                    cg = db.cgpt_products.find_one({'_id': ObjectId(_cgid)})
+                except Exception:
+                    cg = None
+                if not cg:
+                    return _json_resp(self, 404, {'error': 'Product not found'})
+                dur = next((d for d in cg.get('durations', []) if d.get('dur_id') == _durid), None)
+                if not dur:
+                    return _json_resp(self, 404, {'error': 'Duration not found'})
+                # لازم إيميل
+                if not buyer_email or '@' not in buyer_email:
+                    return _json_resp(self, 400, {
+                        'error': 'email required for ChatGPT products',
+                        'message': 'This is a ChatGPT Business seat. Send the buyer email in the "email" field so we can invite them.',
+                        'example': {'product_id': product_id, 'email': 'buyer@example.com'}
+                    })
+                cg_price = float(dur.get('price', 0))
+                cg_minutes = int(dur.get('minutes', 0))
+                # نفحص المقاعd المتاحة
+                try:
+                    _seats = _cgpt_get_seats_cached()
+                except Exception:
+                    _seats = None
+                if _seats is not None and _seats <= 0:
+                    return _json_resp(self, 409, {'error': 'No seats available'})
+                # نخصم من رصيد المطوّر
+                api_user = db.users.find_one({'user_id': uid})
+                api_bal = float(api_user.get('balance', 0)) if api_user else 0
+                if api_bal < cg_price:
+                    return _json_resp(self, 402, {'error': 'Insufficient balance',
+                                                  'required': cg_price, 'balance': api_bal})
+                updated = db.users.find_one_and_update(
+                    {'user_id': uid, 'balance': {'$gte': cg_price}},
+                    {'$inc': {'balance': -cg_price}}, return_document=True)
+                if not updated:
+                    return _json_resp(self, 402, {'error': 'Insufficient balance'})
+                _invalidate_user_cache(uid)
+                # نجد حساباً فيه مقعd ونرسل الدعوة
+                _acc = _cgpt_find_available_account()
+                if not _acc:
+                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': cg_price}})
+                    _invalidate_user_cache(uid)
+                    return _json_resp(self, 409, {'error': 'No seats available (refunded)'})
+                _mgr = _acc['mgr']
+                _mgr._last_buyer_uid = f"api_{uid}"
+                inv = _mgr.invite_user(buyer_email, cg_minutes)
+                if inv.get('ok'):
+                    _CGPT_SEATS_CACHE['exp'] = 0
+                    order_id = "CGAPI" + str(int(time.time()))[-6:]
+                    try:
+                        db.api_orders.insert_one({
+                            'order_id': order_id, 'api_user_id': uid,
+                            'product_id': product_id, 'product_name': f"{cg.get('name','ChatGPT')} — {dur.get('label','')}",
+                            'qty': 1, 'total_price': cg_price, 'email': buyer_email,
+                            'expires_at': inv.get('expires_at'), 'status': 'completed',
+                            'type': 'chatgpt_business'
+                        })
+                    except Exception:
+                        pass
+                    return _json_resp(self, 200, {
+                        'success': True, 'order_id': order_id,
+                        'type': 'chatgpt_business',
+                        'email': buyer_email,
+                        'expires_at': inv.get('expires_at'),
+                        'duration_minutes': cg_minutes,
+                        'message': f'Invitation sent to {buyer_email}. The buyer must accept it from their email to activate the seat.',
+                        'total': cg_price,
+                        'balance_after': float(updated.get('balance', 0)) - 0,
+                    })
+                else:
+                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': cg_price}})
+                    _invalidate_user_cache(uid)
+                    return _json_resp(self, 500, {'error': 'Invite failed (refunded)',
+                                                  'detail': str(inv.get('error', ''))[:200]})
+
             try:
                 qty = int(qty)
                 if qty < 1 or qty > 50: return _json_resp(self, 400, {'error': 'qty: 1-50'})
@@ -5865,13 +6022,22 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
             custom_emoji_id = p.get('custom_emoji_id')
             icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
 
+            # نحسب المقاعd المتاحة (المخزون الحقيقي)
+            _seats = _cgpt_get_seats_cached()
+            if _seats is None:
+                stock_ar = "غير محدود"
+                stock_en = "Unlimited"
+            else:
+                stock_ar = f"{_seats} مقعد"
+                stock_en = f"{_seats} seats"
+
             if lang == 'ar':
                 text = (
                     f"{icon_html} <b>{p_name}</b>\n\n"
                     f"📝 {p_desc}\n\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"⚡ <b>التسليم:</b> تلقائي فوري\n"
-                    f"📦 <b>المخزون:</b> غير محدود\n"
+                    f"📦 <b>المقاعd المتاحة:</b> {stock_ar}\n"
                     f"━━━━━━━━━━━━━━\n\n"
                     f"🗓 <b>اختر المدة:</b>"
                 )
@@ -5881,7 +6047,7 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                     f"📝 {p_desc}\n\n"
                     f"━━━━━━━━━━━━━━\n"
                     f"⚡ <b>Delivery:</b> Instant\n"
-                    f"📦 <b>Stock:</b> Unlimited\n"
+                    f"📦 <b>Available seats:</b> {stock_en}\n"
                     f"━━━━━━━━━━━━━━\n\n"
                     f"🗓 <b>Choose duration:</b>"
                 )
@@ -5904,8 +6070,20 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                         except:
                             pass
                 dur_price = float(dur.get('price', 0))
+                # نعرض المدة بوضوح — لو الـ label ناقص نحسبها من الدقائق
+                _mins = int(dur.get('minutes', 0))
+                if not dur_label or not dur_label.strip():
+                    if _mins >= 43200:
+                        dur_label = f"{_mins // 43200} شهر" if lang == 'ar' else f"{_mins // 43200} month"
+                    elif _mins >= 1440:
+                        dur_label = f"{_mins // 1440} يوم" if lang == 'ar' else f"{_mins // 1440} days"
+                    else:
+                        dur_label = f"{_mins // 60} ساعة" if lang == 'ar' else f"{_mins // 60} hours"
+                # نضيف عدd الأيام دائماً للوضوح
+                _days = round(_mins / 1440, 1) if _mins else 0
+                _dtxt = f" ({_days}ي)" if lang == 'ar' else f" ({_days}d)"
                 markup.add(CustomInlineButton(
-                    text=f"{dur_label} — ${dur_price:.2f}",
+                    text=f"📅 {dur_label} — ${dur_price:.2f}{_dtxt}",
                     callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
                     style="success"
                 ))
@@ -7252,7 +7430,7 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
     except Exception as _e:
         logger.debug(f"flat stock batch err: {_e}")
 
-    # نبني القائمة الموحّدة: (نوع, معرّف, اسم, رمز, سعر, ستوك, متوفر؟, يدوي؟)
+    # نبني القائمة الموحّدة: (نوع, معرّف, اسم, رمز, سعر, ستوك, متوفر؟, يدوي؟, cgpt؟)
     items = []
     for p in reg_prods:
         pid = str(p.get('id', str(p.get('_id', ''))))
@@ -7263,7 +7441,7 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
         st = stock_map.get(pid, 0)
         in_stock = is_manual or is_cgpt or st > 0
         items.append(('reg', pid, nm, p.get('custom_emoji_id'),
-                      float(p.get('price', 0)), st, in_stock, is_manual))
+                      float(p.get('price', 0)), st, in_stock, is_manual, is_cgpt))
     for ep in db.ext_products.find():
         if ep.get('hidden') and not is_admin:
             continue
@@ -7271,23 +7449,26 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
         items.append(('ext', str(ep['_id']), str(ep.get('name', '')),
                       ep.get('emoji_id'),
                       float(ep.get('sell_price', ep.get('base_price', 0))),
-                      st, st > 0, False))
+                      st, st > 0, False, False))
 
-    # ترتيب: المتوفر أولاً (أبجدياً)، ثم غير المتوفر (أبجدياً) في الآخر
-    items.sort(key=lambda x: (not x[6], x[2].lower()))
+    # ترتيب: منتج ChatGPT أولاً، ثم المتوفر (أبجدياً)، ثم غير المتوفر
+    items.sort(key=lambda x: (not x[8], not x[6], x[2].lower()))
 
     total = len(items)
     start = page * PER
     page_items = items[start:start + PER]
 
     markup = InlineKeyboardMarkup(row_width=1)
-    for typ, iid, nm, emoji_id, price, st, in_stock, is_manual in page_items:
+    for typ, iid, nm, emoji_id, price, st, in_stock, is_manual, is_cgpt in page_items:
         short_n = nm[:25] + ".." if len(nm) > 25 else nm
-        st_text = "FW" if is_manual else str(st)
+        if is_cgpt:
+            _s = _cgpt_get_seats_cached()
+            st_text = "FW" if _s is None else str(_s)
+        else:
+            st_text = "FW" if is_manual else str(st)
         btn_text = f"{short_n} | ${price:.2f} | 📦 {st_text}"
-        # أخضر للمتوفر، أحمر لغير المتوفر
         bstyle = "success" if in_stock else "danger"
-        cb = f"vi_p_{iid}" if typ == 'reg' else f"vext_{iid}"
+        cb = f"vi_p_cgpt_main_{iid}" if is_cgpt else (f"vi_p_{iid}" if typ == 'reg' else f"vext_{iid}")
         bkw = {'text': btn_text, 'callback_data': cb, 'style': bstyle}
         if emoji_id:
             bkw['icon_custom_emoji_id'] = emoji_id
@@ -7707,8 +7888,18 @@ def shop_detail_ui(call):
                     except:
                         pass
             dur_price = float(dur.get('price', 0))
+            _mins = int(dur.get('minutes', 0))
+            if not dur_label or not dur_label.strip():
+                if _mins >= 43200:
+                    dur_label = f"{_mins // 43200} شهر" if lang == 'ar' else f"{_mins // 43200} month"
+                elif _mins >= 1440:
+                    dur_label = f"{_mins // 1440} يوم" if lang == 'ar' else f"{_mins // 1440} days"
+                else:
+                    dur_label = f"{_mins // 60} ساعة" if lang == 'ar' else f"{_mins // 60} hours"
+            _days = round(_mins / 1440, 1) if _mins else 0
+            _dtxt = f" ({_days}ي)" if lang == 'ar' else f" ({_days}d)"
             markup.add(CustomInlineButton(
-                text=f"{dur_label} — ${dur_price:.2f}",
+                text=f"📅 {dur_label} — ${dur_price:.2f}{_dtxt}",
                 callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
                 style="success"
             ))
