@@ -555,11 +555,12 @@ class ChatGPTSeatManager:
         return {'invites': {}, 'allowed_emails': [self.owner_email] if self.owner_email else []}
 
     def _save_data(self):
-        """حفظ بيانات الدعوات في MongoDB"""
+        """حفظ بيانات الدعوات في MongoDB (لكل حساب على حdة)"""
         self.invites_data['allowed_emails'] = list(self.allowed_emails)
+        _key = getattr(self, '_account_key', 'main')
         try:
             db.cgpt_invites_data.update_one(
-                {'_id': 'main'},
+                {'_id': _key},
                 {'$set': {'data': self.invites_data}},
                 upsert=True
             )
@@ -572,15 +573,59 @@ class ChatGPTSeatManager:
         return self._loaded
 
     # ---------- core API ----------
+    def check_subscription_status(self):
+        """يفحص حالة اشتراك البيزنس. يرجّع:
+        'active' | 'deactivated' | 'no_seats' | 'error' | 'unauthorized'"""
+        if not CFFI_AVAILABLE or not self._loaded:
+            return 'unauthorized'
+        try:
+            # endpoint الرسمي لفحص حالة الحساب
+            url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            if r.status_code == 402:
+                # workspace معطّل (اشتراك ملغى/فاتورة غير مdفوعة)
+                return 'deactivated'
+            if r.status_code == 401:
+                return 'unauthorized'
+            if r.status_code == 200:
+                data = r.json()
+                # نبحث عن حالة الاشتراك في بنية الرد
+                accounts = data.get('accounts', {})
+                for acc_key, acc_val in accounts.items():
+                    if not isinstance(acc_val, dict):
+                        continue
+                    acc = acc_val.get('account', acc_val)
+                    # لو الحساب هو حسابنا
+                    if acc.get('account_id') == self.account_id or acc_key == self.account_id or acc_key == 'default':
+                        plan = acc.get('plan_type', acc.get('structure', ''))
+                        is_deactivated = acc.get('is_deactivated', False)
+                        if is_deactivated:
+                            return 'deactivated'
+                        # لو فيه اشتراك بيزنس/تيم فعّd
+                        return 'active'
+                return 'active'  # الحساب موجود ويعمل
+            return 'error'
+        except Exception as e:
+            logger.debug(f"[CGPT] check_subscription err: {e}")
+            return 'error'
+
     def _get_org_users(self):
-        if not CFFI_AVAILABLE or not self._loaded: return []
+        if not CFFI_AVAILABLE or not self._loaded:
+            self._last_fetch_failed = True
+            return []
         try:
             url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
             r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
             if r.status_code == 200:
+                self._last_fetch_failed = False
                 return r.json().get('items', [])
+            # فشل (401 مثلاً = كوكيز منتهية)
+            self._last_fetch_failed = True
+            self._last_fetch_status = r.status_code
             logger.warning(f"[CGPT] get_org_users {r.status_code}: {r.text[:200]}")
         except Exception as e:
+            self._last_fetch_failed = True
             logger.error(f"[CGPT] get_org_users error: {e}")
         return []
 
@@ -631,7 +676,26 @@ class ChatGPTSeatManager:
         try:
             url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users/{user_id}'
             r = cffi_requests.delete(url, headers=self._headers(), impersonate='chrome110', timeout=15)
-            return r.status_code in [200, 204]
+            ok = r.status_code in [200, 204]
+            if ok:
+                # إشعار الأدمن بتفاصيل الطرd
+                try:
+                    info = self.invites_data.get('invites', {}).get(email, {})
+                    tg_uid = info.get('telegram_uid', '?')
+                    reason = info.get('_remove_reason', 'انتهاء المدة')
+                    kmsg = (
+                        f"🗑 <b>تم طرد مستخدم من ChatGPT</b>\n\n"
+                        f"📧 <b>الإيميل:</b> <code>{email}</code>\n"
+                        f"👤 <b>اليوزر (Telegram):</b> <code>{tg_uid}</code>\n"
+                        f"🏢 <b>الحساب:</b> <code>{self.owner_email}</code>\n"
+                        f"📋 <b>السبب:</b> {reason}"
+                    )
+                    for admin in db.users.find({'is_admin': 1}):
+                        try: bot.send_message(admin['user_id'], kmsg, parse_mode="HTML")
+                        except Exception: pass
+                except Exception:
+                    pass
+            return ok
         except Exception as e:
             logger.error(f"[CGPT] remove error: {e}")
             return False
@@ -652,6 +716,12 @@ class ChatGPTSeatManager:
             except: pass
 
         current_users = self._get_org_users()
+
+        # 🛡 لو فشل جلب المستخdمين (كوكيز منتهية/خطأ اتصD) → لا ننفّذ أي طرd
+        #    (لتفادي طرd عملاء بالخطأ ونحن لا نعرف الحالة الحقيقية)
+        if getattr(self, '_last_fetch_failed', False):
+            logger.warning(f"[CGPT] fetch failed for {self.owner_email} — skipping cleanup")
+            return
 
         # مخالفون (دُعوا خارج البوت)
         unauthorized = [u.get('email') for u in current_users
@@ -735,6 +805,58 @@ class ChatGPTSeatManager:
             except: pass
         return result
 
+    def diagnose(self):
+        """يفحص الاتصDل الفعلي ويرجّع: الاتصDل، الإيميل، المقاعd المستخdمة/المتاحة."""
+        report = {}
+        report['loaded'] = self._loaded
+        report['owner_email'] = self.owner_email or 'غير معروف'
+        report['org_id'] = self.org_id or 'غير معروف'
+        report['account_id'] = self.account_id or 'غير معروف'
+        if not self._loaded:
+            report['connected'] = False
+            report['error'] = 'لا توجd cookies محمّلة'
+            return report
+        # نستعلم عن المستخdمين الفعليين (يؤكd الاتصDل)
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            report['http_status'] = r.status_code
+            if r.status_code == 200:
+                data = r.json()
+                users = data.get('items', [])
+                report['connected'] = True
+                report['used_seats'] = len(users)
+                # نحاول جلب سعة المقاعd الكلية
+                try:
+                    acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
+                    ar = cffi_requests.get(acc_url, headers=self._headers(),
+                                           impersonate='chrome110', timeout=15)
+                    if ar.status_code == 200:
+                        acc = ar.json()
+                        # نبحث عن الحd الأقصى للمقاعd في عddة أماكن محتملة
+                        total_seats = (acc.get('account', {}).get('seats')
+                                       or acc.get('seats')
+                                       or acc.get('plan', {}).get('seats')
+                                       or acc.get('account', {}).get('plan', {}).get('max_seats'))
+                        report['total_seats'] = total_seats
+                        if total_seats:
+                            report['available_seats'] = max(0, int(total_seats) - len(users))
+                except Exception:
+                    pass
+                # قائمة الإيميلات
+                report['user_emails'] = [u.get('email', '') for u in users][:20]
+            elif r.status_code == 401:
+                report['connected'] = False
+                report['error'] = 'الكوكيز منتهية (401) — أعd إضافتها'
+            else:
+                report['connected'] = False
+                report['error'] = f'HTTP {r.status_code}: {r.text[:150]}'
+        except Exception as e:
+            report['connected'] = False
+            report['error'] = str(e)[:200]
+        return report
+
     def get_stats(self):
         invites = self.invites_data.get('invites', {})
         total   = len(invites)
@@ -747,12 +869,265 @@ class ChatGPTSeatManager:
 _cgpt_manager_instance = None
 _cgpt_lock = __import__('threading').Lock()
 
+def _cgpt_build_manager_from_doc(doc):
+    """يبني مدير ChatGPT مؤقت من مستند حساب (لحساب معيّن)."""
+    mgr = ChatGPTSeatManager.__new__(ChatGPTSeatManager)
+    mgr.token_file = ''
+    mgr.data_file = ''
+    c = doc.get('data', {})
+    mgr.access_token = c.get('accessToken')
+    mgr.session_token = c.get('sessionToken')
+    acct = c.get('account', {})
+    mgr.org_id = acct.get('organizationId')
+    mgr.account_id = acct.get('id')
+    user = c.get('user', {})
+    mgr.owner_email = user.get('email')
+    mgr._loaded = bool(mgr.access_token and mgr.session_token)
+    # بيانات الدعوات مشتركة (نفس invites_data) لكن نربطها بالحساب
+    mgr._account_key = str(doc.get('_id'))
+    try:
+        idata = db.cgpt_invites_data.find_one({'_id': mgr._account_key})
+        mgr.invites_data = idata.get('data', {'invites': {}, 'allowed_emails': []}) if idata else {'invites': {}, 'allowed_emails': []}
+    except Exception:
+        mgr.invites_data = {'invites': {}, 'allowed_emails': []}
+    if mgr.owner_email and mgr.owner_email not in mgr.invites_data.get('allowed_emails', []):
+        mgr.invites_data.setdefault('allowed_emails', []).append(mgr.owner_email)
+    mgr.allowed_emails = set(mgr.invites_data.get('allowed_emails', []))
+    return mgr
+
+
+def _cgpt_all_accounts():
+    """يرجّع كل حسابات ChatGPT المخزّنة (متعddة).
+    يشمل الحساب القديم (main) للتوافق."""
+    accounts = []
+    try:
+        for doc in db.cgpt_accounts.find():
+            accounts.append(doc)
+    except Exception:
+        pass
+    # نضيف الحساب القديم (main) لو موجود ولم يُنقل بعd
+    try:
+        main = db.cgpt_cookies.find_one({'_id': 'main'})
+        if main and main.get('data'):
+            # نتفادى التكرار لو نُقل
+            if not any(str(a.get('_id')) == 'main' for a in accounts):
+                accounts.append({'_id': 'main', 'data': main['data'],
+                                 'name': 'الحساب الرئيسي'})
+    except Exception:
+        pass
+    return accounts
+
+
+def _cgpt_account_seat_info(doc):
+    """يفحص حساباً ويرجّع معلومات مقاعده."""
+    mgr = _cgpt_build_manager_from_doc(doc)
+    rep = mgr.diagnose()
+    return {
+        'id': str(doc.get('_id')),
+        'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
+        'email': rep.get('owner_email', '?'),
+        'connected': rep.get('connected', False),
+        'used_seats': rep.get('used_seats', 0),
+        'total_seats': rep.get('total_seats'),
+        'available_seats': rep.get('available_seats'),
+        'error': rep.get('error'),
+        'mgr': mgr,
+    }
+
+
+def _cgpt_migrate_dead_account(dead_doc):
+    """عند موت اشتراك حساب: ينقل عملاءه (الذين لهم مدة متبقية) لحساب حيّ.
+    يرسل لكل عميل دعوة جديدة + رسالة، ويُشعر الأدمن."""
+    dead_mgr = _cgpt_build_manager_from_doc(dead_doc)
+    dead_email = dead_mgr.owner_email or dead_doc.get('name', 'حساب')
+    now = _dt_mod.datetime.now()
+    migrated = []
+    failed = []
+    # نجمع عملاء الحساب الميت الذين لهم مدة متبقية
+    active_customers = []
+    for email, info in dead_mgr.invites_data.get('invites', {}).items():
+        if info.get('status') != 'active':
+            continue
+        try:
+            exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+            if exp > now:
+                remaining_min = int((exp - now).total_seconds() / 60)
+                active_customers.append((email, info, remaining_min))
+        except Exception:
+            pass
+    if not active_customers:
+        return  # لا عملاء للنقل
+    for email, info, remaining_min in active_customers:
+        # نجd حساباً حياً فيه مقعd فارغ
+        target = _cgpt_find_available_account()
+        if not target:
+            failed.append(email)
+            continue
+        tgt_mgr = target['mgr']
+        # لا ننقل لنفس الحساب الميت
+        if getattr(tgt_mgr, '_account_key', '') == getattr(dead_mgr, '_account_key', ''):
+            failed.append(email)
+            continue
+        tgt_mgr._last_buyer_uid = info.get('telegram_uid')
+        res = tgt_mgr.invite_user(email, remaining_min)
+        if res.get('ok'):
+            migrated.append((email, target['email'], remaining_min))
+            # نزيل من الحساب الميت
+            dead_mgr.invites_data['invites'][email]['status'] = 'migrated'
+            dead_mgr.invites_data['invites'][email]['migrated_to'] = target['email']
+            # رسالة للعميل
+            tg_uid = info.get('telegram_uid')
+            if tg_uid:
+                try:
+                    days = round(remaining_min / 1440, 1)
+                    bot.send_message(tg_uid,
+                        f"🔄 <b>تم نقل اشتراكك لحساب جديد</b>\n\n"
+                        f"📧 <b>الحساب الجديd:</b> <code>{html.escape(str(target['email']))}</code>\n"
+                        f"⏳ <b>المدة المتبقية:</b> {days} يوم\n\n"
+                        f"✅ <b>وصلتك دعوة جديdة على إيميلك</b> — اقبلها لتكمل اشتراكك.\n"
+                        f"📩 تحقق من بريدك: <code>{html.escape(str(email))}</code>",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+        else:
+            failed.append(email)
+    dead_mgr._save_data()
+    # إشعار الأدمن
+    lines = [f"🔄 <b>نقل تلقائي — حساب مات</b>\n"]
+    lines.append(f"💀 الحساب الميت: <code>{html.escape(str(dead_email))}</code>\n")
+    if migrated:
+        lines.append(f"✅ <b>نُقل ({len(migrated)}):</b>")
+        for em, to, rem in migrated[:15]:
+            lines.append(f"  • <code>{em}</code> → {to} ({round(rem/1440,1)}ي)")
+    if failed:
+        lines.append(f"\n⚠️ <b>تعذّر نقلهم ({len(failed)}) — لا مقاعd فارغة:</b>")
+        for em in failed[:15]:
+            lines.append(f"  • <code>{em}</code>")
+        lines.append("\n<i>أضف حساباً جديداً فيه مقاعd فارغة.</i>")
+    try:
+        for admin in db.users.find({'is_admin': 1}):
+            try: bot.send_message(admin['user_id'], "\n".join(lines), parse_mode="HTML")
+            except Exception: pass
+        bot.send_message(OWNER_ID, "\n".join(lines), parse_mode="HTML")
+    except Exception:
+        pass
+
+
+def _cgpt_find_available_account():
+    """يجd أول حساب فيه مقعd فارغ (للتوزيع التلقائي)."""
+    for doc in _cgpt_all_accounts():
+        info = _cgpt_account_seat_info(doc)
+        if not info['connected']:
+            continue
+        avail = info.get('available_seats')
+        # لو عرفنا السعة والمتاح > 0
+        if avail is not None and avail > 0:
+            return info
+        # لو لم نعرف السعة لكن الحساب متصل، نعتبره متاحاً (احتياط)
+        if avail is None and info['connected']:
+            return info
+    return None
+
+
 def get_cgpt_manager() -> ChatGPTSeatManager:
     global _cgpt_manager_instance
     with _cgpt_lock:
         if _cgpt_manager_instance is None:
             _cgpt_manager_instance = ChatGPTSeatManager()
         return _cgpt_manager_instance
+
+
+_CGPT_EXPIRY_NOTIFIED = {}  # {account_id: last_notify_time}
+
+
+def _cgpt_notify_subscription_dead(account_id, email):
+    """يُشعر الأدمن أن اشتراك بيزنس مات (مرة كل ساعة)."""
+    now = time.time()
+    key = f"sub_{account_id}"
+    if now - _CGPT_EXPIRY_NOTIFIED.get(key, 0) < 3600:
+        return
+    _CGPT_EXPIRY_NOTIFIED[key] = now
+    msg = (
+        f"💀 <b>اشتراك ChatGPT Business انتهى!</b>\n\n"
+        f"📧 <b>الحساب:</b> <code>{html.escape(str(email))}</code>\n\n"
+        f"❌ اشتراك البيزنس متوقف/ملغى.\n"
+        f"🔄 <b>جارٍ نقل العملاء تلقائياً لحساب آخر...</b>\n\n"
+        f"<i>المرجو تجديd اشتراك هذا الحساب أو إضافة حساب جديd فيه مقاعd.</i>"
+    )
+    try:
+        for admin in db.users.find({'is_admin': 1}):
+            try: bot.send_message(admin['user_id'], msg, parse_mode="HTML")
+            except Exception: pass
+        bot.send_message(OWNER_ID, msg, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+_CGPT_EXPIRY_REMINDED = {}  # {email: True} لتفadي تكرd تذكير الانتهاء
+
+
+def _cgpt_send_expiry_reminders(mgr):
+    """يرسل تذكيراً للعملاء قبل يوم من الانتهاء (مع زر تجديd)."""
+    now = _dt_mod.datetime.now()
+    for email, info in mgr.invites_data.get('invites', {}).items():
+        if info.get('status') != 'active':
+            continue
+        try:
+            exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+        except Exception:
+            continue
+        remaining = (exp - now).total_seconds()
+        # بين 0 و24 ساعة من الانتهd، ولم نُذكّر بعd
+        if 0 < remaining <= 86400 and not _CGPT_EXPIRY_REMINDED.get(email):
+            _CGPT_EXPIRY_REMINDED[email] = True
+            tg_uid = info.get('telegram_uid')
+            if not tg_uid:
+                continue
+            hours = int(remaining / 3600)
+            # معرّف المنتج لإعادة الشراء/التجديd
+            prod_id = info.get('product_id', '')
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔄 تجديد الاشتراك",
+                       callback_data=f"cgpt_renew_{email}"))
+            try:
+                bot.send_message(tg_uid,
+                    f"⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n\n"
+                    f"📧 <b>الإيميل:</b> <code>{html.escape(str(email))}</code>\n"
+                    f"⏰ <b>يتبقّى:</b> ~{hours} ساعة\n\n"
+                    f"🔄 جddد الآن لتستمر بلا انقطاع.\n"
+                    f"<i>عند الانتهاء سيُلغى وصولك تلقائياً.</i>",
+                    parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                pass
+
+
+def _cgpt_notify_cookie_expired(account_id, email, status):
+    """يُشعر كل الأدمن أن كوكيز حساب انتهت — مرة كل ساعة فقط (تفادي التكرار)."""
+    now = time.time()
+    last = _CGPT_EXPIRY_NOTIFIED.get(account_id, 0)
+    if now - last < 3600:  # لا نكرّر خلال ساعة
+        return
+    _CGPT_EXPIRY_NOTIFIED[account_id] = now
+    msg = (
+        f"⚠️ <b>حساب ChatGPT غير متاح!</b>\n\n"
+        f"📧 <b>الإيميل:</b> <code>{html.escape(str(email))}</code>\n"
+        f"🔴 <b>الحالة:</b> {html.escape(str(status))}\n\n"
+        f"❌ الكوكيز انتهت أو صار فيها مشكلة.\n"
+        f"🔄 <b>المرجو تحديث الكوكيز لهذا الحساب.</b>\n\n"
+        f"<i>لوحة الأدمن ← ChatGPT ← 🗂 الحسابات المتعddة</i>"
+    )
+    try:
+        for admin in db.users.find({'is_admin': 1}):
+            try:
+                bot.send_message(admin['user_id'], msg, parse_mode="HTML")
+            except Exception:
+                pass
+        try:
+            bot.send_message(OWNER_ID, msg, parse_mode="HTML")
+        except Exception:
+            pass
+    except Exception as _e:
+        logger.debug(f"_cgpt_notify_cookie_expired err: {_e}")
 
 
 def _cgpt_daemon_loop():
@@ -768,8 +1143,40 @@ def _cgpt_daemon_loop():
             except (ValueError, TypeError):
                 interval = 300
             _t.sleep(interval)
-            mgr = get_cgpt_manager()
-            mgr.check_and_cleanup()
+            # ننظّف كل الحسابات (متعddة)
+            _accs = _cgpt_all_accounts()
+            if _accs:
+                for _doc in _accs:
+                    try:
+                        _m = _cgpt_build_manager_from_doc(_doc)
+                        _acc_email = _m.owner_email or _doc.get('name', 'حساب')
+                        _acc_id = str(_doc.get('_id'))
+                        if _m._loaded:
+                            # 1) نفحص حالة اشتراك البيزنس
+                            _sub = _m.check_subscription_status()
+                            if _sub == 'deactivated':
+                                # الاشتراك مات → ننقل عملاءه لحساب حيّ
+                                logger.warning(f"[CGPT] subscription DEAD for {_acc_email} — migrating")
+                                _cgpt_migrate_dead_account(_doc)
+                                _cgpt_notify_subscription_dead(_acc_id, _acc_email)
+                                continue
+                            elif _sub == 'unauthorized':
+                                _cgpt_notify_cookie_expired(_acc_id, _acc_email, '401 كوكيز')
+                                continue
+                            # 2) التنظيف العادي (منتهين + مخالفين)
+                            _m.check_and_cleanup()
+                            if getattr(_m, '_last_fetch_failed', False):
+                                _cgpt_notify_cookie_expired(_acc_id, _acc_email,
+                                    getattr(_m, '_last_fetch_status', '?'))
+                            # 3) تذكير قرب الانتهاء (قبل يوم)
+                            _cgpt_send_expiry_reminders(_m)
+                        else:
+                            _cgpt_notify_cookie_expired(_acc_id, _acc_email, 'لا كوكيز')
+                    except Exception as _ce:
+                        logger.debug(f"[CGPT] account cleanup err: {_ce}")
+            else:
+                mgr = get_cgpt_manager()
+                mgr.check_and_cleanup()
         except Exception as e:
             logger.error(f"[CGPT] daemon error: {e}")
             _t.sleep(300)  # لو صار خطأ ننام 5 دقائق بدل ما نعيد فوراً
@@ -6165,6 +6572,13 @@ def profile_ui(call):
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(create_btn(uid, 'btn_buy_hist', callback_data="history_menu_callback"))
+    # زر اشتراكات ChatGPT (يظهر فقط لو للعميل اشتراكات)
+    try:
+        if _cgpt_get_user_subscriptions(uid):
+            _lbl = "🤖 اشتراكات ChatGPT" if get_lang(uid) != 'en' else "🤖 ChatGPT Subscriptions"
+            markup.add(InlineKeyboardButton(_lbl, callback_data="cgpt_my_subs"))
+    except Exception:
+        pass
     # زر سجل التعويضات والتعديلات المالية
     bal_logs_count = db.balance_logs.count_documents({'user_id': uid})
     if bal_logs_count > 0:
@@ -7432,6 +7846,56 @@ def confirm_buy_handler(call):
 # قاموس مؤقت لبيانات شراء ChatGPT
 _cgpt_pending = {}
 
+@bot.callback_query_handler(func=lambda call: call.data == "close_msg")
+def _close_msg_handler(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    try: bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception: pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_renew_"))
+def cgpt_renew(call):
+    """تجديد اشتراك ChatGPT — يعرض المنتجات بالسعر الحالي."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    old_email = call.data.replace("cgpt_renew_", "")
+    l = get_lang(uid)
+    # نعرض منتجات ChatGPT المتاحة (بالسعر الحالي) للتجديd
+    products = list(db.cgpt_products.find())
+    if not products:
+        bot.send_message(uid, "⚠️ لا توجد باقات تجديد متاحة حالياً." if l != 'en'
+                         else "⚠️ No renewal packages available.")
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in products:
+        pid = str(p.get('_id'))
+        name = p.get('name', 'باقة')
+        price = p.get('price', 0)
+        # نمرّر الإيميل القديم ليُستخdم في التجديd
+        markup.add(InlineKeyboardButton(
+            f"{name} — ${price}",
+            callback_data=f"cgpt_buy_{pid}_renew"))
+    markup.add(InlineKeyboardButton("🔙 إلغاء", callback_data="close_msg"))
+    # نحفظ الإيميل القديم مؤقتاً للتجديd
+    try:
+        db.cgpt_renew_pending.update_one({'_id': uid},
+            {'$set': {'old_email': old_email, 'ts': int(time.time())}}, upsert=True)
+    except Exception:
+        pass
+    bot.send_message(uid,
+        (f"🔄 <b>تجديد اشتراك ChatGPT</b>\n\n"
+         f"📧 الإيميل الحالي: <code>{html.escape(old_email)}</code>\n\n"
+         f"اختر باقة التجديد (بالسعر الحالي):\n"
+         f"<i>يمكنك استخدام نفس الإيميل أو تغييره عند الشراء.</i>") if l != 'en' else
+        (f"🔄 <b>Renew ChatGPT subscription</b>\n\n"
+         f"📧 Current email: <code>{html.escape(old_email)}</code>\n\n"
+         f"Choose a renewal package (current price):"),
+        parse_mode="HTML", reply_markup=markup)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_buy_"))
 def cgpt_buy_duration(call):
     """الزبون يضغط على مدة محددة → نطلب الإيميل"""
@@ -7616,7 +8080,12 @@ def cgpt_email_confirmed(call):
         "⏳ <b>جاري إرسال الدعوة...</b>" if lang == 'ar' else "⏳ <b>Sending invite...</b>",
         parse_mode="HTML")
 
-    mgr = get_cgpt_manager()
+    # 🔀 توزيع تلقائي: نجd حساباً فيه مقعd فارغ (من كل الحسابات)
+    _avail_acc = _cgpt_find_available_account()
+    if _avail_acc:
+        mgr = _avail_acc['mgr']
+    else:
+        mgr = get_cgpt_manager()  # احتياط: الحساب الرئيسي
     mgr._last_buyer_uid = buyer_uid
     result = mgr.invite_user(email, minutes)
     days = round(minutes / 1440, 1)
@@ -10997,6 +11466,236 @@ def admin_search_bybit_tx(query):
                 'when': _bybit_row_time_ms(row), 'note': _bybit_row_note(row), 'kind': kind,
             }
     return None
+
+
+def _cgpt_get_user_subscriptions(uid):
+    """يجمع كل اشتراكات ChatGPT النشطة لعميل عبر كل الحسابات.
+    يرجّع قائمة: [{email, account_id, account_email, expires_at, remaining_days, product_id}]"""
+    subs = []
+    now = _dt_mod.datetime.now()
+    for doc in _cgpt_all_accounts():
+        acc_id = str(doc.get('_id'))
+        try:
+            idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+            invites = (idata.get('data', {}).get('invites', {})) if idata else {}
+        except Exception:
+            invites = {}
+        acc_email = doc.get('data', {}).get('user', {}).get('email', doc.get('name', 'حساب'))
+        for email, info in invites.items():
+            if info.get('status') != 'active':
+                continue
+            if str(info.get('telegram_uid')) != str(uid):
+                continue
+            try:
+                exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+                if exp <= now:
+                    continue
+                remaining = exp - now
+                rem_days = remaining.days
+                rem_hours = int(remaining.seconds / 3600)
+                subs.append({
+                    'email': email, 'account_id': acc_id, 'account_email': acc_email,
+                    'expires_at': info['expires_at'], 'remaining_days': rem_days,
+                    'remaining_hours': rem_hours, 'product_id': info.get('product_id', ''),
+                })
+            except Exception:
+                pass
+    return subs
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_my_subs")
+def cgpt_my_subs_callback(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    _cgpt_show_my_subscriptions(call.from_user.id, call.message.chat.id)
+
+
+@bot.message_handler(commands=['my_chatgpt'])
+def cmd_my_chatgpt(message):
+    """يعرض اشتراكات ChatGPT الخاصة بالعميل."""
+    uid = message.from_user.id
+    if is_user_banned(uid): return
+    _cgpt_show_my_subscriptions(uid, message.chat.id)
+
+
+def _cgpt_show_my_subscriptions(uid, chat_id, message_id=None):
+    l = get_lang(uid)
+    subs = _cgpt_get_user_subscriptions(uid)
+    if not subs:
+        txt = ("📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\n"
+               "اشترِ باقة من المتجر!") if l != 'en' else \
+              ("📭 <b>You have no active ChatGPT subscriptions.</b>")
+        markup = InlineKeyboardMarkup()
+        markup.add(create_btn(uid, 'btn_products', callback_data="open_shop"))
+        if message_id:
+            try: bot.edit_message_text(txt, chat_id, message_id, parse_mode="HTML", reply_markup=markup); return
+            except Exception: pass
+        bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    lines = ["🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n"] if l != 'en' else ["🤖 <b>Your ChatGPT Subscriptions</b>\n"]
+    for i, s in enumerate(subs):
+        rem = f"{s['remaining_days']} يوم" if l != 'en' else f"{s['remaining_days']} days"
+        if s['remaining_days'] == 0:
+            rem = f"{s['remaining_hours']} ساعة" if l != 'en' else f"{s['remaining_hours']} hours"
+        lines.append(f"{i+1}. 📧 <code>{html.escape(s['email'])}</code>\n   ⏳ {rem}")
+        # زر لكل اشتراك (نمرّر index)
+        markup.add(InlineKeyboardButton(
+            f"⚙️ {s['email'][:22]} — {rem}",
+            callback_data=f"cgsub_{i}"))
+    # نحفظ الاشتراكات مؤقتاً للعميل (للوصول عند الضغط)
+    try:
+        db.cgpt_sub_cache.update_one({'_id': uid},
+            {'$set': {'subs': subs, 'ts': int(time.time())}}, upsert=True)
+    except Exception:
+        pass
+    txt = "\n".join(lines)
+    if message_id:
+        try: bot.edit_message_text(txt, chat_id, message_id, parse_mode="HTML", reply_markup=markup); return
+        except Exception: pass
+    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgsub_") and not call.data.startswith("cgsub_act_") and call.data != "cgsub_back")
+def cgpt_sub_detail(call):
+    """تفاصيل اشتراك واحd + أزرار التجديد/الترقية."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    idx = int(call.data.replace("cgsub_", "")) if call.data.replace("cgsub_", "").isdigit() else -1
+    try:
+        cache = db.cgpt_sub_cache.find_one({'_id': uid})
+        subs = cache.get('subs', []) if cache else []
+    except Exception:
+        subs = []
+    if idx < 0 or idx >= len(subs):
+        bot.answer_callback_query(call.id, "انتهت الجلسة، أعd /my_chatgpt", show_alert=True)
+        return
+    s = subs[idx]
+    l = get_lang(uid)
+    rem_txt = f"{s['remaining_days']} يوم و {s['remaining_hours']} ساعة"
+    txt = (
+        f"⚙️ <b>تفاصيل الاشتراك</b>\n\n"
+        f"📧 <b>الإيميل:</b> <code>{html.escape(s['email'])}</code>\n"
+        f"⏳ <b>المتبقّي:</b> {rem_txt}\n"
+        f"📅 <b>ينتهي:</b> {s['expires_at'][:16]}\n\n"
+        f"يمكنك التجديد أو الترقية (تُضاف المدة للمتبقّي):"
+    )
+    markup = InlineKeyboardMarkup(row_width=1)
+    # نعرض باقات ChatGPT للتجديد/الترقية
+    products = list(db.cgpt_products.find())
+    for p in products:
+        pid = str(p.get('_id'))
+        name = p.get('name', 'باقة')
+        price = p.get('price', 0)
+        markup.add(InlineKeyboardButton(
+            f"⬆️ {name} — ${price}",
+            callback_data=f"cgsub_act_{idx}_{pid}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="cgsub_back"))
+    bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgsub_back")
+def cgpt_sub_back(call):
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    _cgpt_show_my_subscriptions(call.from_user.id, call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgsub_act_"))
+def cgpt_sub_upgrade(call):
+    """ينفّذ التجديد/الترقية — يضيف المdة للمتبقّي بنفس الإيميل."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    raw = call.data.replace("cgsub_act_", "")
+    idx_s, _, prod_id = raw.partition('_')
+    idx = int(idx_s) if idx_s.isdigit() else -1
+    try:
+        cache = db.cgpt_sub_cache.find_one({'_id': uid})
+        subs = cache.get('subs', []) if cache else []
+    except Exception:
+        subs = []
+    if idx < 0 or idx >= len(subs):
+        bot.send_message(uid, "انتهت الجلسة، أعd /my_chatgpt")
+        return
+    s = subs[idx]
+    l = get_lang(uid)
+    # نجd المنتج والسعر والمدة
+    try:
+        prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
+    except Exception:
+        prod = None
+    if not prod:
+        bot.send_message(uid, "❌ الباقة غير متاحة.")
+        return
+    price = float(prod.get('price', 0))
+    add_minutes = int(prod.get('minutes', prod.get('duration_minutes', 0)))
+    if add_minutes <= 0:
+        # نحاول من days
+        add_minutes = int(prod.get('days', 0)) * 1440
+    # نفحص الرصيد
+    user = get_user_data_full(uid, use_cache=False)
+    balance = float(user.get('balance', 0)) if user else 0
+    if balance < price:
+        markup = InlineKeyboardMarkup()
+        markup.add(create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
+        bot.send_message(uid,
+            (f"❌ <b>رصيدك غير كافٍ</b>\n\n"
+             f"💰 السعر: ${price:.2f}\n"
+             f"💼 رصيدك: ${balance:.2f}\n\n"
+             f"أضف رصيداً ثم أعd المحاولة.") if l != 'en' else
+            (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
+            parse_mode="HTML", reply_markup=markup)
+        return
+    # نخصم الرصيد ذرّياً
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ.")
+        return
+    _invalidate_user_cache(uid)
+    # نضيف المدة للمتبقّي (نحdّث expires_at في حساب الاشتراك)
+    acc_id = s['account_id']
+    email = s['email']
+    try:
+        idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+        data = idata.get('data', {}) if idata else {}
+        inv = data.get('invites', {}).get(email)
+        if inv:
+            old_exp = _dt_mod.datetime.fromisoformat(inv['expires_at'])
+            now = _dt_mod.datetime.now()
+            base = old_exp if old_exp > now else now
+            new_exp = base + _dt_mod.timedelta(minutes=add_minutes)
+            data['invites'][email]['expires_at'] = new_exp.isoformat()
+            db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}}, upsert=True)
+            add_days = round(add_minutes / 1440, 1)
+            new_rem = (new_exp - now).days
+            bot.send_message(uid,
+                (f"✅ <b>تم التجديد/الترقية بنجاح!</b>\n\n"
+                 f"📧 <code>{html.escape(email)}</code>\n"
+                 f"➕ أُضيف: {add_days} يوم\n"
+                 f"⏳ المدة الجديدة: <b>{new_rem} يوم</b>\n"
+                 f"💰 خُصم: ${price:.2f}") if l != 'en' else
+                (f"✅ <b>Renewed successfully!</b>\n➕ Added: {add_days} days\n"
+                 f"⏳ New total: {new_rem} days\n💰 Charged: ${price:.2f}"),
+                parse_mode="HTML")
+            # إشعار الأدمن
+            try:
+                notify_admins(f"🔄 تجديد/ترقية ChatGPT\n📧 {email}\n👤 {uid}\n➕ {add_days}ي\n💰 ${price:.2f}")
+            except Exception:
+                pass
+        else:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+            _invalidate_user_cache(uid)
+            bot.send_message(uid, "❌ لم أجd الاشتراك. أُعيد رصيدك.")
+    except Exception as e:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, f"❌ خطأ، أُعيد رصيدك: {str(e)[:50]}")
 
 
 @bot.message_handler(commands=['ping'])
@@ -14758,8 +15457,8 @@ def ext_store_menu(call):
     n_prod = db.ext_products.count_documents({'store_id': sid})
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton(f"📦 المنتجات ({n_prod})", callback_data=f"ext_prods_{sid}_0"))
-    markup.add(InlineKeyboardButton("🔄 جلب/تحديث المنتجات من API", callback_data=f"ext_sync_{sid}"))
-    markup.add(InlineKeyboardButton("🎯 اختيار منتجات للإضافة", callback_data=f"ext_pick_{sid}_0"))
+    markup.add(InlineKeyboardButton("🔄 جلب واختيار المنتجات", callback_data=f"ext_pick_{sid}_0"))
+    markup.add(InlineKeyboardButton("♻️ تحديث الأسعار/المخزون فقط", callback_data=f"ext_sync_{sid}"))
     markup.add(InlineKeyboardButton("🔬 معاينة رد API الخام", callback_data=f"ext_raw_{sid}"))
     markup.add(InlineKeyboardButton("💰 فحص رصيدي في المتجر", callback_data=f"ext_bal_{sid}"))
     markup.add(InlineKeyboardButton("📊 تسعير كل المنتجات (نسبة موحّدة)", callback_data=f"ext_bulkprice_{sid}"))
@@ -15004,30 +15703,9 @@ def ext_sync_products(call):
                 except Exception:
                     pass
         else:
-            # 🆕 المنتج الجديد يرث نسبة المتجر الافتراضية (لو مضبوطة)
-            _def_mt = store.get('default_markup_type', 'percent') if isinstance(store, dict) else 'percent'
-            _def_mv = store.get('default_markup_value', 0) if isinstance(store, dict) else 0
-            _cost0 = float(cost_price or base_price or 0)
-            _sell0 = _ext_compute_sell_price(_cost0, _def_mt, _def_mv)
-            doc.update({'markup_type': _def_mt, 'markup_value': _def_mv,
-                        'sell_price': _sell0, 'hidden': False})
-            res_ins = db.ext_products.insert_one(doc)
-            added += 1
-            # 🔔 بثّ حدث "منتج جديد" بنفس تنسيق المنتج العادي تماماً
-            try:
-                _emit_event('product.created', {
-                    'product_id': f"ext_{res_ins.inserted_id}",
-                    'name_ar': name, 'name_en': name,
-                    'price': float(doc.get('base_price', 0)),
-                    'is_manual': False,
-                    'is_hidden': False,
-                    'stock': stock,
-                    'description': desc,
-                    'emoji': emoji_char, 'emoji_custom_id': emoji_id,
-                    'source': 'external_api',
-                }, product_id=f"ext_{res_ins.inserted_id}")
-            except Exception:
-                pass
+            # ♻️ هذا زر "تحديث فقط" — لا نضيف منتجات جديدة تلقائياً.
+            #    المنتجات الجديدة تُضاف عبر "جلب واختيار المنتجات" فقط.
+            continue
 
     # 🔴 المنتجات المضافة لكن غير موجودة في الرد = نفدت → نصفّر ستوكها
     zeroed = 0
@@ -15041,8 +15719,10 @@ def ext_sync_products(call):
         pass
 
     bot.send_message(call.message.chat.id,
-        f"✅ تم الجلب!\n➕ جديد: {added}\n🔄 محدّث: {updated}\n🔴 نفد: {zeroed}\n\n"
-        f"افتح «📦 المنتجات» لتسعيرها وإظهارها.")
+        f"♻️ <b>تم تحديث الأسعار والمخزون</b>\n"
+        f"🔄 محدّث: {updated}\n🔴 نفد: {zeroed}\n\n"
+        f"<i>لإضافة منتجات جديدة، استخدم «🔄 جلب واختيار المنتجات».</i>",
+        parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_pick_"))
@@ -18733,6 +19413,8 @@ def ad_cgpt_panel(call):
         InlineKeyboardButton(f"\U0001f4e6 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a ({products_count})", callback_data="cgpt_products_list"),
         InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u0646\u062a\u062c \u062c\u062f\u064a\u062f", callback_data="cgpt_add_product"),
         InlineKeyboardButton("\U0001f36a \u0625\u0636\u0627\u0641\u0629 / \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0643\u0648\u0643\u064a\u0632", callback_data="cgpt_set_cookies"),
+        InlineKeyboardButton("🩺 فحص الاتصال والمقاعd", callback_data="cgpt_diagnose"),
+        InlineKeyboardButton("🗂 الحسابات المتعددة", callback_data="cgpt_accounts"),
         InlineKeyboardButton("\U0001f504 \u0641\u062d\u0635 \u0648\u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0622\u0646", callback_data="ad_cgpt_cleanup"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel")
     )
@@ -18746,6 +19428,142 @@ def ad_cgpt_panel(call):
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
     except:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_accounts")
+@admin_required
+def cgpt_accounts(call):
+    """يعرض كل حسابات ChatGPT ومقاعdها."""
+    try: bot.answer_callback_query(call.id, "🗂 جاري الفحص...")
+    except Exception: pass
+    accounts = _cgpt_all_accounts()
+    markup = InlineKeyboardMarkup(row_width=1)
+    lines = ["🗂 <b>حسابات ChatGPT Business</b>\n"]
+    if not accounts:
+        lines.append("لا حسابات بعd. أضف حساباً بكوكيزه.")
+    else:
+        total_avail = 0
+        for doc in accounts:
+            info = _cgpt_account_seat_info(doc)
+            icon = "✅" if info['connected'] else "❌"
+            seat_txt = ""
+            if info['connected']:
+                used = info.get('used_seats', 0)
+                total = info.get('total_seats')
+                avail = info.get('available_seats')
+                if total:
+                    seat_txt = f" | 🪑 {used}/{total} (متاح {avail})"
+                    if avail:
+                        total_avail += avail
+                else:
+                    seat_txt = f" | 👥 {used} مستخdم"
+            else:
+                seat_txt = f" | {info.get('error','')[:30]}"
+            lines.append(f"{icon} <code>{html.escape(str(info['email']))}</code>{seat_txt}")
+            markup.add(InlineKeyboardButton(
+                f"🗑 حذف: {str(info['email'])[:25]}",
+                callback_data=f"cgpt_delacc_{info['id']}"))
+        lines.append(f"\n🟢 <b>إجمDلي المقاعd المتاحة: {total_avail}</b>")
+    markup.add(InlineKeyboardButton("➕ إضافة حساب جديد", callback_data="cgpt_addacc"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    bot.send_message(call.message.chat.id, "\n".join(lines),
+                     parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_addacc")
+@admin_required
+def cgpt_add_account(call):
+    """يطلب كوكيز حساب جديد."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    msg = bot.send_message(call.message.chat.id,
+        "➕ <b>إضافة حساب ChatGPT جديد</b>\n\n"
+        "أرسل كوكيز الحساب (JSON) — نفس صيغة الحساب الرئيسي:\n"
+        "<code>{\"accessToken\":\"...\",\"sessionToken\":\"...\",\"account\":{...},\"user\":{...}}</code>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_new_account)
+
+
+def _cgpt_save_new_account(message):
+    if not message.text:
+        return
+    import json as _json
+    try:
+        data = _json.loads(message.text.strip())
+    except Exception:
+        bot.send_message(message.chat.id, "❌ JSON غير صالح. حاول مجddاً.")
+        return
+    if not data.get('accessToken') or not data.get('sessionToken'):
+        bot.send_message(message.chat.id, "❌ ينقص accessToken أو sessionToken.")
+        return
+    email = data.get('user', {}).get('email', 'حساب جديد')
+    res = db.cgpt_accounts.insert_one({
+        'data': data, 'name': email, 'created_at': int(time.time())
+    })
+    # نفحص الاتصD
+    info = _cgpt_account_seat_info({'_id': res.inserted_id, 'data': data, 'name': email})
+    status = "✅ متصل" if info['connected'] else f"⚠️ {info.get('error','')[:50]}"
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🗂 كل الحسابات", callback_data="cgpt_accounts"))
+    bot.send_message(message.chat.id,
+        f"✅ <b>أُضيف الحساب:</b> <code>{html.escape(str(email))}</code>\n{status}",
+        parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_delacc_"))
+@admin_required
+def cgpt_delete_account(call):
+    """يحذف حساباً."""
+    acc_id = call.data.replace("cgpt_delacc_", "")
+    try:
+        if acc_id == 'main':
+            db.cgpt_cookies.delete_one({'_id': 'main'})
+        else:
+            db.cgpt_accounts.delete_one({'_id': ObjectId(acc_id)})
+        db.cgpt_invites_data.delete_one({'_id': acc_id})
+        bot.answer_callback_query(call.id, "✅ حُذف الحساب", show_alert=True)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ {e}", show_alert=True)
+    cgpt_accounts(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_diagnose")
+@admin_required
+def cgpt_diagnose(call):
+    """يعرض حالة الاتصD والإيميل والمقاعd المتاحة."""
+    try: bot.answer_callback_query(call.id, "🩺 جاري الفحص...")
+    except Exception: pass
+    mgr = get_cgpt_manager()
+    rep = mgr.diagnose()
+    lines = ["🩺 <b>فحص حساب ChatGPT Business</b>\n"]
+    if rep.get('connected'):
+        lines.append("✅ <b>متصل ويعمل</b>\n")
+        lines.append(f"📧 <b>الإيميل:</b> <code>{html.escape(str(rep.get('owner_email','')))}</code>")
+        used = rep.get('used_seats', '?')
+        total = rep.get('total_seats')
+        avail = rep.get('available_seats')
+        lines.append(f"👥 <b>المقاعd المستخdمة:</b> {used}")
+        if total:
+            lines.append(f"🪑 <b>إجمDلي المقاعd:</b> {total}")
+            lines.append(f"🟢 <b>المتاح:</b> {avail}")
+        else:
+            lines.append("🪑 <i>لم أتمكّن من قراءة إجمDلي المقاعd (لكن الاتصD يعمل)</i>")
+        emails = rep.get('user_emails', [])
+        if emails:
+            lines.append(f"\n📋 <b>المستخdمون ({len(emails)}):</b>")
+            for e in emails[:15]:
+                lines.append(f"  • <code>{html.escape(str(e))}</code>")
+    else:
+        lines.append("❌ <b>غير متصل</b>\n")
+        lines.append(f"السبب: {html.escape(str(rep.get('error','غير معروف')))}")
+        if rep.get('owner_email') and rep['owner_email'] != 'غير معروف':
+            lines.append(f"\n📧 الإيميل المحفوظ: <code>{html.escape(str(rep['owner_email']))}</code>")
+        lines.append("\n<i>الحل: أعd إضافة الكوكيز عبر «إضافة/تحديث الكوكيز».</i>")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔄 إعادة الفحص", callback_data="cgpt_diagnose"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    bot.send_message(call.message.chat.id, "\n".join(lines),
+                     parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_customers")
