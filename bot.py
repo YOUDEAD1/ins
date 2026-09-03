@@ -19714,52 +19714,125 @@ def cgpt_customers(call):
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
     except:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
-
-
 @bot.callback_query_handler(func=lambda call: call.data in ["cgpt_cust_active", "cgpt_cust_expired", "cgpt_cust_violated"])
 @admin_required
 def cgpt_cust_view(call):
-    bot.answer_callback_query(call.id)
-    mgr = get_cgpt_manager()
+    """يعرض العملاء (عبر كل الحسابات) مع زر حذف لكل واحد."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
     mode = call.data.replace("cgpt_cust_", "")
-    invites = mgr.invites_data.get('invites', {})
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="cgpt_customers"))
-    titles = {"active": "\U0001f7e2 \u0627\u0644\u0646\u0634\u0637\u0648\u0646", "expired": "\U0001f534 \u0627\u0644\u0645\u0646\u062a\u0647\u0648\u0646", "violated": "\u26d4\ufe0f \u0627\u0644\u0645\u062e\u0627\u0644\u0641\u0648\u0646"}
-    status_map = {"active": "active", "expired": "expired", "violated": "violated"}
+    titles = {"active": "🟢 النشطون", "expired": "🔴 المنتهون", "violated": "⛔️ المخالفون"}
     title = titles.get(mode, "")
-    items = [(e, i) for e, i in invites.items() if i.get('status') == status_map[mode]]
-    if not items:
-        txt = title + "\n\n\u0644\u0627 \u064a\u0648\u062c\u062f."
+    # نجمع من كل الحسابات
+    all_items = []  # (email, info, account_id, account_email)
+    for doc in _cgpt_all_accounts():
+        acc_id = str(doc.get('_id'))
+        try:
+            idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+            invites = (idata.get('data', {}).get('invites', {})) if idata else {}
+        except Exception:
+            invites = {}
+        acc_email = doc.get('data', {}).get('user', {}).get('email', 'حساب')
+        for email, info in invites.items():
+            if info.get('status') == mode:
+                all_items.append((email, info, acc_id, acc_email))
+    markup = InlineKeyboardMarkup(row_width=1)
+    if not all_items:
+        txt = title + "\n\nلا يوجد."
     else:
-        txt = title + "\n\n"
-        for idx, (email, info) in enumerate(items[:20], 1):
+        txt = title + f"\n\nالعدد: {len(all_items)}\n\n"
+        for idx, (email, info, acc_id, acc_email) in enumerate(all_items[:25], 1):
             exp = info.get('expires_at', '')[:10]
             uid_tg = info.get('telegram_uid', '')
-            txt += f"{idx}. <code>{email}</code>\n"
-            if uid_tg:
-                try:
-                    u_data = db.users.find_one({'user_id': int(uid_tg)}, {'username': 1, 'name': 1})
-                    uname = u_data.get('username') if u_data else None
-                    uname_str = f"@{uname} | " if uname else ""
-                    udisp = f"   \U0001f464 {uname_str}<code>{uid_tg}</code>\n"
-                except:
-                    udisp = f"   \U0001f464 <code>{uid_tg}</code>\n"
-                txt += udisp
+            line = f"{idx}. <code>{email}</code>"
             if exp:
                 try:
                     exp_dt = _dt_mod.datetime.fromisoformat(info.get('expires_at', ''))
                     rem = exp_dt - _dt_mod.datetime.now()
                     d = max(0, rem.days)
-                    h = max(0, int(rem.total_seconds() // 3600) % 24)
-                    txt += f"   \U0001f4c5 {exp} | \u0645\u062a\u0628\u0642\u064a: {d}\u064a {h}\u0633\n"
-                except:
-                    txt += f"   \U0001f4c5 {exp}\n"
-            txt += "\n"
+                    line += f" — {d}ي"
+                except Exception:
+                    pass
+            txt += line + "\n"
+            # زر حذف لكل إيميل (نمرر index في cache)
+            markup.add(InlineKeyboardButton(
+                f"🗑 حذف: {email[:28]}",
+                callback_data=f"cgptdel_{mode}_{idx-1}"))
+    # نحفظ القائمة مؤقتاً للحذف
+    try:
+        db.cgpt_del_cache.update_one({'_id': f"{call.from_user.id}_{mode}"},
+            {'$set': {'items': [(e, a) for e, i, a, ae in all_items], 'ts': int(time.time())}},
+            upsert=True)
+    except Exception:
+        pass
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="cgpt_customers"))
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
-    except:
+    except Exception:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgptdel_"))
+@admin_required
+def cgpt_delete_customer(call):
+    """يحذف إيميل عميل من الحساب (طرد فوري) — أي حالة."""
+    raw = call.data.replace("cgptdel_", "")
+    parts = raw.rsplit("_", 1)
+    if len(parts) != 2:
+        return
+    mode, idx_s = parts[0], parts[1]
+    idx = int(idx_s) if idx_s.isdigit() else -1
+    try:
+        cache = db.cgpt_del_cache.find_one({'_id': f"{call.from_user.id}_{mode}"})
+        items = cache.get('items', []) if cache else []
+    except Exception:
+        items = []
+    if idx < 0 or idx >= len(items):
+        bot.answer_callback_query(call.id, "انتهت الجلسة، افتح القائمة مجدداً", show_alert=True)
+        return
+    email, acc_id = items[idx][0], items[idx][1]
+    try: bot.answer_callback_query(call.id, "🗑 جاري الحذف...")
+    except Exception: pass
+    # نبني مدير الحساب ونطرد الإيميل فعلياً
+    try:
+        doc = None
+        if acc_id == 'main':
+            m = db.cgpt_cookies.find_one({'_id': 'main'})
+            doc = {'_id': 'main', 'data': m.get('data', {})} if m else None
+        else:
+            doc = db.cgpt_accounts.find_one({'_id': ObjectId(acc_id)})
+    except Exception:
+        doc = None
+    removed_from_org = False
+    if doc:
+        try:
+            mgr = _cgpt_build_manager_from_doc(doc)
+            # نجد user_id في المؤسسة
+            users = mgr._get_org_users()
+            uid_in_org = None
+            for u in users:
+                if u.get('email') == email:
+                    uid_in_org = u.get('id') or u.get('user_id')
+                    break
+            if uid_in_org:
+                removed_from_org = mgr._remove_user(uid_in_org, email)
+        except Exception as e:
+            logger.debug(f"cgpt del org err: {e}")
+    # نحذف السجل من قاعdة البيانات
+    try:
+        idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+        if idata:
+            data = idata.get('data', {})
+            data.get('invites', {}).pop(email, None)
+            db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}})
+    except Exception:
+        pass
+    status_txt = "✅ طُرد من الحساب وحُذف السجل" if removed_from_org else "✅ حُذف السجل (لم يكن في الحساب أو الكوكيز منتهية)"
+    bot.send_message(call.message.chat.id,
+        f"🗑 <b>{email}</b>\n{status_txt}", parse_mode="HTML")
+    # نعيد عرض القائمة
+    call.data = f"cgpt_cust_{mode}"
+    cgpt_cust_view(call)
 
 
 def _cgpt_show_products_list(chat_id, msg_id=None):
