@@ -892,6 +892,25 @@ class ChatGPTSeatManager:
                                     total_seats = _find_seats(sr.json())
                             except Exception:
                                 pass
+                        # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
+                        if not total_seats:
+                            try:
+                                chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+                                cr = cffi_requests.get(chk_url, headers=self._headers(),
+                                                       impersonate='chrome110', timeout=12)
+                                if cr.status_code == 200:
+                                    chk = cr.json()
+                                    report['_raw_check'] = str(chk)[:800]
+                                    total_seats = _find_seats(chk)
+                                    # نبحث في accounts داخل check
+                                    if not total_seats and isinstance(chk.get('accounts'), dict):
+                                        for _av in chk['accounts'].values():
+                                            found = _find_seats(_av) if isinstance(_av, dict) else None
+                                            if found:
+                                                total_seats = found
+                                                break
+                            except Exception:
+                                pass
                         report['total_seats'] = total_seats
                         if total_seats:
                             report['available_seats'] = max(0, int(total_seats) - len(users))
@@ -19530,7 +19549,7 @@ def cgpt_accounts(call):
             markup.add(InlineKeyboardButton(
                 f"🪑 ضبط مقاعد: {str(info['email'])[:20]}",
                 callback_data=f"cgpt_setseats_{info['id']}"))
-        lines.append(f"\n🟢 <b>إجماللي المقاعد المتاحة: {total_avail}</b>")
+        lines.append(f"\n🟢 <b>إجمالي المقاعد المتاحة: {total_avail}</b>")
     markup.add(InlineKeyboardButton("➕ إضافة حساب جديد", callback_data="cgpt_addacc"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
     bot.send_message(call.message.chat.id, "\n".join(lines),
@@ -19666,14 +19685,16 @@ def cgpt_diagnose(call):
         avail = rep.get('available_seats')
         lines.append(f"👥 <b>المقاعد المستخدمة:</b> {used}")
         if total:
-            lines.append(f"🪑 <b>إجماللي المقاعد:</b> {total}")
+            lines.append(f"🪑 <b>إجمالي المقاعد:</b> {total}")
             lines.append(f"🟢 <b>المتاح:</b> {avail}")
         else:
-            lines.append("🪑 <i>لم أتمكّن من قراءة إجماللي المقاعد تلقائياً.</i>")
-            _raw = rep.get('_raw_account', '')
+            lines.append("🪑 <i>لم أتمكّن من قراءة إجمالي المقاعد تلقائياً.</i>")
+            _raw = rep.get('_raw_check') or rep.get('_raw_account', '')
             if _raw:
-                lines.append(f"\n🔬 <b>بنية الحساب (للتشخيص):</b>\n<code>{html.escape(str(_raw)[:600])}</code>")
-                lines.append("\n<i>أرسل هذا للمطوّr لضبط قراءة المقاعد.</i>")
+                lines.append(f"\n🔬 <b>بنية الرد (للتشخيص):</b>\n<code>{html.escape(str(_raw)[:700])}</code>")
+                lines.append("\n<i>أرسل هذا لضبط القراءة، أو استخدم «🪑 ضبط مقاعد» يدوياً.</i>")
+            else:
+                lines.append("\n<i>استخدم «🪑 ضبط مقاعد» في «الحسابات المتعددة» لضبطها يدوياً.</i>")
         emails = rep.get('user_emails', [])
         if emails:
             lines.append(f"\n📋 <b>المستخدمون ({len(emails)}):</b>")
