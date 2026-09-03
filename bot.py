@@ -1095,6 +1095,42 @@ def _cgpt_migrate_dead_account(dead_doc):
         pass
 
 
+_CGPT_SEATS_CACHE = {'val': None, 'exp': 0}
+
+
+def _cgpt_get_seats_cached():
+    """يرجّع المقاعd المتاحة مع cache 30 ثانية (تفادي بطء الاستعلام المتكرر)."""
+    now = time.time()
+    if _CGPT_SEATS_CACHE['exp'] > now:
+        return _CGPT_SEATS_CACHE['val']
+    val = _cgpt_total_available_seats()
+    _CGPT_SEATS_CACHE['val'] = val
+    _CGPT_SEATS_CACHE['exp'] = now + 30
+    return val
+
+
+def _cgpt_total_available_seats():
+    """يرجّع إجمالي المقاعd المتاحة عبر كل الحسابات (تُستخdم كمخزون)."""
+    total = 0
+    has_unknown = False
+    for doc in _cgpt_all_accounts():
+        try:
+            info = _cgpt_account_seat_info(doc)
+            if not info.get('connected'):
+                continue
+            avail = info.get('available_seats')
+            if avail is not None:
+                total += max(0, int(avail))
+            else:
+                has_unknown = True
+        except Exception:
+            pass
+    # لو كل الحسابات بلا سعة معروفة، نرجّع None (لامحدود)
+    if total == 0 and has_unknown:
+        return None
+    return total
+
+
 def _cgpt_find_available_account():
     """يجد أول حساب فيه مقعد فارغ (للتوزيع التلقائي)."""
     for doc in _cgpt_all_accounts():
@@ -5997,11 +6033,25 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             logger.debug(f"catalog stock batch err: {_cse}")
 
         items = []
+        # نحسب المقاعd المتاحة مرة واحدة (تُستخdم كمخزون لمنتجات ChatGPT)
+        _cgpt_seats = None
+        _cgpt_computed = False
         for p, actual_pid in cat_prods:
             is_manual = p.get('is_manual', False)
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = cat_stock_map.get(str(actual_pid), 0)
-            in_stock = is_manual or is_cgpt or st > 0
+            if is_cgpt:
+                if not _cgpt_computed:
+                    _cgpt_seats = _cgpt_get_seats_cached()
+                    _cgpt_computed = True
+                if _cgpt_seats is None:
+                    st = 0
+                    in_stock = True  # لامحdود
+                else:
+                    st = _cgpt_seats
+                    in_stock = st > 0
+            else:
+                st = cat_stock_map.get(str(actual_pid), 0)
+                in_stock = is_manual or st > 0
             items.append((p, actual_pid, st, is_manual, in_stock))
 
         # الترتيب: المثبّت أولاً، ثم المتوفر (أخضر)، ثم غير المتوفر (أحمر) في الأسفل
@@ -6018,9 +6068,9 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             n = clean_name(p.get('name_en') if lang == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
             is_cgpt_main = p.get('product_type') == 'cgpt_main'
-            # الاسم + العدد (ستوك) — FW للمنتج اليدوي/اللامحدود
+            # الاسم + العدد (ستوك) — لمنتج ChatGPT نعرض المقاعd المتاحة
             if is_cgpt_main:
-                st_text = "FW"
+                st_text = "FW" if st == 0 and in_stock else str(st)
             else:
                 st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
@@ -8148,6 +8198,15 @@ def cgpt_email_confirmed(call):
     order_id = pending['order_id']
     p_name  = pending['p_name']
 
+    # 🪑 فحص المقاعd قبل الخصم — لو نفدت، نمنع الشراء
+    _seats = _cgpt_get_seats_cached()
+    if _seats is not None and _seats <= 0:
+        bot.send_message(call.message.chat.id,
+            ("❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً." if lang == 'ar'
+             else "❌ Sorry, no seats available right now. Try later."),
+            parse_mode="HTML")
+        return
+
     # خصم الرصيد أتوميك
     updated = db.users.find_one_and_update(
         {'user_id': buyer_uid, 'balance': {'$gte': price}},
@@ -8167,12 +8226,21 @@ def cgpt_email_confirmed(call):
     if _avail_acc:
         mgr = _avail_acc['mgr']
     else:
-        mgr = get_cgpt_manager()  # احتياط: الحساب الرئيسي
+        # لا حساب متاح → نرد المال
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(buyer_uid)
+        # نمسح الـ cache ليعيد الحساب
+        _CGPT_SEATS_CACHE['exp'] = 0
+        bot.send_message(buyer_uid,
+            ("❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك." if lang == 'ar'
+             else "❌ No seats available. Your balance was refunded."))
+        return
     mgr._last_buyer_uid = buyer_uid
     result = mgr.invite_user(email, minutes)
     days = round(minutes / 1440, 1)
 
     if result['ok']:
+        _CGPT_SEATS_CACHE['exp'] = 0  # نمسح cache المقاعd (نقص مقعd)
         expires_iso = result['expires_at']
         db.orders.insert_one({
             'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
@@ -11664,15 +11732,21 @@ def cgpt_sub_detail(call):
         f"يمكنك التجديد أو الترقية (تُضاف المدة للمتبقّي):"
     )
     markup = InlineKeyboardMarkup(row_width=1)
-    # نعرض باقات ChatGPT للتجديد/الترقية
+    # نعرض كل مدد كل منتجات ChatGPT (كل مدة بسعرها) للتجديد/الترقية
     products = list(db.cgpt_products.find())
     for p in products:
         pid = str(p.get('_id'))
-        name = p.get('name', 'باقة')
-        price = p.get('price', 0)
-        markup.add(InlineKeyboardButton(
-            f"⬆️ {name} — ${price}",
-            callback_data=f"cgsub_act_{idx}_{pid}"))
+        pname = p.get('name', 'باقة')
+        durations = sorted(p.get('durations', []), key=lambda x: x.get('price', 0))
+        for dur in durations:
+            dur_id = dur.get('dur_id', '')
+            label = dur.get('label', '')
+            price = dur.get('price', 0)
+            mins = dur.get('minutes', 0)
+            days = round(mins / 1440, 1) if mins else 0
+            markup.add(InlineKeyboardButton(
+                f"⬆️ {label} — ${price} (+{days}ي)",
+                callback_data=f"cgsub_act_{idx}_{pid}_{dur_id}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="cgsub_back"))
     bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
 
@@ -11692,7 +11766,14 @@ def cgpt_sub_upgrade(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     raw = call.data.replace("cgsub_act_", "")
-    idx_s, _, prod_id = raw.partition('_')
+    # الصيغة: {idx}_{prod_id}_{dur_id}
+    parts = raw.split('_')
+    if len(parts) < 3:
+        bot.send_message(uid, "❌ بيان, غير مكتملة.")
+        return
+    idx_s = parts[0]
+    prod_id = parts[1]
+    dur_id = '_'.join(parts[2:])  # dur_id قد يحوي _
     idx = int(idx_s) if idx_s.isdigit() else -1
     try:
         cache = db.cgpt_sub_cache.find_one({'_id': uid})
@@ -11704,7 +11785,7 @@ def cgpt_sub_upgrade(call):
         return
     s = subs[idx]
     l = get_lang(uid)
-    # نجد المنتج والسعر والمدة
+    # نجد المنتج والمدة المحددة
     try:
         prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
     except Exception:
@@ -11712,11 +11793,16 @@ def cgpt_sub_upgrade(call):
     if not prod:
         bot.send_message(uid, "❌ الباقة غير متاحة.")
         return
-    price = float(prod.get('price', 0))
-    add_minutes = int(prod.get('minutes', prod.get('duration_minutes', 0)))
+    # نجد المدة بالـ dur_id
+    dur = next((d for d in prod.get('durations', []) if d.get('dur_id') == dur_id), None)
+    if not dur:
+        bot.send_message(uid, "❌ المدة غير متاحة.")
+        return
+    price = float(dur.get('price', 0))
+    add_minutes = int(dur.get('minutes', 0))
     if add_minutes <= 0:
-        # نحاول من days
-        add_minutes = int(prod.get('days', 0)) * 1440
+        bot.send_message(uid, "❌ مدة غير صالحة.")
+        return
     # نفحص الرصيد
     user = get_user_data_full(uid, use_cache=False)
     balance = float(user.get('balance', 0)) if user else 0
@@ -19577,7 +19663,7 @@ def _cgpt_save_new_account(message):
     try:
         data = _json.loads(message.text.strip())
     except Exception:
-        bot.send_message(message.chat.id, "❌ JSON غير صالح. حاول مجddاً.")
+        bot.send_message(message.chat.id, "❌ JSON غير صالح. حاول مجدداً.")
         return
     if not data.get('accessToken') or not data.get('sessionToken'):
         bot.send_message(message.chat.id, "❌ ينقص accessToken أو sessionToken.")
@@ -19586,14 +19672,112 @@ def _cgpt_save_new_account(message):
     res = db.cgpt_accounts.insert_one({
         'data': data, 'name': email, 'created_at': int(time.time())
     })
-    # نفحص الاتصال
+    # نفحص الاتصال والمستخدمين الحاليين
     info = _cgpt_account_seat_info({'_id': res.inserted_id, 'data': data, 'name': email})
     status = "✅ متصل" if info['connected'] else f"⚠️ {info.get('error','')[:50]}"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🗂 كل الحسابات", callback_data="cgpt_accounts"))
-    bot.send_message(message.chat.id,
-        f"✅ <b>أُضيف الحساب:</b> <code>{html.escape(str(email))}</code>\n{status}",
+    used = info.get('used_seats', 0)
+    # نطلب عدد المقاعد مباشرة
+    msg = bot.send_message(message.chat.id,
+        f"✅ <b>أُضيف الحساب:</b> <code>{html.escape(str(email))}</code>\n{status}\n"
+        f"👥 المستخدمون الحاليون: {used}\n\n"
+        f"🪑 <b>الآن أرسل عدد المقاعد الإجمالي لهذا الحساب</b> (رقم):\n"
+        f"<i>مثال: 5 — لو اشتراكك فيه 5 مقاعد. سيحسب البوت المتاح تلقائياً.</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_seats, str(res.inserted_id))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_bcast_"))
+@admin_required
+def cgpt_broadcast_choose(call):
+    """يختار منتج ChatGPT ليُربط ببرودكاست المقاعد."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    acc_id = call.data.replace("cgpt_bcast_", "")
+    products = list(db.cgpt_products.find())
+    if not products:
+        bot.send_message(call.message.chat.id,
+            "⚠️ لا توجد منتجات ChatGPT. أنشئ منتجاً أولاً ثم أرسل البرودكاست.")
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in products:
+        pid = str(p['_id'])
+        name = p.get('name', 'منتج')
+        markup.add(InlineKeyboardButton(f"📢 {name}", callback_data=f"cgpt_bsend_{pid}"))
+    markup.add(InlineKeyboardButton("❌ إلغاء", callback_data="cgpt_accounts"))
+    bot.send_message(call.message.chat.id,
+        "📢 <b>اختر منتج ChatGPT</b> ليُربط بزر الشراء في البرودكاست:",
         parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_bsend_"))
+@admin_required
+def cgpt_broadcast_send(call):
+    """يرسل برودكاست المقاعد لكل العملاء مع زر شراء المنتج."""
+    try: bot.answer_callback_query(call.id, "📢 جاري الإرسال...")
+    except Exception: pass
+    prod_id = call.data.replace("cgpt_bsend_", "")
+    try:
+        prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
+    except Exception:
+        prod = None
+    if not prod:
+        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
+        return
+    # نحسب إجمالي المقاعد المتاحة عبر كل الحسابات
+    total_avail = 0
+    for doc in _cgpt_all_accounts():
+        try:
+            info = _cgpt_account_seat_info(doc)
+            if info['connected'] and info.get('available_seats'):
+                total_avail += info['available_seats']
+        except Exception:
+            pass
+    name = prod.get('name', 'ChatGPT Business')
+    emoji_id = prod.get('emoji_id') or prod.get('custom_emoji_id')
+
+    admin_chat = call.message.chat.id
+    bot.send_message(admin_chat,
+        f"📢 جاري إرسال البرودكاست لكل العملاء...\n🪑 المقاعد المتاحة: {total_avail}")
+
+    def _do_broadcast():
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        success = 0
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                if is_user_banned(uid_u):
+                    continue
+                lu = u.get('lang', 'ar') if u.get('lang_chosen') else 'ar'
+                if lu == 'en':
+                    txt = (f"🤖 <b>ChatGPT Business Seats Available!</b>\n\n"
+                           f"🛍 <b>{html.escape(name)}</b>\n"
+                           f"🪑 Available seats: <b>{total_avail}</b>\n\n"
+                           f"<i>Grab yours now before they run out!</i>")
+                    btn = f"🛒 Buy — {name}"
+                else:
+                    txt = (f"🤖 <b>توفرت مقاعد ChatGPT Business!</b>\n\n"
+                           f"🛍 <b>{html.escape(name)}</b>\n"
+                           f"🪑 المقاعد المتاحة: <b>{total_avail}</b>\n\n"
+                           f"<i>سارع بالحصول على مقعدك قبل النفاد!</i>")
+                    btn = f"🛒 شراء — {name}"
+                markup = InlineKeyboardMarkup()
+                bkw = {'text': btn, 'callback_data': f"vi_p_cgpt_main_{prod_id}", 'style': 'success'}
+                if emoji_id:
+                    bkw['icon_custom_emoji_id'] = emoji_id
+                markup.add(CustomInlineButton(**bkw))
+                bot.send_message(uid_u, txt, parse_mode="HTML", reply_markup=markup)
+                success += 1
+                time.sleep(0.05)
+            except Exception:
+                pass
+        try:
+            bot.send_message(admin_chat,
+                f"✅ <b>انتهى البرودكاست!</b>\n📨 وصل: {success} عميل\n🪑 المقاعد: {total_avail}",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+    threading.Thread(target=_do_broadcast, daemon=True).start()
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_delacc_"))
@@ -19661,9 +19845,29 @@ def _cgpt_save_seats(message, acc_id):
     try:
         if acc_id == 'main':
             db.cgpt_cookies.update_one({'_id': 'main'}, {'$set': {'manual_seats': n}}, upsert=True)
+            doc = db.cgpt_cookies.find_one({'_id': 'main'})
+            doc = {'_id': 'main', 'data': doc.get('data', {}), 'manual_seats': n} if doc else None
         else:
             db.cgpt_accounts.update_one({'_id': ObjectId(acc_id)}, {'$set': {'manual_seats': n}})
-        bot.send_message(message.chat.id, f"✅ ضُبط عدد المقاعد على: {n}")
+            doc = db.cgpt_accounts.find_one({'_id': ObjectId(acc_id)})
+        # نحسب المتاح الحيّ (المقاعد - المستخدمين الفعليين)
+        avail_txt = ""
+        if doc:
+            try:
+                info = _cgpt_account_seat_info(doc)
+                used = info.get('used_seats', 0)
+                avail = max(0, n - used)
+                avail_txt = f"\n👥 مستخدمون: {used}\n🟢 متاح الآن: <b>{avail}</b>"
+            except Exception:
+                pass
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("📢 نعم، أرسل برودكاست للعملاء", callback_data=f"cgpt_bcast_{acc_id}"))
+        markup.add(InlineKeyboardButton("🗂 لا، فقط احفظ", callback_data="cgpt_accounts"))
+        bot.send_message(message.chat.id,
+            f"✅ <b>ضُبط عدد المقاعد على: {n}</b>{avail_txt}\n\n"
+            f"📢 <b>هل تريد إرسال برودكاست للعملاء</b> بأن هناك مقاعد ChatGPT متاحة؟\n\n"
+            f"<i>عند شراء زبون، يوزّع تلقائياً على أي حساب فيه مقعد فارغ.</i>",
+            parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ {str(e)[:50]}")
 
