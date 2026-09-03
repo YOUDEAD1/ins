@@ -555,7 +555,7 @@ class ChatGPTSeatManager:
         return {'invites': {}, 'allowed_emails': [self.owner_email] if self.owner_email else []}
 
     def _save_data(self):
-        """حفظ بيانات الدعوات في MongoDB (لكل حساب على حdة)"""
+        """حفظ بيانات الدعوات في MongoDB (لكل حساب على حدة)"""
         self.invites_data['allowed_emails'] = list(self.allowed_emails)
         _key = getattr(self, '_account_key', 'main')
         try:
@@ -584,7 +584,7 @@ class ChatGPTSeatManager:
             r = cffi_requests.get(url, headers=self._headers(),
                                   impersonate='chrome110', timeout=15)
             if r.status_code == 402:
-                # workspace معطّل (اشتراك ملغى/فاتورة غير مdفوعة)
+                # workspace معطّل (اشتراك ملغى/فاتورة غير مدفوعة)
                 return 'deactivated'
             if r.status_code == 401:
                 return 'unauthorized'
@@ -602,7 +602,7 @@ class ChatGPTSeatManager:
                         is_deactivated = acc.get('is_deactivated', False)
                         if is_deactivated:
                             return 'deactivated'
-                        # لو فيه اشتراك بيزنس/تيم فعّd
+                        # لو فيه اشتراك بيزنس/تيم فعّال
                         return 'active'
                 return 'active'  # الحساب موجود ويعمل
             return 'error'
@@ -678,7 +678,7 @@ class ChatGPTSeatManager:
             r = cffi_requests.delete(url, headers=self._headers(), impersonate='chrome110', timeout=15)
             ok = r.status_code in [200, 204]
             if ok:
-                # إشعار الأدمن بتفاصيل الطرd
+                # إشعار الأدمن بتفاصيل الطرد
                 try:
                     info = self.invites_data.get('invites', {}).get(email, {})
                     tg_uid = info.get('telegram_uid', '?')
@@ -717,8 +717,8 @@ class ChatGPTSeatManager:
 
         current_users = self._get_org_users()
 
-        # 🛡 لو فشل جلب المستخdمين (كوكيز منتهية/خطأ اتصD) → لا ننفّذ أي طرd
-        #    (لتفادي طرd عملاء بالخطأ ونحن لا نعرف الحالة الحقيقية)
+        # 🛡 لو فشل جلب المستخدمين (كوكيز منتهية/خطأ اتصال) → لا ننفّذ أي طرد
+        #    (لتفادي طرد عملاء بالخطأ ونحن لا نعرف الحالة الحقيقية)
         if getattr(self, '_last_fetch_failed', False):
             logger.warning(f"[CGPT] fetch failed for {self.owner_email} — skipping cleanup")
             return
@@ -805,8 +805,32 @@ class ChatGPTSeatManager:
             except: pass
         return result
 
+    def purge_old_records(self, days_old=7):
+        """يحذف سجلات العملاء المنتهية/المخالفة القديمة (أقdم من X يوم)."""
+        now = _dt_mod.datetime.now()
+        invites = self.invites_data.get('invites', {})
+        to_delete = []
+        for email, info in invites.items():
+            status = info.get('status', '')
+            if status in ('expired', 'violated', 'migrated', 'removed'):
+                # نفحص متى أُزيل/انتهى
+                ref_time = info.get('removed_at') or info.get('expires_at')
+                if ref_time:
+                    try:
+                        rt = _dt_mod.datetime.fromisoformat(ref_time)
+                        if (now - rt).days >= days_old:
+                            to_delete.append(email)
+                    except Exception:
+                        to_delete.append(email)  # تاريخ تالف → نحذف
+                else:
+                    to_delete.append(email)  # بلا تاريخ → قديم
+        for email in to_delete:
+            invites.pop(email, None)
+        self._save_data()
+        return len(to_delete)
+
     def diagnose(self):
-        """يفحص الاتصDل الفعلي ويرجّع: الاتصDل، الإيميل، المقاعd المستخdمة/المتاحة."""
+        """يفحص الاتصالل الفعلي ويرجّع: الاتصالل، الإيميل، المقاعد المستخدمة/المتاحة."""
         report = {}
         report['loaded'] = self._loaded
         report['owner_email'] = self.owner_email or 'غير معروف'
@@ -814,9 +838,9 @@ class ChatGPTSeatManager:
         report['account_id'] = self.account_id or 'غير معروف'
         if not self._loaded:
             report['connected'] = False
-            report['error'] = 'لا توجd cookies محمّلة'
+            report['error'] = 'لا توجد cookies محمّلة'
             return report
-        # نستعلم عن المستخdمين الفعليين (يؤكd الاتصDل)
+        # نستعلم عن المستخدمين الفعليين (يؤكد الاتصالل)
         try:
             url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
             r = cffi_requests.get(url, headers=self._headers(),
@@ -827,28 +851,57 @@ class ChatGPTSeatManager:
                 users = data.get('items', [])
                 report['connected'] = True
                 report['used_seats'] = len(users)
-                # نحاول جلب سعة المقاعd الكلية
+                # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
                 try:
                     acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
                     ar = cffi_requests.get(acc_url, headers=self._headers(),
                                            impersonate='chrome110', timeout=15)
                     if ar.status_code == 200:
                         acc = ar.json()
-                        # نبحث عن الحd الأقصى للمقاعd في عddة أماكن محتملة
-                        total_seats = (acc.get('account', {}).get('seats')
-                                       or acc.get('seats')
-                                       or acc.get('plan', {}).get('seats')
-                                       or acc.get('account', {}).get('plan', {}).get('max_seats'))
+                        report['_raw_account'] = str(acc)[:500]  # للتشخيص
+
+                        # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
+                        def _find_seats(obj, depth=0):
+                            if depth > 5 or not isinstance(obj, dict):
+                                return None
+                            # المفاتيح المحتملة لعدد المقاعد
+                            for k in ('max_member_count', 'max_seats', 'seats',
+                                      'seat_count', 'total_seats', 'member_limit',
+                                      'max_members', 'paid_seats', 'licenses',
+                                      'subscription_seats', 'num_seats'):
+                                v = obj.get(k)
+                                if isinstance(v, int) and v > 0:
+                                    return v
+                            # نغوص في المستويات
+                            for nested in ('account', 'plan', 'subscription',
+                                           'billing', 'workspace', 'limits'):
+                                if isinstance(obj.get(nested), dict):
+                                    found = _find_seats(obj[nested], depth + 1)
+                                    if found:
+                                        return found
+                            return None
+
+                        total_seats = _find_seats(acc)
+                        # نجرّب أيضاً من endpoint الفواتير/الاشتراك
+                        if not total_seats:
+                            try:
+                                sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
+                                sr = cffi_requests.get(sub_url, headers=self._headers(),
+                                                       impersonate='chrome110', timeout=12)
+                                if sr.status_code == 200:
+                                    total_seats = _find_seats(sr.json())
+                            except Exception:
+                                pass
                         report['total_seats'] = total_seats
                         if total_seats:
                             report['available_seats'] = max(0, int(total_seats) - len(users))
-                except Exception:
-                    pass
+                except Exception as _se:
+                    report['_seat_err'] = str(_se)[:100]
                 # قائمة الإيميلات
                 report['user_emails'] = [u.get('email', '') for u in users][:20]
             elif r.status_code == 401:
                 report['connected'] = False
-                report['error'] = 'الكوكيز منتهية (401) — أعd إضافتها'
+                report['error'] = 'الكوكيز منتهية (401) — أعد إضافتها'
             else:
                 report['connected'] = False
                 report['error'] = f'HTTP {r.status_code}: {r.text[:150]}'
@@ -897,7 +950,7 @@ def _cgpt_build_manager_from_doc(doc):
 
 
 def _cgpt_all_accounts():
-    """يرجّع كل حسابات ChatGPT المخزّنة (متعddة).
+    """يرجّع كل حسابات ChatGPT المخزّنة (متعددة).
     يشمل الحساب القديم (main) للتوافق."""
     accounts = []
     try:
@@ -905,14 +958,15 @@ def _cgpt_all_accounts():
             accounts.append(doc)
     except Exception:
         pass
-    # نضيف الحساب القديم (main) لو موجود ولم يُنقل بعd
+    # نضيف الحساب القديم (main) لو موجود ولم يُنقل بعد
     try:
         main = db.cgpt_cookies.find_one({'_id': 'main'})
         if main and main.get('data'):
             # نتفادى التكرار لو نُقل
             if not any(str(a.get('_id')) == 'main' for a in accounts):
                 accounts.append({'_id': 'main', 'data': main['data'],
-                                 'name': 'الحساب الرئيسي'})
+                                 'name': 'الحساب الرئيسي',
+                                 'manual_seats': main.get('manual_seats')})
     except Exception:
         pass
     return accounts
@@ -922,14 +976,23 @@ def _cgpt_account_seat_info(doc):
     """يفحص حساباً ويرجّع معلومات مقاعده."""
     mgr = _cgpt_build_manager_from_doc(doc)
     rep = mgr.diagnose()
+    total = rep.get('total_seats')
+    used = rep.get('used_seats', 0)
+    avail = rep.get('available_seats')
+    # لو الكشف التلقائي فشل، نستخدم القيمة اليدوية المحفوظة (لو موجودة)
+    manual_seats = doc.get('manual_seats')
+    if not total and manual_seats:
+        total = int(manual_seats)
+        avail = max(0, total - used) if rep.get('connected') else None
     return {
         'id': str(doc.get('_id')),
         'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
         'email': rep.get('owner_email', '?'),
         'connected': rep.get('connected', False),
-        'used_seats': rep.get('used_seats', 0),
-        'total_seats': rep.get('total_seats'),
-        'available_seats': rep.get('available_seats'),
+        'used_seats': used,
+        'total_seats': total,
+        'available_seats': avail,
+        'manual': bool(manual_seats and not rep.get('total_seats')),
         'error': rep.get('error'),
         'mgr': mgr,
     }
@@ -958,7 +1021,7 @@ def _cgpt_migrate_dead_account(dead_doc):
     if not active_customers:
         return  # لا عملاء للنقل
     for email, info, remaining_min in active_customers:
-        # نجd حساباً حياً فيه مقعd فارغ
+        # نجد حساباً حياً فيه مقعد فارغ
         target = _cgpt_find_available_account()
         if not target:
             failed.append(email)
@@ -982,9 +1045,9 @@ def _cgpt_migrate_dead_account(dead_doc):
                     days = round(remaining_min / 1440, 1)
                     bot.send_message(tg_uid,
                         f"🔄 <b>تم نقل اشتراكك لحساب جديد</b>\n\n"
-                        f"📧 <b>الحساب الجديd:</b> <code>{html.escape(str(target['email']))}</code>\n"
+                        f"📧 <b>الحساب الجديد:</b> <code>{html.escape(str(target['email']))}</code>\n"
                         f"⏳ <b>المدة المتبقية:</b> {days} يوم\n\n"
-                        f"✅ <b>وصلتك دعوة جديdة على إيميلك</b> — اقبلها لتكمل اشتراكك.\n"
+                        f"✅ <b>وصلتك دعوة جديدة على إيميلك</b> — اقبلها لتكمل اشتراكك.\n"
                         f"📩 تحقق من بريدك: <code>{html.escape(str(email))}</code>",
                         parse_mode="HTML")
                 except Exception:
@@ -1000,10 +1063,10 @@ def _cgpt_migrate_dead_account(dead_doc):
         for em, to, rem in migrated[:15]:
             lines.append(f"  • <code>{em}</code> → {to} ({round(rem/1440,1)}ي)")
     if failed:
-        lines.append(f"\n⚠️ <b>تعذّر نقلهم ({len(failed)}) — لا مقاعd فارغة:</b>")
+        lines.append(f"\n⚠️ <b>تعذّر نقلهم ({len(failed)}) — لا مقاعد فارغة:</b>")
         for em in failed[:15]:
             lines.append(f"  • <code>{em}</code>")
-        lines.append("\n<i>أضف حساباً جديداً فيه مقاعd فارغة.</i>")
+        lines.append("\n<i>أضف حساباً جديداً فيه مقاعد فارغة.</i>")
     try:
         for admin in db.users.find({'is_admin': 1}):
             try: bot.send_message(admin['user_id'], "\n".join(lines), parse_mode="HTML")
@@ -1014,7 +1077,7 @@ def _cgpt_migrate_dead_account(dead_doc):
 
 
 def _cgpt_find_available_account():
-    """يجd أول حساب فيه مقعd فارغ (للتوزيع التلقائي)."""
+    """يجد أول حساب فيه مقعد فارغ (للتوزيع التلقائي)."""
     for doc in _cgpt_all_accounts():
         info = _cgpt_account_seat_info(doc)
         if not info['connected']:
@@ -1052,7 +1115,7 @@ def _cgpt_notify_subscription_dead(account_id, email):
         f"📧 <b>الحساب:</b> <code>{html.escape(str(email))}</code>\n\n"
         f"❌ اشتراك البيزنس متوقف/ملغى.\n"
         f"🔄 <b>جارٍ نقل العملاء تلقائياً لحساب آخر...</b>\n\n"
-        f"<i>المرجو تجديd اشتراك هذا الحساب أو إضافة حساب جديd فيه مقاعd.</i>"
+        f"<i>المرجو تجديد اشتراك هذا الحساب أو إضافة حساب جديد فيه مقاعد.</i>"
     )
     try:
         for admin in db.users.find({'is_admin': 1}):
@@ -1063,11 +1126,11 @@ def _cgpt_notify_subscription_dead(account_id, email):
         pass
 
 
-_CGPT_EXPIRY_REMINDED = {}  # {email: True} لتفadي تكرd تذكير الانتهاء
+_CGPT_EXPIRY_REMINDED = {}  # {email: True} لتفادي تكرار تذكير الانتهاء
 
 
 def _cgpt_send_expiry_reminders(mgr):
-    """يرسل تذكيراً للعملاء قبل يوم من الانتهاء (مع زر تجديd)."""
+    """يرسل تذكيراً للعملاء قبل يوم من الانتهاء (مع زر تجديد)."""
     now = _dt_mod.datetime.now()
     for email, info in mgr.invites_data.get('invites', {}).items():
         if info.get('status') != 'active':
@@ -1077,14 +1140,14 @@ def _cgpt_send_expiry_reminders(mgr):
         except Exception:
             continue
         remaining = (exp - now).total_seconds()
-        # بين 0 و24 ساعة من الانتهd، ولم نُذكّر بعd
+        # بين 0 و24 ساعة من الانتهاء، ولم نُذكّر بعد
         if 0 < remaining <= 86400 and not _CGPT_EXPIRY_REMINDED.get(email):
             _CGPT_EXPIRY_REMINDED[email] = True
             tg_uid = info.get('telegram_uid')
             if not tg_uid:
                 continue
             hours = int(remaining / 3600)
-            # معرّف المنتج لإعادة الشراء/التجديd
+            # معرّف المنتج لإعادة الشراء/التجديد
             prod_id = info.get('product_id', '')
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("🔄 تجديد الاشتراك",
@@ -1094,7 +1157,7 @@ def _cgpt_send_expiry_reminders(mgr):
                     f"⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n\n"
                     f"📧 <b>الإيميل:</b> <code>{html.escape(str(email))}</code>\n"
                     f"⏰ <b>يتبقّى:</b> ~{hours} ساعة\n\n"
-                    f"🔄 جddد الآن لتستمر بلا انقطاع.\n"
+                    f"🔄 جدد الآن لتستمر بلا انقطاع.\n"
                     f"<i>عند الانتهاء سيُلغى وصولك تلقائياً.</i>",
                     parse_mode="HTML", reply_markup=markup)
             except Exception:
@@ -1114,7 +1177,7 @@ def _cgpt_notify_cookie_expired(account_id, email, status):
         f"🔴 <b>الحالة:</b> {html.escape(str(status))}\n\n"
         f"❌ الكوكيز انتهت أو صار فيها مشكلة.\n"
         f"🔄 <b>المرجو تحديث الكوكيز لهذا الحساب.</b>\n\n"
-        f"<i>لوحة الأدمن ← ChatGPT ← 🗂 الحسابات المتعddة</i>"
+        f"<i>لوحة الأدمن ← ChatGPT ← 🗂 الحسابات المتعددة</i>"
     )
     try:
         for admin in db.users.find({'is_admin': 1}):
@@ -1143,7 +1206,7 @@ def _cgpt_daemon_loop():
             except (ValueError, TypeError):
                 interval = 300
             _t.sleep(interval)
-            # ننظّف كل الحسابات (متعddة)
+            # ننظّف كل الحسابات (متعددة)
             _accs = _cgpt_all_accounts()
             if _accs:
                 for _doc in _accs:
@@ -1422,7 +1485,7 @@ class APIHandler(BaseHTTPRequestHandler):
             return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
 
         if route == '/products':
-            # ⚡ cache 30 ثانية — لو عدة عملاء يطلبون بسرعة، نبني الرد مرة واحdة
+            # ⚡ cache 30 ثانية — لو عدة عملاء يطلبون بسرعة، نبني الرد مرة واحدة
             #    (يقلّل استعلامات MongoDB الصادرة بشدة — سبب رئيسي لاستهلاك النطاق)
             _now = time.time()
             global _PRODUCTS_CACHE
@@ -5412,7 +5475,7 @@ def get_user_data_full(uid, use_cache=True):
         if c and c[1] > time.time():
             return c[0]
     data = db.users.find_one({'user_id': uid})
-    # لا نخزّن None في الـ cache (يسبب بيانات قديمة بعd إنشاء المستخدم)
+    # لا نخزّن None في الـ cache (يسبب بيانات قديمة بعد إنشاء المستخدم)
     if data is not None:
         _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
     else:
@@ -7120,7 +7183,7 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
     except Exception as _e:
         logger.debug(f"flat stock batch err: {_e}")
 
-    # نبني القائمة الموحّدة: (نوع, معرّف, اسم, رمز, سعر, ستوك, متوفر؟, يdوي؟)
+    # نبني القائمة الموحّدة: (نوع, معرّف, اسم, رمز, سعر, ستوك, متوفر؟, يدوي؟)
     items = []
     for p in reg_prods:
         pid = str(p.get('id', str(p.get('_id', ''))))
@@ -7863,7 +7926,7 @@ def cgpt_renew(call):
     if is_user_banned(uid): return
     old_email = call.data.replace("cgpt_renew_", "")
     l = get_lang(uid)
-    # نعرض منتجات ChatGPT المتاحة (بالسعر الحالي) للتجديd
+    # نعرض منتجات ChatGPT المتاحة (بالسعر الحالي) للتجديد
     products = list(db.cgpt_products.find())
     if not products:
         bot.send_message(uid, "⚠️ لا توجد باقات تجديد متاحة حالياً." if l != 'en'
@@ -7874,12 +7937,12 @@ def cgpt_renew(call):
         pid = str(p.get('_id'))
         name = p.get('name', 'باقة')
         price = p.get('price', 0)
-        # نمرّر الإيميل القديم ليُستخdم في التجديd
+        # نمرّر الإيميل القديم ليُستخدم في التجديد
         markup.add(InlineKeyboardButton(
             f"{name} — ${price}",
             callback_data=f"cgpt_buy_{pid}_renew"))
     markup.add(InlineKeyboardButton("🔙 إلغاء", callback_data="close_msg"))
-    # نحفظ الإيميل القديم مؤقتاً للتجديd
+    # نحفظ الإيميل القديم مؤقتاً للتجديد
     try:
         db.cgpt_renew_pending.update_one({'_id': uid},
             {'$set': {'old_email': old_email, 'ts': int(time.time())}}, upsert=True)
@@ -8080,7 +8143,7 @@ def cgpt_email_confirmed(call):
         "⏳ <b>جاري إرسال الدعوة...</b>" if lang == 'ar' else "⏳ <b>Sending invite...</b>",
         parse_mode="HTML")
 
-    # 🔀 توزيع تلقائي: نجd حساباً فيه مقعd فارغ (من كل الحسابات)
+    # 🔀 توزيع تلقائي: نجد حساباً فيه مقعد فارغ (من كل الحسابات)
     _avail_acc = _cgpt_find_available_account()
     if _avail_acc:
         mgr = _avail_acc['mgr']
@@ -11558,7 +11621,7 @@ def _cgpt_show_my_subscriptions(uid, chat_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgsub_") and not call.data.startswith("cgsub_act_") and call.data != "cgsub_back")
 def cgpt_sub_detail(call):
-    """تفاصيل اشتراك واحd + أزرار التجديد/الترقية."""
+    """تفاصيل اشتراك واحد + أزرار التجديد/الترقية."""
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     uid = call.from_user.id
@@ -11569,7 +11632,7 @@ def cgpt_sub_detail(call):
     except Exception:
         subs = []
     if idx < 0 or idx >= len(subs):
-        bot.answer_callback_query(call.id, "انتهت الجلسة، أعd /my_chatgpt", show_alert=True)
+        bot.answer_callback_query(call.id, "انتهت الجلسة، أعد /my_chatgpt", show_alert=True)
         return
     s = subs[idx]
     l = get_lang(uid)
@@ -11604,7 +11667,7 @@ def cgpt_sub_back(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgsub_act_"))
 def cgpt_sub_upgrade(call):
-    """ينفّذ التجديد/الترقية — يضيف المdة للمتبقّي بنفس الإيميل."""
+    """ينفّذ التجديد/الترقية — يضيف المدة للمتبقّي بنفس الإيميل."""
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     uid = call.from_user.id
@@ -11618,11 +11681,11 @@ def cgpt_sub_upgrade(call):
     except Exception:
         subs = []
     if idx < 0 or idx >= len(subs):
-        bot.send_message(uid, "انتهت الجلسة، أعd /my_chatgpt")
+        bot.send_message(uid, "انتهت الجلسة، أعد /my_chatgpt")
         return
     s = subs[idx]
     l = get_lang(uid)
-    # نجd المنتج والسعر والمدة
+    # نجد المنتج والسعر والمدة
     try:
         prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
     except Exception:
@@ -11645,7 +11708,7 @@ def cgpt_sub_upgrade(call):
             (f"❌ <b>رصيدك غير كافٍ</b>\n\n"
              f"💰 السعر: ${price:.2f}\n"
              f"💼 رصيدك: ${balance:.2f}\n\n"
-             f"أضف رصيداً ثم أعd المحاولة.") if l != 'en' else
+             f"أضف رصيداً ثم أعد المحاولة.") if l != 'en' else
             (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
             parse_mode="HTML", reply_markup=markup)
         return
@@ -11691,7 +11754,7 @@ def cgpt_sub_upgrade(call):
         else:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
             _invalidate_user_cache(uid)
-            bot.send_message(uid, "❌ لم أجd الاشتراك. أُعيد رصيدك.")
+            bot.send_message(uid, "❌ لم أجد الاشتراك. أُعيد رصيدك.")
     except Exception as e:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
         _invalidate_user_cache(uid)
@@ -12036,7 +12099,7 @@ def cmd_bybit_match(message):
 
 
 def _ext_broadcast_new_product(ep):
-    """يبثّ رسالة 'منتج جديd' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    """يبثّ رسالة 'منتج جديد' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
     if not ep:
         return
     try:
@@ -12216,7 +12279,7 @@ def _auto_sync_ext_stores():
                 if new_stock != old_stock:
                     db.ext_products.update_one({'_id': existing['_id']},
                                                {'$set': {'stock': new_stock}})
-                    # لو توفّر ستوك جديd (كان 0 وصار متوفر) → برودكاست + إشعار
+                    # لو توفّر ستوك جديد (كان 0 وصار متوفر) → برودكاست + إشعار
                     # نرسل الإشعار عند أي زيادة في الستوك (مثل المنتج العادي)
                     if new_stock > old_stock and not existing.get('hidden'):
                         # حماية: لا نكرّر البرودكاست لنفس المنتج خلال 10 دقائق
@@ -15142,7 +15205,7 @@ def _ext_parse_products(data):
 
 
 def _ext_deep_get(p, keys, default=None):
-    """يبحث عن أول مفتD موجod (يدعم مفاتيح متعddة وحالات مختلفة)."""
+    """يبحث عن أول مفتD موجod (يدعم مفاتيح متعددة وحالات مختلفة)."""
     for k in keys:
         if k in p and p[k] not in (None, ''):
             return p[k]
@@ -15239,13 +15302,13 @@ def _ext_api_headers(store):
 
 
 def _ext_api_base(store):
-    """يحddد الـ base URL مع الـ prefix الصحيح.
-    يدعم متاجر بمسD /api/v1 أو /shop-api/v1 (أو المستخdم كتبه كاملاً)."""
+    """يحدdد الـ base URL مع الـ prefix الصحيح.
+    يدعم متاجر بمسD /api/v1 أو /shop-api/v1 (أو المستخدم كتبه كاملاً)."""
     base = str(store.get('base_url', '')).rstrip('/')
-    # لو المستخدم كتب الـ prefix في الـ URL، نستخdمه كما هو
+    # لو المستخدم كتب الـ prefix في الـ URL، نستخدمه كما هو
     if '/api/v1' in base or '/shop-api/v1' in base:
         return base
-    # وإلا نستخdم الـ prefix المكتشف/المحفوظ
+    # وإلا نستخدم الـ prefix المكتشف/المحفوظ
     prefix = store.get('api_prefix', '')
     if prefix:
         return base + prefix
@@ -15296,13 +15359,13 @@ def _ext_api_diagnose(store):
 def _ext_api_get(store, path):
     """GET من متجر API خارجي — يكتشف الـ prefix تلقائياً. يرجّع JSON أو None."""
     base = str(store.get('base_url', '')).rstrip('/')
-    # المسars المحتملة للـ prefix
+    # المسارات المحتملة للـ prefix
     if '/api/v1' in base or '/shop-api/v1' in base:
         prefixes = ['']  # المستخدم كتبه كاملاً
     elif store.get('api_prefix'):
         prefixes = [store['api_prefix']]  # مكتشف مسبقاً
     else:
-        # نجرّب كل المسars الشائعة للـ prefix
+        # نجرّب كل المسارات الشائعة للـ prefix
         prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api',
                     '/store-api/v1', '/reseller/v1', '']
     for prefix in prefixes:
@@ -15480,7 +15543,7 @@ def ext_store_menu(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("extadd_"))
 @admin_required
 def ext_add_new_product(call):
-    """يضيف منتج API جديد (بعd إشعار الأدمن) — يجلبه ويسجّله."""
+    """يضيف منتج API جديد (بعد إشعار الأدمن) — يجلبه ويسجّله."""
     try: bot.answer_callback_query(call.id, "⏳ جاري الإضافة...")
     except Exception: pass
     raw = call.data.replace("extadd_", "")
@@ -15505,7 +15568,7 @@ def ext_add_new_product(call):
                 p = pr
                 break
     if not p:
-        bot.send_message(call.message.chat.id, "❌ لم أجd المنتج في المتجر.")
+        bot.send_message(call.message.chat.id, "❌ لم أجد المنتج في المتجر.")
         return
     # نسجّله بنفس منطق المزامنة
     _f = _ext_extract_fields(p)
@@ -15728,7 +15791,7 @@ def ext_sync_products(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_pick_"))
 @admin_required
 def ext_pick_products(call):
-    """يعرض منتجات المتجر من API للاختيD (صفحات + تلوين أخضر للمختd)."""
+    """يعرض منتجات المتجر من API للاختيار (صفحات + تلوين أخضر للمختار)."""
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     raw = call.data.replace("ext_pick_", "")
@@ -15747,7 +15810,7 @@ def ext_pick_products(call):
     if not prods:
         bot.send_message(call.message.chat.id, "⚠️ لم أجلب منتجات من المتجر.")
         return
-    # نحفظ قائمة الاختيD المؤقتة (المختارة) في المتجr
+    # نحفظ قائمة الاختيار المؤقتة (المختارة) في المتجr
     picked = set(store.get('_pick_selected', []))
     PER = 15
     total = len(prods)
@@ -15782,15 +15845,15 @@ def ext_pick_products(call):
         markup.row(*nav)
     # أزرd التحكم
     markup.add(
-        InlineKeyboardButton("✅ اختيD الكل", callback_data=f"ext_pall_{sid}_{page}"),
+        InlineKeyboardButton("✅ اختيار الكل", callback_data=f"ext_pall_{sid}_{page}"),
         InlineKeyboardButton("❌ إلغd الكل", callback_data=f"ext_pnone_{sid}_{page}")
     )
     markup.add(InlineKeyboardButton(f"✔️ موافق — أضف المختارة ({len(picked)})",
                callback_data=f"ext_pok_{sid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ext_store_{sid}"))
-    txt = (f"🎯 <b>اختيD منتجات للإضافة</b>\n\n"
-           f"اضغط المنتج ليصير 🟢 (مختd). المختd فقط سيُضاف.\n\n"
-           f"📦 المجموع: {total} | 🟢 مختd: {len(picked)}")
+    txt = (f"🎯 <b>اختيار منتجات للإضافة</b>\n\n"
+           f"اضغط المنتج ليصير 🟢 (مختار). المختار فقط سيُضاف.\n\n"
+           f"📦 المجموع: {total} | 🟢 مختار: {len(picked)}")
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
                               parse_mode="HTML", reply_markup=markup)
@@ -15801,7 +15864,7 @@ def ext_pick_products(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_ptog_"))
 @admin_required
 def ext_pick_toggle(call):
-    """يبدّل اختيD منتج (أخضر/رمdي)."""
+    """يبدّل اختيار منتج (أخضر/رمادي)."""
     raw = call.data.replace("ext_ptog_", "")
     parts = raw.rsplit('_', 2)  # sid, ext_id, page
     if len(parts) != 3:
@@ -15852,7 +15915,7 @@ def ext_pick_all(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_pnone_"))
 @admin_required
 def ext_pick_none(call):
-    """يلغي اختيD الكل."""
+    """يلغي اختيار الكل."""
     raw = call.data.replace("ext_pnone_", "")
     sid, _, page = raw.rpartition('_')
     db.ext_stores.update_one({'_id': ObjectId(sid)},
@@ -15907,7 +15970,7 @@ def ext_pick_confirm(call):
         }
         res = db.ext_products.insert_one(doc)
         added += 1
-        # بثّ منتج جديd (للعملاء + المستخدمين) — مثل المنتج العادي
+        # بثّ منتج جديد (للعملاء + المستخدمين) — مثل المنتج العادي
         try:
             _emit_event('product.created', {
                 'product_id': f"ext_{res.inserted_id}",
@@ -15919,7 +15982,7 @@ def ext_pick_confirm(call):
             }, product_id=f"ext_{res.inserted_id}")
         except Exception:
             pass
-    # نمسح الاختيD المؤقت
+    # نمسح الاختيار المؤقت
     db.ext_stores.update_one({'_id': ObjectId(sid)}, {'$unset': {'_pick_selected': ''}})
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📦 عرض المنتجات", callback_data=f"ext_prods_{sid}_0"))
@@ -19413,8 +19476,9 @@ def ad_cgpt_panel(call):
         InlineKeyboardButton(f"\U0001f4e6 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a ({products_count})", callback_data="cgpt_products_list"),
         InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u0646\u062a\u062c \u062c\u062f\u064a\u062f", callback_data="cgpt_add_product"),
         InlineKeyboardButton("\U0001f36a \u0625\u0636\u0627\u0641\u0629 / \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u0643\u0648\u0643\u064a\u0632", callback_data="cgpt_set_cookies"),
-        InlineKeyboardButton("🩺 فحص الاتصال والمقاعd", callback_data="cgpt_diagnose"),
+        InlineKeyboardButton("🩺 فحص الاتصال والمقاعد", callback_data="cgpt_diagnose"),
         InlineKeyboardButton("🗂 الحسابات المتعددة", callback_data="cgpt_accounts"),
+        InlineKeyboardButton("🧹 تنظيف النشاطات القديمة", callback_data="cgpt_purge"),
         InlineKeyboardButton("\U0001f504 \u0641\u062d\u0635 \u0648\u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0622\u0646", callback_data="ad_cgpt_cleanup"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel")
     )
@@ -19433,14 +19497,14 @@ def ad_cgpt_panel(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_accounts")
 @admin_required
 def cgpt_accounts(call):
-    """يعرض كل حسابات ChatGPT ومقاعdها."""
+    """يعرض كل حسابات ChatGPT ومقاعدها."""
     try: bot.answer_callback_query(call.id, "🗂 جاري الفحص...")
     except Exception: pass
     accounts = _cgpt_all_accounts()
     markup = InlineKeyboardMarkup(row_width=1)
     lines = ["🗂 <b>حسابات ChatGPT Business</b>\n"]
     if not accounts:
-        lines.append("لا حسابات بعd. أضف حساباً بكوكيزه.")
+        lines.append("لا حسابات بعد. أضف حساباً بكوكيزه.")
     else:
         total_avail = 0
         for doc in accounts:
@@ -19463,7 +19527,10 @@ def cgpt_accounts(call):
             markup.add(InlineKeyboardButton(
                 f"🗑 حذف: {str(info['email'])[:25]}",
                 callback_data=f"cgpt_delacc_{info['id']}"))
-        lines.append(f"\n🟢 <b>إجمDلي المقاعd المتاحة: {total_avail}</b>")
+            markup.add(InlineKeyboardButton(
+                f"🪑 ضبط مقاعد: {str(info['email'])[:20]}",
+                callback_data=f"cgpt_setseats_{info['id']}"))
+        lines.append(f"\n🟢 <b>إجماللي المقاعد المتاحة: {total_avail}</b>")
     markup.add(InlineKeyboardButton("➕ إضافة حساب جديد", callback_data="cgpt_addacc"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
     bot.send_message(call.message.chat.id, "\n".join(lines),
@@ -19500,7 +19567,7 @@ def _cgpt_save_new_account(message):
     res = db.cgpt_accounts.insert_one({
         'data': data, 'name': email, 'created_at': int(time.time())
     })
-    # نفحص الاتصD
+    # نفحص الاتصال
     info = _cgpt_account_seat_info({'_id': res.inserted_id, 'data': data, 'name': email})
     status = "✅ متصل" if info['connected'] else f"⚠️ {info.get('error','')[:50]}"
     markup = InlineKeyboardMarkup()
@@ -19527,10 +19594,65 @@ def cgpt_delete_account(call):
     cgpt_accounts(call)
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_purge")
+@admin_required
+def cgpt_purge_old(call):
+    """يحذف النشاطات القديمة (منتهية/مخالفة) من كل الحسابات."""
+    try: bot.answer_callback_query(call.id, "🧹 جاري التنظيف...")
+    except Exception: pass
+    total_purged = 0
+    for doc in _cgpt_all_accounts():
+        try:
+            m = _cgpt_build_manager_from_doc(doc)
+            total_purged += m.purge_old_records(days_old=3)
+        except Exception:
+            pass
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    bot.send_message(call.message.chat.id,
+        f"🧹 <b>تم التنظيف!</b>\n\n"
+        f"🗑 حُذف <b>{total_purged}</b> سجل قديم (منتهي/مخالف أقدم من 3 أيام).\n\n"
+        f"<i>السجلات النشطة لم تتأثر.</i>",
+        parse_mode="HTML", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_setseats_"))
+@admin_required
+def cgpt_set_seats(call):
+    """يطلب عدd المقاعد يدوياً لحساب."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    acc_id = call.data.replace("cgpt_setseats_", "")
+    msg = bot.send_message(call.message.chat.id,
+        "🪑 أرسل عدد المقاعد الإجمالي لهذا الحساب (رقم):\n"
+        "<i>مثال: 5 — لو حسابك فيه 5 مقاعد</i>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_seats, acc_id)
+
+
+def _cgpt_save_seats(message, acc_id):
+    if not message.text:
+        return
+    try:
+        n = int(message.text.strip())
+        if n <= 0:
+            raise ValueError()
+    except Exception:
+        bot.send_message(message.chat.id, "❌ رقم غير صالح.")
+        return
+    try:
+        if acc_id == 'main':
+            db.cgpt_cookies.update_one({'_id': 'main'}, {'$set': {'manual_seats': n}}, upsert=True)
+        else:
+            db.cgpt_accounts.update_one({'_id': ObjectId(acc_id)}, {'$set': {'manual_seats': n}})
+        bot.send_message(message.chat.id, f"✅ ضُبط عدد المقاعد على: {n}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ {str(e)[:50]}")
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_diagnose")
 @admin_required
 def cgpt_diagnose(call):
-    """يعرض حالة الاتصD والإيميل والمقاعd المتاحة."""
+    """يعرض حالة الاتصال والإيميل والمقاعد المتاحة."""
     try: bot.answer_callback_query(call.id, "🩺 جاري الفحص...")
     except Exception: pass
     mgr = get_cgpt_manager()
@@ -19542,15 +19664,19 @@ def cgpt_diagnose(call):
         used = rep.get('used_seats', '?')
         total = rep.get('total_seats')
         avail = rep.get('available_seats')
-        lines.append(f"👥 <b>المقاعd المستخdمة:</b> {used}")
+        lines.append(f"👥 <b>المقاعد المستخدمة:</b> {used}")
         if total:
-            lines.append(f"🪑 <b>إجمDلي المقاعd:</b> {total}")
+            lines.append(f"🪑 <b>إجماللي المقاعد:</b> {total}")
             lines.append(f"🟢 <b>المتاح:</b> {avail}")
         else:
-            lines.append("🪑 <i>لم أتمكّن من قراءة إجمDلي المقاعd (لكن الاتصD يعمل)</i>")
+            lines.append("🪑 <i>لم أتمكّن من قراءة إجماللي المقاعد تلقائياً.</i>")
+            _raw = rep.get('_raw_account', '')
+            if _raw:
+                lines.append(f"\n🔬 <b>بنية الحساب (للتشخيص):</b>\n<code>{html.escape(str(_raw)[:600])}</code>")
+                lines.append("\n<i>أرسل هذا للمطوّr لضبط قراءة المقاعد.</i>")
         emails = rep.get('user_emails', [])
         if emails:
-            lines.append(f"\n📋 <b>المستخdمون ({len(emails)}):</b>")
+            lines.append(f"\n📋 <b>المستخدمون ({len(emails)}):</b>")
             for e in emails[:15]:
                 lines.append(f"  • <code>{html.escape(str(e))}</code>")
     else:
@@ -19558,7 +19684,7 @@ def cgpt_diagnose(call):
         lines.append(f"السبب: {html.escape(str(rep.get('error','غير معروف')))}")
         if rep.get('owner_email') and rep['owner_email'] != 'غير معروف':
             lines.append(f"\n📧 الإيميل المحفوظ: <code>{html.escape(str(rep['owner_email']))}</code>")
-        lines.append("\n<i>الحل: أعd إضافة الكوكيز عبر «إضافة/تحديث الكوكيز».</i>")
+        lines.append("\n<i>الحل: أعد إضافة الكوكيز عبر «إضافة/تحديث الكوكيز».</i>")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🔄 إعادة الفحص", callback_data="cgpt_diagnose"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
