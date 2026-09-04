@@ -7891,13 +7891,13 @@ def shop_detail_ui(call):
             _mins = int(dur.get('minutes', 0))
             if not dur_label or not dur_label.strip():
                 if _mins >= 43200:
-                    dur_label = f"{_mins // 43200} شهر" if lang == 'ar' else f"{_mins // 43200} month"
+                    dur_label = f"{_mins // 43200} شهر" if l == 'ar' else f"{_mins // 43200} month"
                 elif _mins >= 1440:
-                    dur_label = f"{_mins // 1440} يوم" if lang == 'ar' else f"{_mins // 1440} days"
+                    dur_label = f"{_mins // 1440} يوم" if l == 'ar' else f"{_mins // 1440} days"
                 else:
-                    dur_label = f"{_mins // 60} ساعة" if lang == 'ar' else f"{_mins // 60} hours"
+                    dur_label = f"{_mins // 60} ساعة" if l == 'ar' else f"{_mins // 60} hours"
             _days = round(_mins / 1440, 1) if _mins else 0
-            _dtxt = f" ({_days}ي)" if lang == 'ar' else f" ({_days}d)"
+            _dtxt = f" ({_days}ي)" if l == 'ar' else f" ({_days}d)"
             markup.add(CustomInlineButton(
                 text=f"📅 {dur_label} — ${dur_price:.2f}{_dtxt}",
                 callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
