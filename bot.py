@@ -902,7 +902,10 @@ class ChatGPTSeatManager:
                 data = r.json()
                 users = data.get('items', [])
                 report['connected'] = True
-                report['used_seats'] = len(users)
+                # المالك لا يُحسب كمقعd مُستهلَك (مقعده ليس للبيع)
+                non_owner = [u for u in users
+                             if str(u.get('email', '')).lower() != str(self.owner_email or '').lower()]
+                report['used_seats'] = len(non_owner)
                 # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
                 try:
                     acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
@@ -7695,7 +7698,24 @@ def shop_list_ui(call):
     if catalogs:
         # ═══ عرض الكتالوجات أولاً (مرتبة أبجدياً) ثم المنتجات العادية ═══
         markup = InlineKeyboardMarkup(row_width=2)
-        
+
+        # 🤖 منتج ChatGPT Business في البداية المطلقة (قبل المجلدات)
+        try:
+            _cgpt_top = None
+            for _cp in db.cgpt_products.find():
+                _cgid = str(_cp['_id'])
+                _seats = _cgpt_get_seats_cached()
+                _seats = _seats if _seats is not None else 0
+                _cgnm = clean_name(_cp.get('name', 'ChatGPT Business'))
+                _bt = f"{_cgnm} | 📦 {_seats}"
+                _bstyle = "success" if _seats > 0 else "danger"
+                _bkw = {'text': _bt, 'callback_data': f"vi_p_cgpt_main_{_cgid}", 'style': _bstyle}
+                if _cp.get('custom_emoji_id'):
+                    _bkw['icon_custom_emoji_id'] = _cp['custom_emoji_id']
+                markup.add(CustomInlineButton(**_bkw))
+        except Exception as _cge:
+            logger.debug(f"cgpt top btn err: {_cge}")
+
         # ترتيب الكتالوجات أبجدياً
         name_key = 'name_en' if l == 'en' else 'name_ar'
         catalogs.sort(key=lambda c: (c.get(name_key) or c.get('name_ar', '')).lower())
@@ -7759,6 +7779,9 @@ def shop_list_ui(call):
             if pid_candidates & all_catalog_pids:
                 continue
             if p.get('is_hidden', False) and not is_admin:
+                continue
+            # منتج ChatGPT معروض في الأعلى بالفعل — نتخطّاه هنا لتفadي التكرار
+            if p.get('product_type') == 'cgpt_main':
                 continue
             prods_no_cat.append(p)
         
@@ -19637,6 +19660,20 @@ def ad_emoji_regular(call):
     page = int(call.data.replace("emj_reg_", "")) if call.data.replace("emj_reg_", "").isdigit() else 0
     PER = 15
     prods = list(db.products.find())
+    # نضيف منتجات ChatGPT (مخزّنة في cgpt_products) لتعيين رموزها أيضاً
+    try:
+        for cg in db.cgpt_products.find():
+            prods.append({
+                'id': f"cgpt_main_{cg['_id']}",
+                '_id': f"cgpt_main_{cg['_id']}",
+                'name_ar': f"🤖 {cg.get('name', 'ChatGPT')}",
+                'name_en': f"🤖 {cg.get('name', 'ChatGPT')}",
+                'custom_emoji_id': cg.get('custom_emoji_id'),
+                'product_type': 'cgpt_main',
+                'cgpt_product_id': str(cg['_id']),
+            })
+    except Exception:
+        pass
     def sort_key(x):
         if l == 'en':
             return str(x.get('name_en', x.get('name_ar', ''))).lower()
