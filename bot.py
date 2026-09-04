@@ -7763,7 +7763,9 @@ def shop_list_ui(call):
             prods_no_cat.append(p)
         
         # ترتيب المنتجات الغير مصنّفة أبجدياً
-        prods_no_cat.sort(key=lambda p: clean_name(p.get('name_en' if l == 'en' else 'name_ar', '')).lower())
+        prods_no_cat.sort(key=lambda p: (
+            not (p.get('product_type') == 'cgpt_main'),
+            clean_name(p.get('name_en' if l == 'en' else 'name_ar', '')).lower()))
 
         # ⚡ جلب عدد المخزون لكل المنتجات بلا مجلد دفعة واحدة (بدل استعلام لكل منتج)
         _stock_map = {}
@@ -7797,13 +7799,25 @@ def shop_list_ui(call):
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
             if is_cgpt:
-                btn_text = f"{short_n} | 📦 FW{hidden_icon}"
+                _cg_seats = _cgpt_get_seats_cached()
+                _cg_seats = _cg_seats if _cg_seats is not None else 0
+                in_stock = _cg_seats > 0
+                st_text = str(_cg_seats)
+                btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             else:
                 st_text = "FW" if is_manual else str(st)
                 btn_text = f"{short_n} | ${p.get('price', 0):.2f} | 📦 {st_text}{hidden_icon}"
             callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
-            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': btn_style}
+            cb = f"vi_p_cgpt_main_{callback_pid}" if is_cgpt else f"vi_p_{callback_pid}"
+            btn_kwargs = {'text': btn_text, 'callback_data': cb, 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
+            if is_cgpt:
+                try:
+                    _cgp = db.cgpt_products.find_one({'_id': ObjectId(str(callback_pid))})
+                    if _cgp and _cgp.get('custom_emoji_id'):
+                        custom_emoji_id = _cgp['custom_emoji_id']
+                except Exception:
+                    pass
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
@@ -7862,6 +7876,8 @@ def shop_list_ui(call):
 
         # نبني القائمة مع حالة التوفّر
         nc_items = []
+        _nc_seats = None
+        _nc_seats_done = False
         for p in all_prods_nc:
             is_hidden = p.get('is_hidden', False)
             if is_hidden and not is_admin:
@@ -7869,13 +7885,22 @@ def shop_list_ui(call):
             is_manual = p.get('is_manual', False)
             pid = str(p.get('id', str(p.get('_id', ''))))
             is_cgpt = p.get('product_type') == 'cgpt_main'
-            st = nc_stock.get(pid, 0)
-            in_stock = is_manual or is_cgpt or st > 0
+            if is_cgpt:
+                if not _nc_seats_done:
+                    _nc_seats = _cgpt_get_seats_cached()
+                    _nc_seats_done = True
+                st = _nc_seats if _nc_seats is not None else 0
+                in_stock = st > 0
+            else:
+                st = nc_stock.get(pid, 0)
+                in_stock = is_manual or st > 0
             nc_items.append((p, pid, st, is_manual, in_stock))
 
-        # المتوفر أولاً (أبجدياً)، غير المتوفر أحمر في الأسفل
-        nc_items.sort(key=lambda x: (not x[4],
-                      clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
+        # منتج ChatGPT أولاً، ثم المتوفر، ثم غير المتوفر
+        nc_items.sort(key=lambda x: (
+            not (x[0].get('product_type') == 'cgpt_main'),
+            not x[4],
+            clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
 
         markup = InlineKeyboardMarkup(row_width=1)
 
@@ -7886,11 +7911,22 @@ def shop_list_ui(call):
             hidden_icon = " 👻(مخفي)" if is_hidden else ""
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
-            st_text = "FW" if (is_manual or is_cgpt) else str(st)
+            if is_cgpt:
+                st_text = str(st)  # المقاعd المتاحة
+            else:
+                st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             callback_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
-            btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}", 'style': db_style}
+            cb = f"vi_p_cgpt_main_{callback_pid}" if is_cgpt else f"vi_p_{callback_pid}"
+            btn_kwargs = {'text': btn_text, 'callback_data': cb, 'style': db_style}
             custom_emoji_id = p.get('custom_emoji_id')
+            if is_cgpt:
+                try:
+                    _cgp = db.cgpt_products.find_one({'_id': ObjectId(str(callback_pid))})
+                    if _cgp and _cgp.get('custom_emoji_id'):
+                        custom_emoji_id = _cgp['custom_emoji_id']
+                except Exception:
+                    pass
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
@@ -20456,9 +20492,15 @@ def cgpt_delete_customer(call):
     if removal_result == 'member':
         status_txt = "✅ طُرد من الحساب (كان عضواً) وحُذف السجل"
     elif removal_result == 'pending':
-        status_txt = "✅ أُلغيت دعوته المعلّقة (لم يقبلها بعd) وحُذف السجل"
+        status_txt = "✅ أُلغيت دعوته المعلّقة (لم يقبلها بعد) وحُذف السجل"
     else:
         status_txt = "⚠️ لم أجده في الحساب (لا عضو ولا دعوة معلّقة) — حُذف السجل فقط"
+    # نمسح cache المقاعd ليُحسب المتاح من جديد (بعd الطرd يزيd مقعd)
+    if removal_result in ('member', 'pending'):
+        try:
+            _CGPT_SEATS_CACHE['exp'] = 0
+        except Exception:
+            pass
     bot.send_message(call.message.chat.id,
         f"🗑 <b>{email}</b>\n{status_txt}", parse_mode="HTML")
     # نعيد عرض القائمة
