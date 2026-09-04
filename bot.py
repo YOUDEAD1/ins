@@ -671,6 +671,58 @@ class ChatGPTSeatManager:
                 return self._remove_user(u.get('id'), email)
         return False
 
+    def remove_by_email(self, email):
+        """يطرد بالإيميل — يفحص العضو (member) وقائمة الانتظار (pending invite).
+        يرجّع: 'member' | 'pending' | 'not_found' | 'error'"""
+        if not CFFI_AVAILABLE or not self._loaded:
+            return 'error'
+        email_l = str(email).strip().lower()
+        # 1) نفحص الأعضاء الفعليين
+        try:
+            users = self._get_org_users()
+            for u in users:
+                if str(u.get('email', '')).lower() == email_l:
+                    uid_org = u.get('id') or u.get('user_id')
+                    if uid_org and self._remove_user(uid_org, email):
+                        return 'member'
+        except Exception as e:
+            logger.debug(f"[CGPT] remove member err: {e}")
+        # 2) نفحص قائمة الانتظار (invites المعلّقة)
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                invites = data.get('items', data.get('invites', []))
+                for inv in invites:
+                    inv_email = str(inv.get('email_address', inv.get('email', ''))).lower()
+                    if inv_email == email_l:
+                        inv_id = inv.get('id') or inv.get('invite_id')
+                        # نحذف الدعوة المعلّقة
+                        del_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+                        # بعض الحسابات تحذف بـ DELETE مع body، بعضها بـ id في المسD
+                        try:
+                            dr = cffi_requests.delete(
+                                f'{del_url}/{inv_id}',
+                                headers=self._headers(), impersonate='chrome110', timeout=15)
+                            if dr.status_code in (200, 204):
+                                return 'pending'
+                        except Exception:
+                            pass
+                        # محاولة بديلة: DELETE مع body {email}
+                        try:
+                            dr2 = cffi_requests.delete(
+                                del_url, headers=self._headers(),
+                                json={'email_address': email}, impersonate='chrome110', timeout=15)
+                            if dr2.status_code in (200, 204):
+                                return 'pending'
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"[CGPT] remove pending err: {e}")
+        return 'not_found'
+
     def _remove_user(self, user_id, email) -> bool:
         if email == self.owner_email: return False
         try:
@@ -1017,6 +1069,54 @@ def _cgpt_account_seat_info(doc):
     }
 
 
+def _cgpt_process_pending_migrations():
+    """ينقل العملاء المعلّقين (من حسابات ماتت) لما تتوفّr مقاعd."""
+    try:
+        pending = list(db.cgpt_pending_migration.find({'status': 'waiting'}))
+    except Exception:
+        return
+    if not pending:
+        return
+    for pm in pending:
+        email = pm.get('email')
+        rem_min = pm.get('remaining_minutes', 0)
+        if rem_min <= 0:
+            db.cgpt_pending_migration.update_one({'_id': pm['_id']},
+                {'$set': {'status': 'expired'}})
+            continue
+        target = _cgpt_find_available_account()
+        if not target:
+            return  # لا مقاعd بعd — ننتظر
+        tgt_mgr = target['mgr']
+        tgt_mgr._last_buyer_uid = pm.get('telegram_uid')
+        res = tgt_mgr.invite_user(email, rem_min)
+        if res.get('ok'):
+            db.cgpt_pending_migration.update_one({'_id': pm['_id']},
+                {'$set': {'status': 'migrated', 'to': target['email'],
+                          'migrated_at': int(time.time())}})
+            _CGPT_SEATS_CACHE['exp'] = 0
+            # رسالة للعميل
+            tg_uid = pm.get('telegram_uid')
+            if tg_uid:
+                try:
+                    days = round(rem_min / 1440, 1)
+                    bot.send_message(tg_uid,
+                        f"🔄 <b>توفّر مقعd جديd — تم نقل اشتراكك!</b>\n\n"
+                        f"📧 <b>الحساب الجديd:</b> <code>{html.escape(str(target['email']))}</code>\n"
+                        f"⏳ <b>المتبقّي:</b> {days} يوم\n\n"
+                        f"✅ وصلتك دعوة على بريدك — اقبلها لتكمل.",
+                        parse_mode="HTML")
+                except Exception:
+                    pass
+            # إشعm الأدمن
+            try:
+                for admin in db.users.find({'is_admin': 1}):
+                    bot.send_message(admin['user_id'],
+                        f"✅ نُقل معلّق: {email} → {target['email']}")
+            except Exception:
+                pass
+
+
 def _cgpt_migrate_dead_account(dead_doc):
     """عند موت اشتراك حساب: ينقل عملاءه (الذين لهم مدة متبقية) لحساب حيّ.
     يرسل لكل عميل دعوة جديدة + رسالة، ويُشعر الأدمن."""
@@ -1072,7 +1172,23 @@ def _cgpt_migrate_dead_account(dead_doc):
                 except Exception:
                     pass
         else:
+            # لا مقعd متاح → نسجّله كـ "معلّق للنقل" (يُنقل لاحقاً تلقائياً)
             failed.append(email)
+            try:
+                db.cgpt_pending_migration.update_one(
+                    {'email': email},
+                    {'$set': {
+                        'email': email,
+                        'from_account': getattr(dead_mgr, '_account_key', ''),
+                        'from_email': dead_email,
+                        'remaining_minutes': remaining_min,
+                        'telegram_uid': info.get('telegram_uid'),
+                        'product_id': info.get('product_id', ''),
+                        'created_at': int(time.time()),
+                        'status': 'waiting'
+                    }}, upsert=True)
+            except Exception:
+                pass
     dead_mgr._save_data()
     # إشعار الأدمن
     lines = [f"🔄 <b>نقل تلقائي — حساب مات</b>\n"]
@@ -1110,9 +1226,9 @@ def _cgpt_get_seats_cached():
 
 
 def _cgpt_total_available_seats():
-    """يرجّع إجمالي المقاعd المتاحة عبر كل الحسابات (تُستخdم كمخزون)."""
+    """يرجّع إجمالي المقاعd المتاحة عبر كل الحسابات (تُستخdم كمخزون).
+    دائماً يرجّع رقماً (لا غير محدود) — الحسابات بلا مقاعd مضبوطة تُعتبر 0."""
     total = 0
-    has_unknown = False
     for doc in _cgpt_all_accounts():
         try:
             info = _cgpt_account_seat_info(doc)
@@ -1121,13 +1237,10 @@ def _cgpt_total_available_seats():
             avail = info.get('available_seats')
             if avail is not None:
                 total += max(0, int(avail))
-            else:
-                has_unknown = True
+            # لو السعة غير معروفة (لم تُضبط) → 0 متاح لهذا الحساب (حتى يُضبط)
         except Exception:
             pass
-    # لو كل الحسابات بلا سعة معروفة، نرجّع None (لامحدود)
-    if total == 0 and has_unknown:
-        return None
+    return total
     return total
 
 
@@ -1292,6 +1405,11 @@ def _cgpt_daemon_loop():
                             _cgpt_notify_cookie_expired(_acc_id, _acc_email, 'لا كوكيز')
                     except Exception as _ce:
                         logger.debug(f"[CGPT] account cleanup err: {_ce}")
+                # بعd التنظيف: ننقل المعلّقين لو توفّرت مقاعd
+                try:
+                    _cgpt_process_pending_migrations()
+                except Exception as _pm_e:
+                    logger.debug(f"[CGPT] pending migration err: {_pm_e}")
             else:
                 mgr = get_cgpt_manager()
                 mgr.check_and_cleanup()
@@ -6221,12 +6339,8 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
                 if not _cgpt_computed:
                     _cgpt_seats = _cgpt_get_seats_cached()
                     _cgpt_computed = True
-                if _cgpt_seats is None:
-                    st = 0
-                    in_stock = True  # لامحdود
-                else:
-                    st = _cgpt_seats
-                    in_stock = st > 0
+                st = _cgpt_seats if _cgpt_seats is not None else 0
+                in_stock = st > 0
             else:
                 st = cat_stock_map.get(str(actual_pid), 0)
                 in_stock = is_manual or st > 0
@@ -6248,13 +6362,21 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             is_cgpt_main = p.get('product_type') == 'cgpt_main'
             # الاسم + العدد (ستوك) — لمنتج ChatGPT نعرض المقاعd المتاحة
             if is_cgpt_main:
-                st_text = "FW" if st == 0 and in_stock else str(st)
+                st_text = str(st)  # عddد المقاعd المتاحة
             else:
                 st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             callback_pid = str(actual_pid).replace("cgpt_main_", "") if str(actual_pid).startswith("cgpt_main_") else str(actual_pid)
             btn_kwargs = {'text': btn_text, 'callback_data': f"vi_p_{callback_pid}_c_{cat_id}", 'style': btn_style}
             custom_emoji_id = p.get('custom_emoji_id')
+            # لمنتج ChatGPT: نجلب الرمز الطازج من cgpt_products (قد يكون تغيّر)
+            if is_cgpt_main:
+                try:
+                    _cgp = db.cgpt_products.find_one({'_id': ObjectId(str(callback_pid))})
+                    if _cgp and _cgp.get('custom_emoji_id'):
+                        custom_emoji_id = _cgp['custom_emoji_id']
+                except Exception:
+                    pass
             if custom_emoji_id:
                 btn_kwargs['icon_custom_emoji_id'] = custom_emoji_id
             markup.add(CustomInlineButton(**btn_kwargs))
@@ -7470,6 +7592,14 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
         bstyle = "success" if in_stock else "danger"
         cb = f"vi_p_cgpt_main_{iid}" if is_cgpt else (f"vi_p_{iid}" if typ == 'reg' else f"vext_{iid}")
         bkw = {'text': btn_text, 'callback_data': cb, 'style': bstyle}
+        # لمنتج ChatGPT: نجلب الرمز الطازج من cgpt_products
+        if is_cgpt:
+            try:
+                _cgp = db.cgpt_products.find_one({'_id': ObjectId(str(iid))})
+                if _cgp and _cgp.get('custom_emoji_id'):
+                    emoji_id = _cgp['custom_emoji_id']
+            except Exception:
+                pass
         if emoji_id:
             bkw['icon_custom_emoji_id'] = emoji_id
         markup.add(CustomInlineButton(**bkw))
@@ -8447,7 +8577,8 @@ def cgpt_email_confirmed(call):
                 f"📧 <b>الإيميل:</b> <code>{email}</code>\n"
                 f"⏱ <b>المدة:</b> {label}\n"
                 f"📅 <b>ينتهي في:</b> {expires_iso[:10]}\n\n"
-                f"<i>تفقد بريدك الإلكتروني وقبل الدعوة 🎉</i>"
+                f"<i>تفقد بريدك الإلكتروني وقبل الدعوة 🎉</i>\n\n"
+                f"🔎 لعرض اشتراكاتك والتجديد اكتب: /my_chatgpt"
             )
         else:
             success = (
@@ -8455,7 +8586,8 @@ def cgpt_email_confirmed(call):
                 f"📧 <b>Email:</b> <code>{email}</code>\n"
                 f"⏱ <b>Duration:</b> {label}\n"
                 f"📅 <b>Expires:</b> {expires_iso[:10]}\n\n"
-                f"<i>Check your inbox and accept the invite 🎉</i>"
+                f"<i>Check your inbox and accept the invite 🎉</i>\n\n"
+                f"🔎 To view your subscriptions & renew, type: /my_chatgpt"
             )
         bot.send_message(buyer_uid, success, parse_mode="HTML")
         notify_admins(
@@ -11914,20 +12046,30 @@ def cgpt_sub_detail(call):
         return
     s = subs[idx]
     l = get_lang(uid)
-    rem_txt = f"{s['remaining_days']} يوم و {s['remaining_hours']} ساعة"
-    txt = (
-        f"⚙️ <b>تفاصيل الاشتراك</b>\n\n"
-        f"📧 <b>الإيميل:</b> <code>{html.escape(s['email'])}</code>\n"
-        f"⏳ <b>المتبقّي:</b> {rem_txt}\n"
-        f"📅 <b>ينتهي:</b> {s['expires_at'][:16]}\n\n"
-        f"يمكنك التجديد أو الترقية (تُضاف المدة للمتبقّي):"
-    )
+    if l == 'en':
+        rem_txt = f"{s['remaining_days']} days, {s['remaining_hours']} hours"
+        txt = (
+            f"⚙️ <b>Subscription Details</b>\n\n"
+            f"📧 <b>Email:</b> <code>{html.escape(s['email'])}</code>\n"
+            f"⏳ <b>Remaining:</b> {rem_txt}\n"
+            f"📅 <b>Expires:</b> {s['expires_at'][:16]}\n\n"
+            f"You can renew or upgrade (time is added to remaining):"
+        )
+        back_lbl = "🔙 Back"
+    else:
+        rem_txt = f"{s['remaining_days']} يوم و {s['remaining_hours']} ساعة"
+        txt = (
+            f"⚙️ <b>تفاصيل الاشتراك</b>\n\n"
+            f"📧 <b>الإيميل:</b> <code>{html.escape(s['email'])}</code>\n"
+            f"⏳ <b>المتبقّي:</b> {rem_txt}\n"
+            f"📅 <b>ينتهي:</b> {s['expires_at'][:16]}\n\n"
+            f"يمكنك التجديد أو الترقية (تُضاف المدة للمتبقّي):"
+        )
+        back_lbl = "🔙 رجوع"
     markup = InlineKeyboardMarkup(row_width=1)
-    # نعرض كل مدد كل منتجات ChatGPT (كل مدة بسعرها) للتجديد/الترقية
     products = list(db.cgpt_products.find())
     for p in products:
         pid = str(p.get('_id'))
-        pname = p.get('name', 'باقة')
         durations = sorted(p.get('durations', []), key=lambda x: x.get('price', 0))
         for dur in durations:
             dur_id = dur.get('dur_id', '')
@@ -11935,10 +12077,11 @@ def cgpt_sub_detail(call):
             price = dur.get('price', 0)
             mins = dur.get('minutes', 0)
             days = round(mins / 1440, 1) if mins else 0
+            _dsuffix = f"(+{days}d)" if l == 'en' else f"(+{days}ي)"
             markup.add(InlineKeyboardButton(
-                f"⬆️ {label} — ${price} (+{days}ي)",
+                f"⬆️ {label} — ${price} {_dsuffix}",
                 callback_data=f"cgsub_act_{idx}_{pid}_{dur_id}"))
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="cgsub_back"))
+    markup.add(InlineKeyboardButton(back_lbl, callback_data="cgsub_back"))
     bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
 
 
@@ -19775,6 +19918,7 @@ def ad_cgpt_panel(call):
         InlineKeyboardButton("🩺 فحص الاتصال والمقاعد", callback_data="cgpt_diagnose"),
         InlineKeyboardButton("🗂 الحسابات المتعددة", callback_data="cgpt_accounts"),
         InlineKeyboardButton("🧹 تنظيف النشاطات القديمة", callback_data="cgpt_purge"),
+        InlineKeyboardButton("💸 احتساب الأموال المستحقة للإرجاع", callback_data="cgpt_refunds"),
         InlineKeyboardButton("\U0001f504 \u0641\u062d\u0635 \u0648\u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0622\u0646", callback_data="ad_cgpt_cleanup"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel")
     )
@@ -19986,6 +20130,62 @@ def cgpt_delete_account(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ {e}", show_alert=True)
     cgpt_accounts(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "cgpt_refunds")
+@admin_required
+def cgpt_refunds(call):
+    """يحسب الأموال المستحقة للإرجاع (للعملاء المتضررين من موت حساب)."""
+    try: bot.answer_callback_query(call.id, "💸 جاري الحساب...")
+    except Exception: pass
+    # نجمع المعلّقين (حساباتهم ماتت) + من عندهم مدة متبقية
+    lines = ["💸 <b>الأموال المستحقة للإرجاع</b>\n"]
+    total_refund = 0.0
+    found = False
+    try:
+        pending = list(db.cgpt_pending_migration.find({'status': {'$in': ['waiting', 'expired']}}))
+    except Exception:
+        pending = []
+    for pm in pending:
+        email = pm.get('email', '')
+        rem_min = pm.get('remaining_minutes', 0)
+        tg_uid = pm.get('telegram_uid', '')
+        rem_days = round(rem_min / 1440, 1)
+        # نجد آخر طلب لهذا العميل لمعرفة السعر المدفوع والمدة الأصلية
+        refund_amount = 0.0
+        try:
+            order = db.orders.find_one(
+                {'user_id': tg_uid, 'product_id': {'$regex': '^cgpt'}},
+                sort=[('_id', -1)])
+            if order:
+                paid = float(order.get('total_price', order.get('price', 0)))
+                orig_min = int(order.get('cgpt_minutes', order.get('duration_minutes', 0)))
+                if orig_min > 0 and paid > 0:
+                    # المبلغ المستحق = (المتبقّي / الأصلي) × المدفوع
+                    refund_amount = round((rem_min / orig_min) * paid, 2)
+        except Exception:
+            pass
+        found = True
+        total_refund += refund_amount
+        lines.append(
+            f"👤 <code>{tg_uid}</code>\n"
+            f"📧 <code>{email}</code>\n"
+            f"⏳ متبقّي: {rem_days} يوم\n"
+            f"💰 مستحق: <b>${refund_amount:.2f}</b>\n"
+            f"━━━━━━━━━━")
+    if not found:
+        lines.append("لا مبالغ مستحقة حالياً. ✅")
+    else:
+        lines.append(f"\n💵 <b>الإجمالي المستحق: ${total_refund:.2f}</b>")
+        lines.append("\n<i>أرجع المبالغ يدوياً للعملاء (شحن رصيد).</i>")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    # نرسل على دفعات لو طويل
+    full = "\n".join(lines)
+    for i in range(0, len(full), 3800):
+        chunk = full[i:i+3800]
+        bot.send_message(call.message.chat.id, chunk, parse_mode="HTML",
+                         reply_markup=markup if i + 3800 >= len(full) else None)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_purge")
@@ -20219,22 +20419,25 @@ def cgpt_delete_customer(call):
             doc = db.cgpt_accounts.find_one({'_id': ObjectId(acc_id)})
     except Exception:
         doc = None
-    removed_from_org = False
+    removal_result = 'not_found'
     if doc:
         try:
             mgr = _cgpt_build_manager_from_doc(doc)
-            # نجد user_id في المؤسسة
-            users = mgr._get_org_users()
-            uid_in_org = None
-            for u in users:
-                if u.get('email') == email:
-                    uid_in_org = u.get('id') or u.get('user_id')
-                    break
-            if uid_in_org:
-                removed_from_org = mgr._remove_user(uid_in_org, email)
+            removal_result = mgr.remove_by_email(email)
         except Exception as e:
-            logger.debug(f"cgpt del org err: {e}")
-    # نحذف السجل من قاعdة البيانات
+            logger.debug(f"cgpt del err: {e}")
+    # لو لم نجده في حسابه، نبحث في كل الحسابات (احتياط)
+    if removal_result == 'not_found':
+        for _d in _cgpt_all_accounts():
+            try:
+                _m = _cgpt_build_manager_from_doc(_d)
+                _r = _m.remove_by_email(email)
+                if _r in ('member', 'pending'):
+                    removal_result = _r
+                    break
+            except Exception:
+                pass
+    # نحذف السجل من قاعدة البيانات
     try:
         idata = db.cgpt_invites_data.find_one({'_id': acc_id})
         if idata:
@@ -20243,7 +20446,12 @@ def cgpt_delete_customer(call):
             db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}})
     except Exception:
         pass
-    status_txt = "✅ طُرد من الحساب وحُذف السجل" if removed_from_org else "✅ حُذف السجل (لم يكن في الحساب أو الكوكيز منتهية)"
+    if removal_result == 'member':
+        status_txt = "✅ طُرد من الحساب (كان عضواً) وحُذف السجل"
+    elif removal_result == 'pending':
+        status_txt = "✅ أُلغيت دعوته المعلّقة (لم يقبلها بعd) وحُذف السجل"
+    else:
+        status_txt = "⚠️ لم أجده في الحساب (لا عضو ولا دعوة معلّقة) — حُذف السجل فقط"
     bot.send_message(call.message.chat.id,
         f"🗑 <b>{email}</b>\n{status_txt}", parse_mode="HTML")
     # نعيد عرض القائمة
