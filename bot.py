@@ -5630,31 +5630,31 @@ def _find_product_db(pid):
                 if p: return p
             except: pass
 
-        # ── 5. آخر محاولة: منتج ChatGPT من cgpt_products (فقط لو ما لقيناه في products) ──
-        if pid_str.startswith("cgpt_"):
-            clean_hex = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
-            if "_" in clean_hex:
-                clean_hex = clean_hex.split("_")[0]
-            if len(clean_hex) == 24:
-                try:
-                    cgpt_p = db.cgpt_products.find_one({'_id': ObjectId(clean_hex)})
-                    if cgpt_p:
-                        return {
-                            '_id': pid_str,
-                            'name_ar': cgpt_p.get('name', 'ChatGPT'),
-                            'name_en': cgpt_p.get('name_en', cgpt_p.get('name', 'ChatGPT')),
-                            'desc_ar': cgpt_p.get('desc', ''),
-                            'desc_en': cgpt_p.get('desc_en', cgpt_p.get('desc', '')),
-                            'custom_emoji_id': cgpt_p.get('custom_emoji_id'),
-                            'product_type': 'cgpt_main',
-                            'cgpt_product_id': clean_hex,
-                            'cgpt_pinned': True,
-                            'is_manual': False,
-                            'is_hidden': False,
-                            'price': 0,
-                            'btn_style': 'primary',
-                        }
-                except: pass
+        # ── 5. آخر محاولة: منتج ChatGPT من cgpt_products ──
+        #    (يدعم البادئة cgpt_ وأيضاً الـ hex المجرّd بلا بادئة)
+        clean_hex = pid_str.replace("cgpt_main_", "").replace("cgpt_", "")
+        if "_" in clean_hex:
+            clean_hex = clean_hex.split("_")[0]
+        if len(clean_hex) == 24:
+            try:
+                cgpt_p = db.cgpt_products.find_one({'_id': ObjectId(clean_hex)})
+                if cgpt_p:
+                    return {
+                        '_id': f"cgpt_main_{clean_hex}",
+                        'name_ar': cgpt_p.get('name', 'ChatGPT'),
+                        'name_en': cgpt_p.get('name_en', cgpt_p.get('name', 'ChatGPT')),
+                        'desc_ar': cgpt_p.get('desc', ''),
+                        'desc_en': cgpt_p.get('desc_en', cgpt_p.get('desc', '')),
+                        'custom_emoji_id': cgpt_p.get('custom_emoji_id'),
+                        'product_type': 'cgpt_main',
+                        'cgpt_product_id': clean_hex,
+                        'cgpt_pinned': True,
+                        'is_manual': False,
+                        'is_hidden': False,
+                        'price': 0,
+                        'btn_style': 'primary',
+                    }
+            except: pass
     except Exception as fp_err:
         logger.error(f"find_product error for pid={pid}: {fp_err}")
     return None
@@ -24298,6 +24298,47 @@ Buy a product.
 - `{{"error": "Not enough stock"}}` — out of stock
 - `{{"error": "Product not found"}}` — product deleted or hidden
 - `{{"error": "Invalid quantity"}}` — qty ≤ 0
+
+---
+
+### 🤖 ChatGPT Business products (IMPORTANT — different!)
+
+ChatGPT Business products have IDs like `cgpt_xxxxx_yyyyy` and `"source": "chatgpt_business"` in /products.
+Each duration (week / month) is a separate product with its own price.
+
+These are SEAT INVITATIONS, not instant codes. To buy one you MUST include the buyer email:
+
+**Body:**
+```json
+{{
+  "product_id": "cgpt_xxxxx_yyyyy",
+  "email": "buyer@example.com"
+}}
+```
+
+**Success:**
+```json
+{{
+  "success": true,
+  "type": "chatgpt_business",
+  "order_id": "CGAPIxxxxxx",
+  "email": "buyer@example.com",
+  "expires_at": "2026-10-05T12:00:00",
+  "duration_minutes": 43200,
+  "message": "Invitation sent. Buyer must accept it from their email.",
+  "total": 15.0
+}}
+```
+
+The buyer gets a ChatGPT invite email and must ACCEPT it. The seat auto-expires after the duration.
+
+**ChatGPT errors:**
+- `{{"error": "email required for ChatGPT products"}}` — you forgot the email
+- `{{"error": "No seats available"}}` — seats full
+- `{{"error": "No seats available (refunded)"}}` — refunded, no free seat
+- `{{"error": "Insufficient balance"}}` — top up
+
+> Regular products are unchanged. Only ChatGPT products need the `email` field.
 
 ### 11. `POST /set_price`
 Set a custom price for a product (applies to your customers only).
