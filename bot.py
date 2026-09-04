@@ -6346,9 +6346,9 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
                 in_stock = is_manual or st > 0
             items.append((p, actual_pid, st, is_manual, in_stock))
 
-        # الترتيب: المثبّت أولاً، ثم المتوفر (أخضر)، ثم غير المتوفر (أحمر) في الأسفل
+        # الترتيب: منتج ChatGPT أولاً دائماً، ثم المتوفر، ثم غير المتوفر
         items.sort(key=lambda x: (
-            not x[0].get('cgpt_pinned', False),
+            not (x[0].get('product_type') == 'cgpt_main' or x[0].get('cgpt_pinned', False)),
             not x[4],
             clean_name(x[0].get('name_en' if lang == 'en' else 'name_ar', '')).lower()
         ))
@@ -7977,7 +7977,14 @@ def shop_detail_ui(call):
         durations = (parent.get('durations', []) if parent else [])
         durations_sorted = sorted(durations, key=lambda x: x.get('price', 0))
         custom_emoji_id = p.get('custom_emoji_id')
+        # نجلب الرمز الطازج من cgpt_products
+        if parent and parent.get('custom_emoji_id'):
+            custom_emoji_id = parent['custom_emoji_id']
         icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
+
+        # المقاعd المتاحة (المخزون الحقيقي)
+        _seats = _cgpt_get_seats_cached()
+        _seats = _seats if _seats is not None else 0
 
         if l == 'ar':
             text = (
@@ -7985,7 +7992,7 @@ def shop_detail_ui(call):
                 f"📝 {p_desc}\n\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"⚡ <b>التسليم:</b> تلقائي فوري\n"
-                f"📦 <b>المخزون:</b> غير محدود\n"
+                f"📦 <b>المقاعd المتاحة:</b> {_seats}\n"
                 f"━━━━━━━━━━━━━━\n\n"
                 f"🗓 <b>اختر المدة:</b>"
             )
@@ -7995,7 +8002,7 @@ def shop_detail_ui(call):
                 f"📝 {p_desc}\n\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"⚡ <b>Delivery:</b> Instant\n"
-                f"📦 <b>Stock:</b> Unlimited\n"
+                f"📦 <b>Available seats:</b> {_seats}\n"
                 f"━━━━━━━━━━━━━━\n\n"
                 f"🗓 <b>Choose duration:</b>"
             )
