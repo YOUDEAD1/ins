@@ -1,6 +1,5 @@
 # [merged] from domain import finite_float, ShopError
 # [merged] from runtime import Runtime
-_safe = Runtime(globals())
 import sys
 import os
 import functools
@@ -2070,6 +2069,10 @@ class Runtime:
         return accounts
 
 
+
+
+# تهيئة Runtime بعd تعريف كل الوحdات المدموجة
+_safe = Runtime(globals())
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
