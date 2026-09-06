@@ -425,6 +425,29 @@ _BUNDLE_SOURCES = {
         '            return original(message,next_step,*args,**kwargs)\n'
         '        self.bot.register_next_step_handler=register\n'
         '\n'
+        '    def _repair_duplicate_users(self):\n'
+        '        """Archive duplicate users and keep the oldest record used historically."""\n'
+        "        groups=self.db.users.aggregate([{'$match':{'user_id':{'$exists':True,'$ne':None}}},{'$group':{'_id':'$user_id','ids':{'$push':'$_id'},'count':{'$sum':1}}},{'$match':{'count':{'$gt':1}}}],allowDiskUse=True)\n"
+        '        repaired=0\n'
+        '        for group in groups:\n'
+        "            docs=list(self.db.users.find({'_id':{'$in':group['ids']}}).sort('_id',1))\n"
+        '            if len(docs)<2:continue\n'
+        '            canonical,duplicates=docs[0],docs[1:]\n'
+        '            now=dt.datetime.now(dt.timezone.utc)\n'
+        '            for duplicate in duplicates:\n'
+        "                archive_id=str(group['_id'])+':'+str(duplicate['_id'])\n"
+        "                self.db.users_duplicates_archive.replace_one({'_id':archive_id},{'_id':archive_id,'user_id':group['_id'],'kept_id':canonical['_id'],'duplicate_id':duplicate['_id'],'document':duplicate,'archived_at':now},upsert=True)\n"
+        '            # Only fill fields absent from the canonical record. In particular,\n'
+        '            # balances are never added together or overwritten automatically.\n'
+        '            missing={}\n'
+        '            for duplicate in duplicates:\n'
+        '                for key,value in duplicate.items():\n'
+        "                    if key not in ('_id','user_id') and key not in canonical and key not in missing:missing[key]=value\n"
+        "            if missing:self.db.users.update_one({'_id':canonical['_id']},{'$set':missing})\n"
+        "            result=self.db.users.delete_many({'_id':{'$in':[doc['_id'] for doc in duplicates]}})\n"
+        '            repaired+=result.deleted_count\n'
+        '        if repaired:self.logger.warning(\'Archived and removed %s duplicate user records; review users_duplicates_archive.\',repaired)\n'
+        '\n'
         '    def initialize(self):\n'
         '        configure(self.g)\n'
         "        hello=self.mongo_client.admin.command('hello')\n"
@@ -433,6 +456,7 @@ _BUNDLE_SOURCES = {
         "        for name in ('wallet_ledger','shop_orders','external_jobs','cgpt_invites_data','cgpt_account_locks','cgpt_checkout',\n"
         "                     'notifications','api_events','event_receipts','api_webhooks','webhook_jobs','counters','quote_locks','quote_slots'):\n"
         '            if name not in self.db.list_collection_names():self.db.create_collection(name)\n'
+        '        self._repair_duplicate_users()\n'
         "        self.db.users.create_index('user_id',unique=True)\n"
         "        self.db.shop_orders.create_index('order_id',unique=True)\n"
         "        self.db.external_jobs.create_index('order_id',unique=True)\n"
