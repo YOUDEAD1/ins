@@ -920,6 +920,18 @@ _BUNDLE_SOURCES = {
         '\n'
         '    def register_ui(self):\n'
         '        from cms import TEMPLATES\n'
+        '        def begin_template_edit(uid,key):\n'
+        "            if key not in TEMPLATES:raise ShopError('النص غير موجود.')\n"
+        "            doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':'ar'}) or {}\n"
+        "            current=str(doc.get('value') or TEMPLATES[key][1])\n"
+        "            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'template','key':key,'lang':'ar','expires':time.time()+900}},upsert=True)\n"
+        "            fields=[]\n"
+        "            for field in re.findall(r'\\{([a-z_][a-z0-9_]*)\\}',current,re.I):\n"
+        "                if field not in fields:fields.append(field)\n"
+        "            field_note=('\\n\\n<b>المتغيرات داخل النص:</b> <code>'+html.escape(' '.join('{'+f+'}' for f in fields))+'</code>') if fields else '\\n\\n<b>لا توجد متغيرات في هذا النص.</b>'\n"
+        "            self.send(uid,'📋 <b>انسخ النص وعدّل الكلمات فقط:</b>\\n\\n<pre>'+html.escape(current)+'</pre>'+field_note)\n"
+        "            m=self.send(uid,'أرسل النص العربي الجديد كما هو، مع إبقاء المتغيرات الموجودة. سيُحفظ العربي وتُنشأ النسخة الإنجليزية تلقائيًا.\\nأرسل /reset لاستعادة الافتراضي، أو /cancel للإلغاء.')\n"
+        '            if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
         '        def route(call):\n'
         '            uid=call.from_user.id;data=call.data\n'
         '            try:self.bot.answer_callback_query(call.id)\n'
@@ -947,18 +959,11 @@ _BUNDLE_SOURCES = {
         "                return self.send(uid,'✏️ اختر الرسالة أو الزر الذي تريد تخصيصه:',reply_markup=self.markup([(v[0],'cgx_tpl_'+k) for k,v in TEMPLATES.items()]+[('📦 أسماء المنتجات والوصف','cgx_products')]))\n"
         "            if data.startswith('cgx_tpl_'):\n"
         "                key=data.removeprefix('cgx_tpl_')\n"
-        "                if key not in TEMPLATES:raise ShopError('النص غير موجود.')\n"
-        "                return self.send(uid,'اختر لغة النص:',reply_markup=self.markup([('العربية','cgx_edit_ar_'+key),('English','cgx_edit_en_'+key)]))\n"
+        "                return begin_template_edit(uid,key)\n"
         "            if data.startswith('cgx_edit_'):\n"
         "                lang,key=data.removeprefix('cgx_edit_').split('_',1)\n"
         "                if key not in TEMPLATES or lang not in ('ar','en'):raise ShopError('اختيار غير صالح.')\n"
-        "                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'template','key':key,'lang':lang,'expires':time.time()+900}},upsert=True)\n"
-        '                from cms import render\n'
-        "                values={k:'مثال' for k in ('email','product','duration','price','expires','hours','account','order_id')}\n"
-        "                self.send(uid,'النص الحالي:\\n'+render(self.db,key,lang,**values))\n"
-        "                m=self.send(uid,'أرسل النص الجديد بتنسيقه وإيموجياته.\\nالمتغيرات المتاحة: <code>{email} {product} {duration} {price} {expires} {hours} {account} {order_id}</code>\\nأرسل /reset لاستعادة الافتراضي، أو /cancel للإلغاء.')\n"
-        '                if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
-        '                return\n'
+        "                return begin_template_edit(uid,key)\n"
         "            if data=='cgx_products':\n"
         "                return self.send(uid,'📦 اختر المنتج لتعديل الاسم والوصف والإيموجي:',reply_markup=self.markup([(re.sub('<[^>]+>','',p.get('name','منتج'))[:40],'cgx_prod_'+str(p['_id'])) for p in self.db.cgpt_products.find()]))\n"
         "            if data.startswith('cgx_prod_'):\n"
@@ -1004,14 +1009,23 @@ _BUNDLE_SOURCES = {
         "        raw=(message.text or '').strip()\n"
         "        if raw=='/cancel':self.db.cgpt_admin_inputs.delete_one({'_id':uid});return self.send(uid,'أُلغي التعديل.')\n"
         "        if p['mode']=='template' and raw=='/reset':\n"
-        "            self.db.custom_texts.delete_one({'key':'cgpt_'+p['key'],'lang':p['lang']})\n"
+        "            self.db.custom_texts.delete_many({'key':'cgpt_'+p['key']})\n"
         '        else:\n'
         '            text=message.html_text or html.escape(raw)\n'
         "            emoji=next((e.custom_emoji_id for e in (message.entities or []) if e.type=='custom_emoji'),None)\n"
         "            if p['mode']=='template':\n"
         "                if p['key'].startswith('btn_'):text=raw\n"
         "                validate_template(text,p['key'].startswith('btn_'))\n"
-        "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':p['lang']},{'$set':{'value':text,'emoji_id':emoji,'updated_by':uid}},upsert=True)\n"
+        "                translator=self.g.get('safe_translate_for_cms')\n"
+        "                translated=translator(text,'en') if callable(translator) else ''\n"
+        "                if not translated or re.search(r'[\\u0600-\\u06FF]',translated):raise ShopError('تعذرت الترجمة الإنجليزية؛ حاول مرة أخرى بعد قليل.')\n"
+        "                validate_template(translated,p['key'].startswith('btn_'))\n"
+        "                src_fields=sorted(re.findall(r'\\{([a-z_][a-z0-9_]*)\\}',text,re.I))\n"
+        "                dst_fields=sorted(re.findall(r'\\{([a-z_][a-z0-9_]*)\\}',translated,re.I))\n"
+        "                if src_fields!=dst_fields:raise ShopError('الترجمة لم تحفظ كل المتغيرات؛ لم يتم الحفظ.')\n"
+        "                values={'emoji_id':emoji,'updated_by':uid}\n"
+        "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'ar'},{'$set':{**values,'value':text}},upsert=True)\n"
+        "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'en'},{'$set':{**values,'value':translated}},upsert=True)\n"
         "            elif p['mode']=='product':\n"
         "                if len(raw)>(100 if p['field'].startswith('name') else 2500):raise ShopError('النص طويل جدًا.')\n"
         '                # Product text is not a template: escape braces during validation only.\n'
@@ -8007,13 +8021,6 @@ def profile_ui(call):
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(create_btn(uid, 'btn_buy_hist', callback_data="history_menu_callback"))
-    # زر اشتراكات ChatGPT (يظهر فقط لو للعميل اشتراكات)
-    try:
-        if _cgpt_get_user_subscriptions(uid):
-            _lbl = "🤖 اشتراكات ChatGPT" if get_lang(uid) != 'en' else "🤖 ChatGPT Subscriptions"
-            markup.add(InlineKeyboardButton(_lbl, callback_data="cgpt_my_subs"))
-    except Exception:
-        pass
     # زر سجل التعويضات والتعديلات المالية
     bal_logs_count = db.balance_logs.count_documents({'user_id': uid})
     if bal_logs_count > 0:
