@@ -30,2568 +30,2670 @@ if __name__ == "__main__" and "--requirements" in _bundle_sys.argv:
     print(_BUNDLE_REQUIREMENTS,end="")
     raise SystemExit(0)
 _BUNDLE_SOURCES = {
-    'customer_service': (
-        '"""Customer portal and durable intervention records. No credentials in tickets."""\n'
-        'import datetime as dt\n'
-        'import html\n'
-        'import re\n'
-        'import time\n'
-        'from domain import ShopError, digest\n'
-        '\n'
-        '\n'
-        'def support_url(value):\n'
-        "    value=str(value or '').strip()\n"
-        "    value=re.sub(r'^https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/','',value).strip('/').lstrip('@')\n"
-        "    return 'https://t.me/'+value if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{4,31}',value) else None\n"
-        '\n'
-        '\n'
-        "FEE_HELP = ('🧾 <b>كيف تضبط رسوم التحويل؟</b>\\n'\n"
-        "    '1️⃣ انسخ العنوان والمبلغ والعملة والشبكة من طلب الدفع الحالي.\\n'\n"
-        "    '2️⃣ في تطبيق التحويل اختر الشبكة نفسها، ثم راجع «المبلغ الذي سيستلمه المستلم».\\n'\n"
-        "    '3️⃣ يجب أن يطابق مبلغ الاستلام المطلوب بكل الكسور. إذا كانت الرسوم تُخصم من المبلغ، زد مبلغ الإرسال بمقدار الرسوم المعروضة. '\n"
-        "    'إذا تُدفع الرسوم منفصلة فلا تضفها إلى مبلغ الاستلام.\\n'\n"
-        "    'مثال توضيحي فقط: المطلوب 5.0087 والرسوم المخصومة 0.2 → الإرسال 5.2087، والاستلام 5.0087.\\n'\n"
-        "    '4️⃣ راجع شاشة التأكيد قبل الإرسال؛ الرسوم تتغير ولا تعتمد على المثال.\\n'\n"
-        "    '5️⃣ الضغط على «تم» أو «فحص الدفع» يطلب التحقق فقط؛ لا يثبت وصول المال.\\n'\n"
-        "    'هذه رسوم تحويل/شبكة، وليست إعداد ضريبة داخل البوت. إذا أرسلت مبلغًا غير مطابق افتح الدعم وأرفق رقم العملية، ولا تدفع مرة ثانية قبل المراجعة.')\n"
-        '\n'
-        '\n'
-        'class CustomerService:\n'
-        "    def issue(self,kind,account='',email='',uid=None,details=None):\n"
-        "        ident=digest('intervention',kind,account,email,uid)\n"
-        '        now=dt.datetime.utcnow()\n'
-        "        self.db.cgpt_interventions.update_one({'_id':ident},{'$set':{'kind':kind,'account':account,'email':email,\n"
-        "            'user_id':uid,'details':details or {},'updated_at':now,'status':'open'},'$setOnInsert':{'created_at':now}},upsert=True)\n"
-        '        return ident\n'
-        '\n'
-        '    def portal(self,uid,page=0):\n'
-        '        rows=[]\n'
-        '        for doc in self.db.cgpt_invites_data.find():\n'
-        "            for email,info in doc.get('data',{}).get('invites',{}).items():\n"
-        "                if info.get('telegram_uid')==uid:rows.append((str(doc['_id']),email,info))\n"
-        "        rows.sort(key=lambda x:(x[2].get('status')!='active',x[1],x[0]))\n"
-        '        page=max(0,min(page,max(0,(len(rows)-1)//4)))\n'
-        "        text=['🤖 <b>اشتراكات ChatGPT</b>'];buttons=[]\n"
-        '        from chatgpt_service import date\n'
-        '        for account,email,info in rows[page*4:page*4+4]:\n'
-        "            exp=date(info.get('expires_at'));left=max(0,int((exp-dt.datetime.utcnow()).total_seconds())) if exp else None\n"
-        "            remaining=f'{left//86400} يوم و{left%86400//3600} ساعة' if left is not None else 'غير معروف'\n"
-        "            status={'active':'نشط','expired':'منتهي','transferred':'نُقل إلى حساب آخر','revoked':'ملغي'}.get(info.get('status'),'غير معروف')\n"
-        "            invite={'accepted':'مقبولة','pending':'بانتظار القبول','missing':'غير موجودة في آخر فحص'}.get(info.get('invite_status'),'لم يتم التحقق بعد')\n"
-        '            text.append(f\'\\n📧 <code>{html.escape(email)}</code>\\nالاشتراك: {status}\\nالدعوة: {invite}\\nالمتبقي: {remaining}\\nالانتهاء (UTC): {html.escape(str(info.get("expires_at","غير معروف")))}\\nآخر فحص: {html.escape(str(info.get("invite_checked_at","غير متاح")))}\')\n'
-        "            history=list(self.db.external_jobs.find({'user_id':uid,'kind':'chatgpt','status':'completed','details.email':email}).sort('created_at',-1).limit(5))\n"
-        "            text.append('سجل الشراء والتجديد (آخر 5): '+(' / '.join(html.escape(str(j.get('order_id',''))) for j in history) or 'لا توجد عمليات موثقة'))\n"
-        "            ref=digest('subscription',account,email,uid)[:24]\n"
-        "            self.db.cgpt_portal_refs.update_one({'_id':ref},{'$set':{'user_id':uid,'account':account,'email':email}},upsert=True)\n"
-        "            if info.get('status')=='active':buttons.append(('📨 لم تصلني الدعوة: '+email[:22],'cgb_missing_'+ref))\n"
-        "        if not rows:text.append('لا توجد اشتراكات مرتبطة بحسابك في البوت.')\n"
-        "        if page:buttons.append(('السابق','cgb_page_'+str(page-1)))\n"
-        "        if (page+1)*4<len(rows):buttons.append(('التالي','cgb_page_'+str(page+1)))\n"
-        "        buttons.extend([('🔄 تجديد','cgb_renew'),('👨\u200d💻 الدعم','cgb_support'),('🔙 الرئيسية','main_menu_refresh')])\n"
-        "        self.send(uid,'\\n'.join(text),reply_markup=self.markup(buttons))\n"
-        '\n'
-        '    def missing_invite(self,uid,ref):\n'
-        "        rec=self.db.cgpt_portal_refs.find_one({'_id':ref,'user_id':uid})\n"
-        "        if not rec:raise ShopError('أعد فتح صفحة اشتراكك.',404)\n"
-        "        doc=self.db.cgpt_invites_data.find_one({'_id':rec['account']}) or {}\n"
-        "        info=doc.get('data',{}).get('invites',{}).get(rec['email'],{})\n"
-        "        if info.get('telegram_uid')!=uid or info.get('status')!='active':raise ShopError('هذا الاشتراك غير نشط.',409)\n"
-        "        ident=self.issue('missing_invite',rec['account'],rec['email'],uid)\n"
-        "        self.notice_once('ticket:'+ident,3600,'📨 لم تصل دعوة العميل: '+html.escape(rec['email'])+'\\nالمستخدم: '+str(uid),self.markup([('قائمة التدخلات','cgx_interventions')]))\n"
-        "        self.send(uid,'📨 سُجل طلب متابعة للدعوة. راجع البريد غير المرغوب فيه وسجّل الدخول بالبريد الظاهر في اشتراكك. لا تشترِ مرة أخرى لحل المشكلة.',reply_markup=self.markup([('اشتراكي','cgb_portal'),('الدعم','cgb_support')]))\n"
-        '\n'
-        '    def support(self,uid):\n'
-        "        url=support_url(self.g.get('OWNER_USER'))\n"
-        "        markup=self.markup([('📝 فتح طلب دعم','cgb_ticket'),('🧾 شرح الرسوم','cgb_fees'),('اشتراكي','cgb_portal')])\n"
-        "        if url:markup.add(self.InlineKeyboardButton('💬 مراسلة الدعم',url=url))\n"
-        "        self.send(uid,'👨\u200d💻 اختر مراسلة الدعم أو افتح طلب متابعة داخل البوت. لا ترسل كلمة المرور أو الكوكيز.',reply_markup=markup)\n"
-        '\n'
-        '    def customer_route(self,call):\n'
-        '        uid=call.from_user.id;data=call.data\n'
-        '        try:self.bot.answer_callback_query(call.id)\n'
-        '        except Exception:pass\n'
-        "        if data.startswith('cgb_order_'):\n"
-        "            job=self.db.external_jobs.find_one({'order_id':data.removeprefix('cgb_order_'),'user_id':uid,'kind':'external'})\n"
-        "            if not job:raise ShopError('الطلب غير موجود أو لا يخصك.',404)\n"
-        '            return self.ext_result(uid,job)\n'
-        "        if data=='cgb_portal':return self.portal(uid)\n"
-        "        if data.startswith('cgb_page_'):return self.portal(uid,int(data.removeprefix('cgb_page_')))\n"
-        "        if data.startswith('cgb_missing_'):return self.missing_invite(uid,data.removeprefix('cgb_missing_'))\n"
-        "        if data=='cgb_support':return self.support(uid)\n"
-        "        if data=='cgb_fees':return self.send(uid,FEE_HELP,reply_markup=self.markup([('الدعم','cgb_support')]))\n"
-        "        if data=='cgb_ticket':\n"
-        "            ident=self.issue('support',uid=uid)\n"
-        "            self.notice_once('ticket:'+ident,3600,'📝 طلب دعم من المستخدم '+str(uid),self.markup([('التدخلات','cgx_interventions')]))\n"
-        "            message=self.send(uid,'📝 سُجل طلبك برقم <code>'+ident[:12]+'</code>. أرسل الآن وصف المشكلة ورقم الطلب أو التحويل إن وجد. لا ترسل كلمات المرور أو الكوكيز. للإلغاء: /cancel')\n"
-        '            if message:self.bot.register_next_step_handler(message,self.support_input,ident,uid)\n'
-        '            return message\n'
-        '\n'
-        '    def interventions(self,uid,page=0):\n'
-        "        page=max(0,page);rows=list(self.db.cgpt_interventions.find({'status':'open'}).sort('updated_at',-1).skip(page*4).limit(5))\n"
-        "        buttons=[];lines=['🛠 <b>الحالات التي تحتاج تدخلًا</b>']\n"
-        "        labels={'no_seat_refund':'💰 مستحق استرجاع: انتهاء الحساب ولا يوجد بديل','support':'طلب دعم','missing_invite':'دعوة لم تصل','unknown_member':'عضوية غير مسجلة','account_unavailable':'حساب غير متاح','migration':'نقل الاشتراك','removal_failed':'تعذر إنهاء العضوية'}\n"
-        '        for row in rows[:4]:\n'
-        "            lines.append('\\n'+html.escape(labels.get(row['kind'],row['kind']))+' — '+html.escape(row.get('email') or str(row.get('user_id') or row.get('account','')))+'\\n'+html.escape(str(row.get('details',{}))[:500]))\n"
-        "            buttons.append(('عرض الحالة '+row['_id'][:8],'cgx_issue_'+row['_id'][:40]))\n"
-        "        if not rows:lines.append('لا توجد حالات مفتوحة.')\n"
-        "        if page:buttons.append(('السابق','cgx_interventions_'+str(page-1)))\n"
-        "        if len(rows)>4:buttons.append(('التالي','cgx_interventions_'+str(page+1)))\n"
-        "        self.send(uid,'\\n'.join(lines),reply_markup=self.markup(buttons))\n"
-        '\n'
-        '    def intervention_detail(self,uid,prefix):\n'
-        "        row=self.db.cgpt_interventions.find_one({'_id':{'$regex':'^'+re.escape(prefix)}})\n"
-        "        if not row:raise ShopError('الحالة غير موجودة.',404)\n"
-        "        text='🛠 '+html.escape(str({k:v for k,v in row.items() if k!='_id'})[:2200])\n"
-        "        markup=self.markup(([('✉️ الرد على العميل','cgx_reply_'+row['_id'][:40])] if row.get('user_id') else [])+[('✅ تمت المراجعة','cgx_close_'+row['_id'][:40]),('القائمة','cgx_interventions')])\n"
-        "        if row.get('user_id'):markup.add(self.InlineKeyboardButton('مراسلة العميل',url='tg://user?id='+str(int(row['user_id']))))\n"
-        '        self.send(uid,text,reply_markup=markup)\n'
-        '\n'
-        '    def support_input(self,message,ident,uid):\n'
-        '        if message.from_user.id!=uid:return\n'
-        "        text=(message.text or '').strip()\n"
-        "        if text=='/cancel':return self.send(uid,'أُلغي إدخال التفاصيل. الطلب محفوظ للمتابعة.')\n"
-        "        if not text:return self.send(uid,'أرسل وصفًا نصيًا عبر فتح الدعم مجددًا.')\n"
-        "        self.db.cgpt_interventions.update_one({'_id':ident,'user_id':uid},{'$set':{'details':{'message':text[:1800]},'status':'open','updated_at':dt.datetime.utcnow()}})\n"
-        "        self.notice_once('ticket-details:'+ident,60,'📩 وصلت تفاصيل طلب دعم من '+str(uid),self.markup([('التدخلات','cgx_interventions')]))\n"
-        "        self.send(uid,'✅ وصلت تفاصيل المشكلة، وسترد الإدارة هنا في البوت.')\n"
-        '\n'
-        '    def support_reply_begin(self,uid,prefix):\n'
-        "        row=self.db.cgpt_interventions.find_one({'_id':{'$regex':'^'+re.escape(prefix)}})\n"
-        "        if not row or not isinstance(row.get('user_id'),int):raise ShopError('العميل غير معروف.')\n"
-        "        message=self.send(uid,'اكتب الرد الذي سيصل للعميل داخل البوت. للإلغاء /cancel')\n"
-        "        if message:self.bot.register_next_step_handler(message,self.support_reply,row['_id'],uid)\n"
-        '\n'
-        '    def support_reply(self,message,ident,admin_uid):\n'
-        "        if message.from_user.id!=admin_uid or not self.admin(admin_uid):raise ShopError('ليس لديك صلاحية.',403)\n"
-        "        text=(message.text or '').strip()\n"
-        "        if text=='/cancel':return self.send(admin_uid,'أُلغي الرد.')\n"
-        "        row=self.db.cgpt_interventions.find_one({'_id':ident})\n"
-        "        if not row or not text:raise ShopError('رد غير صالح.')\n"
-        "        reply_id=digest('support_reply',ident,admin_uid,message.message_id)\n"
-        "        self.db.notifications.update_one({'_id':reply_id},{'$setOnInsert':{'uids':[row['user_id']], 'text':'👨\u200d💻 رد الدعم:\\n'+html.escape(text[:1800]),'sent':False,'next_at':time.time(),'created':time.time(), 'markup':self.markup([('متابعة مع الدعم','cgb_ticket')]).to_json()}},upsert=True)\n"
-        "        self.db.cgpt_interventions.update_one({'_id':ident},{'$set':{'last_reply':text[:1800],'replied_by':admin_uid,'updated_at':dt.datetime.utcnow()}})\n"
-        "        self.send(admin_uid,'✅ حُفظ الرد في طابور الإرسال للعميل.')\n"
-        '\n'
-        '    def manual_remove(self,admin_uid,token):\n'
-        '        from chatgpt_service import SeatManager, account_lock\n'
-        "        if not self.admin(admin_uid):raise ShopError('ليس لديك صلاحية.',403)\n"
-        "        request=self.db.cgpt_removal_requests.find_one({'_id':token,'admin_uid':admin_uid})\n"
-        "        if not request or request['expires']<time.time():raise ShopError('انتهت صلاحية الزر؛ افتح قائمة النشطين مجددًا.',409)\n"
-        "        account=request['account'];email=request['email']\n"
-        '        doc=self.account_doc(account)\n'
-        "        if not doc:raise ShopError('الحساب غير موجود؛ لم يُحذف سجل العميل.',404)\n"
-        '        with account_lock(self.db,account):\n'
-        '            mgr=SeatManager.from_doc(doc)\n'
-        "            info=mgr.invites_data['invites'].get(email)\n"
-        "            if not info:raise ShopError('الاشتراك غير موجود.',404)\n"
-        "            replay=info.get('status')=='revoked' and info.get('removal_request')==token\n"
-        '            if not replay:\n'
-        "                if any(info.get(k)!=request['snapshot'].get(k) for k in ('status','expires_at','telegram_uid','last_job_id')):\n"
-        "                    raise ShopError('تغير الاشتراك منذ فتح القائمة؛ أعد فتحها قبل الطرد.',409)\n"
-        '                outcome=mgr.remove_by_email(email)\n'
-        "                if outcome not in ('member','pending','not_found'):\n"
-        "                    self.issue('removal_failed',account,email,info.get('telegram_uid'),{'reason':'فشل الطرد الإداري؛ لم يتغير الاشتراك.'})\n"
-        "                    raise ShopError('تعذر تأكيد الطرد؛ لم يُحذف السجل ولم يُرسل إشعار نجاح.',503)\n"
-        "                info.update(status='revoked',removed_at=dt.datetime.utcnow().isoformat(),removed_by=admin_uid,\n"
-        '                            removal_request=token,removal_outcome=outcome)\n'
-        '                mgr.allowed_emails.discard(email);mgr._save_data()\n'
-        "            outcome=info['removal_outcome'];uid=info.get('telegram_uid')\n"
-        '            if isinstance(uid,int):\n'
-        "                text=('تم طردك من مساحة عمل ChatGPT بواسطة الإدارة.' if outcome=='member' else\n"
-        "                      'ألغت الإدارة دعوتك إلى مساحة عمل ChatGPT.' if outcome=='pending' else\n"
-        "                      'أنهت الإدارة اشتراكك في مساحة عمل ChatGPT؛ لم توجد عضوية أو دعوة عند الفحص.')\n"
-        "                text+='\\nالبريد: <code>'+html.escape(email)+'</code>\\nللاستفسار تواصل مع الدعم.'\n"
-        "                self.db.notifications.update_one({'_id':digest('manual_removal',token)},{'$setOnInsert':{\n"
-        "                    'uids':[uid],'text':text,'markup':self.markup([('الدعم','cgb_support')]).to_json(),\n"
-        "                    'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
-        "            else:self.issue('removal_notice_missing_user',account,email,details={'reason':'تم إنهاء الاشتراك؛ لا يوجد معرف Telegram لإشعار العميل.'})\n"
-        "            self.db.cgpt_removal_requests.update_one({'_id':token},{'$set':{'status':'completed','outcome':outcome}})\n"
-        "            self.g.get('_CGPT_SEATS_CACHE',{})['exp']=0\n"
-        '        return outcome\n'
-    ),
-    'finance': (
-        '"""Durable financial operations. MongoDB replica-set transactions are required."""\n'
-        'import datetime as dt\n'
-        'import time\n'
-        'import uuid\n'
-        'from pymongo import ReturnDocument\n'
-        'from pymongo.read_concern import ReadConcern\n'
-        'from pymongo.write_concern import WriteConcern\n'
-        'from domain import ShopError, cents, quantity, canonical_tx, payment_namespace, digest\n'
-        '\n'
-        'class Finance:\n'
-        '    def __init__(self, db): self.db = db\n'
-        '\n'
-        '    def atomic(self, callback):\n'
-        '        with self.db.client.start_session() as session:\n'
-        "            return session.with_transaction(callback, read_concern=ReadConcern('snapshot'), write_concern=WriteConcern('majority'))\n"
-        '\n'
-        '    def user(self, uid, session):\n'
-        "        u = self.db.users.find_one({'user_id': uid}, session=session)\n"
-        "        if not u or u.get('is_banned') == 1:\n"
-        "            raise ShopError('الحساب غير متاح.', 403)\n"
-        '        return u\n'
-        '\n'
-        '    def change(self, uid, amount_cents, key, session, reason):\n'
-        "        old = self.db.wallet_ledger.find_one({'_id': key}, session=session)\n"
-        '        if old:\n'
-        "            if old['user_id'] != uid or old['amount_cents'] != amount_cents:\n"
-        "                raise ShopError('تعارض في هوية العملية المالية.', 409)\n"
-        '            return old\n'
-        "        u = self.user(uid, session) if amount_cents < 0 else self.db.users.find_one({'user_id':uid},session=session)\n"
-        "        if not u:raise ShopError('الحساب غير موجود.',404)\n"
-        "        balance = cents(u.get('balance', 0), minimum=-5000000, maximum=100000000000)\n"
-        "        if balance + amount_cents < 0: raise ShopError('رصيدك غير كافٍ.', 402)\n"
-        "        updated = self.db.users.update_one({'_id': u['_id'], 'balance': u.get('balance', 0)},\n"
-        "            {'$set': {'balance': (balance + amount_cents)/100}}, session=session)\n"
-        "        if updated.matched_count != 1: raise ShopError('تغير الرصيد، أعد المحاولة.',409)\n"
-        "        rec = {'_id':key, 'user_id':uid, 'amount_cents':amount_cents,\n"
-        "               'balance_after_cents':balance+amount_cents, 'reason':reason, 'created_at':dt.datetime.utcnow()}\n"
-        '        self.db.wallet_ledger.insert_one(rec, session=session)\n'
-        '        return rec\n'
-        '\n'
-        '    def credit(self, uid, amount, txid, method, pending_id=None):\n'
-        '        value=cents(amount,minimum=10)\n'
-        '        tx=canonical_tx(txid)\n'
-        '        # Blockchain transaction hashes must not be reused via another provider/label.\n'
-        '        ns=payment_namespace(method)\n'
-        "        key=digest('credit', 'chain' if len(tx)==64 and all(c in '0123456789abcdef' for c in tx) else ns,tx)\n"
-        '        def work(s):\n'
-        "            old=self.db.wallet_ledger.find_one({'_id':key},session=s)\n"
-        '            if old:\n'
-        "                if old['user_id'] != uid: raise ShopError('العملية مسجلة لحساب آخر؛ راجع الإدارة.',409)\n"
-        "                return {'ok':True,'already':True,'amount':old['amount_cents']/100}\n"
-        '            # Preserve historical records. Never guess whether an old split write credited a user.\n'
-        "            legacy=self.db.used_transactions.find_one({'transaction_id':{'$in':[tx,str(txid).strip(),str(txid).strip().lower(),str(txid).replace('0x','').lower()]}},session=s)\n"
-        '            if legacy:\n'
-        "                raise ShopError('عملية قديمة مسجلة؛ يلزم مطابقة السجل المالي من الإدارة.',409)\n"
-        '            p=None\n'
-        '            if pending_id:\n'
-        "                p=self.db.pending_deposits.find_one({'pending_id':pending_id,'user_id':uid,'status':{'$in':['pending','processing']}},session=s)\n"
-        "                if not p: raise ShopError('طلب الإيداع غير متاح.',409)\n"
-        "            self.change(uid,value,key,s,'deposit')\n"
-        "            self.db.used_transactions.insert_one({'transaction_id':tx,'namespace':ns,'ledger_id':key,\n"
-        "                'amount':value/100,'user_id':uid,'method':method,'created_at':int(time.time())},session=s)\n"
-        '            if p:\n'
-        "                self.db.pending_deposits.update_one({'_id':p['_id']},{'$set':{'status':'completed','credited_usd':value/100,'tx_id_detected':tx,'completed_at':int(time.time())}},session=s)\n"
-        "                self.db.users.update_one({'user_id':uid,'deposit_lock_pending_id':pending_id},{'$set':{'deposit_locked':False},'$unset':{'deposit_lock_pending_id':'','deposit_lock_expires':''}},session=s)\n"
-        "            return {'ok':True,'already':False,'amount':value/100}\n"
-        '        return self.atomic(work)\n'
-        '\n'
-        "    def buy_stock(self,uid,pid,qty,idem,via_api=False,buyer_info=''):\n"
-        '        qty=quantity(qty); pid=str(pid)\n'
-        "        key=digest('order',uid,idem); request=digest(pid,qty,buyer_info)\n"
-        '        oid=uuid.uuid4().hex\n'
-        '        def work(s):\n'
-        '            self.user(uid,s)\n'
-        "            old=self.db.shop_orders.find_one({'_id':key},session=s)\n"
-        '            if old:\n'
-        "                if old['request_hash']!=request: raise ShopError('مفتاح الطلب مستعمل لطلب مختلف.',409)\n"
-        '                return old\n'
-        "            qs=[{'id':pid},{'_id':pid}]\n"
-        "            if pid.isdigit(): qs.extend([{'id':int(pid)},{'id':float(pid)}])\n"
-        '            from bson import ObjectId\n'
-        "            if ObjectId.is_valid(pid): qs.append({'_id':ObjectId(pid)})\n"
-        "            p=self.db.products.find_one({'$or':qs,'is_hidden':{'$ne':True}},session=s)\n"
-        "            if not p: raise ShopError('المنتج غير متاح.',404)\n"
-        "            if p.get('product_type') in ('chatgpt_seat','cgpt_main'):\n"
-        "                raise ShopError('اختر باقة ChatGPT وأدخل البريد من شاشة الاشتراكات.')\n"
-        "            unit=cents(p.get('price',0),minimum=1)\n"
-        "            for t in sorted(p.get('discount_tiers',[]),key=lambda x:x.get('min_qty',0),reverse=True):\n"
-        "                if qty>=quantity(t.get('min_qty',1),1000):\n"
-        "                    unit=cents(t.get('price',unit/100),minimum=1); break\n"
-        '            total=unit*qty\n'
-        "            if total>5000000: raise ShopError('قيمة الطلب أعلى من الحد المسموح.')\n"
-        "            canonical=str(p.get('id',p['_id'])); codes=[]\n"
-        "            if not p.get('is_manual'):\n"
-        '                values=[canonical]\n'
-        '                if canonical.isdigit(): values.extend([int(canonical),float(canonical)])\n'
-        '                for _ in range(qty):\n'
-        "                    item=self.db.product_stock.find_one_and_update({'product_id':{'$in':values},'is_sold':False},\n"
-        "                        {'$set':{'is_sold':True,'order_id':oid,'sold_at':int(time.time())}},return_document=ReturnDocument.AFTER,session=s)\n"
-        "                    if not item or not item.get('code_line'): raise ShopError('المخزون غير كافٍ؛ لم يُخصم رصيد.',409)\n"
-        "                    codes.append(item['code_line'])\n"
-        "            ledger=self.change(uid,-total,'debit:'+key,s,'purchase')\n"
-        "            rec={'_id':key,'order_id':oid,'user_id':uid,'product_id':canonical,'product_name':p.get('name_ar',p.get('name_en','')),\n"
-        "                'qty':qty,'unit_price':unit/100,'total_price':total/100,'codes':codes,'request_hash':request,\n"
-        "                'status':'pending_manual' if p.get('is_manual') else 'completed','delivery_status':'pending',\n"
-        "                'via_api':via_api,'buyer_info':buyer_info,'created_at':dt.datetime.utcnow(),'new_balance':ledger['balance_after_cents']/100}\n"
-        '            self.db.shop_orders.insert_one(rec,session=s)\n'
-        "            for code in codes or ['طلب يدوي: '+oid]:\n"
-        "                self.db.orders.insert_one({'user_id':uid,'order_id':oid,'product_id':canonical,'code_delivered':code,\n"
-        "                    'qty':1 if codes else qty,'price':unit/100,'total_price':unit/100 if codes else total/100,\n"
-        "                    'status':rec['status'],'via_api':via_api,'created_at':dt.datetime.utcnow()},session=s)\n"
-        '            if via_api:\n'
-        "                self.db.api_orders.insert_one({k:v for k,v in {**rec,'api_user_id':uid}.items() if k!='_id'},session=s)\n"
-        '            return rec\n'
-        '        return self.atomic(work)\n'
-        '\n'
-        '    def reserve_external(self,uid,amount,idem,kind,details):\n'
-        "        value=cents(amount,minimum=1); key=digest('external',uid,idem); signature=digest(kind,details,value)\n"
-        '        def work(s):\n'
-        '            self.user(uid,s)\n'
-        "            old=self.db.external_jobs.find_one({'_id':key},session=s)\n"
-        '            if old:\n'
-        "                if old['signature']!=signature: raise ShopError('مفتاح الطلب مستخدم لعملية مختلفة.',409)\n"
-        '                return old\n'
-        "            self.change(uid,-value,'debit:'+key,s,kind)\n"
-        "            doc={'_id':key,'order_id':uuid.uuid4().hex,'user_id':uid,'amount_cents':value,'signature':signature,\n"
-        "                 'kind':kind,'details':details,'status':'queued','created_at':dt.datetime.utcnow()}\n"
-        '            self.db.external_jobs.insert_one(doc,session=s)\n'
-        '            return doc\n'
-        '        return self.atomic(work)\n'
-        '\n'
-        '    def refund(self,jobid,reason):\n'
-        '        def work(s):\n'
-        "            j=self.db.external_jobs.find_one({'_id':jobid},session=s)\n"
-        "            if not j: raise ShopError('الطلب غير موجود.',404)\n"
-        "            if j['status']=='refunded': return j\n"
-        "            if j['status'] not in ('queued','rejected'): raise ShopError('نتيجة الطلب غير محسومة؛ يلزم التحقق قبل الاسترجاع.',409)\n"
-        "            self.change(j['user_id'],j['amount_cents'],'refund:'+jobid,s,reason)\n"
-        "            self.db.external_jobs.update_one({'_id':jobid},{'$set':{'status':'refunded','refund_reason':reason}},session=s)\n"
-        "            return {**j,'status':'refunded'}\n"
-        '        return self.atomic(work)\n'
-    ),
-    'runtime': (
-        '"""Safe services used by the preserved Telegram UI in bot.py."""\n'
-        'import contextvars\n'
-        'import datetime as dt\n'
-        'import functools\n'
-        'import html\n'
-        'import io\n'
-        'import json\n'
-        'import logging\n'
-        'import re\n'
-        'import secrets\n'
-        'import threading\n'
-        'import time\n'
-        'import uuid\n'
-        'from bson import ObjectId\n'
-        'from pymongo.errors import DuplicateKeyError\n'
-        'from domain import ShopError, cents, quantity, canonical_tx, digest, finite_float\n'
-        'from finance import Finance\n'
-        'from network import public_endpoint,post_webhook\n'
-        'from chatgpt_service import SeatManager,configure,date,parse_cookies,account_candidates\n'
-        '\n'
-        "_ADMIN=contextvars.ContextVar('admin_action',default=False)\n"
-        '\n'
-        'from customer_service import CustomerService\n'
-        '\n'
-        'class Runtime(CustomerService):\n'
-        '    def __init__(self,g):self.g=g;self.ready=False;self._stop=threading.Event()\n'
-        '    def __getattr__(self,name):return self.g[name]\n'
-        '    @property\n'
-        '    def finance(self):return Finance(self.db)\n'
-        '    def send(self,uid,text,**kwargs):\n'
-        "        try:return self.bot.send_message(uid,text,parse_mode='HTML',**kwargs)\n"
-        '        except Exception:\n'
-        "            self.logger.warning('Notification delivery failed (uid=%s)',uid)\n"
-        '            return None\n'
-        '    def admin(self,uid):\n'
-        '        if uid==self.OWNER_ID and uid:return True\n'
-        "        u=self.db.users.find_one({'user_id':uid})\n"
-        "        return bool(u and u.get('is_admin')==1 and u.get('is_banned')!=1)\n"
-        '    def guard(self,func,admin=False):\n'
-        '        @functools.wraps(func)\n'
-        '        def wrapped(event,*a,**kw):\n'
-        '            uid=event.from_user.id\n'
-        '            if admin and not self.admin(uid):\n'
-        "                self.send(uid,'❌ ليس لديك صلاحية.');return\n"
-        '            token=_ADMIN.set(admin or _ADMIN.get())\n'
-        '            try:\n'
-        "                if hasattr(event,'data') and (str(event.data).startswith(('open_','cat_','vi_p_','cgsub_back','cgb_portal','cgpt_cust_')) or event.data in ('main_menu_refresh','admin_panel_main','cgpt_accounts')):\n"
-        '                    self.bot.clear_step_handler_by_chat_id(event.from_user.id)\n'
-        '                return func(event,*a,**kw)\n'
-        "            except ShopError as e:self.send(uid,'❌ '+html.escape(str(e)))\n"
-        '            except (ValueError,TypeError) as e:\n'
-        "                self.logger.warning('Invalid input in %s',func.__name__)\n"
-        "                self.send(uid,'❌ البيانات غير صالحة. أعد فتح العملية وحاول مجددًا.')\n"
-        '            except Exception:\n'
-        "                self.logger.exception('Handler failed: %s',func.__name__)\n"
-        "                self.send(uid,'⚠️ تعذر إكمال الإجراء. إذا كان طلب شراء فراجع سجل الطلبات قبل إعادة المحاولة.')\n"
-        '            finally:_ADMIN.reset(token)\n'
-        '        return wrapped\n'
-        '    def install_handlers(self,admin_names):\n'
-        '        for collection in (self.bot.callback_query_handlers,self.bot.message_handlers):\n'
-        '            for handler in collection:\n'
-        "                f=handler['function'];handler['function']=self.guard(f,f.__name__ in admin_names)\n"
-        '        original=self.bot.register_next_step_handler\n'
-        '        def register(message,callback,*args,**kwargs):\n'
-        '            owner=message.chat.id;requires_admin=_ADMIN.get() or callback.__name__ in admin_names\n'
-        '            def next_step(incoming,*a,**kw):\n'
-        '                if incoming.from_user.id!=owner or incoming.chat.id!=owner:\n'
-        '                    return\n'
-        '                return self.guard(callback,requires_admin)(incoming,*a,**kw)\n'
-        '            return original(message,next_step,*args,**kwargs)\n'
-        '        self.bot.register_next_step_handler=register\n'
-        '\n'
-        '    def _repair_duplicate_users(self):\n'
-        '        """Archive duplicate users and keep the oldest record used historically."""\n'
-        "        groups=self.db.users.aggregate([{'$match':{'user_id':{'$exists':True,'$ne':None}}},{'$group':{'_id':'$user_id','ids':{'$push':'$_id'},'count':{'$sum':1}}},{'$match':{'count':{'$gt':1}}}],allowDiskUse=True)\n"
-        '        repaired=0\n'
-        '        for group in groups:\n'
-        "            docs=list(self.db.users.find({'_id':{'$in':group['ids']}}).sort('_id',1))\n"
-        '            if len(docs)<2:continue\n'
-        '            canonical,duplicates=docs[0],docs[1:]\n'
-        '            now=dt.datetime.now(dt.timezone.utc)\n'
-        '            for duplicate in duplicates:\n'
-        "                archive_id=str(group['_id'])+':'+str(duplicate['_id'])\n"
-        "                self.db.users_duplicates_archive.replace_one({'_id':archive_id},{'_id':archive_id,'user_id':group['_id'],'kept_id':canonical['_id'],'duplicate_id':duplicate['_id'],'document':duplicate,'archived_at':now},upsert=True)\n"
-        '            # Only fill fields absent from the canonical record. In particular,\n'
-        '            # balances are never added together or overwritten automatically.\n'
-        '            missing={}\n'
-        '            for duplicate in duplicates:\n'
-        '                for key,value in duplicate.items():\n'
-        "                    if key not in ('_id','user_id') and key not in canonical and key not in missing:missing[key]=value\n"
-        "            if missing:self.db.users.update_one({'_id':canonical['_id']},{'$set':missing})\n"
-        "            result=self.db.users.delete_many({'_id':{'$in':[doc['_id'] for doc in duplicates]}})\n"
-        '            repaired+=result.deleted_count\n'
-        '        if repaired:self.logger.warning(\'Archived and removed %s duplicate user records; review users_duplicates_archive.\',repaired)\n'
-        '\n'
-        '    def initialize(self):\n'
-        '        configure(self.g)\n'
-        "        hello=self.mongo_client.admin.command('hello')\n"
-        "        if not hello.get('setName') and hello.get('msg')!='isdbgrid':\n"
-        "            raise RuntimeError('MongoDB replica set/Atlas is required for financial transactions. See README_AR.md.')\n"
-        "        for name in ('wallet_ledger','shop_orders','external_jobs','cgpt_invites_data','cgpt_account_locks','cgpt_checkout',\n"
-        "                     'notifications','api_events','event_receipts','api_webhooks','webhook_jobs','counters','quote_locks','quote_slots'):\n"
-        '            if name not in self.db.list_collection_names():self.db.create_collection(name)\n'
-        '        self._repair_duplicate_users()\n'
-        "        self.db.users.create_index('user_id',unique=True)\n"
-        "        self.db.shop_orders.create_index('order_id',unique=True)\n"
-        "        self.db.external_jobs.create_index('order_id',unique=True)\n"
-        "        self.db.external_jobs.create_index([('status',1),('next_reconcile_at',1)])\n"
-        "        self.db.api_webhooks.create_index('api_user_id',unique=True)\n"
-        "        self.db.api_events.create_index('created_at',expireAfterSeconds=86400)\n"
-        "        self.db.api_events.create_index('sequence',unique=True,sparse=True)\n"
-        "        self.db.webhook_jobs.create_index([('status',1),('next_at',1)])\n"
-        "        self.db.notifications.create_index([('sent',1),('next_at',1)])\n"
-        "        self.db.cgpt_checkout.create_index('user_id',unique=True)\n"
-        "        self.db.cgpt_removal_requests.create_index([('admin_uid',1),('status',1)])\n"
-        "        self.db.quote_slots.create_index('expires_at',expireAfterSeconds=0)\n"
-        "        self.db.pending_deposits.create_index('pending_id',unique=True)\n"
-        '        # Drop only the incorrect constraint, keep every historical financial record.\n'
-        '        for name,info in self.db.used_transactions.index_information().items():\n'
-        "            if list(info.get('key',[]))==[('fingerprint',1)] and info.get('unique'):\n"
-        '                self.db.used_transactions.drop_index(name)\n'
-        "        self.db.used_transactions.create_index('ledger_id',unique=True,sparse=True)\n"
-        "        self.db.referrals_v2.create_index('invited_id',unique=True)\n"
-        "        self.db.referrals_v2.create_index([('referrer_id',1),('status',1)])\n"
-        "        if '_ops' in self.g:self.g['_ops'].initialize()\n"
-        '        self.ready=True\n'
-        '\n'
-        '    def notice_once(self,key,seconds,text,markup=None):\n'
-        "        now=time.time();old=self.db.notifications.find_one({'_id':key})\n"
-        "        if old and old.get('created',0)>now-seconds:return\n"
-        "        ids={self.OWNER_ID}|{u['user_id'] for u in self.db.users.find({'is_admin':1,'is_banned':{'$ne':1}})}\n"
-        "        self.db.notifications.update_one({'_id':key},{'$set':{'created':now,'text':text,'uids':list(ids-{0}),\n"
-        "            'markup':markup.to_json() if markup else None,'sent':False,'next_at':now}},upsert=True)\n"
-        '\n'
-        '    def normalize_tx_id(self,tx_id):\n'
-        '        try:return canonical_tx(tx_id)\n'
-        "        except ShopError:return ''\n"
-        '    def credit_user(self,uid,amt,tx_id,lang,method,trusted_txid=False):\n'
-        '        try:\n'
-        "            pending=self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','base_amount_usd':cents(amt,minimum=10)/100})\n"
-        "            result=self.finance.credit(uid,amt,tx_id,method,pending['pending_id'] if pending else None)\n"
-        '            self._invalidate_user_cache(uid)\n'
-        "            if not result['already']:self.send(uid,self.get_text(uid,'dep_success',result['amount']))\n"
-        '            return result\n'
-        '        except ShopError as e:\n'
-        "            self.send(uid,'⚠️ '+html.escape(str(e)));return {'ok':False,'error':str(e)}\n"
-        '    def auto_credit_from_pending(self,pending,tx_id_for_record,method_label,actual_usd=None):\n'
-        "        amount=pending['base_amount_usd'] if actual_usd is None else actual_usd\n"
-        '        try:\n'
-        "            result=self.finance.credit(pending['user_id'],amount,tx_id_for_record,method_label,pending['pending_id'])\n"
-        "            self._invalidate_user_cache(pending['user_id'])\n"
-        "            if not result['already']:self.send(pending['user_id'],self.get_text(pending['user_id'],'dep_success',result['amount']))\n"
-        '            return True\n'
-        '        except Exception:\n'
-        "            self.logger.exception('Deposit not credited; pending retained')\n"
-        '            return False\n'
-        '    def check_duplicate_transaction(self,uid,amount,method,sender_addr=None,receiver_addr=None,tx_timestamp=None,tx_id_clean=None,trusted_txid=False):\n'
-        '        if not tx_id_clean:return None\n'
-        "        r=self.db.used_transactions.find_one({'transaction_id':canonical_tx(tx_id_clean)})\n"
-        "        return {'match_type':'tx_id','original_uid':r['user_id'],'original_amount':r.get('amount',0),'original_record':r} if r else None\n"
-        '    def collision_review(self,*args,**kwargs):\n'
-        "        self.notice_once('deposit-review:'+digest(args),3600,'⚠️ محاولة استخدام إيداع مسجل. يلزم التحقق من السجل؛ لم يُحظر صاحب الإيداع تلقائيًا.')\n"
-        '        return False\n'
-        '\n'
-        '    def _do_purchase(self,uid,pid,qty,lang,idem=None):\n'
-        '        qty=quantity(qty)\n'
-        '        p=self._find_product_db(pid)\n'
-        "        if p and p.get('product_type') in ('chatgpt_seat','cgpt_main'):\n"
-        "            raise ShopError('اختر المدة من صفحة ChatGPT لإكمال الشراء بالبريد.')\n"
-        '        order=self.finance.buy_stock(uid,pid,qty,idem or uuid.uuid4().hex)\n'
-        '        self._invalidate_user_cache(uid);self._invalidate_products_cache()\n'
-        '        self.deliver_order(order)\n'
-        "        self.emit_event('stock.sold',{'product_id':order['product_id'],'qty_sold':order['qty'],'remaining_stock':self.get_product_stock_count(order['product_id'])},order['product_id'])\n"
-        '        return order\n'
-        '    def confirm_buy_handler(self,call):\n'
-        "        uid=call.from_user.id;parts=call.data.split('_');qty=quantity(parts[-1]);pid='_'.join(parts[2:-1])\n"
-        '        self.bot.answer_callback_query(call.id)\n'
-        "        return self._do_purchase(uid,pid,qty,self.get_lang(uid),f'tg:{call.message.chat.id}:{call.message.message_id}')\n"
-        '    def deliver_order(self,order):\n'
-        "        uid=order['user_id']\n"
-        "        if order['status']=='pending_manual':\n"
-        '            self.send(uid,f"✅ طلبك محفوظ للتسليم اليدوي.\\nرقم الطلب: <code>{order[\'order_id\']}</code>")\n'
-        '            self.notice_once(\'manual:\'+order[\'order_id\'],86400,f"📦 طلب يدوي جديد: <code>{order[\'order_id\']}</code> — {order[\'qty\']} قطعة")\n'
-        '            return\n'
-        "        if len(order['codes'])!=order['qty']:raise ShopError('الطلب يحتاج مراجعة، لم يُعلن اكتمال التسليم.',409)\n"
-        "        f=io.BytesIO(('\\n'.join(order['codes'])).encode());f.name='order_'+order['order_id']+'.txt'\n"
-        '        try:\n'
-        '            self.bot.send_document(uid,f,caption=f"✅ تم الشراء — {order[\'qty\']} قطعة، ${order[\'total_price\']:.2f}\\nرقم الطلب: {order[\'order_id\']}")\n'
-        "            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'delivered'}})\n"
-        '        except Exception:\n'
-        '            # Delivery might have succeeded at Telegram; never refund/re-sell those codes.\n'
-        "            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'retry'}})\n"
-        "            self.send(uid,'📄 الأكواد محفوظة في سجل مشترياتك. يمكنك تنزيلها مجددًا؛ لن يُخصم رصيد جديد.')\n"
-        '        self.reward_once(order)\n'
-        '    def reward_once(self,order):\n'
-        "        if order['status']!='completed':return\n"
-        "        ref=self.db.referrals_v2.find_one({'invited_id':order['user_id']})\n"
-        "        if not ref or order['total_price']<=self.get_referral_min_purchase():return\n"
-        "        rid=int(ref.get('referrer_id',0));reward=cents(self.get_referral_purchase_reward(),minimum=0)\n"
-        '        if not rid or not reward:return\n'
-        "        try:self.finance.atomic(lambda s:self.finance.change(rid,reward,'referral:'+order['order_id'],s,'purchase_referral'))\n"
-        '        except ShopError:pass\n'
-        '        self._invalidate_user_cache(rid)\n'
-        '\n'
-        '    def get_api_user(self,key):\n'
-        "        doc=self.db.api_keys.find_one({'api_key':key,'is_active':True})\n"
-        '        if not doc:return None,None\n'
-        "        u=self.db.users.find_one({'user_id':doc['user_id'],'is_banned':{'$ne':1}})\n"
-        '        return (doc,u) if u else (None,None)\n'
-        '\n'
-        '    def emit_event(self,event_type,data,product_id=None):\n'
-        "        if data.get('source')=='external_api' and event_type in ('product.created','product.updated'):return\n"
-        '        # Orders are private. Catalog events never expose buyer/order details.\n'
-        "        owner=data.get('api_user_id') if event_type.startswith('order.') else None\n"
-        "        if event_type.startswith('order.') and owner is None:return\n"
-        "        public={k:v for k,v in data.items() if k not in ('buyer_user_id','api_user_id','order_id','total_price','codes','email')}\n"
-        '        if owner is not None:public=dict(data)\n'
-        "        event_key=digest('event',event_type,data['order_id']) if data.get('order_id') else uuid.uuid4().hex\n"
-        '        def work(s):\n'
-        "            if self.db.event_receipts.find_one({'_id':event_key},session=s):return\n"
-        "            seq=self.db.counters.find_one_and_update({'_id':'events'},{'$inc':{'value':1}},upsert=True,return_document=True,session=s)['value']\n"
-        "            event={'_id':event_key,'event_id':event_key,'sequence':seq,'event_type':event_type,'timestamp':int(time.time()),\n"
-        "                   'created_at':dt.datetime.utcnow(),'data':public,'product_id':str(product_id) if product_id else None,'owner_uid':owner}\n"
-        "            self.db.event_receipts.insert_one({'_id':event_key,'created_at':dt.datetime.utcnow()},session=s)\n"
-        '            self.db.api_events.insert_one(event,session=s)\n'
-        "            for hook in self.db.api_webhooks.find({'is_active':True},session=s):\n"
-        "                if owner is not None and hook['api_user_id']!=owner:continue\n"
-        "                self.db.webhook_jobs.insert_one({'_id':digest(event['event_id'],hook['_id']),'hook_id':hook['_id'],'event':{k:v for k,v in event.items() if k not in ('_id','created_at','owner_uid')},'status':'pending','attempts':0,'next_at':time.time()},session=s)\n"
-        '        try:self.finance.atomic(work)\n'
-        "        except Exception:self.logger.exception('Event persistence failed')\n"
-        '    def deliver_webhook(self,hook,event):\n'
-        "        if hook.get('event_filter') and event['event_type'] not in hook['event_filter'] and event['event_type']!='webhook.test':return True\n"
-        "        body=json.dumps(event,ensure_ascii=False,separators=(',',':')).encode();timestamp=str(int(time.time()))\n"
-        "        sig=self._sign_webhook_body(hook.get('secret',''),body,timestamp)\n"
-        "        try:return post_webhook(hook['url'],body,{'Content-Type':'application/json','X-Event-Id':event['event_id'],\n"
-        "            'X-Event-Type':event['event_type'],'X-Webhook-Timestamp':timestamp,'X-Webhook-Signature':'sha256='+sig})\n"
-        '        except Exception:return False\n'
-        '    def webhook_worker(self):\n'
-        '        while not self._stop.wait(1):\n'
-        '            now=time.time()\n'
-        "            job=self.db.webhook_jobs.find_one_and_update({'status':{'$in':['pending','sending']},'next_at':{'$lte':now}},\n"
-        "                {'$set':{'status':'sending','next_at':now+60},'$inc':{'attempts':1}},return_document=True)\n"
-        '            if not job:\n'
-        '                self._stop.wait(9);continue\n'
-        "            hook=self.db.api_webhooks.find_one({'_id':job['hook_id'],'is_active':True})\n"
-        "            ok=not hook or self.deliver_webhook(hook,job['event'])\n"
-        "            state='sent' if ok else 'failed' if job['attempts']>=8 else 'pending'\n"
-        "            self.db.webhook_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'next_at':time.time()+min(3600,2**job['attempts'])}})\n"
-        "            if state=='failed':self.notice_once('webhook-failed',3600,'⚠️ فشل تسليم بعض webhooks بعد إعادة المحاولة. الأحداث متاحة في API لمدة 24 ساعة.')\n"
-        '\n'
-        '    def generate_unique_amount_for_user(self,base_amount_usd,uid,coin):\n'
-        '        base=cents(base_amount_usd,minimum=100,maximum=1000000)/100\n'
-        "        group='shared-usdt' if coin in ('USDT','USDT_BEP20') or str(coin).startswith('BYBIT') else coin\n"
-        '        def reserve(session):\n'
-        '            # A shared write serializes quote allocation across concurrent processes.\n'
-        "            self.db.quote_locks.update_one({'_id':group},{'$inc':{'revision':1}},upsert=True,session=session)\n"
-        "            now=dt.datetime.utcnow();spacing=0.002 if group!='shared-usdt' else 0.0003\n"
-        '            for _ in range(400):\n'
-        "                extra=secrets.randbelow(95)+5 if str(coin).startswith('BYBIT') else secrets.randbelow(9900)+100\n"
-        "                value=round(base+extra/(100 if str(coin).startswith('BYBIT') else 1000000),6)\n"
-        "                clash=self.db.quote_slots.find_one({'group':group,'expires_at':{'$gt':now},'amount':{'$gte':value-spacing,'$lte':value+spacing}},session=session)\n"
-        "                old=self.db.pending_deposits.find_one({'status':'pending','unique_amount_usd':{'$gte':value-spacing,'$lte':value+spacing},'expires_at':{'$gt':int(time.time())}},session=session)\n"
-        '                if clash or old:continue\n'
-        "                self.db.quote_slots.insert_one({'_id':uuid.uuid4().hex,'group':group,'uid':uid,'coin':coin,'amount':value,'expires_at':now+dt.timedelta(hours=2)},session=session)\n"
-        '                return value\n'
-        "            raise ShopError('مجال مبالغ الإيداع مشغول حاليًا. حاول لاحقًا.',409)\n"
-        '        return self.finance.atomic(reserve)\n'
-        '    def register_pending_deposit(self,uid,base_amount_usd,unique_amount_usd,coin,sender_uid=None):\n'
-        '        cents(base_amount_usd,minimum=100);unique=finite_float(unique_amount_usd)\n'
-        '        price=None;units=None\n'
-        "        if coin in ('LTC','TON'):\n"
-        "            price=self.get_ltc_price_usd() if coin=='LTC' else self.get_ton_price_usd()\n"
-        "            if not price or price<=0:raise ShopError('تعذر تثبيت سعر العملة الآن.',503)\n"
-        "            scale=100000000 if coin=='LTC' else 1000000000\n"
-        '            units=round(unique/price*scale)\n'
-        '        pending_id=uuid.uuid4().hex\n'
-        '        def work(s):\n'
-        '            self.finance.user(uid,s)\n'
-        "            self.db.quote_locks.update_one({'_id':'user:'+str(uid)},{'$inc':{'revision':1}},upsert=True,session=s)\n"
-        "            if self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','expires_at':{'$gt':int(time.time())}},session=s):\n"
-        "                raise ShopError('لديك إيداع معلق؛ أكمله أو ألغِه أولًا.',409)\n"
-        "            rec={'pending_id':pending_id,'user_id':uid,'base_amount_usd':cents(base_amount_usd)/100,\n"
-        "                'unique_amount_usd':unique,'coin':coin,'status':'pending','created_at':int(time.time()),'expires_at':int(time.time())+7200}\n"
-        '            if price:rec.update(quoted_price=price,crypto_units=units)\n'
-        "            if sender_uid:rec['sender_uid']=str(sender_uid)\n"
-        '            self.db.pending_deposits.insert_one(rec,session=s)\n'
-        "            self.db.users.update_one({'user_id':uid},{'$set':{'deposit_locked':True,'deposit_lock_pending_id':pending_id,'deposit_lock_expires':rec['expires_at']}},session=s)\n"
-        '            return rec\n'
-        '        return self.finance.atomic(work)\n'
-        '    def native_pending(self,coin,units,tx_time):\n'
-        '        if not tx_time or int(tx_time)>int(time.time())+60:return None\n'
-        "        records=list(self.db.pending_deposits.find({'coin':coin,'status':'pending','crypto_units':int(units),\n"
-        "            'created_at':{'$lte':int(tx_time)},'expires_at':{'$gt':int(time.time()),'$gte':int(tx_time)}}))\n"
-        '        return records[0] if len(records)==1 else None\n'
-        '\n'
-        '    def check_ltc_blockchain_auto(self):\n'
-        "        wallet=self.get_setting('ltc_address')\n"
-        "        if not wallet or wallet=='Not Set':return\n"
-        "        res=self.requests.get(f'https://litecoinspace.org/api/address/{wallet}/txs',timeout=10)\n"
-        '        if res.status_code!=200:return\n'
-        '        for tx in res.json():\n'
-        "            if not tx.get('status',{}).get('confirmed'):continue\n"
-        "            if any(v.get('prevout',{}).get('scriptpubkey_address')==wallet for v in tx.get('vin',[])):continue\n"
-        "            units=sum(int(v.get('value',0)) for v in tx.get('vout',[]) if v.get('scriptpubkey_address')==wallet)\n"
-        "            p=self.native_pending('LTC',units,tx.get('status',{}).get('block_time'))\n"
-        "            if p:self.auto_credit_from_pending(p,tx['txid'],'Litecoin (LTC) Auto')\n"
-        '    def check_ton_blockchain_auto(self):\n'
-        '        from ton_payments import TonClient\n'
-        "        pending=list(self.db.pending_deposits.find({'coin':'TON','status':'pending','expires_at':{'$gt':int(time.time())}}))\n"
-        '        if not pending:return\n'
-        "        client=TonClient(self.requests,self.get_setting('ton_address'))\n"
-        "        for hit in client.recent(min(p['created_at'] for p in pending)):\n"
-        "            p=self.native_pending('TON',hit['units'],hit['utime'])\n"
-        "            if p:self.auto_credit_from_pending(p,hit['hash'],'Toncoin (TON) Auto')\n"
-        '\n'
-        '\n'
-        '    def ct(self,uid,key,**values):\n'
-        '        from cms import render\n'
-        '        return render(self.db,key,self.get_lang(uid),**values)\n'
-        '    def markup(self,buttons):\n'
-        '        m=self.InlineKeyboardMarkup(row_width=1)\n'
-        '        for label,data in buttons:m.add(self.InlineKeyboardButton(label,callback_data=data))\n'
-        '        return m\n'
-        '    def cg_button(self,uid,key,data):\n'
-        "        doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':self.get_lang(uid)}) or {}\n"
-        "        return self.InlineKeyboardButton(self.ct(uid,key),callback_data=data,icon_custom_emoji_id=str(doc['emoji_id']) if str(doc.get('emoji_id') or '').isdigit() else None)\n"
-        '    def account_doc(self,key):\n'
-        "        if key=='main':return self.db.cgpt_cookies.find_one({'_id':'main'})\n"
-        "        if not ObjectId.is_valid(key):raise ShopError('معرّف الحساب غير صالح.')\n"
-        "        return self.db.cgpt_accounts.find_one({'_id':ObjectId(key)})\n"
-        '    def account_info(self,doc):\n'
-        '        mgr=SeatManager.from_doc(doc);rep=mgr.diagnose()\n'
-        "        return {**rep,'id':str(doc['_id']),'email':mgr.owner_email,'name':doc.get('name','حساب'),'mgr':mgr,'manual':rep.get('capacity_source')=='manual'}\n"
-        '    def find_account(self):\n'
-        '        for doc in self._cgpt_all_accounts():\n'
-        '            info=self.account_info(doc)\n'
-        "            if info['connected'] and info.get('status')=='active' and info.get('available_seats') is not None and info['available_seats']>0:return info\n"
-        '        return None\n'
-        '    def account_report(self,key):\n'
-        '        doc=self.account_doc(key)\n'
-        "        if not doc:raise ShopError('الحساب غير موجود.',404)\n"
-        '        rep=self.account_info(doc)\n'
-        "        def show(v):return 'غير متاح من المصدر' if v is None else str(v)\n"
-        "        state={'active':'✅ نشط','cookies_expired':'🍪 الكوكيز منتهية','deactivated':'⛔ الاشتراك غير نشط','unknown':'❔ غير مؤكد','unavailable':'⏳ تعذر الاتصال'}.get(rep.get('status'),'❔ غير مؤكد')\n"
-        '        lines=[f"🏢 <b>{html.escape(doc.get(\'name\',rep[\'email\']) or \'ChatGPT Business\')}</b>",state,\n'
-        '               f"🪑 الإجمالي: {show(rep.get(\'total_seats\'))}",f"👥 الأعضاء (يشمل المالك): {show(rep.get(\'member_count\'))}",\n'
-        '               f"✉️ دعوات معلقة: {show(rep.get(\'pending_invites\'))}",f"🟢 المتاح للبيع: {show(rep.get(\'available_seats\'))}"]\n'
-        "        if rep.get('capacity_source')=='manual':lines.append('السعة مضبوطة يدويًا؛ استخدام المقاعد مقروء من الحساب.')\n"
-        "        lines.append('📅 نهاية الاشتراك: '+show(rep.get('expires_at')))\n"
-        "        if rep.get('renews_at'):lines.append('🧾 موعد التجديد/الفاتورة: '+rep['renews_at'])\n"
-        "        buttons=[('🔄 إعادة الفحص','cgx_account_'+key),('🍪 تحديث الكوكيز','cgx_cookie_'+key),('🪑 ضبط السعة يدويًا','cgpt_setseats_'+key),('🔙 الحسابات','cgpt_accounts')]\n"
-        "        return '\\n'.join(lines),self.markup(buttons)\n"
-        '    def accounts_ui(self,call):\n'
-        '        buttons=[]\n'
-        "        for doc in self._cgpt_all_accounts():buttons.append(('🏢 '+str(doc.get('name') or doc.get('data',{}).get('user',{}).get('email','حساب'))[:40],'cgx_account_'+str(doc['_id'])))\n"
-        "        buttons.extend([('➕ إضافة حساب','cgx_cookie_new'),('🔙 ChatGPT','ad_cgpt_panel')])\n"
-        "        self.send(call.from_user.id,'🏢 اختر الحساب لعرض المقاعد والاشتراك وتحديث الكوكيز.',reply_markup=self.markup(buttons))\n"
-        "    def cookies_begin(self,call,key='main'):\n"
-        "        if key not in ('main','new') and not self.account_doc(key):raise ShopError('الحساب غير موجود.')\n"
-        '        uid=call.from_user.id\n'
-        "        self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'cookies','account_key':key,'expires':time.time()+600}},upsert=True)\n"
-        "        m=self.send(uid,'🍪 أرسل الكوكيز كنص أو ملف <b>JSON / TXT</b> حتى 256KB.\\nيدعم ملف جلسة، قائمة كوكيز المتصفح، أو نص Cookie.\\nلن نستبدل البيانات السابقة إلا بعد نجاح التحقق من الحساب.\\nأرسل /cancel للإلغاء.')\n"
-        '        if m:self.bot.register_next_step_handler(m,self.cookies_input)\n'
-        '    def cookies_input(self,message):\n'
-        '        uid=message.from_user.id\n'
-        "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
-        "        pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'cookies','expires':{'$gt':time.time()}})\n"
-        "        if not pending:raise ShopError('انتهت جلسة التحديث؛ افتح الزر مجددًا.')\n"
-        "        if (message.text or '').strip() in ('/cancel','إلغاء','الغاء'):\n"
-        "            self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.send(uid,'أُلغي التحديث.');return\n"
-        "        raw=message.text or ''\n"
-        '        if message.document:\n'
-        '            doc=message.document\n'
-        "            if doc.file_size is None or doc.file_size>262144 or not str(doc.file_name).lower().endswith(('.json','.txt')):raise ShopError('أرسل ملف JSON/TXT حتى 256KB.')\n"
-        '            f=self.bot.get_file(doc.file_id);data=self.bot.download_file(f.file_path)\n'
-        "            if len(data)>262144:raise ShopError('الملف أكبر من الحد.')\n"
-        "            raw=data.decode('utf-8-sig')\n"
-        "        data=parse_cookies(raw);target=pending['account_key'];old=self.account_doc(target) if target!='new' else None\n"
-        "        if old:data['account']=old.get('data',{}).get('account',{})\n"
-        "        mgr=SeatManager.from_doc({'_id':target,'data':data});choices=mgr.hydrate()\n"
-        "        data['accessToken']=mgr.access_token;data['user']={**data.get('user',{}),'email':mgr.owner_email}\n"
-        "        selected=data.get('account',{}).get('id')\n"
-        "        choices=[c for c in choices if c['id']==selected] if selected else choices\n"
-        "        if not choices:raise ShopError('الجلسة لا تملك حساب Business المحدد. لم تتغير الكوكيز السابقة.')\n"
-        '        if len(choices)>1:\n'
-        '            # Short-lived encrypted inputs are retained only until workspace selection.\n'
-        '            from cryptography.fernet import Fernet\n'
-        '            cipher=self.secret_cipher()\n'
-        "            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'choose_workspace','sealed':cipher.encrypt(json.dumps(data).encode()).decode(),'choices':[{k:v for k,v in c.items() if k!='raw'} for c in choices],'expires':time.time()+600}})\n"
-        "            self.send(uid,'اختر مساحة Business التي تريد ربطها:',reply_markup=self.markup([(str(c['name'])[:40],f'cgx_choose_{i}') for i,c in enumerate(choices)]))\n"
-        '        else:\n'
-        "            data['account']={'id':choices[0]['id']};self.save_cookies(uid,target,data)\n"
-        '        try:self.bot.delete_message(message.chat.id,message.message_id)\n'
-        '        except Exception:pass\n'
-        '    def secret_cipher(self):\n'
-        '        from cryptography.fernet import Fernet\n'
-        '        import os\n'
-        "        key=os.environ.get('SESSION_ENCRYPTION_KEY','')\n"
-        "        if not key:raise ShopError('اضبط SESSION_ENCRYPTION_KEY لحفظ جلسات الكوكيز بأمان.')\n"
-        '        return Fernet(key.encode())\n'
-        '    def save_cookies(self,uid,key,data):\n'
-        "        mgr=SeatManager.from_doc({'_id':key,'data':data});rep=mgr.diagnose()\n"
-        "        if not rep['connected'] and rep.get('status')!='deactivated':raise ShopError(rep.get('error','فشل التحقق.'))\n"
-        '        # Keep the existing document, subscriptions and manual capacity.\n'
-        "        coll=self.db.cgpt_cookies if key=='main' else self.db.cgpt_accounts\n"
-        "        ident='main' if key=='main' else ObjectId() if key=='new' else ObjectId(key)\n"
-        "        if key=='new':\n"
-        '            for doc in self._cgpt_all_accounts():\n'
-        "                if doc.get('data',{}).get('account',{}).get('id')==data['account']['id']:raise ShopError('الحساب مضاف مسبقًا؛ استخدم زر تحديثه.')\n"
-        "        coll.update_one({'_id':ident},{'$set':{'data':{'account':data.get('account',{}),'user':data.get('user',{})},'sealed_data':self.secret_cipher().encrypt(json.dumps(data).encode()).decode(),'name':data.get('user',{}).get('email','ChatGPT Business'),'cookies_updated_at':dt.datetime.utcnow(),'last_status':rep.get('status')}},upsert=True)\n"
-        "        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.db.notifications.delete_one({'_id':'cookie:'+str(ident)})\n"
-        "        self.g['_cgpt_manager_instance']=None;self.g['_CGPT_SEATS_CACHE']['exp']=0\n"
-        "        text,markup=self.account_report(str(ident));self.send(uid,'✅ تم تحديث الكوكيز والتحقق من الحساب.\\n\\n'+text,reply_markup=markup)\n"
-        '    def cgpt_begin(self,call):\n'
-        "        uid=call.from_user.id;pid,durid=call.data.removeprefix('cgpt_buy_').split('_',1)\n"
-        "        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid)})\n"
-        "        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)\n"
-        "        if not d:raise ShopError('الباقة غير متاحة.')\n"
-        "        amount=cents(d['price'],minimum=1);minutes=quantity(d['minutes'],525600)\n"
-        "        old=self.db.cgpt_checkout.find_one({'user_id':uid})\n"
-        "        if old and old.get('state')=='processing':raise ShopError('يوجد طلب قيد المعالجة. راجع سجل الطلبات أولًا.',409)\n"
-        "        checkout={'user_id':uid,'pid':pid,'dur_id':durid,'price':amount/100,'minutes':minutes,'label':d.get('label',''),\n"
-        "                  'product':p.get('name','ChatGPT'),'order_id':uuid.uuid4().hex,'state':'email','created_at':time.time()}\n"
-        "        self.db.cgpt_checkout.replace_one({'user_id':uid},checkout,upsert=True)\n"
-        "        m=self.send(uid,self.ct(uid,'ask_email',product=checkout['product'],price=f'{amount/100:.2f}')+'\\n\\n📜 الاشتراك لا يسمح بإضافة مستخدمين أو إرسال دعوات للآخرين. تُراجع المخالفة بناءً على دليل مصدر الدعوة، وقد تؤدي إلى إلغاء الاشتراك.')\n"
-        '        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))\n'
-        '    def cgpt_email_step(self,message,buyer_uid,lang):\n'
-        "        if message.from_user.id!=buyer_uid:raise ShopError('الطلب لا يخصك.',403)\n"
-        "        email=(message.text or '').strip().lower()\n"
-        "        if email in ('/cancel','cancel','إلغاء','الغاء'):return self.cgpt_cancel(buyer_uid,lang)\n"
-        "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:raise ShopError('البريد غير صالح؛ أعد فتح الباقة.')\n"
-        "        p=self.db.cgpt_checkout.find_one_and_update({'user_id':buyer_uid,'state':{'$in':['email','confirm']}},\n"
-        "            {'$set':{'email':email,'state':'confirm'}},return_document=True)\n"
-        "        if not p:raise ShopError('انتهت الجلسة.')\n"
-        '        markup=self.InlineKeyboardMarkup()\n'
-        "        markup.add(self.cg_button(buyer_uid,'btn_confirm',f'cgpt_email_ok_{buyer_uid}'),self.cg_button(buyer_uid,'btn_change',f'cgpt_email_change_{buyer_uid}'))\n"
-        "        markup.add(self.cg_button(buyer_uid,'btn_cancel',f'cgpt_cancel_buy_{buyer_uid}'))\n"
-        '        self.send(buyer_uid,self.ct(buyer_uid,\'confirm_email\',email=email,product=p[\'product\'],duration=p[\'label\'],price=f"{p[\'price\']:.2f}"),reply_markup=markup)\n'
-        '    def cgpt_cancel(self,uid,lang):\n'
-        "        result=self.db.cgpt_checkout.delete_one({'user_id':uid,'state':{'$in':['email','confirm']}})\n"
-        '        self.bot.clear_step_handler_by_chat_id(uid)\n'
-        "        self.send(uid,'أُلغي الطلب؛ لم يُخصم رصيد.' if result.deleted_count else 'لا يوجد طلب قابل للإلغاء؛ راجع سجل الطلبات.')\n"
-        '    def own_callback(self,call,prefix):\n'
-        "        if str(call.from_user.id)!=call.data.removeprefix(prefix):raise ShopError('الطلب لا يخصك.',403)\n"
-        '        return call.from_user.id\n'
-        "    def cgpt_cancel_callback(self,call):return self.cgpt_cancel(self.own_callback(call,'cgpt_cancel_buy_'),self.get_lang(call.from_user.id))\n"
-        '    def cgpt_change(self,call):\n'
-        "        uid=self.own_callback(call,'cgpt_email_change_')\n"
-        "        m=self.send(uid,'📧 أرسل البريد الصحيح:')\n"
-        '        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))\n'
-        '    def cgpt_confirm(self,call):\n'
-        "        uid=self.own_callback(call,'cgpt_email_ok_')\n"
-        "        p=self.db.cgpt_checkout.find_one_and_update({'user_id':uid,'state':'confirm'},{'$set':{'state':'processing'}},return_document=True)\n"
-        "        if not p:raise ShopError('الطلب قيد المعالجة أو انتهت الجلسة؛ راجع سجل الطلبات.')\n"
-        '        try:\n'
-        "            job=self.buy_cgpt(uid,p['pid'],p['dur_id'],p['email'],p['order_id'])\n"
-        "            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'done','job_id':job['_id']}})\n"
-        '            self.cgpt_result(uid,job)\n'
-        '        except Exception:\n'
-        '            # No blind refund; durable external_jobs is the authority if debit committed.\n'
-        "            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'review'}})\n"
-        '            raise\n'
-        '    def buy_cgpt(self,uid,pid,durid,email,idem):\n'
-        "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:raise ShopError('بريد غير صالح.')\n"
-        "        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})\n"
-        '        if previous:\n'
-        "            d=previous['details']\n"
-        "            if previous['kind']!='chatgpt' or (d.get('pid'),d.get('dur_id'),d.get('email'))!=(pid,durid,email):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)\n"
-        "            return self.process_cgpt_job(previous) if previous['status']=='queued' else previous\n"
-        "        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid),'is_hidden':{'$ne':True}})\n"
-        "        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)\n"
-        "        if not d:raise ShopError('الباقة غير متاحة.',404)\n"
-        '        # Existing owned email stays on its workspace when renewing.\n'
-        '        target=None\n'
-        '        for doc in self._cgpt_all_accounts():\n'
-        "            mgr=SeatManager.from_doc(doc);info=mgr.invites_data['invites'].get(email)\n"
-        "            if info and info.get('telegram_uid')==uid and info.get('status') in ('active','expired'):\n"
-        "                target={'mgr':mgr,'id':str(doc['_id'])};break\n"
-        '        if not target:target=self.find_account()\n'
-        "        if not target:raise ShopError(self.ct(uid,'no_seats'),409)\n"
-        "        details={'pid':pid,'dur_id':durid,'email':email,'minutes':quantity(d['minutes'],525600),'account_key':target['id'],'product':p.get('name','ChatGPT')}\n"
-        "        job=self.finance.reserve_external(uid,d['price'],idem,'chatgpt',details)\n"
-        '        return self.process_cgpt_job(job)\n'
-        '    def process_cgpt_job(self,job):\n'
-        "        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},\n"
-        "            {'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
-        "        if not claimed:return self.db.external_jobs.find_one({'_id':job['_id']})\n"
-        '        try:\n'
-        "            d=job['details'];doc=self.account_doc(d['account_key'])\n"
-        "            if not doc:result={'ok':False,'definitive':True,'error':'الحساب غير موجود.'}\n"
-        '            else:\n'
-        "                mgr=SeatManager.from_doc(doc);mgr._last_buyer_uid=job['user_id'];mgr._product_id=d['pid'];mgr._order_id=job['order_id'];mgr._job_id=job['_id']\n"
-        "                result=mgr.invite_user(d['email'],d['minutes'])\n"
-        "            if result.get('ok'):\n"
-        '                def finish(s):\n'
-        "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed','result':result}},session=s)\n"
-        "                    self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],\n"
-        "                        'product_id':'cgpt_'+d['pid'],'code_delivered':'chatgpt_seat:'+d['email'],'qty':1,'price':job['amount_cents']/100,\n"
-        "                        'total_price':job['amount_cents']/100,'status':'completed','cgpt_email':d['email'],'cgpt_expires_at':result['expires_at']}},upsert=True,session=s)\n"
-        '                self.finance.atomic(finish)\n'
-        '            else:\n'
-        "                state='rejected' if result.get('definitive') else 'unknown'\n"
-        "                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'error':result.get('error','')}})\n"
-        "                if state=='rejected':self.finance.refund(job['_id'],'invite_rejected')\n"
-        "                else:self.notice_once('job:'+job['_id'],86400,'⚠️ دعوة تحتاج مراجعة نتيجة المزود. رقم الطلب: '+job['order_id'])\n"
-        '        except Exception:\n'
-        "            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})\n"
-        "            self.logger.exception('ChatGPT result not yet reconciled')\n"
-        "        self._invalidate_user_cache(job['user_id']);self.g['_CGPT_SEATS_CACHE']['exp']=0\n"
-        "        return self.db.external_jobs.find_one({'_id':job['_id']})\n"
-        '    def cgpt_result(self,uid,job):\n'
-        "        key='invite_success' if job['status']=='completed' else 'refunded' if job['status']=='refunded' else 'unavailable'\n"
-        "        self.send(uid,self.ct(uid,key,email=job['details']['email'],expires=job.get('result',{}).get('expires_at',''),order_id=job['order_id']))\n"
-        '    def renew_ui(self,call):\n'
-        '        uid=call.from_user.id;buttons=[]\n'
-        "        for p in self.db.cgpt_products.find({'is_hidden':{'$ne':True}}):\n"
-        "            for d in p.get('durations',[]):\n"
-        '                buttons.append((f"{re.sub(\'<[^>]+>\',\'\',p.get(\'name\',\'ChatGPT\'))[:20]} — {d[\'label\']} — ${d[\'price\']}",f"cgpt_buy_{p[\'_id\']}_{d[\'dur_id\']}"))\n'
-        "        self.send(uid,'🔄 اختر مدة التجديد ثم أدخل البريد نفسه. ستُضاف المدة إلى المتبقي من اشتراكك.',reply_markup=self.markup(buttons[:80]))\n"
-        '    def queue_subscription_notice(self,account,email,info,key,hours=0):\n'
-        "        uid=info.get('telegram_uid')\n"
-        '        if not isinstance(uid,int):return\n'
-        "        ident=digest('subscription_notice',account,email,info.get('expires_at'),key,24 if hours>2 else 1 if hours else 0)\n"
-        "        markup=self.markup([(self.ct(uid,'btn_renew'),'cgb_renew')])\n"
-        "        self.db.notifications.update_one({'_id':ident},{'$setOnInsert':{'uids':[uid],'text':self.ct(uid,key,email=email,hours=hours),\n"
-        "            'markup':markup.to_json(),'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
-        '    def cgpt_cycle(self):\n'
-        '        for doc in self._cgpt_all_accounts():\n'
-        '            try:self.cgpt_account_cycle(doc)\n'
-        '            except Exception:\n'
-        "                self.logger.exception('Account monitor failed: %s',str(doc['_id']))\n"
-        "                self.issue('account_unavailable',str(doc['_id']),details={'status':'monitor_failed'})\n"
-        '\n'
-        '    def cgpt_account_cycle(self,doc):\n'
-        '        for doc in [doc]:\n'
-        "            mgr=SeatManager.from_doc(doc);key=str(doc['_id']);rep=mgr.diagnose()\n"
-        "            for email,info in mgr.invites_data['invites'].items():\n"
-        "                exp=date(info.get('expires_at'))\n"
-        "                if info.get('status')=='active' and exp:\n"
-        '                    left=(exp-dt.datetime.utcnow()).total_seconds()\n'
-        "                    if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))\n"
-        "            self.db.cgpt_account_status.update_one({'_id':key},{'$set':{k:v for k,v in rep.items() if k not in ('user_emails','pending_emails','membership_evidence')}|{'checked_at':dt.datetime.utcnow()}},upsert=True)\n"
-        "            if rep['status']=='cookies_expired':\n"
-        "                self.issue('account_unavailable',key,details={'status':'cookies_expired'})\n"
-        "                self.notice_once('cookie:'+key,86400,self.ct(self.OWNER_ID,'cookie_expired',account=mgr.owner_email),self.markup([('🍪 تحديث الكوكيز','cgx_cookie_'+key)]));continue\n"
-        "            if rep['status']=='deactivated':\n"
-        '                from subscription_lifecycle import migrate\n'
-        "                self.issue('account_unavailable',key,details={'status':'deactivated'})\n"
-        '                migrate(self,mgr)\n'
-        "                self.notice_once('inactive:'+key,86400,self.ct(self.OWNER_ID,'account_expired',account=mgr.owner_email),self.markup([('🏢 عرض الحساب','cgx_account_'+key)]));continue\n"
-        "            if not rep['connected']:\n"
-        "                self.issue('account_unavailable',key,details={'status':rep.get('status','unknown')});continue\n"
-        "            self.db.cgpt_interventions.update_many({'kind':'account_unavailable','account':key},{'$set':{'status':'resolved'}})\n"
-        '            mgr.check_and_cleanup()\n'
-        "            for email,info in mgr.invites_data['invites'].items():\n"
-        "                exp=date(info.get('expires_at'))\n"
-        "                if info.get('status')!='active' or not exp:continue\n"
-        '                left=(exp-dt.datetime.utcnow()).total_seconds()\n'
-        "                if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))\n"
-        '    def cgpt_daemon(self):\n'
-        '        while not self._stop.is_set():\n'
-        '            try:self.cgpt_cycle()\n'
-        "            except Exception:self.logger.exception('ChatGPT monitor failed')\n"
-        '            self._stop.wait(300)\n'
-        '\n'
-        '    def register_ui(self):\n'
-        '        from cms import TEMPLATES\n'
-        '        def begin_template_edit(uid,key):\n'
-        "            if key not in TEMPLATES:raise ShopError('النص غير موجود.')\n"
-        "            doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':'ar'}) or {}\n"
-        "            current=str(doc.get('value') or TEMPLATES[key][1])\n"
-        "            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'template','key':key,'lang':'ar','expires':time.time()+900}},upsert=True)\n"
-        "            fields=[]\n"
-        "            for field in re.findall(r'\\{([a-z_][a-z0-9_]*)\\}',current,re.I):\n"
-        "                if field not in fields:fields.append(field)\n"
-        "            field_note=('\\n\\n<b>المتغيرات داخل النص:</b> <code>'+html.escape(' '.join('{'+f+'}' for f in fields))+'</code>') if fields else '\\n\\n<b>لا توجد متغيرات في هذا النص.</b>'\n"
-        "            self.send(uid,'📋 <b>انسخ النص وعدّل الكلمات فقط:</b>\\n\\n<pre>'+html.escape(current)+'</pre>'+field_note)\n"
-        "            m=self.send(uid,'أرسل النص العربي الجديد كما هو، مع إبقاء المتغيرات الموجودة. سيُحفظ العربي وتُنشأ النسخة الإنجليزية تلقائيًا.\\nأرسل /reset لاستعادة الافتراضي، أو /cancel للإلغاء.')\n"
-        '            if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
-        '        def route(call):\n'
-        '            uid=call.from_user.id;data=call.data\n'
-        '            try:self.bot.answer_callback_query(call.id)\n'
-        '            except Exception:pass\n'
-        "            if data.startswith('cgx_interventions'):\n"
-        "                return self.interventions(uid,int(data.removeprefix('cgx_interventions_')) if data.startswith('cgx_interventions_') else 0)\n"
-        "            if data.startswith('cgx_reply_'):return self.support_reply_begin(uid,data.removeprefix('cgx_reply_'))\n"
-        "            if data.startswith('cgx_issue_'):return self.intervention_detail(uid,data.removeprefix('cgx_issue_'))\n"
-        "            if data.startswith('cgx_close_'):\n"
-        "                prefix=data.removeprefix('cgx_close_')\n"
-        "                self.db.cgpt_interventions.update_one({'_id':{'$regex':'^'+re.escape(prefix)}},{'$set':{'status':'resolved','resolved_by':uid}})\n"
-        '                return self.interventions(uid)\n'
-        "            if data.startswith('cgx_account_'):\n"
-        "                text,m=self.account_report(data.removeprefix('cgx_account_'));return self.send(uid,text,reply_markup=m)\n"
-        "            if data.startswith('cgx_cookie_'):return self.cookies_begin(call,data.removeprefix('cgx_cookie_'))\n"
-        "            if data.startswith('cgx_choose_'):\n"
-        "                pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'choose_workspace','expires':{'$gt':time.time()}})\n"
-        "                if not pending:raise ShopError('انتهت جلسة الاختيار.')\n"
-        "                index=int(data.removeprefix('cgx_choose_'))\n"
-        "                if not 0<=index<len(pending['choices']):raise ShopError('اختيار غير صالح.')\n"
-        "                obj=json.loads(self.secret_cipher().decrypt(pending['sealed'].encode()))\n"
-        "                obj['account']={'id':pending['choices'][index]['id']}\n"
-        "                return self.save_cookies(uid,pending['account_key'],obj)\n"
-        "            if data=='cgx_cms':\n"
-        "                return self.send(uid,'✏️ اختر الرسالة أو الزر الذي تريد تخصيصه:',reply_markup=self.markup([(v[0],'cgx_tpl_'+k) for k,v in TEMPLATES.items()]+[('📦 أسماء المنتجات والوصف','cgx_products')]))\n"
-        "            if data.startswith('cgx_tpl_'):\n"
-        "                key=data.removeprefix('cgx_tpl_')\n"
-        "                return begin_template_edit(uid,key)\n"
-        "            if data.startswith('cgx_edit_'):\n"
-        "                lang,key=data.removeprefix('cgx_edit_').split('_',1)\n"
-        "                if key not in TEMPLATES or lang not in ('ar','en'):raise ShopError('اختيار غير صالح.')\n"
-        "                return begin_template_edit(uid,key)\n"
-        "            if data=='cgx_products':\n"
-        "                return self.send(uid,'📦 اختر المنتج لتعديل الاسم والوصف والإيموجي:',reply_markup=self.markup([(re.sub('<[^>]+>','',p.get('name','منتج'))[:40],'cgx_prod_'+str(p['_id'])) for p in self.db.cgpt_products.find()]))\n"
-        "            if data.startswith('cgx_prod_'):\n"
-        "                pid=data.removeprefix('cgx_prod_')\n"
-        "                if not ObjectId.is_valid(pid):raise ShopError('منتج غير صالح.')\n"
-        "                return self.send(uid,'اختر الحقل:',reply_markup=self.markup([(label,f'cgx_field_{field}_{pid}') for label,field in [('الاسم العربي','name'),('الاسم الإنجليزي','name-en'),('الوصف العربي','desc'),('الوصف الإنجليزي','desc-en')]]))\n"
-        "            if data.startswith('cgx_field_'):\n"
-        "                field,pid=data.removeprefix('cgx_field_').split('_',1);field=field.replace('-','_')\n"
-        "                if field not in ('name','name_en','desc','desc_en') or not ObjectId.is_valid(pid):raise ShopError('اختيار غير صالح.')\n"
-        "                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'product','field':field,'pid':pid,'expires':time.time()+900}},upsert=True)\n"
-        "                m=self.send(uid,'أرسل النص الجديد. التنسيق والإيموجي المخصص محفوظان كما ترسلهما. أرسل /cancel للإلغاء.')\n"
-        '                if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
-        '                return\n'
-        "            if data=='cgx_jobs':return self.jobs_ui(uid)\n"
-        "            if data.startswith('cgx_job_'):\n"
-        "                jid=data.removeprefix('cgx_job_');job=self.db.external_jobs.find_one({'order_id':jid})\n"
-        "                if not job:raise ShopError('طلب غير موجود.')\n"
-        "                buttons=[('🔎 إعادة مطابقة النتيجة','cgx_recheck_'+jid),('📝 تسوية موثقة','cgx_resolve_'+jid)]\n"
-        '                return self.send(uid,f"طلب <code>{jid}</code>\\nالنوع: {job[\'kind\']}\\nالحالة: {job[\'status\']}\\nالمبلغ: ${job[\'amount_cents\']/100:.2f}",reply_markup=self.markup(buttons))\n'
-        "            if data.startswith('cgx_recheck_'):\n"
-        "                job=self.db.external_jobs.find_one({'order_id':data.removeprefix('cgx_recheck_')})\n"
-        "                if not job:raise ShopError('طلب غير موجود.')\n"
-        '                self.reconcile_job(job);return self.jobs_ui(uid)\n'
-        "            if data.startswith('cgx_resolve_'):\n"
-        "                oid=data.removeprefix('cgx_resolve_')\n"
-        "                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'resolve','oid':oid,'expires':time.time()+600}},upsert=True)\n"
-        "                m=self.send(uid,'تحقق من نتيجة المزود أولًا.\\nلإرجاع مال طلب مرفوض: <code>refund سبب التحقق ورقم المرجع</code>\\nلطلب تم تسليمه: <code>delivered سبب التحقق ورقم المرجع</code>\\nلا تستخدم الاسترجاع عند عدم معرفة النتيجة.')\n"
-        '                if m:self.bot.register_next_step_handler(m,self.resolve_input)\n'
-        "        route.__name__='cgx_admin_route'\n"
-        "        self.bot.register_callback_query_handler(self.guard(route,True),func=lambda c:bool(c.data) and c.data.startswith('cgx_'))\n"
-        "        self.bot.register_callback_query_handler(self.guard(self.renew_ui),func=lambda c:c.data=='cgb_renew')\n"
-        "        self.bot.register_callback_query_handler(self.guard(self.customer_route),func=lambda c:bool(c.data) and c.data.startswith('cgb_') and c.data!='cgb_renew')\n"
-        "        self.bot.register_message_handler(self.guard(lambda m:self.portal(m.from_user.id)),commands=['subscription'])\n"
-        "        self.bot.register_message_handler(self.guard(lambda m:self.support(m.from_user.id)),commands=['support'])\n"
-        "        self.bot.register_message_handler(self.guard(lambda m:self.interventions(m.from_user.id),True),commands=['interventions'])\n"
-        "        self.bot.register_message_handler(self.guard(lambda m:self.customer_orders(m.from_user.id)),commands=['orders'])\n"
-        '    def cms_input(self,message):\n'
-        '        from cms import validate_template\n'
-        '        uid=message.from_user.id\n'
-        "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
-        "        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'expires':{'$gt':time.time()}})\n"
-        "        if not p:raise ShopError('انتهت جلسة التعديل.')\n"
-        "        raw=(message.text or '').strip()\n"
-        "        if raw=='/cancel':self.db.cgpt_admin_inputs.delete_one({'_id':uid});return self.send(uid,'أُلغي التعديل.')\n"
-        "        if p['mode']=='template' and raw=='/reset':\n"
-        "            self.db.custom_texts.delete_many({'key':'cgpt_'+p['key']})\n"
-        '        else:\n'
-        '            text=message.html_text or html.escape(raw)\n'
-        "            emoji=next((e.custom_emoji_id for e in (message.entities or []) if e.type=='custom_emoji'),None)\n"
-        "            if p['mode']=='template':\n"
-        "                if p['key'].startswith('btn_'):text=raw\n"
-        "                validate_template(text,p['key'].startswith('btn_'))\n"
-        "                translator=self.g.get('safe_translate_for_cms')\n"
-        "                translated=translator(text,'en') if callable(translator) else text\n"
-        "                values={'emoji_id':emoji,'updated_by':uid}\n"
-        "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'ar'},{'$set':{**values,'value':text}},upsert=True)\n"
-        "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'en'},{'$set':{**values,'value':translated}},upsert=True)\n"
-        "            elif p['mode']=='product':\n"
-        "                if len(raw)>(100 if p['field'].startswith('name') else 2500):raise ShopError('النص طويل جدًا.')\n"
-        '                # Product text is not a template: escape braces during validation only.\n'
-        "                validate_template(text.replace('{','{{').replace('}','}}'))\n"
-        "                update={p['field']:text}\n"
-        "                if p['field']=='name':update['custom_emoji_id']=emoji\n"
-        "                self.db.cgpt_products.update_one({'_id':ObjectId(p['pid'])},{'$set':update})\n"
-        '                # Update existing shop projection, not just the separate product collection.\n'
-        "                projection={'name':'name_ar','name_en':'name_en','desc':'desc_ar','desc_en':'desc_en'}\n"
-        "                self.db.products.update_many({'$or':[{'cgpt_product_id':p['pid']},{'_id':'cgpt_main_'+p['pid']}]},{'$set':{projection[p['field']]:text}})\n"
-        "        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self._invalidate_custom_texts_cache();self._invalidate_products_cache();self.g['_PRODUCTS_CACHE']=None\n"
-        "        self.send(uid,'✅ تم الحفظ. التغييرات تظهر في الرسائل التالية.',reply_markup=self.markup([('✏️ تخصيص ChatGPT','cgx_cms')]))\n"
-        '    def jobs_ui(self,uid):\n'
-        "        jobs=list(self.db.external_jobs.find({'status':{'$in':['queued','processing','unknown','pending_provider']}}).sort('created_at',-1).limit(30))\n"
-        '        self.send(uid,\'📋 الطلبات التي تحتاج متابعة:\' if jobs else \'✅ لا توجد طلبات تحتاج متابعة.\',reply_markup=self.markup([(f"{j[\'kind\']} — {j[\'status\']} — {j[\'order_id\'][:8]}",\'cgx_job_\'+j[\'order_id\']) for j in jobs]))\n'
-        '    def resolve_input(self,message):\n'
-        '        uid=message.from_user.id\n'
-        "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
-        "        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'resolve','expires':{'$gt':time.time()}})\n"
-        "        action,sep,note=(message.text or '').partition(' ')\n"
-        "        if not p or action not in ('refund','delivered') or len(note.strip())<12:raise ShopError('أرسل الإجراء وسببًا موثقًا من 12 حرفًا على الأقل.')\n"
-        "        job=self.db.external_jobs.find_one({'order_id':p['oid']})\n"
-        "        if not job or job['status'] in ('completed','refunded'):raise ShopError('الطلب منتهٍ بالفعل.')\n"
-        '        # Administrator explicitly attests remote outcome; record immutable evidence.\n'
-        "        self.db.job_resolutions.insert_one({'job_id':job['_id'],'admin_id':uid,'action':action,'note':note,'created_at':dt.datetime.utcnow()})\n"
-        "        if action=='refund':\n"
-        "            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'rejected'}})\n"
-        "            self.finance.refund(job['_id'],'admin_verified_rejection')\n"
-        "        else:self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed','resolution_note':note}})\n"
-        "        self._invalidate_user_cache(job['user_id']);self.db.cgpt_admin_inputs.delete_one({'_id':uid})\n"
-        "        self.send(uid,'✅ سُجلت التسوية مرة واحدة.');self.send(job['user_id'],'تمت مراجعة طلبك '+job['order_id']+' وتحديث حالته.')\n"
-        "        if job['kind']=='gemini':\n"
-        "            self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
-        '    def customer_orders(self,uid):\n'
-        "        jobs=list(self.db.external_jobs.find({'user_id':uid}).sort('created_at',-1).limit(15))\n"
-        '        rows=[f"<code>{html.escape(j[\'order_id\'])}</code> — {html.escape(j[\'status\'])}" for j in jobs]\n'
-        "        buttons=[('📦 عرض الطلب '+j['order_id'][:8],'cgb_order_'+j['order_id']) for j in jobs if j.get('kind')=='external']\n"
-        "        buttons.append(('🔙 الرئيسية','main_menu_refresh'))\n"
-        "        self.send(uid,'📋 آخر طلبات الخدمات:\\n'+'\\n'.join(rows) if rows else 'لا توجد طلبات خدمات بعد.',reply_markup=self.markup(buttons))\n"
-        '\n'
-        '    def reconcile_job(self,job):\n'
-        "        if job['kind']=='chatgpt':\n"
-        "            doc=self.account_doc(job['details']['account_key'])\n"
-        '            if doc:\n'
-        "                mgr=SeatManager.from_doc(doc);inv=mgr.invites_data['invites'].get(job['details']['email'],{})\n"
-        "                if inv.get('last_job_id')==job['_id']:\n"
-        "                    self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['refunded','completed']}},{'$set':{'status':'completed','result':{'ok':True,'expires_at':inv['expires_at']}}})\n"
-        '                    return\n'
-        "        if job['kind']=='github' and job.get('provider_job_id'):\n"
-        '            self.github_poll(job);return\n'
-        "        if job['kind']=='external' and job.get('provider_order_id'):\n"
-        "            d=job['details'];store=self.db.ext_stores.find_one({'_id':ObjectId(d['store_id'])})\n"
-        '            if store:\n'
-        "                resp=self._ext_api_get(store,'/orders/'+str(job['provider_order_id']))\n"
-        '                if resp:self.complete_external(job,resp)\n'
-        '\n'
-        '    def ext_post(self,store,path,body,idem_key=None):\n'
-        "        base=str(store.get('base_url','')).rstrip('/');prefix=store.get('api_prefix','')\n"
-        "        if not prefix and '/api/v1' not in base and '/shop-api/v1' not in base:\n"
-        "            raise ShopError('افحص اتصال المتجر لاكتشاف مسار API قبل أول شراء.')\n"
-        '        headers=self._ext_api_headers(store)\n'
-        "        if idem_key:headers['Idempotency-Key']=idem_key\n"
-        '        try:\n'
-        '            r=self.requests.post(base+prefix+path,headers=headers,json=body,timeout=25,allow_redirects=False)\n'
-        '            try:obj=r.json()\n'
-        '            except ValueError:obj={}\n'
-        '            if r.status_code in (200,201,202):return True,obj\n'
-        "            return False,{'definitive':r.status_code in (400,401,403,404,422),'status_code':r.status_code}\n"
-        "        except Exception:return False,{'definitive':False,'error':'response_unknown'}\n"
-        '    def buy_external(self,uid,epid,qty,idem):\n'
-        '        qty=quantity(qty)\n'
-        "        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})\n"
-        '        if previous:\n'
-        "            if previous['kind']!='external' or (previous['details'].get('epid'),previous['details'].get('qty'))!=(epid,qty):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)\n"
-        '            return previous\n'
-        "        qty=quantity(qty);ep=self.db.ext_products.find_one({'_id':ObjectId(epid),'hidden':{'$ne':True}})\n"
-        "        if not ep:raise ShopError('المنتج غير متاح.',404)\n"
-        "        store=self.db.ext_stores.find_one({'_id':ObjectId(ep['store_id'])})\n"
-        "        if not store:raise ShopError('المتجر غير متاح.',404)\n"
-        "        if not store.get('api_prefix') and '/api/v1' not in store.get('base_url','') and '/shop-api/v1' not in store.get('base_url',''):\n"
-        "            self._ext_api_get(store,'/products')\n"
-        "            if not store.get('api_prefix'):raise ShopError('تعذر تأكيد مسار API للمتجر قبل الخصم.')\n"
-        "        details={'epid':epid,'store_id':str(ep['store_id']),'ext_id':ep['ext_id'],'qty':qty,'product':ep.get('name','')}\n"
-        "        job=self.finance.reserve_external(uid,cents(ep.get('sell_price',ep.get('base_price')),minimum=1)*qty/100,idem,'external',details)\n"
-        "        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
-        '        if claimed:\n'
-        "            ok,resp=self.ext_post(store,'/orders',{'product_id':self._ext_int_or_str(ep['ext_id']),'quantity':qty},job['_id'])\n"
-        '            if ok:self.complete_external(job,resp)\n'
-        '            else:\n'
-        "                state='rejected' if resp.get('definitive') else 'unknown'\n"
-        "                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state}})\n"
-        "                if state=='rejected':self.finance.refund(job['_id'],'provider_rejected')\n"
-        '        self._invalidate_user_cache(uid)\n'
-        "        return self.db.external_jobs.find_one({'_id':job['_id']})\n"
-        '    def complete_external(self,job,resp):\n'
-        "        codes=self._ext_extract_codes(resp);obj=resp.get('order',resp) if isinstance(resp,dict) else {}\n"
-        "        state='completed' if len(codes)==job['details']['qty'] else 'pending_provider'\n"
-        "        oid=obj.get('id',obj.get('order_id',''))\n"
-        '        def save(s):\n'
-        "            j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)\n"
-        "            if not j or j['status'] in ('refunded','completed'):return\n"
-        "            saved_oid=str(oid or j.get('provider_order_id',''))\n"
-        "            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'codes':codes,'provider_order_id':saved_oid}},session=s)\n"
-        "            self.db.ext_orders.update_one({'idempotency_key':job['_id']},{'$set':{'store_id':job['details']['store_id'],'user_id':job['user_id'],\n"
-        "                'product_name':job['details']['product'],'price':job['amount_cents']/100,'quantity':job['details']['qty'],\n"
-        "                'codes':codes,'status':state,'ext_order_id':saved_oid,'created_at':int(time.time())}},upsert=True,session=s)\n"
-        "            if state=='completed':\n"
-        "                self.db.notifications.update_one({'_id':digest('external-ready',job['_id'])},{'$setOnInsert':{\n"
-        "                    'uids':[job['user_id']],'text':'✅ اكتمل طلبك. اضغط لعرض الأكواد: '+html.escape(job['order_id']),\n"
-        "                    'markup':self.markup([('📦 استلام الطلب','cgb_order_'+job['order_id'])]).to_json(),\n"
-        "                    'sent':False,'created':time.time(),'next_at':time.time()}},upsert=True,session=s)\n"
-        '                for index,code in enumerate(codes):\n'
-        "                    self.db.orders.update_one({'order_id':job['order_id'],'code_index':index},{'$setOnInsert':{'order_id':job['order_id'],'code_index':index,\n"
-        "                        'user_id':job['user_id'],'product_id':'ext_'+job['details']['epid'],'code_delivered':code,'qty':1,\n"
-        "                        'price':job['amount_cents']/100/job['details']['qty'],'status':'completed'}},upsert=True,session=s)\n"
-        '        self.finance.atomic(save)\n'
-        '    def ext_result(self,uid,job):\n'
-        "        if job['status']=='completed':\n"
-        "            f=io.BytesIO('\\n'.join(job.get('codes',[])).encode());f.name='order_'+job['order_id']+'.txt'\n"
-        "            try:self.bot.send_document(uid,f,caption='✅ طلب '+job['order_id'])\n"
-        "            except Exception:self.send(uid,'الأكواد محفوظة في سجل مشترياتك.')\n"
-        "        elif job['status']=='refunded':self.send(uid,'رُفض الطلب وأُعيد رصيدك. '+job['order_id'])\n"
-        "        else:self.send(uid,'⏳ الطلب محفوظ وقيد التحقق؛ لا تعِد شراءه.\\n<code>'+job['order_id']+'</code>')\n"
-        '    def ext_buy_callback(self,call):\n'
-        "        self.ext_result(call.from_user.id,self.buy_external(call.from_user.id,call.data.removeprefix('buyext_'),1,f'tg:{call.message.chat.id}:{call.message.message_id}'))\n"
-        '    def ext_buy_message(self,message,epid,lang):\n'
-        "        self.ext_result(message.from_user.id,self.buy_external(message.from_user.id,epid,quantity((message.text or '').strip()),f'tg:{message.chat.id}:{message.message_id}'))\n"
-        '\n'
-        '    def github_begin(self,message):\n'
-        '        uid=message.from_user.id;data=self.temp_github_data.pop(uid,None)\n'
-        "        if not data:raise ShopError('انتهت جلسة الطلب.')\n"
-        "        credentials={'github_username':self.decrypt_sensitive(data['user']),'github_password':self.decrypt_sensitive(data['pass']),'totp_secret':(message.text or '').strip()}\n"
-        "        if not self.GITHUB_API_KEY:raise ShopError('مزود الخدمة غير مهيأ.')\n"
-        "        job=self.finance.reserve_external(uid,data['price'],f'github:{message.chat.id}:{message.message_id}','github',{'product':'GitHub Student'})\n"
-        "        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
-        '        try:self.bot.delete_message(uid,message.message_id)\n'
-        '        except Exception:pass\n'
-        '        if claim:\n'
-        '            try:\n'
-        "                r=self.requests.post(self.GITHUB_BASE_URL+'/api/run',headers={'X-API-Key':self.GITHUB_API_KEY,'Idempotency-Key':job['_id']},json=credentials,timeout=30)\n"
-        '                if r.status_code in (200,201,202):\n'
-        "                    obj=r.json();jid=obj.get('job_id')\n"
-        "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'pending_provider' if jid else 'unknown','provider_job_id':jid}})\n"
-        '                elif r.status_code in (400,401,403,404,422):\n'
-        "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'rejected'}});self.finance.refund(job['_id'],'github_rejected')\n"
-        "                else:self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})\n"
-        "            except Exception:self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})\n"
-        '            finally:credentials.clear();self.secure_wipe(data)\n'
-        '        self._release_purchase_lock(uid);self._invalidate_user_cache(uid)\n'
-        "        self.send(uid,'طلبك محفوظ. ستصلك النتيجة بعد تحقق المزود.\\n<code>'+job['order_id']+'</code>')\n"
-        '    def github_poll(self,job):\n'
-        "        r=self.requests.get(self.GITHUB_BASE_URL+'/api/job/'+str(job['provider_job_id']),headers={'X-API-Key':self.GITHUB_API_KEY},timeout=15)\n"
-        '        if r.status_code!=200:return\n'
-        "        obj=r.json();state=str(obj.get('status','')).lower()\n"
-        "        if state=='submitted':\n"
-        '            def save(s):\n'
-        "                self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed'}},session=s)\n"
-        "                self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],\n"
-        "                    'product_id':'GitHub_Student','code_delivered':'AppID: '+str(obj.get('app_id','')),'qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)\n"
-        "            self.finance.atomic(save);self.send(job['user_id'],'✅ اكتمل طلب GitHub '+job['order_id'])\n"
-        "        elif state in ('failed','error'):\n"
-        "            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['refunded','completed']}},{'$set':{'status':'rejected'}})\n"
-        "            self.finance.refund(job['_id'],'github_failed');self._invalidate_user_cache(job['user_id'])\n"
-        "            self.send(job['user_id'],'لم يُنفذ طلب GitHub وأُعيد رصيدك.')\n"
-        '\n'
-        '    def notification_worker(self):\n'
-        '        while not self._stop.wait(2):\n'
-        '            try:\n'
-        "                now=time.time();n=self.db.notifications.find_one_and_update({'sent':False,'next_at':{'$lte':now}},\n"
-        "                    {'$set':{'next_at':now+60}},return_document=True)\n"
-        '                if n:\n'
-        "                    remaining=[];markup=self.InlineKeyboardMarkup.de_json(n['markup']) if n.get('markup') else None\n"
-        "                    for uid in n.get('uids',[]):\n"
-        "                        if not self.send(uid,n['text'],reply_markup=markup):remaining.append(uid)\n"
-        "                    self.db.notifications.update_one({'_id':n['_id']},{'$set':{'uids':remaining,'sent':not remaining,'next_at':time.time()+300}})\n"
-        '                self.reconcile_pending_once()\n'
-        "            except Exception:self.logger.exception('Background reconciliation failed')\n"
-        '            self._stop.wait(20)\n'
-        '\n'
-        '    def csv_orders(self,call):\n'
-        '        import csv\n'
-        '        f=io.StringIO();writer=csv.writer(f)\n'
-        "        writer.writerow(['التاريخ','المستخدم','رقم الطلب','المنتج','الكمية','السعر المدفوع للوحدة','الإجمالي المحفوظ','الحالة'])\n"
-        "        for r in self.db.orders.find().sort('_id',-1):\n"
-        "            qty=r.get('qty',r.get('quantity',1));total=r.get('total_price');unit=r.get('price')\n"
-        '            # Historical unknowns stay blank; never recompute from current catalog price.\n'
-        '            if total is None and unit is not None:total=unit*qty\n'
-        '            if unit is None and total is not None and qty:unit=total/qty\n'
-        '            def safe(v):\n'
-        "                text=str(v if v is not None else '')\n"
-        '                return "\'"+text if text.startswith((\'=\',\'+\',\'-\',\'@\')) else text\n'
-        "            writer.writerow([safe(r.get('created_at',getattr(r.get('_id'),'generation_time',''))),r.get('user_id'),r.get('order_id',''),safe(r.get('product_id','')),qty,unit if unit is not None else '',total if total is not None else '',r.get('status','legacy_unverified')])\n"
-        "        file=io.BytesIO(f.getvalue().encode('utf-8-sig'));file.name='orders.csv';self.bot.send_document(call.from_user.id,file)\n"
-        '\n'
-        '    def gemini_buy(self,call):\n'
-        '        uid=call.from_user.id\n'
-        "        if not self.g.get('client') or not self.g.get('USERBOT_LOOP'):raise ShopError('مزود Gemini غير متصل؛ لم يُخصم رصيد.')\n"
-        "        price=cents(self.get_setting('gemini_price'),minimum=1)/100\n"
-        "        job=self.finance.reserve_external(uid,price,f'gemini:{call.message.chat.id}:{call.message.message_id}','gemini',{'product':'Gemini Advanced'})\n"
-        "        self._invalidate_user_cache(uid);self.send(uid,'طلب Gemini محفوظ في الطابور.\\n<code>'+job['order_id']+'</code>')\n"
-        '        self.gemini_next()\n'
-        '    def gemini_next(self):\n'
-        '        import asyncio\n'
-        '        # One durable provider stream. An uncertain job blocks reuse until reconciliation.\n'
-        "        if self.db.external_jobs.find_one({'kind':'gemini','status':{'$in':['processing','unknown']}}):return\n"
-        "        job=self.db.external_jobs.find_one({'kind':'gemini','status':'queued'},sort=[('created_at',1)])\n"
-        '        if not job:return\n'
-        "        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
-        '        if not claim:return\n'
-        "        self.g['ACTIVE_GEMINI_SESSION']={'uid':job['user_id'],'price':job['amount_cents']/100,'job_id':job['_id'],'ready':False,'msg_map':{}}\n"
-        '        async def begin():\n'
-        '            try:\n'
-        "                provider=self.get_setting('provider_bot','').replace('@','')\n"
-        "                await self.client.send_message(provider,'/start');await self.asyncio.sleep(3)\n"
-        "                self.g['ACTIVE_GEMINI_SESSION']['ready']=True\n"
-        '                messages=await self.client.get_messages(provider,limit=5)\n'
-        '                for msg in messages:\n'
-        "                    if msg.reply_markup and hasattr(msg.reply_markup,'rows'):\n"
-        '                        for ri,row in enumerate(msg.reply_markup.rows):\n'
-        '                            for ci,button in enumerate(row.buttons):\n'
-        "                                if 'Create verify' in (button.text or ''):\n"
-        '                                    await msg.click(ri,ci);return\n'
-        "                await self.client.send_message(provider,'✨ Create verify')\n"
-        '            except Exception:\n'
-        "                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})\n"
-        "                self.send(job['user_id'],'تعذر حسم اتصال المزود. طلبك محفوظ للمراجعة؛ لن يُكرر تلقائيًا.')\n"
-        '        asyncio.run_coroutine_threadsafe(begin(),self.USERBOT_LOOP)\n'
-        '    def userbot_start(self):\n'
-        '        import os,asyncio\n'
-        "        session=self.get_setting('userbot_session','');provider=self.get_setting('provider_bot','').replace('@','')\n"
-        "        if not session or session=='Not Set' or not provider or provider=='Not Set':return False\n"
-        "        api_id=os.environ.get('TELEGRAM_API_ID');api_hash=os.environ.get('TELEGRAM_API_HASH')\n"
-        '        if not api_id or not api_hash:\n'
-        "            self.logger.warning('Gemini userbot needs TELEGRAM_API_ID and TELEGRAM_API_HASH');return False\n"
-        "        if self.g.get('client'):return True\n"
-        '        loop=asyncio.new_event_loop();asyncio.set_event_loop(loop);client=self.TelegramClient(self.StringSession(session),int(api_id),api_hash)\n'
-        "        self.g['USERBOT_LOOP']=loop;self.g['client']=client\n"
-        '        @client.on(self.events.NewMessage(chats=provider))\n'
-        '        @client.on(self.events.MessageEdited(chats=provider))\n'
-        '        async def event_handler(event):\n'
-        "            active=self.g.get('ACTIVE_GEMINI_SESSION')\n"
-        "            if not active or not active.get('ready'):return\n"
-        "            job=self.db.external_jobs.find_one({'_id':active['job_id'],'status':'processing'})\n"
-        '            if not job:return\n'
-        '            event_time=event.message.date.timestamp() if event.message.date else 0\n'
-        "            if event_time<job.get('started_at',0)-1:return\n"
-        "            text=event.raw_text or '';self.send(job['user_id'],'📩 '+html.escape(text[:3500]))\n"
-        "            if '✅ Status: SUCCEEDED' in text:\n"
-        '                def complete(s):\n'
-        "                    j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)\n"
-        "                    if j['status']!='processing':return\n"
-        "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed'}},session=s)\n"
-        "                    self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],'product_id':'Gemini_Activation','code_delivered':'تم التفعيل','qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)\n"
-        "                self.finance.atomic(complete);self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
-        "            elif '❌ Status: FAILED' in text or '❌ Error' in text:\n"
-        "                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'rejected'}})\n"
-        "                self.finance.refund(job['_id'],'gemini_failed');self._invalidate_user_cache(job['user_id'])\n"
-        "                self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
-        '        def run():\n'
-        '            asyncio.set_event_loop(loop)\n'
-        '            async def connect():\n'
-        '                await client.connect()\n'
-        "                if not await client.is_user_authorized():raise RuntimeError('Userbot session unauthorized')\n"
-        '                self.gemini_next();await client.run_until_disconnected()\n'
-        '            try:loop.run_until_complete(connect())\n'
-        '            except Exception:\n'
-        "                self.logger.exception('Userbot stopped');self.g['client']=None\n"
-        "        threading.Thread(target=run,name='gemini-userbot',daemon=True).start();return True\n"
-        '\n'
-        '    def start(self):\n'
-        '        import os\n'
-        "        if not self.TOKEN or not self.MONGO_URI or not self.OWNER_ID:raise RuntimeError('TOKEN, MONGO_URI and OWNER_ID must be configured.')\n"
-        '        self.secret_cipher()  # Validate encryption configuration before accepting requests.\n'
-        "        self.initialize();self.register_ui();self.install_handlers(set(self.g['_SAFE_ADMIN_NAMES'])|{'cgx_admin_route'})\n"
-        '        self.bot.delete_webhook(drop_pending_updates=False)\n'
-        '        self.userbot_start()\n'
-        "        workers=[('http',self.keep_alive),('deposits',self.auto_deposit_monitor_thread),('chatgpt',self.cgpt_daemon),\n"
-        "                 ('notifications',self.notification_worker),('referrals',self.background_referral_checker_v2)]\n"
-        "        workers.append(('restock-digests',self.g['_ops'].restock_worker))\n"
-        "        for i in range(1):workers.append(('webhook-'+str(i),self.webhook_worker))\n"
-        '        for name,fn in workers:threading.Thread(target=self.run_worker,args=(fn,),name=name,daemon=True).start()\n'
-        "        self.logger.info('Runtime ready; pending Telegram updates will be processed.')\n"
-        "        self.bot.infinity_polling(skip_pending=False,timeout=30,long_polling_timeout=30,allowed_updates=['message','callback_query','pre_checkout_query'])\n"
-        '\n'
-        '    def stars_invoice(self,message,lang):\n'
-        "        uid=message.from_user.id;value=cents((message.text or '').replace('$','').replace(',','.'),minimum=10,maximum=100000)\n"
-        '        stars=max(1,(value*quantity(self.STARS_RATE,100000)+99)//100)\n'
-        '        ident=uuid.uuid4().hex\n'
-        "        self.db.star_invoices.insert_one({'_id':ident,'user_id':uid,'amount_cents':value,'stars':stars,'status':'created','created_at':dt.datetime.utcnow()})\n"
-        "        self.bot.send_invoice(uid,'شحن رصيد المتجر','شحن رصيد المتجر باستخدام النجوم',payload='invoice:'+ident,\n"
-        "            provider_token='',currency='XTR',prices=[self.LabeledPrice(label='رصيد المتجر',amount=stars)])\n"
-        '    def stars_checkout(self,query):\n'
-        "        inv=self.db.star_invoices.find_one({'_id':str(query.invoice_payload).removeprefix('invoice:'),'user_id':query.from_user.id})\n"
-        "        ok=bool(inv and inv['stars']==query.total_amount and query.currency=='XTR' and inv['status'] in ('created','paid'))\n"
-        "        self.bot.answer_pre_checkout_query(query.id,ok=ok,error_message=None if ok else 'الفاتورة غير صالحة؛ أنشئ فاتورة جديدة.')\n"
-        '    def stars_paid(self,message):\n'
-        '        payment=message.successful_payment;uid=message.from_user.id\n'
-        "        inv=self.db.star_invoices.find_one({'_id':str(payment.invoice_payload).removeprefix('invoice:'),'user_id':uid})\n"
-        "        if not inv or inv['stars']!=payment.total_amount or payment.currency!='XTR':\n"
-        "            self.notice_once('stars-review:'+payment.telegram_payment_charge_id,86400,'⚠️ دفعة نجوم قديمة أو غير مطابقة تحتاج تسوية. المستخدم: '+str(uid));return\n"
-        "        result=self.credit_user(uid,inv['amount_cents']/100,payment.telegram_payment_charge_id,self.get_lang(uid),'Telegram Stars')\n"
-        "        if result.get('ok'):self.db.star_invoices.update_one({'_id':inv['_id']},{'$set':{'status':'paid','charge_id':payment.telegram_payment_charge_id}})\n"
-        '\n'
-        '    def run_worker(self,fn):\n'
-        '        while not self._stop.is_set():\n'
-        '            try:\n'
-        '                fn()\n'
-        '                return\n'
-        '            except Exception:\n'
-        "                self.logger.exception('Worker interrupted; will resume')\n"
-        '                self._stop.wait(5)\n'
-        '\n'
-        '    def all_accounts(self):\n'
-        '        accounts=list(self.db.cgpt_accounts.find())\n'
-        "        main=self.db.cgpt_cookies.find_one({'_id':'main'})\n"
-        "        if main and (main.get('data') or main.get('sealed_data')) and not any(str(a['_id'])=='main' for a in accounts):\n"
-        "            accounts.append({**main,'name':main.get('name','الحساب الرئيسي')})\n"
-        '        return accounts\n'
-        '\n'
-        '    def reconcile_pending_once(self):\n'
-        '        for _ in range(20):\n'
-        '            now=time.time()\n'
-        "            job=self.db.external_jobs.find_one_and_update({'status':{'$in':['processing','pending_provider','unknown']},\n"
-        "                '$or':[{'next_reconcile_at':{'$exists':False}},{'next_reconcile_at':{'$lte':now}}]},\n"
-        "                {'$set':{'next_reconcile_at':now+300}},sort=[('next_reconcile_at',1),('created_at',1)],return_document=True)\n"
-        '            if not job:return\n'
-        "            if job.get('started_at',0)>now-60:continue\n"
-        '            try:\n'
-        '                self.reconcile_job(job)\n'
-        "                current=self.db.external_jobs.find_one({'_id':job['_id']}) or {}\n"
-        "                if current.get('status') in ('completed','refunded'):continue\n"
-        "                if job.get('started_at',0)<now-300:\n"
-        "                    self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})\n"
-        "                    if not job.get('provider_order_id') and not job.get('provider_job_id'):\n"
-        "                        self.notice_once('job:'+job['_id'],86400,'⚠️ طلب يحتاج مطابقة النتيجة: '+job['order_id'],self.markup([('متابعة الطلب','cgx_job_'+job['order_id'])]))\n"
-        '            except Exception:\n'
-        "                self.logger.exception('Reconciliation failed for one job: %s',job['_id'])\n"
-    ),
-    'refund_review': (
-        '"""Review amounts only when an expired workspace has no verified alternative seat."""\n'
-        'import datetime as dt\n'
-        'from decimal import Decimal, ROUND_HALF_UP\n'
-        'from chatgpt_service import date\n'
-        'from domain import digest\n'
-        '\n'
-        '\n'
-        'def refund_quote(db,uid,email,expires_at,cutoff):\n'
-        '    end=date(expires_at);start=date(cutoff)\n'
-        '    if not isinstance(uid,int) or not end or not start or start>=end:\n'
-        "        return {'amount_cents':None,'reason':'بيانات المدة أو المستخدم غير مكتملة.'}\n"
-        '    segments=[]\n'
-        "    for job in db.external_jobs.find({'kind':'chatgpt','status':'completed','user_id':uid,'details.email':email}):\n"
-        "        finish=date(job.get('result',{}).get('expires_at'))\n"
-        "        minutes=job.get('details',{}).get('minutes');paid=job.get('amount_cents')\n"
-        '        if not finish or type(minutes)!=int or minutes<=0 or type(paid)!=int or paid<0:continue\n'
-        '        begin=finish-dt.timedelta(minutes=minutes)\n'
-        '        a=max(start,begin);b=min(end,finish)\n'
-        "        if b>a:segments.append((a,b,paid,minutes,job.get('order_id','')))\n"
-        '    segments.sort(key=lambda s:s[0]);cursor=start;total=Decimal(0);orders=[]\n'
-        '    for a,b,paid,minutes,oid in segments:\n'
-        '        if abs((a-cursor).total_seconds())>0.01:\n'
-        "            return {'amount_cents':None,'reason':'سجل الدفع لا يغطي كامل المدة أو يتضمن تداخلًا؛ راجع الطلبات.'}\n"
-        '        total+=Decimal(paid)*Decimal(str((b-a).total_seconds()))/Decimal(minutes*60)\n'
-        '        cursor=b;orders.append(oid)\n'
-        '    if abs((end-cursor).total_seconds())>0.01:\n'
-        "        return {'amount_cents':None,'reason':'لا توجد بيانات دفع كافية لحساب المتبقي.'}\n"
-        "    return {'amount_cents':int(total.quantize(Decimal('1'),rounding=ROUND_HALF_UP)),'order_ids':orders,\n"
-        "            'reason':'قيمة المدة غير المستخدمة من مبالغ الشراء والتجديد الفعلية.'}\n"
-        '\n'
-        '\n'
-        'def queue_no_seat_refund(runtime,source,email,info,report):\n'
-        "    uid=info.get('telegram_uid');now=dt.datetime.utcnow()\n"
-        '    # Freeze the first observed outage, unless the provider supplies a verified expiry.\n'
-        "    cutoff=date(report.get('expires_at')) or now\n"
-        '    if cutoff>now:cutoff=now\n'
-        "    ident=digest('no_seat_refund',source._account_key,email,info.get('expires_at'),info.get('last_job_id'))\n"
-        "    runtime.db.cgpt_refund_reviews.update_one({'_id':ident},{'$setOnInsert':{'account':source._account_key,'email':email,\n"
-        "        'user_id':uid,'cutoff':cutoff.isoformat(),'subscription_expires_at':info.get('expires_at'),'status':'review','created_at':now}},upsert=True)\n"
-        "    rec=runtime.db.cgpt_refund_reviews.find_one({'_id':ident})\n"
-        "    quote=refund_quote(runtime.db,uid,email,info.get('expires_at'),rec['cutoff'])\n"
-        "    user=runtime.db.users.find_one({'user_id':uid}) or {}\n"
-        "    amount=quote['amount_cents']\n"
-        "    details={'السبب':'انتهى اشتراك الحساب ولا يوجد مقعد بديل مؤكد.',\n"
-        "             'المستخدم':str(uid) if uid is not None else 'غير مرتبط','يوزر':user.get('username') or 'غير متاح',\n"
-        "             'المستحق بالدولار':f'{amount/100:.2f}' if amount is not None else 'يحتاج حسابًا يدويًا: سجل الدفع غير مكتمل',\n"
-        "             'بداية التعطل UTC':rec['cutoff'],'نهاية اشتراك العميل UTC':info.get('expires_at'),\n"
-        "             'المتبقي بالساعات':round(max(0,(date(info.get('expires_at'))-date(rec['cutoff'])).total_seconds())/3600,2),\n"
-        "             'طريقة الحساب':quote['reason'],'ملاحظة':'للمراجعة والإرجاع يدويًا؛ لم يُنفذ تحويل أو تعديل رصيد.'}\n"
-        "    runtime.db.cgpt_refund_reviews.update_one({'_id':ident},{'$set':{'quote':quote,'updated_at':now}})\n"
-        "    issue=runtime.issue('no_seat_refund',source._account_key,email,uid,details)\n"
-        "    runtime.notice_once('refund-review:'+ident,86400,'💰 يوجد عميل يحتاج مراجعة مبلغ استرجاع بسبب انتهاء الحساب وعدم وجود مقعد بديل.',runtime.markup([('عرض الحالة','cgx_issue_'+issue[:40])]))\n"
-    ),
-    'broadcast_service': (
-        '"""Bounded Telegram broadcast retry; never silently drop a rate-limited recipient."""\n'
-        'import time\n'
-        '\n'
-        '\n'
-        'def deliver(send,uid,db,wait=time.sleep):\n'
-        "    user=db.users.find_one({'user_id':uid}) or {}\n"
-        "    if user.get('is_banned')==1 or user.get('broadcast_disabled'):return 'skipped'\n"
-        '    for attempt in range(4):\n'
-        '        try:\n'
-        "            send();wait(.1);return 'sent'\n"
-        '        except Exception as exc:\n'
-        "            code=getattr(exc,'error_code',None)\n"
-        '            if code==403:\n'
-        "                db.users.update_one({'user_id':uid},{'$set':{'broadcast_disabled':True}})\n"
-        "                return 'blocked'\n"
-        "            params=getattr(exc,'result_json',{}) or {}\n"
-        "            retry=params.get('parameters',{}).get('retry_after')\n"
-        '            if code==429 and retry and attempt<3:\n'
-        '                # Telegram rejection confirms this recipient has not received it.\n'
-        '                delay=min(3600,max(1,float(retry)))+1\n'
-        '                wait(delay);continue\n'
-        '            # Network timeout is ambiguous; do not duplicate a possibly delivered message.\n'
-        "            return 'failed'\n"
-        "    return 'failed'\n"
-    ),
-    'http_api': (
-        'import json\n'
-        'import math\n'
-        'import time\n'
-        'from urllib.parse import urlparse,parse_qs\n'
-        'from domain import ShopError,quantity,digest\n'
-        'from network import public_endpoint\n'
-        '\n'
-        'MAX_BODY=262144\n'
-        '\n'
-        'def read_body(handler):\n'
-        "    if handler.headers.get('Transfer-Encoding'):raise ShopError('Chunked requests are not supported; send Content-Length.',411)\n"
-        "    try:size=int(handler.headers.get('Content-Length','0'))\n"
-        "    except ValueError:raise ShopError('Invalid Content-Length')\n"
-        "    if not 0<size<=MAX_BODY:raise ShopError('Request body exceeds limit or is empty.',413)\n"
-        '    raw=handler.rfile.read(size)\n'
-        "    if len(raw)!=size:raise ShopError('Incomplete body')\n"
-        '    try:\n'
-        '        obj=json.loads(raw,parse_constant=lambda s:(_ for _ in ()).throw(ValueError(s)))\n'
-        '        if not isinstance(obj,dict):raise ValueError()\n'
-        "    except (ValueError,UnicodeDecodeError):raise ShopError('JSON object required')\n"
-        "    if urlparse(handler.path).path.endswith('/set_webhook'):public_endpoint(str(obj.get('url','')))\n"
-        "    return raw.decode('utf-8')\n"
-        '\n'
-        '\n'
-        'def make_handler(base,rt):\n'
-        '    class APIHandler(base):\n'
-        '        def setup(self):\n'
-        '            super().setup();self.connection.settimeout(15)\n'
-        '        def do_GET(self):\n'
-        '            try:\n'
-        "                p=urlparse(self.path);route=p.path.rstrip('/');gw='/'+rt._get_api_gateway()\n"
-        "                if route in ('','/'):\n"
-        "                    return rt._json_resp(self,200 if rt.ready else 503,{'status':'online' if rt.ready else 'initializing'})\n"
-        "                if not rt.ready:raise ShopError('Service initializing',503)\n"
-        "                if route==gw+'/changes':return self.changes(parse_qs(p.query))\n"
-        "                if route.startswith(gw+'/order/'):\n"
-        '                    doc,user=self._auth()\n'
-        "                    if not doc:raise ShopError('Invalid API key',401)\n"
-        "                    oid=route.rsplit('/',1)[1]\n"
-        "                    job=rt.db.external_jobs.find_one({'order_id':oid,'user_id':doc['user_id']})\n"
-        '                    if job:return rt._json_resp(self,200,job_response(job))\n'
-        '                return super().do_GET()\n'
-        "            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})\n"
-        '            except Exception:\n'
-        "                rt.logger.exception('API GET failed');return rt._json_resp(self,500,{'error':'Internal error'})\n"
-        '        def changes(self,params):\n'
-        '            doc,user=self._auth()\n'
-        "            if not doc:raise ShopError('Invalid API key',401)\n"
-        "            if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)\n"
-        "            limit=quantity(params.get('limit',['100'])[0],500)\n"
-        "            since=params.get('since',['s:0'])[0]\n"
-        "            q={'$or':[{'owner_uid':None},{'owner_uid':doc['user_id']}],'sequence':{'$exists':True}}\n"
-        "            if since.startswith('s:'):\n"
-        '                try:n=int(since[2:])\n'
-        "                except ValueError:raise ShopError('Invalid cursor')\n"
-        "                q['sequence']={'$gt':max(0,n)}\n"
-        '            else:\n'
-        "                try:q['timestamp']={'$gte':int(since)}\n"
-        "                except ValueError:raise ShopError('Invalid cursor')\n"
-        "            events=list(rt.db.api_events.find(q).sort('sequence',1).limit(limit))\n"
-        "            cursor='s:'+str(events[-1]['sequence']) if events else since\n"
-        "            out=[{k:v for k,v in e.items() if k not in ('_id','created_at','owner_uid')} for e in events]\n"
-        "            return rt._json_resp(self,200,{'success':True,'events':out,'cursor':cursor,'count':len(out)})\n"
-        '        def do_POST(self):\n'
-        '            try:\n'
-        "                if not rt.ready:raise ShopError('Service initializing',503)\n"
-        "                path=urlparse(self.path).path.rstrip('/');gw='/'+rt._get_api_gateway()\n"
-        "                if path!=gw+'/purchase':return super().do_POST()\n"
-        '                doc,user=self._auth()\n'
-        "                if not doc:raise ShopError('Invalid API key',401)\n"
-        "                if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)\n"
-        "                body=json.loads(read_body(self));uid=doc['user_id'];pid=str(body.get('product_id',''))\n"
-        "                qty=quantity(body.get('qty',1));idem=self.headers.get('Idempotency-Key','').strip()\n"
-        "                if not 8<=len(idem)<=128:raise ShopError('Idempotency-Key header required (8–128 characters)')\n"
-        "                if pid.startswith('cgpt_'):\n"
-        "                    if qty!=1:raise ShopError('ChatGPT purchase requires qty=1 and one email')\n"
-        "                    product,duration=pid[5:].split('_',1);email=str(body.get('email','')).strip().lower()\n"
-        "                    job=rt.buy_cgpt(uid,product,duration,email,'api:'+idem)\n"
-        '                    result=job_response(job)\n'
-        "                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':1,'total_price':job['amount_cents']/100}},upsert=True)\n"
-        "                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)\n"
-        "                if pid.startswith('ext_'):\n"
-        "                    job=rt.buy_external(uid,pid[4:],qty,'api:'+idem);result=job_response(job)\n"
-        "                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':qty,'total_price':job['amount_cents']/100}},upsert=True)\n"
-        "                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)\n"
-        "                order=rt.finance.buy_stock(uid,pid,qty,'api:'+idem,True,str(body.get('buyer_info',''))[:200])\n"
-        '                rt._invalidate_user_cache(uid);rt._invalidate_products_cache()\n'
-        "                rt.emit_event('order.completed' if order['status']=='completed' else 'order.pending',{'api_user_id':uid,'order_id':order['order_id'],'status':order['status']},pid)\n"
-        "                rt.emit_event('stock.sold',{'product_id':pid,'order_id':order['order_id'],'qty_sold':qty,'remaining_stock':rt.get_product_stock_count(pid)},pid)\n"
-        '                rt.reward_once(order)\n'
-        "                return rt._json_resp(self,200,{k:v for k,v in order.items() if k not in ('_id','created_at','request_hash')})\n"
-        "            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})\n"
-        "            except (ValueError,TypeError,KeyError):return rt._json_resp(self,400,{'error':'Invalid input'})\n"
-        '            except Exception:\n'
-        "                rt.logger.exception('API purchase failed; retry with SAME Idempotency-Key')\n"
-        "                return rt._json_resp(self,503,{'error':'Result uncertain; retry with the same Idempotency-Key'})\n"
-        '    return APIHandler\n'
-        '\n'
-        '\n'
-        'def job_response(job):\n'
-        "    return {'success':job['status']=='completed','order_id':job['order_id'],'status':job['status'],\n"
-        "            'total_price':job['amount_cents']/100,'codes':job.get('codes',[]),\n"
-        "            'email':job['details'].get('email'),'expires_at':job.get('result',{}).get('expires_at')}\n"
-        '\n'
-        '\n'
-        'def encode_response(data, accept_encoding, path):\n'
-        '    import gzip\n'
-        "    raw=json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')\n"
-        '    supports=False\n'
-        "    for part in accept_encoding.lower().split(','):\n"
-        "        fields=[x.strip() for x in part.split(';')]\n"
-        "        if fields[0]!='gzip':continue\n"
-        "        try:supports=all(float(x[2:])>0 for x in fields[1:] if x.startswith('q='))\n"
-        '        except ValueError:supports=False\n'
-        "    if supports and len(raw)>1024 and urlparse(path).path.rstrip('/').endswith('/products'):\n"
-        "        return gzip.compress(raw,compresslevel=4,mtime=0),'gzip'\n"
-        '    return raw,None\n'
-    ),
-    'operations': (
-        '"""Bounded catalog sync, restock digests and referral work."""\n'
-        'import datetime as dt\n'
-        'import html\n'
-        'import os\n'
-        'import threading\n'
-        'import time\n'
-        'from bson import ObjectId\n'
-        'from pymongo.errors import DuplicateKeyError\n'
-        'from domain import ShopError, finite_float\n'
-        '\n'
-        '\n'
-        'def seconds(name, default, minimum=30):\n'
-        '    try:return max(minimum, int(os.getenv(name, str(default))))\n'
-        '    except ValueError:return default\n'
-        '\n'
-        '\n'
-        'def product_list(data):\n'
-        '    """None means invalid, never an empty successful catalog."""\n'
-        '    if isinstance(data, list):return data if all(isinstance(p, dict) for p in data) else None\n'
-        '    if isinstance(data, dict):\n'
-        "        if data.get('success') is False or data.get('error'):return None\n"
-        "        for key in ('products','data','items','result','results','catalog','list','response'):\n"
-        '            value=data.get(key)\n'
-        '            if isinstance(value,(dict,list)):\n'
-        '                result=product_list(value)\n'
-        '                if result is not None:return result\n'
-        '    return None\n'
-        '\n'
-        '\n'
-        'class Operations:\n'
-        '    def __init__(self, g):\n'
-        '        self.g=g\n'
-        '        self.stop=threading.Event()\n'
-        '        self.sub_cache={};self.channels=(0,[]);self.seat_snapshot=(0,None)\n'
-        '        self.locks=[threading.Lock() for _ in range(64)]\n'
-        '        self.sync_lock=threading.Lock()\n'
-        '    def __getattr__(self,name):return self.g[name]\n'
-        '    def initialize(self):\n'
-        "        self.db.referral_work.create_index('due')\n"
-        "        self.db.referrals_v2.create_index([('status',1),('next_check',1)])\n"
-        "        self.db.referrals_v2.create_index([('referrer_id',1),('created_at',1)])\n"
-        "        self.db.ext_products.create_index([('store_id',1),('ext_id',1)])\n"
-        "        self.db.ext_products.create_index('catalog_id')\n"
-        "        self.db.restock_events.create_index([('status',1),('ready_at',1)])\n"
-        "        self.db.restock_events.create_index('expires',expireAfterSeconds=0)\n"
-        "        self.db.restock_recipients.create_index('expires',expireAfterSeconds=0)\n"
-        "        self.db.restock_events.update_many({'status':'sending'}, {'$set':{'status':'sent','delivery_uncertain':True}})\n"
-        "        self.db.referrals_v2.update_many({'next_check':{'$exists':False}}, {'$set':{'next_check':0}})\n"
-        '        # Repair conflicting legacy ChatGPT folder memberships without deleting products.\n'
-        '        catalogs=list(self.db.catalogs.find())\n'
-        "        valid={str(c['_id']) for c in catalogs}\n"
-        "        for p in self.db.products.find({'product_type':'cgpt_main'}):\n"
-        "            target=str(p.get('catalog_id') or '')\n"
-        '            if target not in valid:\n'
-        "                target=next((str(c['_id']) for c in catalogs if str(p['_id']) in {str(x) for x in c.get('product_ids',[])}),None)\n"
-        '            self.move_product(p,target)\n'
-        '\n'
-        '    def move_product(self, product, cat_id):\n'
-        "        pid=product['_id'];cat_id=None if cat_id in (None,'','none') else str(cat_id)\n"
-        "        cat=self.db.catalogs.find_one({'_id':ObjectId(cat_id)}) if cat_id else None\n"
-        "        if cat_id and not cat:raise ShopError('المجلد غير موجود.')\n"
-        '        aliases=[pid,str(pid)]\n'
-        "        if product.get('id') is not None:aliases += [product['id'],str(product['id'])]\n"
-        "        self.db.catalogs.update_many({'product_ids':{'$in':aliases}}, {'$pull':{'product_ids':{'$in':aliases}}})\n"
-        "        self.db.products.update_one({'_id':pid},{'$set':{'catalog_id':cat_id}})\n"
-        "        if cat:self.db.catalogs.update_one({'_id':cat['_id']},{'$push':{'product_ids':{'$each':[pid],'$position':0}}})\n"
-        '        self._invalidate_products_cache()\n'
-        '    def display_seats(self):\n'
-        '        # Display uses monitor snapshots. Checkout still validates live capacity.\n'
-        '        if self.seat_snapshot[0]>time.time():return self.seat_snapshot[1]\n'
-        '        total=0;known=False\n'
-        "        for report in self.db.cgpt_account_status.find({'checked_at':{'$gt':dt.datetime.utcnow()-dt.timedelta(minutes=15)}}):\n"
-        "            if report.get('connected') and report.get('available_seats') is not None:\n"
-        "                total+=max(0,int(report['available_seats']));known=True\n"
-        '        value=total if known else None\n'
-        '        self.seat_snapshot=(time.time()+15,value)\n'
-        '        return value\n'
-        '    def queue_referrer(self,rid,progress=False):\n'
-        "        self.db.referral_work.update_one({'_id':int(rid)},\n"
-        "            {'$setOnInsert':{'due':time.time()+10},'$inc':{'generation':1},'$max':{'progress':int(progress)}},upsert=True)\n"
-        '    def register_referral(self,invited,rid):\n'
-        '        invited=int(invited);rid=int(rid)\n'
-        "        if invited==rid or not self.db.users.find_one({'user_id':rid},{'_id':1}):return False\n"
-        "        try:self.db.referrals_v2.insert_one({'invited_id':invited,'referrer_id':rid,'status':'pending',\n"
-        "            'created_at':int(time.time()),'updated_at':int(time.time()),'next_check':time.time()+300})\n"
-        '        except DuplicateKeyError:return False\n'
-        '        self.queue_referrer(rid);return True\n'
-        '    def mark_referral(self,uid,status):\n'
-        "        if status not in ('pending','active','left'):raise ValueError('Invalid referral status')\n"
-        "        old=self.db.referrals_v2.find_one_and_update({'invited_id':int(uid),'status':{'$ne':status}},\n"
-        "            {'$set':{'status':status,'updated_at':int(time.time()),'next_check':time.time()+300}})\n"
-        "        if old:self.queue_referrer(old['referrer_id'],status=='active')\n"
-        '    def forced_sub(self,uid,use_cache=True):\n'
-        '        if uid==self.OWNER_ID:return True\n'
-        '        with self.locks[int(uid)%64]:\n'
-        '            now=time.time();cached=self.sub_cache.get(uid)\n'
-        '            if use_cache and cached and cached[0]>now:return cached[1]\n'
-        '            user=self.get_user_data_full(uid)\n'
-        "            if user and user.get('is_admin')==1:return True\n"
-        '            if self.channels[0]<now:self.channels=(now+30,list(self.db.required_channels.find()))\n'
-        '            result=True\n'
-        '            for channel in self.channels[1]:\n'
-        '                try:\n'
-        "                    member=self.bot.get_chat_member(channel['channel_id'],uid)\n"
-        "                    if member.status in ('left','kicked') or (member.status=='restricted' and not getattr(member,'is_member',False)):\n"
-        '                        result=False;break\n'
-        '                except Exception:result=None\n'
-        '            if len(self.sub_cache)>=10000:self.sub_cache.clear()\n'
-        '            self.sub_cache[uid]=(now+(300 if result is True else 3),result)\n'
-        '            return result\n'
-        '    def referral_cycle(self):\n'
-        '        now=time.time()\n'
-        '        # Fixed budget; indexed schedule avoids re-scanning all members every minute.\n'
-        '        for _ in range(10):\n'
-        "            ref=self.db.referrals_v2.find_one_and_update({'status':{'$in':['pending','active','left']},'next_check':{'$lte':now}},\n"
-        "                {'$set':{'next_check':now+300}},sort=[('next_check',1)],return_document=False)\n"
-        '            if not ref:break\n'
-        "            result=self.forced_sub(ref['invited_id'],use_cache=False)\n"
-        '            if result is None:continue\n'
-        "            misses=0 if result else ref.get('left_checks',0)+1\n"
-        "            if result:self.mark_referral(ref['invited_id'],'active')\n"
-        "            elif misses>=3 and ref['status']=='active':self.mark_referral(ref['invited_id'],'left')\n"
-        "            self.db.referrals_v2.update_one({'_id':ref['_id']},{'$set':{'left_checks':misses,\n"
-        "                'next_check':now+(21600 if result else 300 if misses<3 else 3600)}})\n"
-        '            if self.stop.wait(.2):break\n'
-        '    def referral_work_once(self):\n'
-        "        job=self.db.referral_work.find_one_and_update({'due':{'$lte':time.time()}},\n"
-        "            {'$set':{'due':time.time()+60}},sort=[('due',1)],return_document=True)\n"
-        '        if not job:return\n'
-        "        rid=job['_id']\n"
-        '        self.update_referrer_balance(rid)\n'
-        '        self._check_referral_spam(rid)\n'
-        "        if job.get('progress'):\n"
-        '            now=time.time()\n'
-        "            claimed=self.db.users.update_one({'user_id':rid,'$or':[{'ref_progress_at':{'$lte':now-300}},{'ref_progress_at':{'$exists':False}}]},\n"
-        "                {'$set':{'ref_progress_at':now}})\n"
-        '            if claimed.modified_count:self.send_progress_log_notification(rid)\n'
-        '        # New joins during work are retained for the next iteration.\n'
-        "        self.db.referral_work.delete_one({'_id':rid,'generation':job.get('generation')})\n"
-        '    def referral_worker(self):\n'
-        '        next_check=time.time()+60\n'
-        '        while not self.stop.wait(2):\n'
-        '            try:\n'
-        '                self.referral_work_once()\n'
-        '                if time.time()>=next_check:\n'
-        '                    self.referral_cycle();next_check=time.time()+60\n'
-        "            except Exception:self.logger.exception('Referral background work failed')\n"
-        '    def queue_restock(self,ep,old_stock):\n'
-        "        if old_stock!=0 or ep.get('stock',0)<=0 or ep.get('hidden'):return False\n"
-        "        now=time.time();pid=ep['_id']\n"
-        "        if self.db.restock_events.find_one({'_id':pid,'status':{'$in':['pending','sending']}}):return False\n"
-        "        claimed=self.db.ext_products.update_one({'_id':pid,'$or':[{'last_stock_broadcast':{'$lte':now-21600}},{'last_stock_broadcast':{'$exists':False}}]},\n"
-        "            {'$set':{'last_stock_broadcast':now}})\n"
-        '        if not claimed.modified_count:return False\n'
-        "        self.db.restock_events.update_one({'_id':pid},{'$set':{'status':'pending','ready_at':now+120,\n"
-        "            'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True)\n"
-        '        return True\n'
-        '    def sync_external(self):\n'
-        '        if not self.sync_lock.acquire(blocking=False):return\n'
-        '        try:\n'
-        '            for store in self.db.ext_stores.find():\n'
-        '                now=time.time()\n'
-        "                if store.get('sync_next_at',0)>now:continue\n"
-        "                sid=str(store['_id'])\n"
-        '                try:\n'
-        "                    products=product_list(self._ext_api_get(store,'/products'))\n"
-        "                    if products is None:raise ValueError('Invalid catalog response')\n"
-        '                    self.sync_products(sid,products)\n'
-        "                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':0,'sync_next_at':now+seconds('EXT_SYNC_SECONDS',300),'last_sync_at':now}})\n"
-        '                except Exception:\n'
-        "                    failures=min(6,store.get('sync_failures',0)+1)\n"
-        "                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':failures,'sync_next_at':now+min(3600,60*2**failures)}})\n"
-        "                    self.logger.warning('External catalog sync failed; backing off (%s)',sid)\n"
-        '        finally:self.sync_lock.release()\n'
-        '    def sync_products(self,sid,products):\n'
-        "        existing={str(p.get('ext_id')):p for p in self.db.ext_products.find({'store_id':sid})}\n"
-        "        pending={str(p.get('ext_id')) for p in self.db.ext_pending_new.find({'store_id':sid},{'ext_id':1})}\n"
-        '        changed=False\n'
-        '        for raw in products:\n'
-        "            f=self._ext_extract_fields(raw);eid=f['ext_id']\n"
-        '            if not eid:continue\n'
-        '            old=existing.get(eid)\n'
-        '            if not old:\n'
-        '                if eid not in pending:\n'
-        "                    self.db.ext_pending_new.insert_one({'store_id':sid,'ext_id':eid,'name':f['name'],'raw':raw,'created_at':int(time.time())});pending.add(eid)\n"
-        '                continue\n'
-        "            stock=max(0,int(f['stock'])) if f['available'] is not False else 0\n"
-        '            updates={}\n'
-        "            if stock!=old.get('stock',0):updates['stock']=stock\n"
-        "            cost=finite_float(f['cost_price'])\n"
-        "            if cost>0 and abs(cost-finite_float(old.get('cost_price',old.get('base_price',0)) or 0))>.001:\n"
-        '                updates.update(cost_price=cost,base_price=cost,\n'
-        "                    sell_price=self._ext_compute_sell_price(cost,old.get('markup_type','percent'),old.get('markup_value',0)))\n"
-        '            if not updates:continue\n'
-        '            # One compare-and-set prevents repeated restock transitions from concurrent sync.\n'
-        "            result=self.db.ext_products.update_one({'_id':old['_id'],'stock':old.get('stock',0)}, {'$set':updates})\n"
-        '            if result.modified_count:\n'
-        '                changed=True;updated={**old,**updates}\n'
-        "                if stock>0 and old.get('stock',0)==0:self.queue_restock(updated,0)\n"
-        '                existing[eid]=updated\n'
-        '        # Missing IDs may mean pagination/filtering. Never infer sell-out from omission.\n'
-        '        if changed:self._invalidate_products_cache()\n'
-        '    def restock_once(self):\n'
-        "        now=time.time();window=seconds('RESTOCK_DIGEST_SECONDS',1800,300)\n"
-        '        # One digest globally per window, persistent across restarts.\n'
-        "        state=self.db.operational_state.find_one({'_id':'restock'}) or {}\n"
-        "        if state.get('next_at',0)>now:return\n"
-        "        events=list(self.db.restock_events.find({'status':'pending','ready_at':{'$lte':now}}).limit(500))\n"
-        '        if not events:return\n'
-        '        try:\n'
-        "            claim=self.db.operational_state.find_one_and_update({'_id':'restock','$or':[{'next_at':{'$lte':now}},{'next_at':{'$exists':False}}]},\n"
-        "                {'$set':{'next_at':now+window}},upsert=True,return_document=True)\n"
-        '        except DuplicateKeyError:return\n'
-        '        if not claim:return\n'
-        "        ids=[e['_id'] for e in events]\n"
-        "        products=list(self.db.ext_products.find({'_id':{'$in':ids},'hidden':{'$ne':True},'stock':{'$gt':0}}))\n"
-        "        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sending'}})\n"
-        '        if products:\n'
-        "            for user in self.db.users.find({'is_banned':{'$ne':1},'broadcast_disabled':{'$ne':True}},{'user_id':1,'lang':1,'lang_chosen':1}).batch_size(100):\n"
-        "                uid=user['user_id'];ar=user.get('lang')=='ar'\n"
-        '                # Reserve recipient BEFORE send: avoid replay storms after uncertain delivery.\n'
-        '                try:\n'
-        "                    recipient=self.db.restock_recipients.find_one_and_update({'_id':uid,'$or':[{'next_at':{'$lte':time.time()}},{'next_at':{'$exists':False}}]},\n"
-        "                        {'$set':{'next_at':time.time()+window,'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True,return_document=True)\n"
-        '                except DuplicateKeyError:continue\n'
-        '                if not recipient:continue\n'
-        "                lines=['📦 <b>منتجات عادت للتوفر</b>' if ar else '📦 <b>Back in stock</b>']\n"
-        "                for p in products[:12]:lines.append('• '+html.escape(str(p.get('name',''))[:90]))\n"
-        '                if len(products)>12:lines.append(f"+ {len(products)-12} "+(\'منتج آخر\' if ar else \'more products\'))\n'
-        "                markup=self.InlineKeyboardMarkup();markup.add(self.InlineKeyboardButton('🛒 المتجر' if ar else '🛒 Shop',callback_data='open_shop'))\n"
-        "                try:self.bot.send_message(uid,'\\n'.join(lines),parse_mode='HTML',reply_markup=markup)\n"
-        '                except Exception as exc:\n'
-        "                    params=getattr(exc,'result_json',{}) or {}\n"
-        "                    retry=params.get('parameters',{}).get('retry_after',0)\n"
-        '                    if retry:\n'
-        '                        # Leave pending for a later digest, avoid sleeping/looping on a rate limit.\n'
-        "                        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'pending','ready_at':time.time()+max(window,retry)}})\n"
-        '                        return\n'
-        "                    if getattr(exc,'error_code',None)==403:self.db.users.update_one({'user_id':uid},{'$set':{'broadcast_disabled':True}})\n"
-        '                if self.stop.wait(.2):return\n'
-        "        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sent'}})\n"
-        '    def restock_worker(self):\n'
-        '        while not self.stop.wait(30):\n'
-        '            try:self.restock_once()\n'
-        '            except Exception:\n'
-        "                self.logger.exception('Restock digest interrupted')\n"
-        "                self.db.restock_events.update_many({'status':'sending'},{'$set':{'status':'sent','delivery_uncertain':True}})\n"
-    ),
-    'cms': (
-        'import html\n'
-        'import string\n'
-        'from html.parser import HTMLParser\n'
-        'from domain import ShopError\n'
-        '\n'
-        'TEMPLATES={\n'
-        "'ask_email':('طلب البريد','📧 أرسل بريد حساب ChatGPT لباقة {product}.\\n💰 السعر: ${price}\\nلن يُخصم الرصيد حتى التأكيد.','📧 Send your ChatGPT email for {product}.\\n💰 Price: ${price}\\nYour balance is charged after confirmation.'),\n"
-        "'confirm_email':('تأكيد البريد','📧 البريد: <code>{email}</code>\\n📦 {product}\\n⏱ {duration}\\n💰 ${price}\\nهل تؤكد الشراء؟','📧 Email: <code>{email}</code>\\n📦 {product}\\n⏱ {duration}\\n💰 ${price}\\nConfirm purchase?'),\n"
-        "'invite_success':('نجاح الدعوة','✅ اشتراكك جاهز!\\n📧 <code>{email}</code>\\n⏱ ينتهي: {expires}\\n📩 اقبل الدعوة من بريدك إذا كانت جديدة.','✅ Your subscription is ready!\\n📧 <code>{email}</code>\\n⏱ Expires: {expires}\\n📩 Accept the email invitation if this is a new subscription.'),\n"
-        "'reminder':('تذكير قبل الانتهاء','⏳ اشتراكك يقترب من الانتهاء.\\n📧 <code>{email}</code>\\n⏱ متبقّي نحو {hours} ساعة.\\nجدد من الزر أدناه للحفاظ على المدة المتبقية.','⏳ Your subscription expires soon.\\n📧 <code>{email}</code>\\n⏱ About {hours} hours left.\\nRenew below; your remaining time is preserved.'),\n"
-        "'expired':('انتهاء اشتراك العميل','انتهت مدة اشتراكك في ChatGPT.\\n📧 <code>{email}</code>\\nيمكنك التجديد من الزر أدناه.','Your ChatGPT subscription has expired.\\n📧 <code>{email}</code>\\nRenew using the button below.'),\n"
-        "'cookie_expired':('تنبيه الكوكيز للإدارة','🍪 انتهت جلسة حساب {account}.\\nاضغط تحديث الكوكيز وأرسل نصًا أو ملف JSON/TXT. بيانات العملاء محفوظة.','🍪 The session for {account} expired.\\nUpdate cookies using text or a JSON/TXT file. Customer subscriptions are preserved.'),\n"
-        "'account_expired':('انتهاء اشتراك الحساب للإدارة','⚠️ اشتراك حساب {account} غير نشط.\\nأوقف البوت البيع عليه. راجع التجديد أو نقل العملاء ذوي المدة المتبقية.','⚠️ Workspace subscription {account} is inactive.\\nNew sales are paused. Renew it or move customers with remaining time.'),\n"
-        "'unavailable':('تعذر الدعوة','⚠️ تعذر إكمال الدعوة الآن. طلبك محفوظ برقم {order_id}. ستراجع الإدارة نتيجته قبل أي استرجاع.','⚠️ The invitation result is not confirmed. Order {order_id} is saved for review before any refund.'),\n"
-        "'refunded':('استرجاع طلب مرفوض','أُعيد رصيد طلبك {order_id} لأن الدعوة لم تُنفذ. يمكنك المحاولة مجددًا.','Order {order_id} was refunded because the invitation was rejected. You can try again.'),\n"
-        "'no_seats':('نفاد المقاعد','لا توجد مقاعد مؤكدة متاحة الآن. حاول لاحقًا أو تواصل مع الدعم.','No verified seats are available. Please try later or contact support.'),\n"
-        "'btn_renew':('زر التجديد','🔄 تجديد الاشتراك','🔄 Renew subscription'),\n"
-        "'btn_confirm':('زر تأكيد الشراء','✅ تأكيد الشراء','✅ Confirm purchase'),\n"
-        "'btn_change':('زر تغيير البريد','✏️ تغيير البريد','✏️ Change email'),\n"
-        "'btn_cancel':('زر الإلغاء','❌ إلغاء','❌ Cancel'),\n"
-        '}\n'
-        "FIELDS={'email','product','duration','price','expires','hours','account','order_id'}\n"
-        '\n'
-        'class TelegramHTML(HTMLParser):\n'
-        "    tags={'b','strong','i','em','u','ins','s','strike','del','span','tg-spoiler','code','pre','a','tg-emoji','blockquote'}\n"
-        '    def __init__(self):super().__init__();self.stack=[]\n'
-        '    def handle_starttag(self,tag,attrs):\n'
-        "        if tag not in self.tags:raise ShopError('وسم HTML غير مدعوم: '+tag)\n"
-        '        attrs=dict(attrs)\n'
-        "        allowed={'a':{'href'},'tg-emoji':{'emoji-id'},'span':{'class'},'code':{'class'},'blockquote':{'expandable'}}.get(tag,set())\n"
-        "        if set(attrs)-allowed:raise ShopError('خصائص HTML غير مسموحة.')\n"
-        "        if tag=='a' and not str(attrs.get('href','')).startswith(('https://','tg://')):raise ShopError('الرابط غير صالح.')\n"
-        "        if tag=='tg-emoji' and not str(attrs.get('emoji-id','')).isdigit():raise ShopError('معرّف الإيموجي غير صالح.')\n"
-        '        self.stack.append(tag)\n'
-        '    def handle_endtag(self,tag):\n'
-        "        if not self.stack or self.stack.pop()!=tag:raise ShopError('تنسيق HTML غير متوازن.')\n"
-        "    def handle_startendtag(self,tag,attrs):raise ShopError('وسم غير مدعوم.')\n"
-        '\n'
-        'def validate_template(text,button=False):\n'
-        "    if not text or len(text)> (64 if button else 3000):raise ShopError('النص فارغ أو أطول من الحد المسموح.')\n"
-        '    try:\n'
-        '        for _,field,spec,conversion in string.Formatter().parse(text):\n'
-        "            if field is not None and (field not in FIELDS or spec or conversion):raise ShopError('متغير غير معروف أو تنسيق متغير غير مسموح.')\n"
-        "    except ValueError:raise ShopError('أقواس المتغيرات غير متوازنة.')\n"
-        '    if not button:\n'
-        '        parser=TelegramHTML();parser.feed(text);parser.close()\n'
-        "        if parser.stack:raise ShopError('تنسيق HTML غير مكتمل.')\n"
-        "    elif '<' in text or '>' in text:raise ShopError('نص الزر لا يستعمل وسوم HTML؛ يمكن اختيار إيموجي من الرسالة.')\n"
-        '    return text\n'
-        '\n'
-        '\n'
-        'def render(db,key,lang,**values):\n'
-        "    lang='en' if lang=='en' else 'ar'\n"
-        "    doc=db.custom_texts.find_one({'key':'cgpt_'+key,'lang':lang}) or {}\n"
-        "    default=TEMPLATES[key][2 if lang=='en' else 1]\n"
-        "    text=doc.get('value',default)\n"
-        '    try:\n'
-        "        validate_template(text,key.startswith('btn_'))\n"
-        "        return text.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})\n"
-        '    except (ShopError,ValueError,KeyError):\n'
-        "        return default.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})\n"
-    ),
-    'ton_payments': (
-        '"""Native TON receipt verification, using documented TON Center v3 queries.\n'
-        'https://docs.ton.org/api/v3/blockchain-data/get-transactions\n'
-        'https://docs.ton.org/api/v3/blockchain-data/get-transactions-by-message\n'
-        'https://docs.ton.org/foundations/addresses/formats\n'
-        '"""\n'
-        'import base64,binascii,re,os,time,threading\n'
-        'from urllib.parse import urlparse,unquote\n'
-        'from domain import ShopError\n'
-        '\n'
-        '\n'
-        'def hash_hex(value):\n'
-        "    value=str(value or '').strip()\n"
-        "    if value.startswith(('https://','http://')):\n"
-        '        parsed=urlparse(value)\n'
-        "        if parsed.hostname not in ('tonviewer.com','tonscan.org'):raise ShopError('رابط مستكشف TON غير مدعوم؛ أرسل الهاش فقط.')\n"
-        "        value=unquote(parsed.path).removeprefix('/transaction/').removeprefix('/tx/').strip('/')\n"
-        "    if re.fullmatch(r'(?:0x)?[a-fA-F0-9]{64}',value):return value.removeprefix('0x').lower()\n"
-        "    if re.fullmatch(r'[A-Za-z0-9_+/=-]{43,44}',value):\n"
-        '        try:\n'
-        "            raw=base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True)\n"
-        '            if len(raw)==32:return raw.hex()\n'
-        '        except (ValueError,binascii.Error):pass\n'
-        "    raise ShopError('أرسل هاش TON كاملًا بصيغة hex أو Base64 أو رابط المعاملة.')\n"
-        '\n'
-        '\n'
-        'def address(value):\n'
-        "    if isinstance(value,dict):value=value.get('address','')\n"
-        "    value=str(value or '').strip()\n"
-        "    if re.fullmatch(r'-?\\d+:[a-fA-F0-9]{64}',value):\n"
-        "        wc,h=value.split(':');return str(int(wc))+':'+h.lower()\n"
-        '    try:\n'
-        "        raw=base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True)\n"
-        '        if len(raw)!=36 or raw[0] not in (0x11,0x51):return None\n'
-        "        if binascii.crc_hqx(raw[:34],0).to_bytes(2,'big')!=raw[34:]:return None\n"
-        "        return str(int.from_bytes(raw[1:2],'big',signed=True))+':'+raw[2:34].hex()\n"
-        '    except (ValueError,binascii.Error):return None\n'
-        '\n'
-        '\n'
-        'def receipt(tx,wallet):\n'
-        "    target=address(wallet);msg=tx.get('in_msg') or {};desc=tx.get('description') or {}\n"
-        "    if not target or address(tx.get('account'))!=target or address(msg.get('destination'))!=target:return None\n"
-        "    if not address(msg.get('source')) or address(msg.get('source'))==target:return None\n"
-        "    if tx.get('emulated') is True or desc.get('aborted') is not False or msg.get('bounced') is True:return None\n"
-        "    if desc.get('compute_ph',{}).get('success') is False or desc.get('action',{}).get('success') is False:return None\n"
-        "    units=int(msg.get('value') or 0);stamp=int(tx.get('now') or 0)\n"
-        '    if units<=0 or stamp<=0 or stamp>time.time()+60:return None\n'
-        "    return {'hash':hash_hex(tx['hash']),'units':units,'received_ton':units/10**9,'utime':stamp,'source_addr':msg.get('source','')}\n"
-        '\n'
-        '\n'
-        'class TonClient:\n'
-        '    _lock=threading.Lock();_last=0\n'
-        '    def __init__(self,requests,wallet):\n'
-        "        if not address(wallet):raise ShopError('عنوان محفظة TON غير صالح أو ليس عنوان mainnet.')\n"
-        '        self.requests=requests;self.wallet=wallet\n'
-        '    def query(self,path,**params):\n'
-        '        # Shared spacing avoids exhausting the unauthenticated 1 RPS allowance.\n'
-        '        with self._lock:\n'
-        '            delay=1.05-(time.monotonic()-type(self)._last)\n'
-        '            if delay>0:time.sleep(delay)\n'
-        '            type(self)._last=time.monotonic()\n'
-        "        headers={};key=os.getenv('TONCENTER_API_KEY','').strip()\n"
-        "        if key:headers['X-API-Key']=key\n"
-        "        try:r=self.requests.get('https://toncenter.com/api/v3/'+path,params=params,headers=headers,timeout=15)\n"
-        "        except Exception:raise ShopError('تعذر الاتصال بمصدر TON؛ حاول لاحقًا. لم يتغير رصيدك.',503)\n"
-        "        if r.status_code!=200:raise ShopError('مصدر TON غير متاح الآن (HTTP '+str(r.status_code)+')؛ لا يعني ذلك أن الحوالة غير موجودة.',503)\n"
-        '        data=r.json()\n'
-        "        if not isinstance(data,dict) or not isinstance(data.get('transactions'),list):raise ShopError('استجابة TON غير معروفة.',503)\n"
-        "        return data['transactions']\n"
-        '    def lookup(self,query):\n'
-        "        h=hash_hex(query);matches={};direct=self.query('transactions',hash=h,limit=10)\n"
-        '        for tx in direct:\n'
-        "            if hash_hex(tx.get('hash'))!=h:continue\n"
-        '            hit=receipt(tx,self.wallet)\n'
-        "            if hit:matches[hit['hash']]=hit\n"
-        '            # A sender-side transaction has a different hash from its receipt.\n'
-        "            for msg in tx.get('out_msgs',[]):\n"
-        "                if address(msg.get('destination'))!=address(self.wallet) or not msg.get('hash'):continue\n"
-        "                mh=hash_hex(msg['hash'])\n"
-        "                for incoming in self.query('transactionsByMessage',msg_hash=mh,direction='in',limit=10):\n"
-        "                    if hash_hex((incoming.get('in_msg') or {}).get('hash',''))!=mh:continue\n"
-        '                    hit=receipt(incoming,self.wallet)\n'
-        "                    if hit:matches[hit['hash']]=hit\n"
-        '        if not direct:\n'
-        "            for tx in self.query('transactionsByMessage',msg_hash=h,direction='in',limit=10):\n"
-        "                if hash_hex((tx.get('in_msg') or {}).get('hash',''))!=h:continue\n"
-        '                hit=receipt(tx,self.wallet)\n'
-        "                if hit:matches[hit['hash']]=hit\n"
-        "        if len(matches)>1:raise ShopError('الهاش يتضمن عدة تحويلات؛ أرسل هاش الاستلام المحدد أو راجع الدعم.',409)\n"
-        '        return next(iter(matches.values()),None)\n'
-        '    def recent(self,since):\n'
-        '        for page in range(10):\n'
-        "            rows=self.query('transactions',account=self.wallet,start_utime=int(since),limit=100,offset=page*100,sort='desc')\n"
-        '            for tx in rows:\n'
-        '                hit=receipt(tx,self.wallet)\n'
-        '                if hit:yield hit\n'
-        '            if len(rows)<100:return\n'
-        '\n'
-        '\n'
-        'def verify_customer(rt,message,wallet):\n'
-        '    uid=message.from_user.id\n'
-        '    if rt.is_user_banned(uid):return\n'
-        "    raw=(message.text or '').strip()\n"
-        "    if raw in ('/cancel','إلغاء','الغاء','cancel'):return rt.cancel_deposit_handler(NS_call(message))\n"
-        '    try:\n'
-        '        hit=TonClient(rt.requests,wallet).lookup(raw)\n'
-        "        if not hit:raise ShopError('لم يظهر إيداع TON مؤكد لهذه المحفظة بهذا الهاش؛ تحقق من اكتماله أو أرسل هاش الاستلام.')\n"
-        "        p=rt.native_pending('TON',hit['units'],hit['utime'])\n"
-        "        if not p or p['user_id']!=uid:raise ShopError('الحوالة لا تطابق طلب إيداعك الحالي في المبلغ أو الوقت. راجع الدعم؛ لن يتغير الرصيد.')\n"
-        "        result=rt.auto_credit_from_pending(p,hit['hash'],'Toncoin (TON)')\n"
-        "        if not result:raise ShopError('تعذر إضافة الإيداع؛ راجع السجل أو الدعم قبل إعادة المحاولة.')\n"
-        "    except ShopError as e:rt.send(uid,str(e),reply_markup=rt.markup([('الدعم','cgb_support'),('إلغاء الإيداع','cancel_deposit')]))\n"
-        '\n'
-        '\n'
-        'def NS_call(message):\n'
-        '    from types import SimpleNamespace\n'
-        "    return SimpleNamespace(from_user=message.from_user,message=message,id='cancel',data='cancel_deposit')\n"
-    ),
-    'network': (
-        '"""Outbound webhook client with DNS pinning, TLS verification and no redirects."""\n'
-        'import http.client\n'
-        'import ipaddress\n'
-        'import json\n'
-        'import socket\n'
-        'import ssl\n'
-        'from urllib.parse import urlsplit\n'
-        'from domain import ShopError\n'
-        '\n'
-        '\n'
-        'def public_endpoint(url):\n'
-        '    p=urlsplit(url)\n'
-        "    if p.scheme!='https' or not p.hostname or p.username or p.password or p.fragment:\n"
-        "        raise ShopError('رابط webhook يجب أن يكون HTTPS عامًا بلا بيانات دخول.')\n"
-        "    if p.port not in (None,443):raise ShopError('webhook يدعم المنفذ 443 فقط.')\n"
-        '    try:\n'
-        '        addresses={x[4][0] for x in socket.getaddrinfo(p.hostname,443,type=socket.SOCK_STREAM)}\n'
-        '        if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):raise ValueError()\n'
-        "    except (OSError,ValueError):raise ShopError('وجهة webhook غير متاحة أو غير عامة.')\n"
-        '    return p,sorted(addresses)[0]\n'
-        '\n'
-        '\n'
-        'def post_webhook(url,body,headers):\n'
-        '    p,address=public_endpoint(url)\n'
-        '    conn=http.client.HTTPSConnection(p.hostname,443,timeout=8,context=ssl.create_default_context())\n'
-        '    # Connect to the validated address; TLS still authenticates the original hostname.\n'
-        '    raw=socket.create_connection((address,443),timeout=8)\n'
-        '    try:\n'
-        '        conn.sock=ssl.create_default_context().wrap_socket(raw,server_hostname=p.hostname)\n'
-        "        conn.request('POST',p.path or '/' if not p.query else (p.path or '/')+'?'+p.query,body=body,headers=headers)\n"
-        '        response=conn.getresponse();status=response.status;response.read(1024)\n'
-        '        return 200<=status<300\n'
-        '    finally:\n'
-        '        conn.close();raw.close()\n'
-    ),
-    'subscription_lifecycle': (
-        '"""Resumable migration. An ambiguous remote write requires review, never replay."""\n'
-        'import copy\n'
-        'import datetime as dt\n'
-        'import html\n'
-        'import time\n'
-        'from chatgpt_service import SeatManager, account_lock, date\n'
-        'from domain import digest\n'
-        '\n'
-        '\n'
-        'def migrate(runtime, source):\n'
-        '    db=runtime.db\n'
-        '    with account_lock(db,source._account_key):\n'
-        '        source.reload_data()\n'
-        '        # Revalidate inside the lock; expired cookies/network errors are not expiry.\n'
-        '        source_report=source.diagnose()\n'
-        "        if source_report.get('status')!='deactivated':return\n"
-        "        for email,info in list(source.invites_data['invites'].items()):\n"
-        "            exp=date(info.get('expires_at'))\n"
-        "            if info.get('status') not in ('active','transferred') or not exp:continue\n"
-        "            if info.get('status')=='active' and exp<=dt.datetime.utcnow():continue\n"
-        "            ident=digest('migration',source._account_key,email,info['expires_at'])\n"
-        "            job=db.cgpt_migrations.find_one({'_id':ident})\n"
-        "            if job and job['status']=='completed':continue\n"
-        "            if job and job['status'] in ('sending','review'):\n"
-        "                runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'نتيجة الدعوة غير مؤكدة؛ تحقق من الحساب الهدف قبل إعادة الإرسال.','target':job.get('target')})\n"
-        '                continue\n'
-        '            if not job:\n'
-        "                if info.get('status')!='active':continue\n"
-        '                candidates=[];capacity_unknown=False;has_capacity=False\n'
-        '                for doc in runtime._cgpt_all_accounts():\n'
-        "                    if str(doc['_id'])==source._account_key:continue\n"
-        '                    try:\n'
-        '                        target=SeatManager.from_doc(doc);rep=target.diagnose()\n'
-        "                        if rep.get('status')!='deactivated' and (not rep.get('connected') or rep.get('available_seats') is None):capacity_unknown=True\n"
-        "                        if rep.get('connected') and rep.get('status')=='active' and (rep.get('available_seats') or 0)>0:\n"
-        '                            has_capacity=True\n'
-        '                            candidates.append(target)\n'
-        '                    except Exception:capacity_unknown=True;continue\n'
-        "                target=next((t for t in candidates if email not in t.invites_data['invites']),None)\n"
-        '                if not target:\n'
-        '                    if not capacity_unknown and not has_capacity:\n'
-        '                        from refund_review import queue_no_seat_refund\n'
-        '                        queue_no_seat_refund(runtime,source,email,info,source_report)\n'
-        "                    runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'لا يوجد حساب بديل بسعة مؤكدة.'});continue\n"
-        "                job={'_id':ident,'source':source._account_key,'target':target._account_key,'email':email,'status':'prepared','created_at':dt.datetime.utcnow()}\n"
-        '                db.cgpt_migrations.insert_one(job)\n'
-        "            target_doc=runtime.account_doc(job['target'])\n"
-        '            if not target_doc:\n'
-        "                runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'الحساب الهدف غير موجود.'});continue\n"
-        '            target=SeatManager.from_doc(target_doc)\n'
-        '            with account_lock(db,target._account_key):\n'
-        "                target.reload_data();existing=target.invites_data['invites'].get(email)\n"
-        "                if job['status']!='invited':\n"
-        '                    rep=target.diagnose()\n'
-        "                    if not rep.get('connected') or rep.get('status')!='active' or not (rep.get('available_seats') or 0)>0:continue\n"
-        "                    if existing or email in rep.get('user_emails',[]) or email in rep.get('pending_emails',[]):\n"
-        "                        db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'review'}})\n"
-        "                        runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'البريد موجود مسبقًا في الحساب الهدف.'});continue\n"
-        "                    db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'sending'}})\n"
-        "                    try:r=target.request('POST',f'/backend-api/accounts/{target.account_id}/invites',json={'email_addresses':[email],'role':'standard-user'})\n"
-        '                    except Exception:r=None\n'
-        '                    if r is None or r.status_code not in (200,201):\n'
-        "                        db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'review'}})\n"
-        "                        runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'تعذر تأكيد دعوة الحساب البديل.','target':target._account_key});continue\n"
-        "                    db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'invited'}})\n"
-        "                if existing and existing.get('migration_id')!=ident:\n"
-        "                    runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'تعارض سجل الحساب الهدف.'});continue\n"
-        '                if not existing:\n'
-        "                    target.invites_data['invites'][email]={**copy.deepcopy(info),'migration_id':ident,'migrated_from':source._account_key,\n"
-        "                        'invite_status':'pending','invite_checked_at':dt.datetime.utcnow().isoformat()}\n"
-        '                    target.allowed_emails.add(email);target._save_data()\n'
-        '                # Save target first, retain source history, preserve exact expiration.\n'
-        "                info['status']='transferred';info['transferred_to']=target._account_key\n"
-        '                source.allowed_emails.discard(email);source._save_data()\n'
-        "                uid=info.get('telegram_uid')\n"
-        '                if isinstance(uid,int):\n'
-        "                    text=('🔄 تم تغيير حساب مساحة العمل لاشتراكك.\\nالبريد: <code>'+html.escape(email)+'</code>\\n'\n"
-        "                          'افتح بريدك واقبل الدعوة الجديدة. لم يتغير موعد انتهاء اشتراكك (UTC): '+html.escape(info['expires_at']))\n"
-        "                    db.notifications.update_one({'_id':ident},{'$setOnInsert':{'uids':[uid],'text':text,'sent':False,'next_at':time.time(),'created':time.time(),\n"
-        "                        'markup':runtime.markup([('اشتراكي','cgb_portal')]).to_json()}},upsert=True)\n"
-        "                db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'completed'}})\n"
-        "                db.cgpt_interventions.update_many({'kind':'no_seat_refund','account':source._account_key,'email':email},{'$set':{'status':'resolved'}})\n"
-        "                db.cgpt_refund_reviews.update_many({'account':source._account_key,'email':email,'status':'review'},{'$set':{'status':'transferred_review_outage'}})\n"
-        "                db.cgpt_interventions.update_many({'kind':'migration','account':source._account_key,'email':email},{'$set':{'status':'resolved'}})\n"
-    ),
-    'chatgpt_service': (
-        '"""Account-scoped ChatGPT adapter. Backend availability is checked, never assumed."""\n'
-        'import copy\n'
-        'import datetime as dt\n'
-        'import json\n'
-        'import re\n'
-        'import time\n'
-        'import uuid\n'
-        'from contextlib import contextmanager\n'
-        'from http.cookies import SimpleCookie\n'
-        'from bson import ObjectId\n'
-        'from pymongo.errors import DuplicateKeyError\n'
-        'from domain import ShopError\n'
-        '\n'
-        'G=None\n'
-        '\n'
-        'def configure(g):\n'
-        '    global G\n'
-        '    G=g\n'
-        '\n'
-        '\n'
-        'def date(value):\n'
-        '    if not value: return None\n'
-        '    try:\n'
-        '        if isinstance(value,(int,float)):\n'
-        '            return dt.datetime.utcfromtimestamp(value/1000 if value>10**12 else value)\n'
-        "        parsed=dt.datetime.fromisoformat(str(value).replace('Z','+00:00'))\n"
-        '        return parsed.astimezone(dt.timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed\n'
-        '    except (ValueError,TypeError,OverflowError): return None\n'
-        '\n'
-        '\n'
-        'def parse_cookies(raw):\n'
-        '    """Accept session JSON, browser cookie exports, Cookie headers, or session token."""\n'
-        "    if len(raw.encode())>262144: raise ShopError('ملف الكوكيز أكبر من 256KB.')\n"
-        "    raw=raw.strip().removeprefix('\\ufeff')\n"
-        "    if raw.startswith('```'):\n"
-        "        raw=re.sub(r'^```(?:json)?\\s*|\\s*```$','',raw)\n"
-        '    try: obj=json.loads(raw)\n'
-        '    except json.JSONDecodeError: obj=None\n'
-        "    result={'cookies':{}}\n"
-        '    if isinstance(obj,dict):\n'
-        "        for k in ('accessToken','sessionToken','account','user'):\n"
-        '            if k in obj: result[k]=obj[k]\n'
-        "        exported=obj.get('cookies',[])\n"
-        "        if isinstance(exported,dict): result['cookies'].update({str(k):str(v) for k,v in exported.items()})\n"
-        '        elif isinstance(exported,list): obj_list=exported\n'
-        "        else: raise ShopError('صيغة cookies غير صالحة.')\n"
-        "        if 'obj_list' in locals():\n"
-        '            for c in obj_list:\n'
-        "                if isinstance(c,dict) and c.get('name') and c.get('value'):\n"
-        "                    domain=str(c.get('domain','chatgpt.com')).lstrip('.')\n"
-        "                    if domain=='chatgpt.com' or domain.endswith('.chatgpt.com'):\n"
-        "                        result['cookies'][c['name']]=str(c['value'])\n"
-        '        for k,v in obj.items():\n'
-        "            if 'session-token' in k and isinstance(v,str):result['cookies'][k]=v\n"
-        '    elif isinstance(obj,list):\n'
-        "        return parse_cookies(json.dumps({'cookies':obj}))\n"
-        "    elif obj is not None: raise ShopError('أرسل كائن JSON أو قائمة كوكيز.')\n"
-        '    else:\n'
-        '        cookie=SimpleCookie()\n'
-        "        try: cookie.load(raw.removeprefix('Cookie:').strip())\n"
-        '        except Exception: pass\n'
-        "        result['cookies']={k:v.value for k,v in cookie.items()}\n"
-        "        if not result['cookies'] and raw and not re.search(r'\\s',raw):result['sessionToken']=raw\n"
-        "    for prefix in ('__Secure-next-auth.session-token','__Secure-authjs.session-token'):\n"
-        "        token=result['cookies'].get(prefix)\n"
-        '        chunks=[]\n'
-        "        for k,v in result['cookies'].items():\n"
-        "            if k.startswith(prefix+'.') and k.rsplit('.',1)[1].isdigit(): chunks.append((int(k.rsplit('.',1)[1]),v))\n"
-        '        if not token and chunks:\n'
-        '            chunks.sort()\n'
-        "            if [n for n,v in chunks]!=list(range(len(chunks))):raise ShopError('أجزاء الكوكيز غير مكتملة.')\n"
-        "            token=''.join(v for n,v in chunks)\n"
-        "        if token: result['sessionToken']=token\n"
-        "    if result.get('sessionToken') and not result['cookies']:\n"
-        "        result['cookies']['__Secure-next-auth.session-token']=str(result['sessionToken'])\n"
-        "    if not result.get('sessionToken') and not result.get('accessToken'):\n"
-        "        raise ShopError('لم أجد كوكيز جلسة صالحة أو accessToken في الملف.')\n"
-        "    for token in [result.get('accessToken',''),*result['cookies'].values()]:\n"
-        "        if not isinstance(token,str) or '\\r' in token or '\\n' in token:raise ShopError('قيمة كوكيز غير صالحة.')\n"
-        '    return result\n'
-        '\n'
-        '\n'
-        'def account_candidates(payload):\n'
-        "    accounts=payload.get('accounts',{}) if isinstance(payload,dict) else {}\n"
-        '    out=[]\n'
-        '    for key,val in accounts.items():\n'
-        '        if not isinstance(val,dict):continue\n'
-        "        acc=val.get('account',val)\n"
-        "        aid=acc.get('account_id') or acc.get('id') or (key if key!='default' else None)\n"
-        "        plan=str(acc.get('plan_type',acc.get('structure',''))).lower()\n"
-        "        if aid and (plan in ('team','business','enterprise') or acc.get('is_business')):\n"
-        "            out.append({'id':aid,'name':acc.get('name',aid),'raw':val})\n"
-        '    return out\n'
-        '\n'
-        '\n'
-        'def extract_capacity(payload):\n'
-        '    """Read explicit, account-scoped fields, not unrelated nested accounts."""\n'
-        '    candidates=[]\n'
-        "    def walk(obj,path='',depth=0):\n"
-        '        if not isinstance(obj,dict) or depth>5:return\n'
-        "        for k in ('total_seats','seat_count','paid_seats','subscription_seats','max_member_count','max_seats','member_limit','num_seats'):\n"
-        '            v=obj.get(k)\n'
-        '            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:\n'
-        '                candidates.append((int(v),path+k))\n'
-        "        for k in ('subscription','billing','plan','workspace','limits','account'):\n"
-        "            if isinstance(obj.get(k),dict):walk(obj[k],path+k+'.',depth+1)\n"
-        "        if path.startswith(('subscription.','billing.')):\n"
-        "            v=obj.get('quantity')\n"
-        "            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:candidates.append((int(v),path+'quantity'))\n"
-        '    walk(payload)\n'
-        '    if not candidates:return None,None\n'
-        '    # If fields disagree, use the smaller verified allowance, expose provenance.\n'
-        '    value,path=min(candidates)\n'
-        '    return value,path\n'
-        '\n'
-        '\n'
-        'def subscription_dates(payload):\n'
-        "    out={'renews_at':None,'expires_at':None}\n"
-        '    def walk(obj,depth=0):\n'
-        '        if not isinstance(obj,dict) or depth>4:return\n'
-        "        for k in ('subscription_end','subscription_expires_at','expires_at'):\n"
-        '            d=date(obj.get(k))\n'
-        "            if d and out['expires_at'] is None:out['expires_at']=d.isoformat()\n"
-        "        period=date(obj.get('current_period_end') or obj.get('next_billing_date'))\n"
-        '        if period:\n'
-        "            out['renews_at']=period.isoformat()\n"
-        "            if obj.get('cancel_at_period_end') is True:out['expires_at']=period.isoformat()\n"
-        "        for k in ('subscription','billing','account','plan'):walk(obj.get(k),depth+1)\n"
-        '    walk(payload)\n'
-        '    return out\n'
-        '\n'
-        '\n'
-        '@contextmanager\n'
-        'def account_lock(db,key):\n'
-        '    token=uuid.uuid4().hex; now=time.time()\n'
-        '    try:\n'
-        "        r=db.cgpt_account_locks.find_one_and_update({'_id':str(key),'expires':{'$lt':now}},\n"
-        "            {'$set':{'token':token,'expires':now+300}},upsert=True,return_document=True)\n"
-        "    except DuplicateKeyError:raise ShopError('الحساب يعالج طلبًا آخر، أعد المحاولة بعد قليل.',409)\n"
-        '    try:yield token\n'
-        "    finally:db.cgpt_account_locks.delete_one({'_id':str(key),'token':token})\n"
-        '\n'
-        '\n'
-        'class SeatManager:\n'
-        '    def __init__(self):\n'
-        "        doc=G['db'].cgpt_cookies.find_one({'_id':'main'}) or {'_id':'main','data':{}}\n"
-        '        self._init(doc)\n'
-        '\n'
-        '    @classmethod\n'
-        '    def from_doc(cls,doc):\n'
-        '        obj=cls.__new__(cls);obj._init(doc);return obj\n'
-        '\n'
-        '    def _init(self,doc):\n'
-        "        self.doc=copy.deepcopy(doc);self._account_key=str(doc.get('_id','main'))\n"
-        "        if doc.get('sealed_data'):\n"
-        '            doc=copy.deepcopy(doc)\n'
-        "            doc['data']=json.loads(G['_safe'].secret_cipher().decrypt(doc['sealed_data'].encode()))\n"
-        '            self.doc=doc\n'
-        "        c=doc.get('data',{});self.access_token=c.get('accessToken');self.session_token=c.get('sessionToken')\n"
-        "        self.cookies=c.get('cookies',{})\n"
-        "        self.account_id=c.get('account',{}).get('id');self.org_id=c.get('account',{}).get('organizationId')\n"
-        "        self.owner_email=c.get('user',{}).get('email','').lower()\n"
-        '        self._loaded=bool(self.access_token and self.account_id)\n'
-        "        self.token_file='';self.data_file='';self._last_fetch_failed=False\n"
-        '        self.reload_data()\n'
-        '\n'
-        '    def reload_data(self):\n'
-        "        rec=G['db'].cgpt_invites_data.find_one({'_id':self._account_key}) or {}\n"
-        "        self.invites_data=copy.deepcopy(rec.get('data',{'invites':{},'allowed_emails':[]}))\n"
-        "        self.invites_data.setdefault('invites',{})\n"
-        "        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))\n"
-        '        if self.owner_email:self.allowed_emails.add(self.owner_email)\n'
-        '        self._baseline=copy.deepcopy(self.invites_data)\n'
-        '\n'
-        '    def _save_data(self):\n'
-        '        current=copy.deepcopy(self.invites_data);base=self._baseline\n'
-        "        changed={k:v for k,v in current['invites'].items() if base.get('invites',{}).get(k)!=v}\n"
-        "        removed=set(base.get('invites',{}))-set(current['invites'])\n"
-        "        added_allowed=self.allowed_emails-set(base.get('allowed_emails',[]))\n"
-        "        removed_allowed=set(base.get('allowed_emails',[]))-self.allowed_emails\n"
-        '        def save(session):\n'
-        "            record=G['db'].cgpt_invites_data.find_one({'_id':self._account_key},session=session) or {}\n"
-        "            data=record.get('data',{'invites':{},'allowed_emails':[]});data.setdefault('invites',{})\n"
-        '            for email in set(changed)|removed:\n'
-        "                if data['invites'].get(email)!=base.get('invites',{}).get(email):\n"
-        "                    raise ShopError('تغير الاشتراك بالتزامن؛ أعد المحاولة.',409)\n"
-        "            data['invites'].update(changed)\n"
-        "            for email in removed:data['invites'].pop(email,None)\n"
-        "            data['allowed_emails']=list((set(data.get('allowed_emails',[]))|added_allowed)-removed_allowed)\n"
-        "            G['db'].cgpt_invites_data.update_one({'_id':self._account_key},{'$set':{'data':data},'$inc':{'revision':1}},upsert=True,session=session)\n"
-        '            return data\n'
-        "        self.invites_data=G['_safe'].finance.atomic(save);self._baseline=copy.deepcopy(self.invites_data)\n"
-        "        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))\n"
-        '\n'
-        '    def _headers(self):\n'
-        '        cookies=dict(self.cookies)\n'
-        "        if not cookies and self.session_token:cookies['__Secure-next-auth.session-token']=self.session_token\n"
-        "        h={'Accept':'application/json','Content-Type':'application/json','ChatGPT-Account-ID':str(self.account_id or '')}\n"
-        "        if self.access_token:h['Authorization']='Bearer '+self.access_token\n"
-        "        if cookies:h['Cookie']='; '.join(k+'='+v for k,v in cookies.items())\n"
-        '        return h\n'
-        '\n'
-        '    def request(self,method,path,**kwargs):\n'
-        "        if not G.get('CFFI_AVAILABLE'):raise ShopError('مكتبة curl_cffi غير مثبتة.',503)\n"
-        '        def send():\n'
-        "            return G['cffi_requests'].request(method,'https://chatgpt.com'+path,headers=self._headers(),\n"
-        "                impersonate='chrome',timeout=12,allow_redirects=False,**kwargs)\n"
-        '        r=send()\n'
-        "        if r.status_code==401 and path!='/api/auth/session' and (self.cookies or self.session_token):\n"
-        "            session=G['cffi_requests'].request('GET','https://chatgpt.com/api/auth/session',headers=self._headers(),\n"
-        "                impersonate='chrome',timeout=12,allow_redirects=False)\n"
-        '            if session.status_code==200:\n'
-        "                obj=session.json();access=obj.get('accessToken')\n"
-        '                if access and access!=self.access_token:\n'
-        '                    self.access_token=access\n'
-        '                    r=send()\n'
-        '        return r\n'
-        '\n'
-        '    def hydrate(self):\n'
-        '        if not self.access_token:\n'
-        "            r=self.request('GET','/api/auth/session')\n"
-        "            if r.status_code!=200:raise ShopError('الجلسة غير صالحة؛ أرسل كوكيز جلسة جديدة.',401)\n"
-        "            session=r.json();self.access_token=session.get('accessToken')\n"
-        "            self.owner_email=str(session.get('user',{}).get('email',self.owner_email)).lower()\n"
-        "            if not self.access_token:raise ShopError('الكوكيز لا تعطي جلسة نشطة؛ حدّثها.',401)\n"
-        "        r=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')\n"
-        "        if r.status_code==401:raise ShopError('انتهت صلاحية الكوكيز.',401)\n"
-        "        if r.status_code!=200:raise ShopError('تعذر التحقق من الحساب الآن؛ الكوكيز السابقة لم تتغير.',503)\n"
-        '        choices=account_candidates(r.json())\n'
-        '        return choices\n'
-        '\n'
-        '    def _pages(self,kind):\n'
-        '        rows=[];offset=0;seen=set()\n'
-        '        for _ in range(20):\n'
-        "            r=self.request('GET',f'/backend-api/accounts/{self.account_id}/{kind}',params={'offset':offset,'limit':100})\n"
-        '            if r.status_code!=200:\n'
-        "                self._last_fetch_status=r.status_code;raise ShopError('تعذر قراءة '+kind,r.status_code)\n"
-        '            obj=r.json()\n'
-        "            if not isinstance(obj,dict) or ('items' not in obj and kind not in obj):\n"
-        "                raise ShopError('استجابة قائمة غير معروفة؛ لن تُنفذ عمليات حذف.',503)\n"
-        "            items=obj.get('items',obj.get(kind))\n"
-        "            if not isinstance(items,list):raise ShopError('استجابة قائمة غير معروفة.',503)\n"
-        '            signature=json.dumps(items,sort_keys=True)\n'
-        "            if signature in seen and items:raise ShopError('المصدر لم يوفر الصفحة التالية.',503)\n"
-        '            seen.add(signature);rows.extend(items);offset+=len(items)\n'
-        "            total=obj.get('total',obj.get('total_count'))\n"
-        "            more=obj.get('has_more') is True\n"
-        '            if total is not None and str(total).isdigit():\n'
-        '                if offset>=int(total):return rows\n'
-        '            elif len(items)<100 and not more:return rows\n'
-        "            if not items:raise ShopError('القائمة غير مكتملة.',503)\n"
-        "        raise ShopError('القائمة أكبر من حد الفحص؛ يلزم مراجعة الإدارة.',503)\n"
-        '\n'
-        '    def _get_org_users(self):\n'
-        '        try:\n'
-        "            rows=self._pages('users');self._last_fetch_failed=False;return rows\n"
-        '        except Exception:\n'
-        '            self._last_fetch_failed=True;return []\n'
-        '\n'
-        '    def diagnose(self):\n'
-        "        rep={'loaded':self._loaded,'owner_email':self.owner_email,'account_id':self.account_id,'org_id':self.org_id,\n"
-        "             'connected':False,'used_seats':None,'total_seats':None,'available_seats':None,'status':'unknown'}\n"
-        "        if not self._loaded:return {**rep,'status':'cookies_expired','error':'أضف أو حدّث الكوكيز.'}\n"
-        '        try:\n'
-        "            users=self._pages('users');pending=self._pages('invites')\n"
-        "            member_keys={str(u.get('email',u.get('id',''))).lower() for u in users}\n"
-        "            pending_keys={str(u.get('email_address',u.get('email',u.get('id','')))).lower() for u in pending\n"
-        "                          if str(u.get('status','pending')).lower() not in ('revoked','expired','accepted','cancelled')}\n"
-        '            pending_count=len(pending_keys-member_keys)\n'
-        "            rep.update(connected=True,status='active',member_count=len(users),pending_invites=pending_count,\n"
-        '                       used_seats=len(users)+pending_count,user_emails=sorted(member_keys),pending_emails=sorted(pending_keys),\n'
-        "                       membership_evidence=[{k:str(v)[:254] for k,v in u.items() if k in ('id','user_id','invite_id','email','email_address','role','created_at','invited_by','inviter_email') and isinstance(v,(str,int))} for u in users+pending])\n"
-        '            account_data={};merged_dates={};cancellation_seen=False\n'
-        "            for suffix in ('','/subscription'):\n"
-        "                r=self.request('GET',f'/backend-api/accounts/{self.account_id}{suffix}')\n"
-        "                if r.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}\n"
-        "                if r.status_code==402:return {**rep,'connected':False,'status':'deactivated','error':'الاشتراك غير نشط.'}\n"
-        '                if r.status_code==200 and isinstance(r.json(),dict):\n'
-        "                    obj=r.json();account_data['account' if not suffix else 'subscription']=obj\n"
-        '                    for k,v in subscription_dates(obj).items():\n'
-        '                        if v:merged_dates[k]=v\n'
-        "                    if obj.get('status') in ('canceled','cancelled'):cancellation_seen=True\n"
-        "                    if obj.get('is_deactivated') is True or obj.get('status') in ('expired','unpaid'):\n"
-        "                        rep['status']='deactivated'\n"
-        "            check=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')\n"
-        "            if check.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}\n"
-        '            if check.status_code==200:\n'
-        "                selected=next((a for a in account_candidates(check.json()) if a['id']==self.account_id),None)\n"
-        "                if not selected: return {**rep,'status':'unknown','connected':False,'error':'الحساب المحدد غير موجود في الجلسة.'}\n"
-        "                account_data['workspace']=selected['raw']\n"
-        "                if selected['raw'].get('account',{}).get('is_deactivated'):rep['status']='deactivated'\n"
-        '            total,source=extract_capacity(account_data)\n'
-        "            if total is None and self.doc.get('manual_seats'):\n"
-        "                total=int(self.doc['manual_seats']);source='manual'\n"
-        '            rep.update(merged_dates)\n'
-        "            exp=date(rep.get('expires_at'))\n"
-        "            if exp and exp<=dt.datetime.utcnow():rep['status']='deactivated'\n"
-        "            if cancellation_seen and rep['status']=='active' and not exp:\n"
-        "                return {**rep,'status':'unknown','connected':False,'available_seats':None,'error':'أُلغي التجديد لكن موعد انتهاء الوصول غير مؤكد؛ راجع الحساب.'}\n"
-        "            rep.update(total_seats=total,capacity_source=source,available_seats=max(0,total-rep['used_seats']) if total is not None and rep['status']=='active' else 0 if rep['status']=='deactivated' else None)\n"
-        '            return rep\n'
-        '        except ShopError as e:\n'
-        "            return {**rep,'connected':False,'status':'cookies_expired' if e.status==401 else 'deactivated' if e.status==402 else 'unavailable','error':str(e),'http_status':e.status}\n"
-        '        except Exception:\n'
-        "            return {**rep,'connected':False,'status':'unavailable','error':'تعذر الاتصال؛ سنعيد الفحص تلقائيًا.'}\n"
-        '\n'
-        '    def check_subscription_status(self):\n'
-        "        rep=self.diagnose();return {'cookies_expired':'unauthorized','active':'active','deactivated':'deactivated'}.get(rep['status'],'error')\n"
-        '\n'
-        '    def invite_user(self,email,minutes_valid):\n'
-        '        email=str(email).strip().lower()\n'
-        "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:\n"
-        "            return {'ok':False,'definitive':True,'error':'بريد غير صالح.'}\n"
-        '        if not isinstance(minutes_valid,int) or not 1<=minutes_valid<=525600:\n'
-        "            return {'ok':False,'definitive':True,'error':'مدة غير صالحة.'}\n"
-        '        sent=False\n'
-        '        try:\n'
-        "            with account_lock(G['db'],self._account_key):\n"
-        "                self.reload_data();existing=self.invites_data['invites'].get(email)\n"
-        "                uid=getattr(self,'_last_buyer_uid',None)\n"
-        "                if existing and existing.get('telegram_uid') not in (None,uid):raise ShopError('البريد مرتبط بمشترك آخر.',409)\n"
-        '                rep=self.diagnose()\n'
-        "                if not rep['connected'] or rep['status']!='active':raise ShopError(rep.get('error','الحساب غير متاح.'),503)\n"
-        "                if email==self.owner_email:raise ShopError('بريد مالك الحساب غير قابل للبيع.')\n"
-        "                already=email in rep.get('user_emails',[]) or email in rep.get('pending_emails',[])\n"
-        "                if already and not existing:raise ShopError('البريد عضو سابق خارج اشتراكات البوت؛ راجع الإدارة.',409)\n"
-        '                if not already:\n'
-        "                    if rep.get('available_seats') is None:raise ShopError('لم يوفر الحساب سعة مؤكدة؛ يلزم ضبطها من الإدارة.',409)\n"
-        "                    if rep['available_seats']<=0:raise ShopError('نفدت المقاعد.',409)\n"
-        '                    sent=True\n'
-        "                    r=self.request('POST',f'/backend-api/accounts/{self.account_id}/invites',json={'email_addresses':[email],'role':'standard-user'})\n"
-        '                    if r.status_code not in (200,201):\n'
-        "                        return {'ok':False,'definitive':r.status_code in (400,401,402,403,404,409,422,429),'error':f'تعذر إرسال الدعوة (HTTP {r.status_code}).'}\n"
-        "                now=dt.datetime.utcnow();old=date(existing.get('expires_at')) if existing else None\n"
-        '                exp=max(now,old or now)+dt.timedelta(minutes=minutes_valid)\n'
-        "                self.invites_data['invites'][email]={**(existing or {}),'invited_at':now.isoformat(),'expires_at':exp.isoformat(),\n"
-        "                    'status':'active','minutes':minutes_valid,'telegram_uid':uid,'product_id':getattr(self,'_product_id',''),\n"
-        "                    'order_id':getattr(self,'_order_id',''),'last_job_id':getattr(self,'_job_id','')}\n"
-        '                self.allowed_emails.add(email);self._save_data()\n'
-        "                return {'ok':True,'expires_at':exp.isoformat(),'account_key':self._account_key}\n"
-        '        except Exception as e:\n'
-        "            return {'ok':False,'definitive':not sent,'error':str(e) if isinstance(e,ShopError) else 'تعذر حفظ نتيجة الدعوة؛ الطلب محفوظ للمراجعة.'}\n"
-        '\n'
-        '    def remove_by_email(self,email):\n'
-        "        if email.lower()==self.owner_email:return 'error'\n"
-        '        try:\n'
-        "            for kind,field in (('users','email'),('invites','email_address')):\n"
-        '                for item in self._pages(kind):\n'
-        "                    if str(item.get(field,item.get('email',''))).lower()==email.lower():\n"
-        "                        if str(item.get('role','')).lower() in ('owner','admin','account-owner','account-admin'):return 'error'\n"
-        "                        ident=item.get('id',item.get('user_id',item.get('invite_id')))\n"
-        "                        if not ident:return 'error'\n"
-        "                        r=self.request('DELETE',f'/backend-api/accounts/{self.account_id}/{kind}/{ident}')\n"
-        "                        return ('member' if kind=='users' else 'pending') if r.status_code in (200,204) else 'error'\n"
-        "            return 'not_found'\n"
-        "        except Exception:return 'error'\n"
-        '\n'
-        "    def remove_user_by_email(self,email):return self.remove_by_email(email) in ('member','pending')\n"
-        '    def _remove_user(self,user_id,email):return self.remove_user_by_email(email)\n'
-        '\n'
-        '    def check_and_cleanup(self):\n'
-        "        with account_lock(G['db'],self._account_key):\n"
-        '            self.reload_data();rep=self.diagnose()\n'
-        "            self._last_fetch_failed=not rep['connected']\n"
-        "            if not rep['connected'] or rep['status']!='active':return\n"
-        "            known=set(self.invites_data['invites'])|self.allowed_emails\n"
-        "            unknown=(set(rep.get('user_emails',[]))|set(rep.get('pending_emails',[])))-known\n"
-        '            for email in unknown:\n'
-        "                evidence=[e for e in rep.get('membership_evidence',[]) if str(e.get('email_address',e.get('email',''))).lower()==email]\n"
-        "                G['_safe'].issue('unknown_member',self._account_key,email,details={'observed':evidence,'attribution':'المصدر لم يثبت هوية مرسل الدعوة؛ لا طرد تلقائي بسبب الاشتباه.'})\n"
-        "            if unknown:G['_safe'].notice_once('unknown:'+self._account_key,3600,'هناك أعضاء خارج سجل البوت في حساب ChatGPT؛ راجعهم من لوحة الحساب. لم يُحذف أي عميل بسببهم.')\n"
-        '            now=dt.datetime.utcnow()\n'
-        "            for email,info in list(self.invites_data['invites'].items()):\n"
-        "                exp=date(info.get('expires_at'))\n"
-        "                info['invite_status']='accepted' if email in rep.get('user_emails',[]) else 'pending' if email in rep.get('pending_emails',[]) else 'missing'\n"
-        "                info['invite_checked_at']=now.isoformat()\n"
-        "                if info.get('status')=='active' and exp and exp>now and info['invite_status']=='missing':\n"
-        "                    G['_safe'].issue('missing_invite',self._account_key,email,info.get('telegram_uid'),{'reason':'البريد غير موجود في آخر فحص كامل.'})\n"
-        "                if info.get('status')=='active' and exp and exp<=now:\n"
-        '                    outcome=self.remove_by_email(email)\n'
-        "                    if outcome in ('member','pending','not_found'):\n"
-        "                        info['status']='expired';info['removed_at']=now.isoformat();self.allowed_emails.discard(email)\n"
-        "                        G['_safe'].queue_subscription_notice(self._account_key,email,info,'expired')\n"
-        '                    else:\n'
-        "                        G['_safe'].issue('removal_failed',self._account_key,email,info.get('telegram_uid'),{'reason':'تعذر تأكيد إزالة العضوية أو الدعوة.'})\n"
-        '            self._save_data()\n'
-        '\n'
-        '    def reload_token(self):\n'
-        "        coll=G['db'].cgpt_cookies if self._account_key=='main' else G['db'].cgpt_accounts\n"
-        "        doc=coll.find_one({'_id':'main' if self._account_key=='main' else ObjectId(self._account_key)})\n"
-        "        self._init(doc or {'_id':self._account_key,'data':{}});return self._loaded\n"
-        '    def _load_tokens(self):return self.reload_token()\n'
-        '    def list_active(self):\n'
-        '        now=dt.datetime.utcnow();out=[]\n'
-        "        for email,info in self.invites_data['invites'].items():\n"
-        "            exp=date(info.get('expires_at'))\n"
-        "            if info.get('status')=='active' and exp:\n"
-        "                out.append({'email':email,'expires_at':exp.isoformat(),'remaining_hours':max(0,int((exp-now).total_seconds()/3600)),'remaining_days':max(0,(exp-now).days)})\n"
-        '        return out\n'
-        '    def get_stats(self):\n'
-        "        n=len(self.invites_data['invites']);a=len(self.list_active());return {'total':n,'active':a,'expired':n-a}\n"
-        '    def purge_old_records(self,days_old=7):\n'
-        '        # Archive only; financial/subscription history is retained.\n'
-        '        return 0\n'
-    ),
-    'domain': (
-        '"""Money and request validation; no network or database side effects."""\n'
-        'import base64\n'
-        'import hashlib\n'
-        'import json\n'
-        'import math\n'
-        'import re\n'
-        'from decimal import Decimal, InvalidOperation, ROUND_HALF_UP\n'
-        '\n'
-        'class ShopError(Exception):\n'
-        '    def __init__(self, message, status=400):\n'
-        '        super().__init__(message)\n'
-        '        self.status = status\n'
-        '\n'
-        '\n'
-        'def finite_float(value):\n'
-        '    result = float(value)\n'
-        '    if not math.isfinite(result):\n'
-        "        raise ValueError('A finite number is required')\n"
-        '    return result\n'
-        '\n'
-        '\n'
-        'def cents(value, minimum=0, maximum=5000000):\n'
-        '    try:\n'
-        '        amount = Decimal(str(value))\n'
-        '        if not amount.is_finite():\n'
-        '            raise ValueError()\n'
-        "        result = int((amount * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))\n"
-        '        if amount < Decimal(minimum) / 100 or result < minimum or result > maximum:\n'
-        '            raise ValueError()\n'
-        '        return result\n'
-        '    except (InvalidOperation, ValueError, TypeError, OverflowError):\n'
-        "        raise ShopError('المبلغ غير صالح أو خارج الحدود المسموحة.')\n"
-        '\n'
-        '\n'
-        'def quantity(value, maximum=50):\n'
-        "    if isinstance(value, bool) or not re.fullmatch(r'[0-9]{1,9}', str(value)):\n"
-        "        raise ShopError('الكمية يجب أن تكون عددًا صحيحًا موجبًا.')\n"
-        '    n = int(value)\n'
-        '    if not 1 <= n <= maximum:\n'
-        "        raise ShopError(f'الكمية المسموحة من 1 إلى {maximum}.')\n"
-        '    return n\n'
-        '\n'
-        '\n'
-        'def canonical_tx(value):\n'
-        "    raw = str(value or '').strip()\n"
-        "    if not raw or len(raw) > 512 or re.search(r'\\s', raw):\n"
-        "        raise ShopError('معرّف عملية غير صالح.')\n"
-        "    h = raw[2:] if raw.lower().startswith('0x') else raw\n"
-        "    if re.fullmatch(r'[a-fA-F0-9]{64}', h):\n"
-        '        return h.lower()\n'
-        '    if len(raw) in (43,44):\n'
-        '        try:\n'
-        "            data = base64.b64decode(raw + '=' * (-len(raw) % 4), altchars=b'-_', validate=True)\n"
-        '            if len(data) == 32:\n'
-        '                return data.hex()\n'
-        '        except ValueError:\n'
-        '            pass\n'
-        '    return raw  # Opaque provider IDs are case-sensitive; preserve punctuation.\n'
-        '\n'
-        '\n'
-        'def payment_namespace(method):\n'
-        '    text = method.lower()\n'
-        "    if 'star' in text: return 'telegram-stars'\n"
-        "    if 'litecoin' in text or 'ltc' in text: return 'ltc'\n"
-        "    if 'ton' in text: return 'ton'\n"
-        "    if 'bep' in text or 'bsc' in text: return 'bsc-usdt'\n"
-        "    if 'trc' in text or 'tron' in text: return 'tron-usdt'\n"
-        "    if 'bybit' in text: return 'bybit'\n"
-        "    if 'binance' in text: return 'binance'\n"
-        '    return text.strip()\n'
-        '\n'
-        '\n'
-        'def digest(*parts):\n'
-        '    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()\n'
-    ),
+'customer_service': (
+    '"""Customer portal and durable intervention records. No credentials in tickets."""\n'
+    'import datetime as dt\n'
+    'import html\n'
+    'import re\n'
+    'import time\n'
+    'from domain import ShopError, digest\n'
+    '\n'
+    '\n'
+    'def support_url(value):\n'
+    "    value=str(value or '').strip()\n"
+    "    value=re.sub(r'^https?://(?:www\\.)?(?:t\\.me|telegram\\.me)/','',value).strip('/').lstrip('@')\n"
+    "    return 'https://t.me/'+value if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{4,31}',value) else None\n"
+    '\n'
+    '\n'
+    "FEE_HELP = ('🧾 <b>كيف تضبط رسوم التحويل؟</b>\\n'\n"
+    "    '1️⃣ انسخ العنوان والمبلغ والعملة والشبكة من طلب الدفع الحالي.\\n'\n"
+    "    '2️⃣ في تطبيق التحويل اختر الشبكة نفسها، ثم راجع «المبلغ الذي سيستلمه المستلم».\\n'\n"
+    "    '3️⃣ يجب أن يطابق مبلغ الاستلام المطلوب بكل الكسور. إذا كانت الرسوم تُخصم من المبلغ، زد مبلغ الإرسال بمقدار الرسوم المعروضة. '\n"
+    "    'إذا تُدفع الرسوم منفصلة فلا تضفها إلى مبلغ الاستلام.\\n'\n"
+    "    'مثال توضيحي فقط: المطلوب 5.0087 والرسوم المخصومة 0.2 → الإرسال 5.2087، والاستلام 5.0087.\\n'\n"
+    "    '4️⃣ راجع شاشة التأكيد قبل الإرسال؛ الرسوم تتغير ولا تعتمد على المثال.\\n'\n"
+    "    '5️⃣ الضغط على «تم» أو «فحص الدفع» يطلب التحقق فقط؛ لا يثبت وصول المال.\\n'\n"
+    "    'هذه رسوم تحويل/شبكة، وليست إعداد ضريبة داخل البوت. إذا أرسلت مبلغًا غير مطابق افتح الدعم وأرفق رقم العملية، ولا تدفع مرة ثانية قبل المراجعة.')\n"
+    '\n'
+    '\n'
+    'class CustomerService:\n'
+    "    def issue(self,kind,account='',email='',uid=None,details=None):\n"
+    "        ident=digest('intervention',kind,account,email,uid)\n"
+    '        now=dt.datetime.utcnow()\n'
+    "        self.db.cgpt_interventions.update_one({'_id':ident},{'$set':{'kind':kind,'account':account,'email':email,\n"
+    "            'user_id':uid,'details':details or {},'updated_at':now,'status':'open'},'$setOnInsert':{'created_at':now}},upsert=True)\n"
+    '        return ident\n'
+    '\n'
+    '    def portal(self,uid,page=0):\n'
+    '        rows=[]\n'
+    '        for doc in self.db.cgpt_invites_data.find():\n'
+    "            for email,info in doc.get('data',{}).get('invites',{}).items():\n"
+    "                if info.get('telegram_uid')==uid:rows.append((str(doc['_id']),email,info))\n"
+    "        rows.sort(key=lambda x:(x[2].get('status')!='active',x[1],x[0]))\n"
+    '        page=max(0,min(page,max(0,(len(rows)-1)//4)))\n'
+    "        text=['🤖 <b>اشتراكات ChatGPT</b>'];buttons=[]\n"
+    '        from chatgpt_service import date\n'
+    '        for account,email,info in rows[page*4:page*4+4]:\n'
+    "            exp=date(info.get('expires_at'));left=max(0,int((exp-dt.datetime.utcnow()).total_seconds())) if exp else None\n"
+    "            remaining=f'{left//86400} يوم و{left%86400//3600} ساعة' if left is not None else 'غير معروف'\n"
+    "            status={'active':'نشط','expired':'منتهي','transferred':'نُقل إلى حساب آخر','revoked':'ملغي'}.get(info.get('status'),'غير معروف')\n"
+    "            invite={'accepted':'مقبولة','pending':'بانتظار القبول','missing':'غير موجودة في آخر فحص'}.get(info.get('invite_status'),'لم يتم التحقق بعد')\n"
+    '            text.append(f\'\\n📧 <code>{html.escape(email)}</code>\\nالاشتراك: {status}\\nالدعوة: {invite}\\nالمتبقي: {remaining}\\nالانتهاء (UTC): {html.escape(str(info.get("expires_at","غير معروف")))}\\nآخر فحص: {html.escape(str(info.get("invite_checked_at","غير متاح")))}\')\n'
+    "            history=list(self.db.external_jobs.find({'user_id':uid,'kind':'chatgpt','status':'completed','details.email':email}).sort('created_at',-1).limit(5))\n"
+    "            text.append('سجل الشراء والتجديد (آخر 5): '+(' / '.join(html.escape(str(j.get('order_id',''))) for j in history) or 'لا توجد عمليات موثقة'))\n"
+    "            ref=digest('subscription',account,email,uid)[:24]\n"
+    "            self.db.cgpt_portal_refs.update_one({'_id':ref},{'$set':{'user_id':uid,'account':account,'email':email}},upsert=True)\n"
+    "            if info.get('status')=='active':buttons.append(('📨 لم تصلني الدعوة: '+email[:22],'cgb_missing_'+ref))\n"
+    "        if not rows:text.append('لا توجد اشتراكات مرتبطة بحسابك في البوت.')\n"
+    "        if page:buttons.append(('السابق','cgb_page_'+str(page-1)))\n"
+    "        if (page+1)*4<len(rows):buttons.append(('التالي','cgb_page_'+str(page+1)))\n"
+    "        buttons.extend([('🔄 تجديد','cgb_renew'),('👨\u200d💻 الدعم','cgb_support'),('🔙 الرئيسية','main_menu_refresh')])\n"
+    "        self.send(uid,'\\n'.join(text),reply_markup=self.markup(buttons))\n"
+    '\n'
+    '    def missing_invite(self,uid,ref):\n'
+    "        rec=self.db.cgpt_portal_refs.find_one({'_id':ref,'user_id':uid})\n"
+    "        if not rec:raise ShopError('أعد فتح صفحة اشتراكك.',404)\n"
+    "        doc=self.db.cgpt_invites_data.find_one({'_id':rec['account']}) or {}\n"
+    "        info=doc.get('data',{}).get('invites',{}).get(rec['email'],{})\n"
+    "        if info.get('telegram_uid')!=uid or info.get('status')!='active':raise ShopError('هذا الاشتراك غير نشط.',409)\n"
+    "        ident=self.issue('missing_invite',rec['account'],rec['email'],uid)\n"
+    "        self.notice_once('ticket:'+ident,3600,'📨 لم تصل دعوة العميل: '+html.escape(rec['email'])+'\\nالمستخدم: '+str(uid),self.markup([('قائمة التدخلات','cgx_interventions')]))\n"
+    "        self.send(uid,'📨 سُجل طلب متابعة للدعوة. راجع البريد غير المرغوب فيه وسجّل الدخول بالبريد الظاهر في اشتراكك. لا تشترِ مرة أخرى لحل المشكلة.',reply_markup=self.markup([('اشتراكي','cgb_portal'),('الدعم','cgb_support')]))\n"
+    '\n'
+    '    def support(self,uid):\n'
+    "        url=support_url(self.g.get('OWNER_USER'))\n"
+    "        markup=self.markup([('🧾 شرح الرسوم','cgb_fees'),('اشتراكي','cgb_portal')])\n"
+    "        if url:markup.add(self.InlineKeyboardButton('💬 مراسلة الدعم',url=url))\n"
+    "        self.send(uid,'👨\u200d💻 اختر مراسلة الدعم أو افتح طلب متابعة داخل البوت. لا ترسل كلمة المرور أو الكوكيز.',reply_markup=markup)\n"
+    '\n'
+    '    def customer_route(self,call):\n'
+    '        uid=call.from_user.id;data=call.data\n'
+    '        try:self.bot.answer_callback_query(call.id)\n'
+    '        except Exception:pass\n'
+    "        if data.startswith('cgb_order_'):\n"
+    "            job=self.db.external_jobs.find_one({'order_id':data.removeprefix('cgb_order_'),'user_id':uid,'kind':'external'})\n"
+    "            if not job:raise ShopError('الطلب غير موجود أو لا يخصك.',404)\n"
+    '            return self.ext_result(uid,job)\n'
+    "        if data=='cgb_portal':return self.portal(uid)\n"
+    "        if data.startswith('cgb_page_'):return self.portal(uid,int(data.removeprefix('cgb_page_')))\n"
+    "        if data.startswith('cgb_missing_'):return self.missing_invite(uid,data.removeprefix('cgb_missing_'))\n"
+    "        if data=='cgb_support':return self.support(uid)\n"
+    "        if data=='cgb_fees':return self.send(uid,FEE_HELP,reply_markup=self.markup([('الدعم','cgb_support')]))\n"
+    "        if data=='cgb_ticket':\n"
+    "            ident=self.issue('support',uid=uid)\n"
+    "            self.notice_once('ticket:'+ident,3600,'📝 طلب دعم من المستخدم '+str(uid),self.markup([('التدخلات','cgx_interventions')]))\n"
+    "            message=self.send(uid,'📝 سُجل طلبك برقم <code>'+ident[:12]+'</code>. أرسل الآن وصف المشكلة ورقم الطلب أو التحويل إن وجد. لا ترسل كلمات المرور أو الكوكيز. للإلغاء: /cancel')\n"
+    '            if message:self.bot.register_next_step_handler(message,self.support_input,ident,uid)\n'
+    '            return message\n'
+    '\n'
+    '    def interventions(self,uid,page=0):\n'
+    "        page=max(0,page);rows=list(self.db.cgpt_interventions.find({'status':'open'}).sort('updated_at',-1).skip(page*4).limit(5))\n"
+    "        buttons=[];lines=['🛠 <b>الحالات التي تحتاج تدخلًا</b>']\n"
+    "        labels={'no_seat_refund':'💰 مستحق استرجاع: انتهاء الحساب ولا يوجد بديل','support':'طلب دعم','missing_invite':'دعوة لم تصل','unknown_member':'عضوية غير مسجلة','account_unavailable':'حساب غير متاح','migration':'نقل الاشتراك','removal_failed':'تعذر إنهاء العضوية'}\n"
+    '        for row in rows[:4]:\n'
+    "            lines.append('\\n'+html.escape(labels.get(row['kind'],row['kind']))+' — '+html.escape(row.get('email') or str(row.get('user_id') or row.get('account','')))+'\\n'+html.escape(str(row.get('details',{}))[:500]))\n"
+    "            buttons.append(('عرض الحالة '+row['_id'][:8],'cgx_issue_'+row['_id'][:40]))\n"
+    "        if not rows:lines.append('لا توجد حالات مفتوحة.')\n"
+    "        if page:buttons.append(('السابق','cgx_interventions_'+str(page-1)))\n"
+    "        if len(rows)>4:buttons.append(('التالي','cgx_interventions_'+str(page+1)))\n"
+    "        self.send(uid,'\\n'.join(lines),reply_markup=self.markup(buttons))\n"
+    '\n'
+    '    def intervention_detail(self,uid,prefix):\n'
+    "        row=self.db.cgpt_interventions.find_one({'_id':{'$regex':'^'+re.escape(prefix)}})\n"
+    "        if not row:raise ShopError('الحالة غير موجودة.',404)\n"
+    "        text='🛠 '+html.escape(str({k:v for k,v in row.items() if k!='_id'})[:2200])\n"
+    "        markup=self.markup(([('✉️ الرد على العميل','cgx_reply_'+row['_id'][:40])] if row.get('user_id') else [])+[('✅ تمت المراجعة','cgx_close_'+row['_id'][:40]),('القائمة','cgx_interventions')])\n"
+    "        if row.get('user_id'):markup.add(self.InlineKeyboardButton('مراسلة العميل',url='tg://user?id='+str(int(row['user_id']))))\n"
+    '        self.send(uid,text,reply_markup=markup)\n'
+    '\n'
+    '    def support_input(self,message,ident,uid):\n'
+    '        if message.from_user.id!=uid:return\n'
+    "        text=(message.text or '').strip()\n"
+    "        if text=='/cancel':return self.send(uid,'أُلغي إدخال التفاصيل. الطلب محفوظ للمتابعة.')\n"
+    "        if not text:return self.send(uid,'أرسل وصفًا نصيًا عبر فتح الدعم مجددًا.')\n"
+    "        self.db.cgpt_interventions.update_one({'_id':ident,'user_id':uid},{'$set':{'details':{'message':text[:1800]},'status':'open','updated_at':dt.datetime.utcnow()}})\n"
+    "        self.notice_once('ticket-details:'+ident,60,'📩 وصلت تفاصيل طلب دعم من '+str(uid),self.markup([('التدخلات','cgx_interventions')]))\n"
+    "        self.send(uid,'✅ وصلت تفاصيل المشكلة، وسترد الإدارة هنا في البوت.')\n"
+    '\n'
+    '    def support_reply_begin(self,uid,prefix):\n'
+    "        row=self.db.cgpt_interventions.find_one({'_id':{'$regex':'^'+re.escape(prefix)}})\n"
+    "        if not row or not isinstance(row.get('user_id'),int):raise ShopError('العميل غير معروف.')\n"
+    "        message=self.send(uid,'اكتب الرد الذي سيصل للعميل داخل البوت. للإلغاء /cancel')\n"
+    "        if message:self.bot.register_next_step_handler(message,self.support_reply,row['_id'],uid)\n"
+    '\n'
+    '    def support_reply(self,message,ident,admin_uid):\n'
+    "        if message.from_user.id!=admin_uid or not self.admin(admin_uid):raise ShopError('ليس لديك صلاحية.',403)\n"
+    "        text=(message.text or '').strip()\n"
+    "        if text=='/cancel':return self.send(admin_uid,'أُلغي الرد.')\n"
+    "        row=self.db.cgpt_interventions.find_one({'_id':ident})\n"
+    "        if not row or not text:raise ShopError('رد غير صالح.')\n"
+    "        reply_id=digest('support_reply',ident,admin_uid,message.message_id)\n"
+    "        self.db.notifications.update_one({'_id':reply_id},{'$setOnInsert':{'uids':[row['user_id']], 'text':'👨\u200d💻 رد الدعم:\\n'+html.escape(text[:1800]),'sent':False,'next_at':time.time(),'created':time.time(), 'markup':self.markup([('متابعة مع الدعم','cgb_ticket')]).to_json()}},upsert=True)\n"
+    "        self.db.cgpt_interventions.update_one({'_id':ident},{'$set':{'last_reply':text[:1800],'replied_by':admin_uid,'updated_at':dt.datetime.utcnow()}})\n"
+    "        self.send(admin_uid,'✅ حُفظ الرد في طابور الإرسال للعميل.')\n"
+    '\n'
+    '    def manual_remove(self,admin_uid,token):\n'
+    '        from chatgpt_service import SeatManager, account_lock\n'
+    "        if not self.admin(admin_uid):raise ShopError('ليس لديك صلاحية.',403)\n"
+    "        request=self.db.cgpt_removal_requests.find_one({'_id':token,'admin_uid':admin_uid})\n"
+    "        if not request or request['expires']<time.time():raise ShopError('انتهت صلاحية الزر؛ افتح قائمة النشطين مجددًا.',409)\n"
+    "        account=request['account'];email=request['email']\n"
+    '        doc=self.account_doc(account)\n'
+    "        if not doc:raise ShopError('الحساب غير موجود؛ لم يُحذف سجل العميل.',404)\n"
+    '        with account_lock(self.db,account):\n'
+    '            mgr=SeatManager.from_doc(doc)\n'
+    "            info=mgr.invites_data['invites'].get(email)\n"
+    "            if not info:raise ShopError('الاشتراك غير موجود.',404)\n"
+    "            replay=info.get('status')=='revoked' and info.get('removal_request')==token\n"
+    '            if not replay:\n'
+    "                if any(info.get(k)!=request['snapshot'].get(k) for k in ('status','expires_at','telegram_uid','last_job_id')):\n"
+    "                    raise ShopError('تغير الاشتراك منذ فتح القائمة؛ أعد فتحها قبل الطرد.',409)\n"
+    '                outcome=mgr.remove_by_email(email)\n'
+    "                if outcome not in ('member','pending','not_found'):\n"
+    "                    self.issue('removal_failed',account,email,info.get('telegram_uid'),{'reason':'فشل الطرد الإداري؛ لم يتغير الاشتراك.'})\n"
+    "                    raise ShopError('تعذر تأكيد الطرد؛ لم يُحذف السجل ولم يُرسل إشعار نجاح.',503)\n"
+    "                info.update(status='revoked',removed_at=dt.datetime.utcnow().isoformat(),removed_by=admin_uid,\n"
+    '                            removal_request=token,removal_outcome=outcome)\n'
+    '                mgr.allowed_emails.discard(email);mgr._save_data()\n'
+    "            outcome=info['removal_outcome'];uid=info.get('telegram_uid')\n"
+    '            if isinstance(uid,int):\n'
+    "                text=('تم طردك من مساحة عمل ChatGPT بواسطة الإدارة.' if outcome=='member' else\n"
+    "                      'ألغت الإدارة دعوتك إلى مساحة عمل ChatGPT.' if outcome=='pending' else\n"
+    "                      'أنهت الإدارة اشتراكك في مساحة عمل ChatGPT؛ لم توجد عضوية أو دعوة عند الفحص.')\n"
+    "                text+='\\nالبريد: <code>'+html.escape(email)+'</code>\\nللاستفسار تواصل مع الدعم.'\n"
+    "                self.db.notifications.update_one({'_id':digest('manual_removal',token)},{'$setOnInsert':{\n"
+    "                    'uids':[uid],'text':text,'markup':self.markup([('الدعم','cgb_support')]).to_json(),\n"
+    "                    'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
+    "            else:self.issue('removal_notice_missing_user',account,email,details={'reason':'تم إنهاء الاشتراك؛ لا يوجد معرف Telegram لإشعار العميل.'})\n"
+    "            self.db.cgpt_removal_requests.update_one({'_id':token},{'$set':{'status':'completed','outcome':outcome}})\n"
+    "            self.g.get('_CGPT_SEATS_CACHE',{})['exp']=0\n"
+    '        return outcome\n'
+),
+'finance': (
+    '"""Durable financial operations. MongoDB replica-set transactions are required."""\n'
+    'import datetime as dt\n'
+    'import time\n'
+    'import uuid\n'
+    'from pymongo import ReturnDocument\n'
+    'from pymongo.read_concern import ReadConcern\n'
+    'from pymongo.write_concern import WriteConcern\n'
+    'from domain import ShopError, cents, quantity, canonical_tx, payment_namespace, digest\n'
+    '\n'
+    'class Finance:\n'
+    '    def __init__(self, db): self.db = db\n'
+    '\n'
+    '    def atomic(self, callback):\n'
+    '        with self.db.client.start_session() as session:\n'
+    "            return session.with_transaction(callback, read_concern=ReadConcern('snapshot'), write_concern=WriteConcern('majority'))\n"
+    '\n'
+    '    def user(self, uid, session):\n'
+    "        u = self.db.users.find_one({'user_id': uid}, session=session)\n"
+    "        if not u or u.get('is_banned') == 1:\n"
+    "            raise ShopError('الحساب غير متاح.', 403)\n"
+    '        return u\n'
+    '\n'
+    '    def change(self, uid, amount_cents, key, session, reason):\n'
+    "        old = self.db.wallet_ledger.find_one({'_id': key}, session=session)\n"
+    '        if old:\n'
+    "            if old['user_id'] != uid or old['amount_cents'] != amount_cents:\n"
+    "                raise ShopError('تعارض في هوية العملية المالية.', 409)\n"
+    '            return old\n'
+    "        u = self.user(uid, session) if amount_cents < 0 else self.db.users.find_one({'user_id':uid},session=session)\n"
+    "        if not u:raise ShopError('الحساب غير موجود.',404)\n"
+    "        balance = cents(u.get('balance', 0), minimum=-5000000, maximum=100000000000)\n"
+    "        if balance + amount_cents < 0: raise ShopError('رصيدك غير كافٍ.', 402)\n"
+    "        updated = self.db.users.update_one({'_id': u['_id'], 'balance': u.get('balance', 0)},\n"
+    "            {'$set': {'balance': (balance + amount_cents)/100}}, session=session)\n"
+    "        if updated.matched_count != 1: raise ShopError('تغير الرصيد، أعد المحاولة.',409)\n"
+    "        rec = {'_id':key, 'user_id':uid, 'amount_cents':amount_cents,\n"
+    "               'balance_after_cents':balance+amount_cents, 'reason':reason, 'created_at':dt.datetime.utcnow()}\n"
+    '        self.db.wallet_ledger.insert_one(rec, session=session)\n'
+    '        return rec\n'
+    '\n'
+    '    def credit(self, uid, amount, txid, method, pending_id=None):\n'
+    '        value=cents(amount,minimum=10)\n'
+    '        tx=canonical_tx(txid)\n'
+    '        # Blockchain transaction hashes must not be reused via another provider/label.\n'
+    '        ns=payment_namespace(method)\n'
+    "        key=digest('credit', 'chain' if len(tx)==64 and all(c in '0123456789abcdef' for c in tx) else ns,tx)\n"
+    '        def work(s):\n'
+    "            old=self.db.wallet_ledger.find_one({'_id':key},session=s)\n"
+    '            if old:\n'
+    "                if old['user_id'] != uid: raise ShopError('العملية مسجلة لحساب آخر؛ راجع الإدارة.',409)\n"
+    "                return {'ok':True,'already':True,'amount':old['amount_cents']/100}\n"
+    '            # Preserve historical records. Never guess whether an old split write credited a user.\n'
+    "            legacy=self.db.used_transactions.find_one({'transaction_id':{'$in':[tx,str(txid).strip(),str(txid).strip().lower(),str(txid).replace('0x','').lower()]}},session=s)\n"
+    '            if legacy:\n'
+    "                raise ShopError('عملية قديمة مسجلة؛ يلزم مطابقة السجل المالي من الإدارة.',409)\n"
+    '            p=None\n'
+    '            if pending_id:\n'
+    "                p=self.db.pending_deposits.find_one({'pending_id':pending_id,'user_id':uid,'status':{'$in':['pending','processing']}},session=s)\n"
+    "                if not p: raise ShopError('طلب الإيداع غير متاح.',409)\n"
+    "            self.change(uid,value,key,s,'deposit')\n"
+    "            self.db.used_transactions.insert_one({'transaction_id':tx,'namespace':ns,'ledger_id':key,\n"
+    "                'amount':value/100,'user_id':uid,'method':method,'created_at':int(time.time())},session=s)\n"
+    '            if p:\n'
+    "                self.db.pending_deposits.update_one({'_id':p['_id']},{'$set':{'status':'completed','credited_usd':value/100,'tx_id_detected':tx,'completed_at':int(time.time())}},session=s)\n"
+    "                self.db.users.update_one({'user_id':uid,'deposit_lock_pending_id':pending_id},{'$set':{'deposit_locked':False},'$unset':{'deposit_lock_pending_id':'','deposit_lock_expires':''}},session=s)\n"
+    "            return {'ok':True,'already':False,'amount':value/100}\n"
+    '        return self.atomic(work)\n'
+    '\n'
+    "    def buy_stock(self,uid,pid,qty,idem,via_api=False,buyer_info=''):\n"
+    '        qty=quantity(qty); pid=str(pid)\n'
+    "        key=digest('order',uid,idem); request=digest(pid,qty,buyer_info)\n"
+    '        oid=uuid.uuid4().hex\n'
+    '        def work(s):\n'
+    '            self.user(uid,s)\n'
+    "            old=self.db.shop_orders.find_one({'_id':key},session=s)\n"
+    '            if old:\n'
+    "                if old['request_hash']!=request: raise ShopError('مفتاح الطلب مستعمل لطلب مختلف.',409)\n"
+    '                return old\n'
+    "            qs=[{'id':pid},{'_id':pid}]\n"
+    "            if pid.isdigit(): qs.extend([{'id':int(pid)},{'id':float(pid)}])\n"
+    '            from bson import ObjectId\n'
+    "            if ObjectId.is_valid(pid): qs.append({'_id':ObjectId(pid)})\n"
+    "            p=self.db.products.find_one({'$or':qs,'is_hidden':{'$ne':True}},session=s)\n"
+    "            if not p: raise ShopError('المنتج غير متاح.',404)\n"
+    "            if p.get('product_type') in ('chatgpt_seat','cgpt_main'):\n"
+    "                raise ShopError('اختر باقة ChatGPT وأدخل البريد من شاشة الاشتراكات.')\n"
+    "            unit=cents(p.get('price',0),minimum=1)\n"
+    "            for t in sorted(p.get('discount_tiers',[]),key=lambda x:x.get('min_qty',0),reverse=True):\n"
+    "                if qty>=quantity(t.get('min_qty',1),1000):\n"
+    "                    unit=cents(t.get('price',unit/100),minimum=1); break\n"
+    '            total=unit*qty\n'
+    "            if total>5000000: raise ShopError('قيمة الطلب أعلى من الحد المسموح.')\n"
+    "            canonical=str(p.get('id',p['_id'])); codes=[]\n"
+    "            if not p.get('is_manual'):\n"
+    '                values=[canonical]\n'
+    '                if canonical.isdigit(): values.extend([int(canonical),float(canonical)])\n'
+    '                for _ in range(qty):\n'
+    "                    item=self.db.product_stock.find_one_and_update({'product_id':{'$in':values},'is_sold':False},\n"
+    "                        {'$set':{'is_sold':True,'order_id':oid,'sold_at':int(time.time())}},return_document=ReturnDocument.AFTER,session=s)\n"
+    "                    if not item or not item.get('code_line'): raise ShopError('المخزون غير كافٍ؛ لم يُخصم رصيد.',409)\n"
+    "                    codes.append(item['code_line'])\n"
+    "            ledger=self.change(uid,-total,'debit:'+key,s,'purchase')\n"
+    "            rec={'_id':key,'order_id':oid,'user_id':uid,'product_id':canonical,'product_name':p.get('name_ar',p.get('name_en','')),\n"
+    "                'qty':qty,'unit_price':unit/100,'total_price':total/100,'codes':codes,'request_hash':request,\n"
+    "                'status':'pending_manual' if p.get('is_manual') else 'completed','delivery_status':'pending',\n"
+    "                'sale_notification_pending':True,'via_api':via_api,'buyer_info':buyer_info,'created_at':dt.datetime.utcnow(),'new_balance':ledger['balance_after_cents']/100}\n"
+    '            self.db.shop_orders.insert_one(rec,session=s)\n'
+    "            for code in codes or ['طلب يدوي: '+oid]:\n"
+    "                self.db.orders.insert_one({'user_id':uid,'order_id':oid,'product_id':canonical,'code_delivered':code,\n"
+    "                    'qty':1 if codes else qty,'price':unit/100,'total_price':unit/100 if codes else total/100,\n"
+    "                    'status':rec['status'],'via_api':via_api,'created_at':dt.datetime.utcnow()},session=s)\n"
+    '            if via_api:\n'
+    "                self.db.api_orders.insert_one({k:v for k,v in {**rec,'api_user_id':uid}.items() if k!='_id'},session=s)\n"
+    '            return rec\n'
+    '        return self.atomic(work)\n'
+    '\n'
+    '    def reserve_external(self,uid,amount,idem,kind,details):\n'
+    "        value=cents(amount,minimum=1); key=digest('external',uid,idem); signature=digest(kind,details,value)\n"
+    '        def work(s):\n'
+    '            self.user(uid,s)\n'
+    "            old=self.db.external_jobs.find_one({'_id':key},session=s)\n"
+    '            if old:\n'
+    "                if old['signature']!=signature: raise ShopError('مفتاح الطلب مستخدم لعملية مختلفة.',409)\n"
+    '                return old\n'
+    "            self.change(uid,-value,'debit:'+key,s,kind)\n"
+    "            doc={'_id':key,'order_id':uuid.uuid4().hex,'user_id':uid,'amount_cents':value,'signature':signature,\n"
+    "                 'kind':kind,'details':details,'status':'queued','sale_notification_pending':True,'created_at':dt.datetime.utcnow()}\n"
+    '            self.db.external_jobs.insert_one(doc,session=s)\n'
+    '            return doc\n'
+    '        return self.atomic(work)\n'
+    '\n'
+    '    def refund(self,jobid,reason):\n'
+    '        def work(s):\n'
+    "            j=self.db.external_jobs.find_one({'_id':jobid},session=s)\n"
+    "            if not j: raise ShopError('الطلب غير موجود.',404)\n"
+    "            if j['status']=='refunded': return j\n"
+    "            if j['status'] not in ('queued','rejected'): raise ShopError('نتيجة الطلب غير محسومة؛ يلزم التحقق قبل الاسترجاع.',409)\n"
+    "            self.change(j['user_id'],j['amount_cents'],'refund:'+jobid,s,reason)\n"
+    "            self.db.external_jobs.update_one({'_id':jobid},{'$set':{'status':'refunded','refund_reason':reason}},session=s)\n"
+    "            return {**j,'status':'refunded'}\n"
+    '        return self.atomic(work)\n'
+),
+'runtime': (
+    '"""Safe services used by the preserved Telegram UI in bot.py."""\n'
+    'import contextvars\n'
+    'import datetime as dt\n'
+    'import functools\n'
+    'import html\n'
+    'import io\n'
+    'import json\n'
+    'import logging\n'
+    'import re\n'
+    'import secrets\n'
+    'import threading\n'
+    'import time\n'
+    'import uuid\n'
+    'from bson import ObjectId\n'
+    'from pymongo.errors import DuplicateKeyError\n'
+    'from domain import ShopError, cents, quantity, canonical_tx, digest, finite_float\n'
+    'from finance import Finance\n'
+    'from network import public_endpoint,post_webhook\n'
+    'from chatgpt_service import SeatManager,configure,date,parse_cookies,account_candidates\n'
+    '\n'
+    "_ADMIN=contextvars.ContextVar('admin_action',default=False)\n"
+    '\n'
+    'from customer_service import CustomerService\n'
+    '\n'
+    'class Runtime(CustomerService):\n'
+    '    def __init__(self,g):self.g=g;self.ready=False;self._stop=threading.Event()\n'
+    '    def __getattr__(self,name):\n'
+    '        try:return self.g[name]\n'
+    '        except KeyError:raise AttributeError(name) from None\n'
+    '    @property\n'
+    '    def finance(self):return Finance(self.db)\n'
+    '    def send(self,uid,text,**kwargs):\n'
+    "        mode=kwargs.pop('parse_mode','HTML')\n"
+    '        try:return self.bot.send_message(uid,text,parse_mode=mode,**kwargs)\n'
+    '        except Exception as exc:\n'
+    "            if getattr(exc,'error_code',None)==400:\n"
+    "                try:return self.bot.send_message(uid,html.unescape(re.sub('<[^>]+>','',text)),parse_mode='',**kwargs)\n"
+    '                except Exception:pass\n'
+    "            self.logger.warning('Notification delivery failed uid=%s type=%s code=%s',uid,type(exc).__name__,getattr(exc,'error_code',None))\n"
+    '            return None\n'
+    '    def admin(self,uid):\n'
+    '        if uid==self.OWNER_ID and uid:return True\n'
+    "        u=self.db.users.find_one({'user_id':uid})\n"
+    "        return bool(u and u.get('is_admin')==1 and u.get('is_banned')!=1)\n"
+    '    def guard(self,func,admin=False):\n'
+    '        @functools.wraps(func)\n'
+    '        def wrapped(event,*a,**kw):\n'
+    '            uid=event.from_user.id\n'
+    '            if admin and not self.admin(uid):\n'
+    "                self.send(uid,'❌ ليس لديك صلاحية.');return\n"
+    '            token=_ADMIN.set(admin or _ADMIN.get())\n'
+    '            try:\n'
+    "                if hasattr(event,'data') and (str(event.data).startswith(('open_','cat_','vi_p_','cgsub_back','cgb_portal','cgpt_cust_')) or event.data in ('main_menu_refresh','admin_panel_main','cgpt_accounts')):\n"
+    '                    self.bot.clear_step_handler_by_chat_id(event.from_user.id)\n'
+    '                return func(event,*a,**kw)\n'
+    "            except ShopError as e:self.send(uid,'❌ '+html.escape(str(e)))\n"
+    '            except (ValueError,TypeError) as e:\n'
+    "                self.logger.warning('Invalid input in %s',func.__name__)\n"
+    "                self.send(uid,'❌ البيانات غير صالحة. أعد فتح العملية وحاول مجددًا.')\n"
+    '            except Exception:\n'
+    "                self.logger.exception('Handler failed: %s',func.__name__)\n"
+    "                self.send(uid,'⚠️ تعذر إكمال الإجراء. إذا كان طلب شراء فراجع سجل الطلبات قبل إعادة المحاولة.')\n"
+    '            finally:_ADMIN.reset(token)\n'
+    '        return wrapped\n'
+    '    def install_handlers(self,admin_names):\n'
+    '        for collection in (self.bot.callback_query_handlers,self.bot.message_handlers):\n'
+    '            for handler in collection:\n'
+    "                f=handler['function'];handler['function']=self.guard(f,f.__name__ in admin_names)\n"
+    '        original=self.bot.register_next_step_handler\n'
+    '        def register(message,callback,*args,**kwargs):\n'
+    '            owner=message.chat.id;requires_admin=_ADMIN.get() or callback.__name__ in admin_names\n'
+    '            def next_step(incoming,*a,**kw):\n'
+    '                if incoming.from_user.id!=owner or incoming.chat.id!=owner:\n'
+    '                    return\n'
+    '                return self.guard(callback,requires_admin)(incoming,*a,**kw)\n'
+    '            return original(message,next_step,*args,**kwargs)\n'
+    '        self.bot.register_next_step_handler=register\n'
+    '\n'
+    '    def _repair_duplicate_users(self):\n'
+    "        groups=self.db.users.aggregate([{'$group':{'_id':'$user_id','count':{'$sum':1}}},{'$match':{'count':{'$gt':1}}}],allowDiskUse=True)\n"
+    '        for group in groups:\n'
+    "            uid=group['_id']\n"
+    '            def repair(session):\n'
+    "                docs=list(self.db.users.find({'user_id':uid},session=session).sort('_id',1))\n"
+    '                if len(docs)<2:return\n'
+    "                baseline={k:v for k,v in docs[0].items() if k!='_id'}\n"
+    "                if any({k:v for k,v in row.items() if k!='_id'}!=baseline for row in docs[1:]):\n"
+    "                    raise RuntimeError('Conflicting duplicate user records require review: '+str(uid))\n"
+    '                for row in docs[1:]:\n'
+    "                    self.db.users_duplicates_archive.update_one({'_id':row['_id']},{'$setOnInsert':{\n"
+    "                        'document':row,'kept_id':docs[0]['_id'],'archived_at':dt.datetime.now(dt.timezone.utc)}},upsert=True,session=session)\n"
+    "                    self.db.users.delete_one({'_id':row['_id']},session=session)\n"
+    '            self.finance.atomic(repair)\n'
+    '\n'
+    '    def initialize(self):\n'
+    '        configure(self.g)\n'
+    "        hello=self.mongo_client.admin.command('hello')\n"
+    "        if not hello.get('setName') and hello.get('msg')!='isdbgrid':\n"
+    "            raise RuntimeError('MongoDB replica set/Atlas is required for financial transactions. See README_AR.md.')\n"
+    "        for name in ('wallet_ledger','shop_orders','external_jobs','cgpt_invites_data','cgpt_account_locks','cgpt_checkout',\n"
+    "                     'notifications','api_events','event_receipts','api_webhooks','webhook_jobs','counters','quote_locks','quote_slots'):\n"
+    '            if name not in self.db.list_collection_names():self.db.create_collection(name)\n'
+    '        self._repair_duplicate_users()\n'
+    "        self.db.users.create_index('user_id',unique=True)\n"
+    "        self.db.shop_orders.create_index('order_id',unique=True)\n"
+    "        self.db.external_jobs.create_index('order_id',unique=True)\n"
+    "        self.db.external_jobs.create_index([('status',1),('next_reconcile_at',1)])\n"
+    "        self.db.api_webhooks.create_index('api_user_id',unique=True)\n"
+    "        self.db.api_events.create_index('created_at',expireAfterSeconds=86400)\n"
+    "        self.db.api_events.create_index('sequence',unique=True,sparse=True)\n"
+    "        self.db.webhook_jobs.create_index([('status',1),('next_at',1)])\n"
+    "        self.db.notifications.create_index([('sent',1),('next_at',1)])\n"
+    "        self.db.cgpt_checkout.create_index('user_id',unique=True)\n"
+    "        self.db.cgpt_removal_requests.create_index([('admin_uid',1),('status',1)])\n"
+    "        self.db.quote_slots.create_index('expires_at',expireAfterSeconds=0)\n"
+    "        self.db.pending_deposits.create_index('pending_id',unique=True)\n"
+    '        # Drop only the incorrect constraint, keep every historical financial record.\n'
+    '        for name,info in self.db.used_transactions.index_information().items():\n'
+    "            if list(info.get('key',[]))==[('fingerprint',1)] and info.get('unique'):\n"
+    '                self.db.used_transactions.drop_index(name)\n'
+    "        self.db.used_transactions.create_index('ledger_id',unique=True,sparse=True)\n"
+    "        self.db.referrals_v2.create_index('invited_id',unique=True)\n"
+    "        self.db.referrals_v2.create_index([('referrer_id',1),('status',1)])\n"
+    "        if '_ops' in self.g:self.g['_ops'].initialize()\n"
+    '        self.ready=True\n'
+    '\n'
+    '    def notice_once(self,key,seconds,text,markup=None):\n'
+    "        now=time.time();old=self.db.notifications.find_one({'_id':key})\n"
+    "        if old and old.get('created',0)>now-seconds:return\n"
+    "        ids={self.OWNER_ID}|{u['user_id'] for u in self.db.users.find({'is_admin':1,'is_banned':{'$ne':1}})}\n"
+    "        self.db.notifications.update_one({'_id':key},{'$set':{'created':now,'text':text,'uids':list(ids-{0}),\n"
+    "            'markup':markup.to_json() if markup else None,'sent':False,'next_at':now}},upsert=True)\n"
+    '\n'
+    '    def normalize_tx_id(self,tx_id):\n'
+    '        try:return canonical_tx(tx_id)\n'
+    "        except ShopError:return ''\n"
+    '    def credit_user(self,uid,amt,tx_id,lang,method,trusted_txid=False):\n'
+    '        try:\n'
+    "            pending=self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','base_amount_usd':cents(amt,minimum=10)/100})\n"
+    "            result=self.finance.credit(uid,amt,tx_id,method,pending['pending_id'] if pending else None)\n"
+    '            self._invalidate_user_cache(uid)\n'
+    "            if not result['already']:self.send(uid,self.get_text(uid,'dep_success',result['amount']))\n"
+    '            return result\n'
+    '        except ShopError as e:\n'
+    "            self.send(uid,'⚠️ '+html.escape(str(e)));return {'ok':False,'error':str(e)}\n"
+    '    def auto_credit_from_pending(self,pending,tx_id_for_record,method_label,actual_usd=None):\n'
+    "        amount=pending['base_amount_usd'] if actual_usd is None else actual_usd\n"
+    '        try:\n'
+    "            result=self.finance.credit(pending['user_id'],amount,tx_id_for_record,method_label,pending['pending_id'])\n"
+    "            self._invalidate_user_cache(pending['user_id'])\n"
+    "            if not result['already']:self.send(pending['user_id'],self.get_text(pending['user_id'],'dep_success',result['amount']))\n"
+    '            return True\n'
+    '        except Exception:\n'
+    "            self.logger.exception('Deposit not credited; pending retained')\n"
+    '            return False\n'
+    '    def check_duplicate_transaction(self,uid,amount,method,sender_addr=None,receiver_addr=None,tx_timestamp=None,tx_id_clean=None,trusted_txid=False):\n'
+    '        if not tx_id_clean:return None\n'
+    "        r=self.db.used_transactions.find_one({'transaction_id':canonical_tx(tx_id_clean)})\n"
+    "        return {'match_type':'tx_id','original_uid':r['user_id'],'original_amount':r.get('amount',0),'original_record':r} if r else None\n"
+    '    def collision_review(self,*args,**kwargs):\n'
+    "        self.notice_once('deposit-review:'+digest(args),3600,'⚠️ محاولة استخدام إيداع مسجل. يلزم التحقق من السجل؛ لم يُحظر صاحب الإيداع تلقائيًا.')\n"
+    '        return False\n'
+    '\n'
+    '    def _do_purchase(self,uid,pid,qty,lang,idem=None):\n'
+    '        qty=quantity(qty)\n'
+    '        p=self._find_product_db(pid)\n'
+    "        if p and p.get('product_type') in ('chatgpt_seat','cgpt_main'):\n"
+    "            raise ShopError('اختر المدة من صفحة ChatGPT لإكمال الشراء بالبريد.')\n"
+    '        order=self.finance.buy_stock(uid,pid,qty,idem or uuid.uuid4().hex)\n'
+    '        self._invalidate_user_cache(uid);self._invalidate_products_cache()\n'
+    '        self.deliver_order(order)\n'
+    "        self.emit_event('stock.sold',{'product_id':order['product_id'],'qty_sold':order['qty'],'remaining_stock':self.get_product_stock_count(order['product_id'])},order['product_id'])\n"
+    '        return order\n'
+    '    def confirm_buy_handler(self,call):\n'
+    "        uid=call.from_user.id;parts=call.data.split('_');qty=quantity(parts[-1]);pid='_'.join(parts[2:-1])\n"
+    '        self.bot.answer_callback_query(call.id)\n'
+    "        return self._do_purchase(uid,pid,qty,self.get_lang(uid),f'tg:{call.message.chat.id}:{call.message.message_id}')\n"
+    '    def deliver_order(self,order):\n'
+    "        uid=order['user_id']\n"
+    "        if order['status']=='pending_manual':\n"
+    '            self.send(uid,f"✅ طلبك محفوظ للتسليم اليدوي.\\nرقم الطلب: <code>{order[\'order_id\']}</code>")\n'
+    '            self.notice_once(\'manual:\'+order[\'order_id\'],86400,f"📦 طلب يدوي جديد: <code>{order[\'order_id\']}</code> — {order[\'qty\']} قطعة")\n'
+    '            return\n'
+    "        if len(order['codes'])!=order['qty']:raise ShopError('الطلب يحتاج مراجعة، لم يُعلن اكتمال التسليم.',409)\n"
+    "        f=io.BytesIO(('\\n'.join(order['codes'])).encode());f.name='order_'+order['order_id']+'.txt'\n"
+    '        try:\n'
+    '            self.bot.send_document(uid,f,caption=f"✅ تم الشراء — {order[\'qty\']} قطعة، ${order[\'total_price\']:.2f}\\nرقم الطلب: {order[\'order_id\']}")\n'
+    "            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'delivered'}})\n"
+    '        except Exception:\n'
+    '            # Delivery might have succeeded at Telegram; never refund/re-sell those codes.\n'
+    "            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'retry'}})\n"
+    "            self.send(uid,'📄 الأكواد محفوظة في سجل مشترياتك. يمكنك تنزيلها مجددًا؛ لن يُخصم رصيد جديد.')\n"
+    '        self.reward_once(order)\n'
+    '    def reward_once(self,order):\n'
+    "        if order['status']!='completed':return\n"
+    "        ref=self.db.referrals_v2.find_one({'invited_id':order['user_id']})\n"
+    "        if not ref or order['total_price']<=self.get_referral_min_purchase():return\n"
+    "        rid=int(ref.get('referrer_id',0));reward=cents(self.get_referral_purchase_reward(),minimum=0)\n"
+    '        if not rid or not reward:return\n'
+    "        try:self.finance.atomic(lambda s:self.finance.change(rid,reward,'referral:'+order['order_id'],s,'purchase_referral'))\n"
+    '        except ShopError:pass\n'
+    '        self._invalidate_user_cache(rid)\n'
+    '\n'
+    '    def get_api_user(self,key):\n'
+    "        doc=self.db.api_keys.find_one({'api_key':key,'is_active':True})\n"
+    '        if not doc:return None,None\n'
+    "        u=self.db.users.find_one({'user_id':doc['user_id'],'is_banned':{'$ne':1}})\n"
+    '        return (doc,u) if u else (None,None)\n'
+    '\n'
+    '    def emit_event(self,event_type,data,product_id=None):\n'
+    "        if data.get('source')=='external_api' and event_type in ('product.created','product.updated'):return\n"
+    '        # Orders are private. Catalog events never expose buyer/order details.\n'
+    "        owner=data.get('api_user_id') if event_type.startswith('order.') else None\n"
+    "        if event_type.startswith('order.') and owner is None:return\n"
+    "        public={k:v for k,v in data.items() if k not in ('buyer_user_id','api_user_id','order_id','total_price','codes','email')}\n"
+    '        if owner is not None:public=dict(data)\n'
+    "        event_key=digest('event',event_type,data['order_id']) if data.get('order_id') else uuid.uuid4().hex\n"
+    '        def work(s):\n'
+    "            if self.db.event_receipts.find_one({'_id':event_key},session=s):return\n"
+    "            seq=self.db.counters.find_one_and_update({'_id':'events'},{'$inc':{'value':1}},upsert=True,return_document=True,session=s)['value']\n"
+    "            event={'_id':event_key,'event_id':event_key,'sequence':seq,'event_type':event_type,'timestamp':int(time.time()),\n"
+    "                   'created_at':dt.datetime.utcnow(),'data':public,'product_id':str(product_id) if product_id else None,'owner_uid':owner}\n"
+    "            self.db.event_receipts.insert_one({'_id':event_key,'created_at':dt.datetime.utcnow()},session=s)\n"
+    '            self.db.api_events.insert_one(event,session=s)\n'
+    "            for hook in self.db.api_webhooks.find({'is_active':True},session=s):\n"
+    "                if owner is not None and hook['api_user_id']!=owner:continue\n"
+    "                self.db.webhook_jobs.insert_one({'_id':digest(event['event_id'],hook['_id']),'hook_id':hook['_id'],'event':{k:v for k,v in event.items() if k not in ('_id','created_at','owner_uid')},'status':'pending','attempts':0,'next_at':time.time()},session=s)\n"
+    '        try:self.finance.atomic(work)\n'
+    "        except Exception:self.logger.exception('Event persistence failed')\n"
+    '    def deliver_webhook(self,hook,event):\n'
+    "        if hook.get('event_filter') and event['event_type'] not in hook['event_filter'] and event['event_type']!='webhook.test':return True\n"
+    "        body=json.dumps(event,ensure_ascii=False,separators=(',',':')).encode();timestamp=str(int(time.time()))\n"
+    "        sig=self._sign_webhook_body(hook.get('secret',''),body,timestamp)\n"
+    "        try:return post_webhook(hook['url'],body,{'Content-Type':'application/json','X-Event-Id':event['event_id'],\n"
+    "            'X-Event-Type':event['event_type'],'X-Webhook-Timestamp':timestamp,'X-Webhook-Signature':'sha256='+sig})\n"
+    '        except Exception:return False\n'
+    '    def webhook_worker(self):\n'
+    '        while not self._stop.wait(1):\n'
+    '            now=time.time()\n'
+    "            job=self.db.webhook_jobs.find_one_and_update({'status':{'$in':['pending','sending']},'next_at':{'$lte':now}},\n"
+    "                {'$set':{'status':'sending','next_at':now+60},'$inc':{'attempts':1}},return_document=True)\n"
+    '            if not job:\n'
+    '                self._stop.wait(9);continue\n'
+    "            hook=self.db.api_webhooks.find_one({'_id':job['hook_id'],'is_active':True})\n"
+    "            ok=not hook or self.deliver_webhook(hook,job['event'])\n"
+    "            state='sent' if ok else 'failed' if job['attempts']>=8 else 'pending'\n"
+    "            self.db.webhook_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'next_at':time.time()+min(3600,2**job['attempts'])}})\n"
+    "            if state=='failed':self.notice_once('webhook-failed',3600,'⚠️ فشل تسليم بعض webhooks بعد إعادة المحاولة. الأحداث متاحة في API لمدة 24 ساعة.')\n"
+    '\n'
+    '    def generate_unique_amount_for_user(self,base_amount_usd,uid,coin):\n'
+    '        base=cents(base_amount_usd,minimum=100,maximum=1000000)/100\n'
+    "        group='shared-usdt' if coin in ('USDT','USDT_BEP20') or str(coin).startswith('BYBIT') else coin\n"
+    '        def reserve(session):\n'
+    '            # A shared write serializes quote allocation across concurrent processes.\n'
+    "            self.db.quote_locks.update_one({'_id':group},{'$inc':{'revision':1}},upsert=True,session=session)\n"
+    "            now=dt.datetime.utcnow();spacing=0.002 if group!='shared-usdt' else 0.0003\n"
+    '            for _ in range(400):\n'
+    "                extra=secrets.randbelow(95)+5 if str(coin).startswith('BYBIT') else secrets.randbelow(9900)+100\n"
+    "                value=round(base+extra/(100 if str(coin).startswith('BYBIT') else 1000000),6)\n"
+    "                clash=self.db.quote_slots.find_one({'group':group,'expires_at':{'$gt':now},'amount':{'$gte':value-spacing,'$lte':value+spacing}},session=session)\n"
+    "                old=self.db.pending_deposits.find_one({'status':'pending','unique_amount_usd':{'$gte':value-spacing,'$lte':value+spacing},'expires_at':{'$gt':int(time.time())}},session=session)\n"
+    '                if clash or old:continue\n'
+    "                self.db.quote_slots.insert_one({'_id':uuid.uuid4().hex,'group':group,'uid':uid,'coin':coin,'amount':value,'expires_at':now+dt.timedelta(hours=2)},session=session)\n"
+    '                return value\n'
+    "            raise ShopError('مجال مبالغ الإيداع مشغول حاليًا. حاول لاحقًا.',409)\n"
+    '        return self.finance.atomic(reserve)\n'
+    '    def register_pending_deposit(self,uid,base_amount_usd,unique_amount_usd,coin,sender_uid=None):\n'
+    '        cents(base_amount_usd,minimum=100);unique=finite_float(unique_amount_usd)\n'
+    '        price=None;units=None\n'
+    "        if coin in ('LTC','TON'):\n"
+    "            price=self.get_ltc_price_usd() if coin=='LTC' else self.get_ton_price_usd()\n"
+    "            if not price or price<=0:raise ShopError('تعذر تثبيت سعر العملة الآن.',503)\n"
+    "            scale=100000000 if coin=='LTC' else 1000000000\n"
+    '            units=round(unique/price*scale)\n'
+    '        pending_id=uuid.uuid4().hex\n'
+    '        def work(s):\n'
+    '            self.finance.user(uid,s)\n'
+    "            self.db.quote_locks.update_one({'_id':'user:'+str(uid)},{'$inc':{'revision':1}},upsert=True,session=s)\n"
+    "            if self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','expires_at':{'$gt':int(time.time())}},session=s):\n"
+    "                raise ShopError('لديك إيداع معلق؛ أكمله أو ألغِه أولًا.',409)\n"
+    "            rec={'pending_id':pending_id,'user_id':uid,'base_amount_usd':cents(base_amount_usd)/100,\n"
+    "                'unique_amount_usd':unique,'coin':coin,'status':'pending','created_at':int(time.time()),'expires_at':int(time.time())+7200}\n"
+    '            if price:rec.update(quoted_price=price,crypto_units=units)\n'
+    "            if sender_uid:rec['sender_uid']=str(sender_uid)\n"
+    '            self.db.pending_deposits.insert_one(rec,session=s)\n'
+    "            self.db.users.update_one({'user_id':uid},{'$set':{'deposit_locked':True,'deposit_lock_pending_id':pending_id,'deposit_lock_expires':rec['expires_at']}},session=s)\n"
+    '            return rec\n'
+    '        return self.finance.atomic(work)\n'
+    '    def native_pending(self,coin,units,tx_time):\n'
+    '        if not tx_time or int(tx_time)>int(time.time())+60:return None\n'
+    "        records=list(self.db.pending_deposits.find({'coin':coin,'status':'pending','crypto_units':int(units),\n"
+    "            'created_at':{'$lte':int(tx_time)},'expires_at':{'$gt':int(time.time()),'$gte':int(tx_time)}}))\n"
+    '        return records[0] if len(records)==1 else None\n'
+    '\n'
+    '    def check_ltc_blockchain_auto(self):\n'
+    "        wallet=self.get_setting('ltc_address')\n"
+    "        if not wallet or wallet=='Not Set':return\n"
+    "        res=self.requests.get(f'https://litecoinspace.org/api/address/{wallet}/txs',timeout=10)\n"
+    '        if res.status_code!=200:return\n'
+    '        for tx in res.json():\n'
+    "            if not tx.get('status',{}).get('confirmed'):continue\n"
+    "            if any(v.get('prevout',{}).get('scriptpubkey_address')==wallet for v in tx.get('vin',[])):continue\n"
+    "            units=sum(int(v.get('value',0)) for v in tx.get('vout',[]) if v.get('scriptpubkey_address')==wallet)\n"
+    "            p=self.native_pending('LTC',units,tx.get('status',{}).get('block_time'))\n"
+    "            if p:self.auto_credit_from_pending(p,tx['txid'],'Litecoin (LTC) Auto')\n"
+    '    def check_ton_blockchain_auto(self):\n'
+    '        from ton_payments import TonClient\n'
+    "        pending=list(self.db.pending_deposits.find({'coin':'TON','status':'pending','expires_at':{'$gt':int(time.time())}}))\n"
+    '        if not pending:return\n'
+    "        client=TonClient(self.requests,self.get_setting('ton_address'))\n"
+    "        for hit in client.recent(min(p['created_at'] for p in pending)):\n"
+    "            p=self.native_pending('TON',hit['units'],hit['utime'])\n"
+    "            if p:self.auto_credit_from_pending(p,hit['hash'],'Toncoin (TON) Auto')\n"
+    '\n'
+    '\n'
+    '    def ct(self,uid,key,**values):\n'
+    '        from cms import render\n'
+    '        return render(self.db,key,self.get_lang(uid),**values)\n'
+    '    def markup(self,buttons):\n'
+    '        m=self.InlineKeyboardMarkup(row_width=1)\n'
+    '        for label,data in buttons:m.add(self.InlineKeyboardButton(label,callback_data=data))\n'
+    '        return m\n'
+    '    def cg_button(self,uid,key,data):\n'
+    "        doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':self.get_lang(uid)}) or {}\n"
+    "        return self.InlineKeyboardButton(self.ct(uid,key),callback_data=data,icon_custom_emoji_id=str(doc['emoji_id']) if str(doc.get('emoji_id') or '').isdigit() else None)\n"
+    '    def account_doc(self,key):\n'
+    "        if key=='main':return self.db.cgpt_cookies.find_one({'_id':'main'})\n"
+    "        if not ObjectId.is_valid(key):raise ShopError('معرّف الحساب غير صالح.')\n"
+    "        return self.db.cgpt_accounts.find_one({'_id':ObjectId(key)})\n"
+    '    def account_info(self,doc):\n'
+    '        mgr=SeatManager.from_doc(doc);rep=mgr.diagnose()\n'
+    "        return {**rep,'id':str(doc['_id']),'email':mgr.owner_email,'name':doc.get('name','حساب'),'mgr':mgr,'manual':rep.get('capacity_source')=='manual'}\n"
+    '    def find_account(self):\n'
+    '        for doc in self._cgpt_all_accounts():\n'
+    '            info=self.account_info(doc)\n'
+    "            if info['connected'] and info.get('status')=='active' and info.get('available_seats') is not None and info['available_seats']>0:return info\n"
+    '        return None\n'
+    '    def account_report(self,key):\n'
+    '        doc=self.account_doc(key)\n'
+    "        if not doc:raise ShopError('الحساب غير موجود.',404)\n"
+    '        rep=self.account_info(doc)\n'
+    "        def show(v):return 'غير متاح من المصدر' if v is None else str(v)\n"
+    "        state={'active':'✅ نشط','cookies_expired':'🍪 الكوكيز منتهية','deactivated':'⛔ الاشتراك غير نشط','unknown':'❔ غير مؤكد','unavailable':'⏳ تعذر الاتصال'}.get(rep.get('status'),'❔ غير مؤكد')\n"
+    '        lines=[f"🏢 <b>{html.escape(doc.get(\'name\',rep[\'email\']) or \'ChatGPT Business\')}</b>",state,\n'
+    '               f"🪑 الإجمالي: {show(rep.get(\'total_seats\'))}",f"👥 الأعضاء (يشمل المالك): {show(rep.get(\'member_count\'))}",\n'
+    '               f"✉️ دعوات معلقة: {show(rep.get(\'pending_invites\'))}",f"🟢 المتاح للبيع: {show(rep.get(\'available_seats\'))}"]\n'
+    "        if rep.get('capacity_source')=='manual':lines.append('السعة مضبوطة يدويًا؛ استخدام المقاعد مقروء من الحساب.')\n"
+    "        lines.append('📅 نهاية الاشتراك: '+show(rep.get('expires_at')))\n"
+    "        if rep.get('renews_at'):lines.append('🧾 موعد التجديد/الفاتورة: '+rep['renews_at'])\n"
+    "        buttons=[('🔄 إعادة الفحص','cgx_account_'+key),('🍪 تحديث الكوكيز','cgx_cookie_'+key),('🪑 ضبط السعة يدويًا','cgpt_setseats_'+key),('🔙 الحسابات','cgpt_accounts')]\n"
+    "        return '\\n'.join(lines),self.markup(buttons)\n"
+    '    def accounts_ui(self,call):\n'
+    '        buttons=[]\n'
+    "        for doc in self._cgpt_all_accounts():buttons.append(('🏢 '+str(doc.get('name') or doc.get('data',{}).get('user',{}).get('email','حساب'))[:40],'cgx_account_'+str(doc['_id'])))\n"
+    "        buttons.extend([('➕ إضافة حساب','cgx_cookie_new'),('🔙 ChatGPT','ad_cgpt_panel')])\n"
+    "        self.send(call.from_user.id,'🏢 اختر الحساب لعرض المقاعد والاشتراك وتحديث الكوكيز.',reply_markup=self.markup(buttons))\n"
+    "    def cookies_begin(self,call,key='main'):\n"
+    "        if key not in ('main','new') and not self.account_doc(key):raise ShopError('الحساب غير موجود.')\n"
+    '        uid=call.from_user.id\n'
+    "        self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'cookies','account_key':key,'expires':time.time()+600}},upsert=True)\n"
+    "        m=self.send(uid,'🍪 أرسل الكوكيز كنص أو ملف <b>JSON / TXT</b> حتى 256KB.\\nيدعم ملف جلسة، قائمة كوكيز المتصفح، أو نص Cookie.\\nلن نستبدل البيانات السابقة إلا بعد نجاح التحقق من الحساب.\\nأرسل /cancel للإلغاء.')\n"
+    '        if m:self.bot.register_next_step_handler(m,self.cookies_input)\n'
+    '    def cookies_input(self,message):\n'
+    '        uid=message.from_user.id\n'
+    "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
+    "        pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'cookies','expires':{'$gt':time.time()}})\n"
+    "        if not pending:raise ShopError('انتهت جلسة التحديث؛ افتح الزر مجددًا.')\n"
+    "        if (message.text or '').strip() in ('/cancel','إلغاء','الغاء'):\n"
+    "            self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.send(uid,'أُلغي التحديث.');return\n"
+    "        raw=message.text or ''\n"
+    '        if message.document:\n'
+    '            doc=message.document\n'
+    "            if doc.file_size is None or doc.file_size>262144 or not str(doc.file_name).lower().endswith(('.json','.txt')):raise ShopError('أرسل ملف JSON/TXT حتى 256KB.')\n"
+    '            f=self.bot.get_file(doc.file_id);data=self.bot.download_file(f.file_path)\n'
+    "            if len(data)>262144:raise ShopError('الملف أكبر من الحد.')\n"
+    "            raw=data.decode('utf-8-sig')\n"
+    "        data=parse_cookies(raw);target=pending['account_key'];old=self.account_doc(target) if target!='new' else None\n"
+    "        if old:data['account']=old.get('data',{}).get('account',{})\n"
+    "        mgr=SeatManager.from_doc({'_id':target,'data':data});choices=mgr.hydrate()\n"
+    "        data['accessToken']=mgr.access_token;data['user']={**data.get('user',{}),'email':mgr.owner_email}\n"
+    "        selected=data.get('account',{}).get('id')\n"
+    "        choices=[c for c in choices if c['id']==selected] if selected else choices\n"
+    "        if not choices:raise ShopError('الجلسة لا تملك حساب Business المحدد. لم تتغير الكوكيز السابقة.')\n"
+    '        if len(choices)>1:\n'
+    '            # Short-lived encrypted inputs are retained only until workspace selection.\n'
+    '            from cryptography.fernet import Fernet\n'
+    '            cipher=self.secret_cipher()\n'
+    "            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'choose_workspace','sealed':cipher.encrypt(json.dumps(data).encode()).decode(),'choices':[{k:v for k,v in c.items() if k!='raw'} for c in choices],'expires':time.time()+600}})\n"
+    "            self.send(uid,'اختر مساحة Business التي تريد ربطها:',reply_markup=self.markup([(str(c['name'])[:40],f'cgx_choose_{i}') for i,c in enumerate(choices)]))\n"
+    '        else:\n'
+    "            data['account']={'id':choices[0]['id']};self.save_cookies(uid,target,data)\n"
+    '        try:self.bot.delete_message(message.chat.id,message.message_id)\n'
+    '        except Exception:pass\n'
+    '    def secret_cipher(self):\n'
+    '        from cryptography.fernet import Fernet\n'
+    '        import os\n'
+    "        key=os.environ.get('SESSION_ENCRYPTION_KEY','')\n"
+    "        if not key:raise ShopError('اضبط SESSION_ENCRYPTION_KEY لحفظ جلسات الكوكيز بأمان.')\n"
+    '        return Fernet(key.encode())\n'
+    '    def save_cookies(self,uid,key,data):\n'
+    "        mgr=SeatManager.from_doc({'_id':key,'data':data});rep=mgr.diagnose()\n"
+    "        if not rep['connected'] and rep.get('status')!='deactivated':raise ShopError(rep.get('error','فشل التحقق.'))\n"
+    '        # Keep the existing document, subscriptions and manual capacity.\n'
+    "        coll=self.db.cgpt_cookies if key=='main' else self.db.cgpt_accounts\n"
+    "        ident='main' if key=='main' else ObjectId() if key=='new' else ObjectId(key)\n"
+    "        if key=='new':\n"
+    '            for doc in self._cgpt_all_accounts():\n'
+    "                if doc.get('data',{}).get('account',{}).get('id')==data['account']['id']:raise ShopError('الحساب مضاف مسبقًا؛ استخدم زر تحديثه.')\n"
+    "        coll.update_one({'_id':ident},{'$set':{'data':{'account':data.get('account',{}),'user':data.get('user',{})},'sealed_data':self.secret_cipher().encrypt(json.dumps(data).encode()).decode(),'name':data.get('user',{}).get('email','ChatGPT Business'),'cookies_updated_at':dt.datetime.utcnow(),'last_status':rep.get('status')}},upsert=True)\n"
+    "        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.db.notifications.delete_one({'_id':'cookie:'+str(ident)})\n"
+    "        self.g['_cgpt_manager_instance']=None;self.g['_CGPT_SEATS_CACHE']['exp']=0\n"
+    "        text,markup=self.account_report(str(ident));self.send(uid,'✅ تم تحديث الكوكيز والتحقق من الحساب.\\n\\n'+text,reply_markup=markup)\n"
+    '    def cgpt_begin(self,call):\n'
+    "        uid=call.from_user.id;pid,durid=call.data.removeprefix('cgpt_buy_').split('_',1)\n"
+    "        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid)})\n"
+    "        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)\n"
+    "        if not d:raise ShopError('الباقة غير متاحة.')\n"
+    "        amount=cents(d['price'],minimum=1);minutes=quantity(d['minutes'],525600)\n"
+    "        old=self.db.cgpt_checkout.find_one({'user_id':uid})\n"
+    "        if old and old.get('state')=='processing':raise ShopError('يوجد طلب قيد المعالجة. راجع سجل الطلبات أولًا.',409)\n"
+    "        checkout={'user_id':uid,'pid':pid,'dur_id':durid,'price':amount/100,'minutes':minutes,'label':d.get('label',''),\n"
+    "                  'product':p.get('name','ChatGPT'),'order_id':uuid.uuid4().hex,'state':'email','created_at':time.time()}\n"
+    "        self.db.cgpt_checkout.replace_one({'user_id':uid},checkout,upsert=True)\n"
+    "        m=self.send(uid,self.ct(uid,'ask_email',product=checkout['product'],price=f'{amount/100:.2f}')+'\\n\\n📜 الاشتراك لا يسمح بإضافة مستخدمين أو إرسال دعوات للآخرين. تُراجع المخالفة بناءً على دليل مصدر الدعوة، وقد تؤدي إلى إلغاء الاشتراك.')\n"
+    '        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))\n'
+    '    def cgpt_email_step(self,message,buyer_uid,lang):\n'
+    "        if message.from_user.id!=buyer_uid:raise ShopError('الطلب لا يخصك.',403)\n"
+    "        email=(message.text or '').strip().lower()\n"
+    "        if email in ('/cancel','cancel','إلغاء','الغاء'):return self.cgpt_cancel(buyer_uid,lang)\n"
+    "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:raise ShopError('البريد غير صالح؛ أعد فتح الباقة.')\n"
+    "        p=self.db.cgpt_checkout.find_one_and_update({'user_id':buyer_uid,'state':{'$in':['email','confirm']}},\n"
+    "            {'$set':{'email':email,'state':'confirm'}},return_document=True)\n"
+    "        if not p:raise ShopError('انتهت الجلسة.')\n"
+    '        markup=self.InlineKeyboardMarkup()\n'
+    "        markup.add(self.cg_button(buyer_uid,'btn_confirm',f'cgpt_email_ok_{buyer_uid}'),self.cg_button(buyer_uid,'btn_change',f'cgpt_email_change_{buyer_uid}'))\n"
+    "        markup.add(self.cg_button(buyer_uid,'btn_cancel',f'cgpt_cancel_buy_{buyer_uid}'))\n"
+    '        self.send(buyer_uid,self.ct(buyer_uid,\'confirm_email\',email=email,product=p[\'product\'],duration=p[\'label\'],price=f"{p[\'price\']:.2f}"),reply_markup=markup)\n'
+    '    def cgpt_cancel(self,uid,lang):\n'
+    "        result=self.db.cgpt_checkout.delete_one({'user_id':uid,'state':{'$in':['email','confirm']}})\n"
+    '        self.bot.clear_step_handler_by_chat_id(uid)\n'
+    "        self.send(uid,'أُلغي الطلب؛ لم يُخصم رصيد.' if result.deleted_count else 'لا يوجد طلب قابل للإلغاء؛ راجع سجل الطلبات.')\n"
+    '    def own_callback(self,call,prefix):\n'
+    "        if str(call.from_user.id)!=call.data.removeprefix(prefix):raise ShopError('الطلب لا يخصك.',403)\n"
+    '        return call.from_user.id\n'
+    "    def cgpt_cancel_callback(self,call):return self.cgpt_cancel(self.own_callback(call,'cgpt_cancel_buy_'),self.get_lang(call.from_user.id))\n"
+    '    def cgpt_change(self,call):\n'
+    "        uid=self.own_callback(call,'cgpt_email_change_')\n"
+    "        m=self.send(uid,'📧 أرسل البريد الصحيح:')\n"
+    '        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))\n'
+    '    def cgpt_confirm(self,call):\n'
+    "        uid=self.own_callback(call,'cgpt_email_ok_')\n"
+    "        p=self.db.cgpt_checkout.find_one_and_update({'user_id':uid,'state':'confirm'},{'$set':{'state':'processing'}},return_document=True)\n"
+    "        if not p:raise ShopError('الطلب قيد المعالجة أو انتهت الجلسة؛ راجع سجل الطلبات.')\n"
+    "        self.send(uid,'⏳ جاري معالجة الدعوة. رقم الطلب: '+p['order_id'] if self.get_lang(uid)!='en' else '⏳ Processing invitation. Order: '+p['order_id'])\n"
+    '        try:\n'
+    "            job=self.buy_cgpt(uid,p['pid'],p['dur_id'],p['email'],p['order_id'])\n"
+    "            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'done','job_id':job['_id']}})\n"
+    '            self.cgpt_result(uid,job)\n'
+    '        except Exception:\n'
+    '            # No blind refund; durable external_jobs is the authority if debit committed.\n'
+    "            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'review'}})\n"
+    '            raise\n'
+    '    def buy_cgpt(self,uid,pid,durid,email,idem):\n'
+    "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:raise ShopError('بريد غير صالح.')\n"
+    "        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})\n"
+    '        if previous:\n'
+    "            d=previous['details']\n"
+    "            if previous['kind']!='chatgpt' or (d.get('pid'),d.get('dur_id'),d.get('email'))!=(pid,durid,email):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)\n"
+    "            return self.process_cgpt_job(previous) if previous['status']=='queued' else previous\n"
+    "        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid),'is_hidden':{'$ne':True}})\n"
+    "        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)\n"
+    "        if not d:raise ShopError('الباقة غير متاحة.',404)\n"
+    '        # Existing owned email stays on its workspace when renewing.\n'
+    '        target=None\n'
+    '        for doc in self._cgpt_all_accounts():\n'
+    "            mgr=SeatManager.from_doc(doc);info=mgr.invites_data['invites'].get(email)\n"
+    "            if info and info.get('telegram_uid')==uid and info.get('status') in ('active','expired'):\n"
+    "                target={'mgr':mgr,'id':str(doc['_id'])};break\n"
+    '        if not target:target=self.find_account()\n'
+    "        if not target:raise ShopError(self.ct(uid,'no_seats'),409)\n"
+    "        details={'pid':pid,'dur_id':durid,'email':email,'minutes':quantity(d['minutes'],525600),'duration':d.get('label',''),'account_key':target['id'],'product':p.get('name','ChatGPT')}\n"
+    "        job=self.finance.reserve_external(uid,d['price'],idem,'chatgpt',details)\n"
+    '        return self.process_cgpt_job(job)\n'
+    '    def finish_cgpt_order(self,job,result):\n'
+    "        d=job['details'];amount=job['amount_cents']/100\n"
+    "        order={'_id':'business:'+str(job['_id']),'order_id':job['order_id'],'user_id':job['user_id'],\n"
+    "            'product_id':'cgpt_'+d['pid'],'product_name':d.get('product','ChatGPT Business'),\n"
+    "            'qty':1,'quantity':1,'unit_price':amount,'price':amount,'total_price':amount,\n"
+    "            'codes':['chatgpt_seat:'+d['email']],'status':'completed','delivery_status':'pending',\n"
+    "            'created_at':job.get('created_at',dt.datetime.utcnow()),'kind':'chatgpt',\n"
+    "            'cgpt_email':d['email'],'cgpt_expires_at':result['expires_at']}\n"
+    '        def finish(session):\n'
+    "            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed','result':result}},session=session)\n"
+    "            self.db.shop_orders.update_one({'_id':order['_id']},{'$setOnInsert':order},upsert=True,session=session)\n"
+    "            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'purchase_effects_pending':True}},session=session)\n"
+    "            self.db.orders.update_one({'order_id':job['order_id']},{'$set':{\n"
+    "                'user_id':job['user_id'],'product_id':'cgpt_'+d['pid'],\n"
+    "                'product_name':d.get('product','ChatGPT Business'),'code_delivered':'chatgpt_seat:'+d['email'],\n"
+    "                'qty':1,'quantity':1,'price':amount,'unit_price':amount,'total_price':amount,\n"
+    "                'status':'completed','cgpt_minutes':d['minutes'],'cgpt_email':d['email'],'cgpt_expires_at':result['expires_at']},\n"
+    "                '$setOnInsert':{'order_id':job['order_id']}},upsert=True,session=session)\n"
+    '        self.finance.atomic(finish)\n'
+    "        try:self.business_purchase_effects({**job,'status':'completed','result':result})\n"
+    "        except Exception:self.logger.exception('Business post-purchase processing queued for retry')\n"
+    '\n'
+    '    def business_purchase_effects(self,job):\n'
+    "        order=self.db.shop_orders.find_one({'order_id':job['order_id']})\n"
+    "        if not order:raise RuntimeError('Business purchase record is missing')\n"
+    '        self.reward_once(order)\n'
+    "        self._invalidate_user_cache(job['user_id']);self._invalidate_products_cache()\n"
+    "        self.cgpt_result(job['user_id'],job)\n"
+    "        self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'purchase_effects_pending':False}})\n"
+    '\n'
+    '\n'
+    '    def process_cgpt_job(self,job):\n'
+    "        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},\n"
+    "            {'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
+    "        if not claimed:return self.db.external_jobs.find_one({'_id':job['_id']})\n"
+    '        try:\n'
+    "            d=job['details'];doc=self.account_doc(d['account_key'])\n"
+    "            if not doc:result={'ok':False,'definitive':True,'error':'الحساب غير موجود.'}\n"
+    '            else:\n'
+    "                mgr=SeatManager.from_doc(doc);mgr._last_buyer_uid=job['user_id'];mgr._product_id=d['pid'];mgr._order_id=job['order_id'];mgr._job_id=job['_id']\n"
+    "                result=mgr.invite_user(d['email'],d['minutes'])\n"
+    "            if result.get('ok'):\n"
+    '                self.finish_cgpt_order(job,result)\n'
+    '            else:\n'
+    "                state='rejected' if result.get('definitive') else 'unknown'\n"
+    "                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'error':result.get('error','')}})\n"
+    "                if state=='rejected':self.finance.refund(job['_id'],'invite_rejected')\n"
+    "                else:self.notice_once('job:'+job['_id'],86400,'⚠️ دعوة تحتاج مراجعة نتيجة المزود. رقم الطلب: '+job['order_id'])\n"
+    '        except Exception:\n'
+    "            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'unknown'}})\n"
+    "            self.logger.exception('ChatGPT result not yet reconciled')\n"
+    "        self._invalidate_user_cache(job['user_id']);self.g['_CGPT_SEATS_CACHE']['exp']=0\n"
+    "        return self.db.external_jobs.find_one({'_id':job['_id']})\n"
+    '    def cgpt_result(self,uid,job):\n'
+    "        key='invite_success' if job['status']=='completed' else 'refunded' if job['status']=='refunded' else 'unavailable'\n"
+    "        values=dict(email=job['details']['email'],expires=job.get('result',{}).get('expires_at',''),order_id=job['order_id'])\n"
+    '        try:text=self.ct(uid,key,**values)\n'
+    '        except Exception:\n'
+    '            from cms import TEMPLATES\n'
+    "            text=TEMPLATES[key][2 if self.get_lang(uid)=='en' else 1].format_map(values)\n"
+    "        if job['status']=='completed':\n"
+    "            admins={self.OWNER_ID}|{u['user_id'] for u in self.db.users.find({'is_admin':1,'is_banned':{'$ne':1}})}\n"
+    "            amount=job['amount_cents']/100\n"
+    "            admin_text=('✅ شراء Business مكتمل\\nالمشتري: '+str(uid)+'\\nالطلب: '+html.escape(job['order_id'])+\n"
+    "                '\\nالبريد: '+html.escape(job['details']['email'])+'\\nالمدة: '+html.escape(str(job['details'].get('duration',job['details'].get('minutes',''))))+'\\nالمبلغ المدفوع: $'+format(amount,'.2f'))\n"
+    "            self.db.notifications.update_one({'_id':'cgpt-sale:'+str(job['_id'])},{'$setOnInsert':{\n"
+    "                'uids':sorted(admins),'text':admin_text,'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
+    "            channel=self.get_setting('log_channel')\n"
+    "            if channel and str(channel)!='Not Set':\n"
+    '                # Public purchase log must not disclose buyer email or order credentials.\n'
+    "                name=html.escape(job['details'].get('product','ChatGPT Business')+' ('+str(job['details'].get('duration',str(job['details'].get('minutes',''))+' minutes'))+')')\n"
+    "                template=self.g['LANG']['en']['log_purchase']\n"
+    "                custom=self.db.custom_texts.find_one({'lang':'en','key':'log_purchase'}) or {}\n"
+    "                try:public_text=custom.get('value',template).format('Customer',name,1)\n"
+    "                except (ValueError,KeyError,IndexError):public_text=template.format('Customer',name,1)\n"
+    "                self.db.notifications.update_one({'_id':'cgpt-channel:'+str(job['_id'])},{'$setOnInsert':{\n"
+    "                    'uids':[channel],'text':public_text,'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
+    "        ident='cgpt-result:'+str(job['_id'])+':'+key\n"
+    "        self.db.notifications.update_one({'_id':ident},{'$setOnInsert':{\n"
+    "            'uids':[uid],'text':text,'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
+    '    def renew_ui(self,call):\n'
+    '        uid=call.from_user.id;buttons=[]\n'
+    "        for p in self.db.cgpt_products.find({'is_hidden':{'$ne':True}}):\n"
+    "            for d in p.get('durations',[]):\n"
+    '                buttons.append((f"{re.sub(\'<[^>]+>\',\'\',p.get(\'name\',\'ChatGPT\'))[:20]} — {d[\'label\']} — ${d[\'price\']}",f"cgpt_buy_{p[\'_id\']}_{d[\'dur_id\']}"))\n'
+    "        self.send(uid,'🔄 اختر مدة التجديد ثم أدخل البريد نفسه. ستُضاف المدة إلى المتبقي من اشتراكك.',reply_markup=self.markup(buttons[:80]))\n"
+    '    def queue_subscription_notice(self,account,email,info,key,hours=0):\n'
+    "        uid=info.get('telegram_uid')\n"
+    '        if not isinstance(uid,int):return\n'
+    "        ident=digest('subscription_notice',account,email,info.get('expires_at'),key,24 if hours>2 else 1 if hours else 0)\n"
+    "        markup=self.markup([(self.ct(uid,'btn_renew'),'cgb_renew')])\n"
+    "        self.db.notifications.update_one({'_id':ident},{'$setOnInsert':{'uids':[uid],'text':self.ct(uid,key,email=email,hours=hours),\n"
+    "            'markup':markup.to_json(),'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)\n"
+    '    def cgpt_cycle(self):\n'
+    '        for doc in self._cgpt_all_accounts():\n'
+    '            try:self.cgpt_account_cycle(doc)\n'
+    '            except Exception:\n'
+    "                self.logger.exception('Account monitor failed: %s',str(doc['_id']))\n"
+    "                self.issue('account_unavailable',str(doc['_id']),details={'status':'monitor_failed'})\n"
+    '\n'
+    '    def cgpt_account_cycle(self,doc):\n'
+    '        for doc in [doc]:\n'
+    "            mgr=SeatManager.from_doc(doc);key=str(doc['_id']);rep=mgr.diagnose()\n"
+    "            for email,info in mgr.invites_data['invites'].items():\n"
+    "                exp=date(info.get('expires_at'))\n"
+    "                if info.get('status')=='active' and exp:\n"
+    '                    left=(exp-dt.datetime.utcnow()).total_seconds()\n'
+    "                    if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))\n"
+    "            self.db.cgpt_account_status.update_one({'_id':key},{'$set':{k:v for k,v in rep.items() if k not in ('user_emails','pending_emails','membership_evidence')}|{'checked_at':dt.datetime.utcnow()}},upsert=True)\n"
+    "            if rep['status']=='cookies_expired':\n"
+    "                self.issue('account_unavailable',key,details={'status':'cookies_expired'})\n"
+    "                self.notice_once('cookie:'+key,86400,self.ct(self.OWNER_ID,'cookie_expired',account=mgr.owner_email),self.markup([('🍪 تحديث الكوكيز','cgx_cookie_'+key)]));continue\n"
+    "            if rep['status']=='deactivated':\n"
+    '                from subscription_lifecycle import migrate\n'
+    "                self.issue('account_unavailable',key,details={'status':'deactivated'})\n"
+    '                migrate(self,mgr)\n'
+    "                self.notice_once('inactive:'+key,86400,self.ct(self.OWNER_ID,'account_expired',account=mgr.owner_email),self.markup([('🏢 عرض الحساب','cgx_account_'+key)]));continue\n"
+    "            if not rep['connected']:\n"
+    "                self.issue('account_unavailable',key,details={'status':rep.get('status','unknown')});continue\n"
+    "            self.db.cgpt_interventions.update_many({'kind':'account_unavailable','account':key},{'$set':{'status':'resolved'}})\n"
+    '            mgr.check_and_cleanup()\n'
+    "            for email,info in mgr.invites_data['invites'].items():\n"
+    "                exp=date(info.get('expires_at'))\n"
+    "                if info.get('status')!='active' or not exp:continue\n"
+    '                left=(exp-dt.datetime.utcnow()).total_seconds()\n'
+    "                if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))\n"
+    '    def cgpt_daemon(self):\n'
+    '        while not self._stop.is_set():\n'
+    '            try:self.cgpt_cycle()\n'
+    "            except Exception:self.logger.exception('ChatGPT monitor failed')\n"
+    '            self._stop.wait(300)\n'
+    '\n'
+    '    def register_ui(self):\n'
+    '        from cms import TEMPLATES\n'
+    '        def begin_template_edit(uid,key):\n'
+    "            if key not in TEMPLATES:raise ShopError('النص غير موجود.')\n"
+    "            doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':'ar'}) or {}\n"
+    "            current=str(doc.get('value') or TEMPLATES[key][1])\n"
+    "            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'template','key':key,'lang':'ar','expires':time.time()+900}},upsert=True)\n"
+    '            fields=[]\n'
+    "            for field in re.findall(r'\\{([a-z_][a-z0-9_]*)\\}',current,re.I):\n"
+    '                if field not in fields:fields.append(field)\n'
+    "            field_note=('\\n\\n<b>المتغيرات داخل النص:</b> <code>'+html.escape(' '.join('{'+f+'}' for f in fields))+'</code>') if fields else '\\n\\n<b>لا توجد متغيرات في هذا النص.</b>'\n"
+    "            self.send(uid,'📋 <b>انسخ النص وعدّل الكلمات فقط:</b>\\n\\n<pre>'+html.escape(current)+'</pre>'+field_note)\n"
+    "            m=self.send(uid,'أرسل النص العربي الجديد كما هو، مع إبقاء المتغيرات الموجودة. سيُحفظ العربي وتُنشأ النسخة الإنجليزية تلقائيًا.\\nأرسل /reset لاستعادة الافتراضي، أو /cancel للإلغاء.')\n"
+    '            if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
+    '        def route(call):\n'
+    '            uid=call.from_user.id;data=call.data\n'
+    '            try:self.bot.answer_callback_query(call.id)\n'
+    '            except Exception:pass\n'
+    "            if data.startswith('cgx_interventions'):\n"
+    "                return self.interventions(uid,int(data.removeprefix('cgx_interventions_')) if data.startswith('cgx_interventions_') else 0)\n"
+    "            if data.startswith('cgx_reply_'):return self.support_reply_begin(uid,data.removeprefix('cgx_reply_'))\n"
+    "            if data.startswith('cgx_issue_'):return self.intervention_detail(uid,data.removeprefix('cgx_issue_'))\n"
+    "            if data.startswith('cgx_close_'):\n"
+    "                prefix=data.removeprefix('cgx_close_')\n"
+    "                self.db.cgpt_interventions.update_one({'_id':{'$regex':'^'+re.escape(prefix)}},{'$set':{'status':'resolved','resolved_by':uid}})\n"
+    '                return self.interventions(uid)\n'
+    "            if data.startswith('cgx_account_'):\n"
+    "                text,m=self.account_report(data.removeprefix('cgx_account_'));return self.send(uid,text,reply_markup=m)\n"
+    "            if data.startswith('cgx_cookie_'):return self.cookies_begin(call,data.removeprefix('cgx_cookie_'))\n"
+    "            if data.startswith('cgx_choose_'):\n"
+    "                pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'choose_workspace','expires':{'$gt':time.time()}})\n"
+    "                if not pending:raise ShopError('انتهت جلسة الاختيار.')\n"
+    "                index=int(data.removeprefix('cgx_choose_'))\n"
+    "                if not 0<=index<len(pending['choices']):raise ShopError('اختيار غير صالح.')\n"
+    "                obj=json.loads(self.secret_cipher().decrypt(pending['sealed'].encode()))\n"
+    "                obj['account']={'id':pending['choices'][index]['id']}\n"
+    "                return self.save_cookies(uid,pending['account_key'],obj)\n"
+    "            if data=='cgx_cms':\n"
+    "                return self.send(uid,'✏️ اختر الرسالة أو الزر الذي تريد تخصيصه:',reply_markup=self.markup([(v[0],'cgx_tpl_'+k) for k,v in TEMPLATES.items()]+[('📦 أسماء المنتجات والوصف','cgx_products')]))\n"
+    "            if data.startswith('cgx_tpl_'):\n"
+    "                key=data.removeprefix('cgx_tpl_')\n"
+    '                return begin_template_edit(uid,key)\n'
+    "            if data.startswith('cgx_edit_'):\n"
+    "                lang,key=data.removeprefix('cgx_edit_').split('_',1)\n"
+    "                if key not in TEMPLATES or lang not in ('ar','en'):raise ShopError('اختيار غير صالح.')\n"
+    '                return begin_template_edit(uid,key)\n'
+    "            if data=='cgx_products':\n"
+    "                return self.send(uid,'📦 اختر المنتج لتعديل الاسم والوصف والإيموجي:',reply_markup=self.markup([(re.sub('<[^>]+>','',p.get('name','منتج'))[:40],'cgx_prod_'+str(p['_id'])) for p in self.db.cgpt_products.find()]))\n"
+    "            if data.startswith('cgx_prod_'):\n"
+    "                pid=data.removeprefix('cgx_prod_')\n"
+    "                if not ObjectId.is_valid(pid):raise ShopError('منتج غير صالح.')\n"
+    "                return self.send(uid,'اختر الحقل:',reply_markup=self.markup([(label,f'cgx_field_{field}_{pid}') for label,field in [('الاسم العربي','name'),('الاسم الإنجليزي','name-en'),('الوصف العربي','desc'),('الوصف الإنجليزي','desc-en')]]))\n"
+    "            if data.startswith('cgx_field_'):\n"
+    "                field,pid=data.removeprefix('cgx_field_').split('_',1);field=field.replace('-','_')\n"
+    "                if field not in ('name','name_en','desc','desc_en') or not ObjectId.is_valid(pid):raise ShopError('اختيار غير صالح.')\n"
+    "                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'product','field':field,'pid':pid,'expires':time.time()+900}},upsert=True)\n"
+    "                m=self.send(uid,'أرسل النص الجديد. التنسيق والإيموجي المخصص محفوظان كما ترسلهما. أرسل /cancel للإلغاء.')\n"
+    '                if m:self.bot.register_next_step_handler(m,self.cms_input)\n'
+    '                return\n'
+    "            if data=='cgx_jobs':return self.jobs_ui(uid)\n"
+    "            if data.startswith('cgx_job_'):\n"
+    "                jid=data.removeprefix('cgx_job_');job=self.db.external_jobs.find_one({'order_id':jid})\n"
+    "                if not job:raise ShopError('طلب غير موجود.')\n"
+    "                buttons=[('🔎 إعادة مطابقة النتيجة','cgx_recheck_'+jid),('📝 تسوية موثقة','cgx_resolve_'+jid)]\n"
+    '                return self.send(uid,f"طلب <code>{jid}</code>\\nالنوع: {job[\'kind\']}\\nالحالة: {job[\'status\']}\\nالمبلغ: ${job[\'amount_cents\']/100:.2f}",reply_markup=self.markup(buttons))\n'
+    "            if data.startswith('cgx_recheck_'):\n"
+    "                job=self.db.external_jobs.find_one({'order_id':data.removeprefix('cgx_recheck_')})\n"
+    "                if not job:raise ShopError('طلب غير موجود.')\n"
+    '                self.reconcile_job(job);return self.jobs_ui(uid)\n'
+    "            if data.startswith('cgx_resolve_'):\n"
+    "                oid=data.removeprefix('cgx_resolve_')\n"
+    "                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'resolve','oid':oid,'expires':time.time()+600}},upsert=True)\n"
+    "                m=self.send(uid,'تحقق من نتيجة المزود أولًا.\\nلإرجاع مال طلب مرفوض: <code>refund سبب التحقق ورقم المرجع</code>\\nلطلب تم تسليمه: <code>delivered سبب التحقق ورقم المرجع</code>\\nلا تستخدم الاسترجاع عند عدم معرفة النتيجة.')\n"
+    '                if m:self.bot.register_next_step_handler(m,self.resolve_input)\n'
+    "        route.__name__='cgx_admin_route'\n"
+    "        self.bot.register_callback_query_handler(self.guard(route,True),func=lambda c:bool(c.data) and c.data.startswith('cgx_'))\n"
+    "        self.bot.register_callback_query_handler(self.guard(self.renew_ui),func=lambda c:c.data=='cgb_renew')\n"
+    "        self.bot.register_callback_query_handler(self.guard(self.customer_route),func=lambda c:bool(c.data) and c.data.startswith('cgb_') and c.data!='cgb_renew')\n"
+    "        self.bot.register_message_handler(self.guard(lambda m:self.portal(m.from_user.id)),commands=['subscription'])\n"
+    "        self.bot.register_message_handler(self.guard(lambda m:self.support(m.from_user.id)),commands=['support'])\n"
+    "        self.bot.register_message_handler(self.guard(lambda m:self.interventions(m.from_user.id),True),commands=['interventions'])\n"
+    "        self.bot.register_message_handler(self.guard(lambda m:self.customer_orders(m.from_user.id)),commands=['orders'])\n"
+    '    def cms_input(self,message):\n'
+    '        from cms import validate_template\n'
+    '        uid=message.from_user.id\n'
+    "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
+    "        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'expires':{'$gt':time.time()}})\n"
+    "        if not p:raise ShopError('انتهت جلسة التعديل.')\n"
+    "        raw=(message.text or '').strip()\n"
+    "        if raw=='/cancel':self.db.cgpt_admin_inputs.delete_one({'_id':uid});return self.send(uid,'أُلغي التعديل.')\n"
+    "        if p['mode']=='template' and raw=='/reset':\n"
+    "            self.db.custom_texts.delete_many({'key':'cgpt_'+p['key']})\n"
+    '        else:\n'
+    "            text=raw if re.search(r'</?[a-zA-Z][^>]*>',raw) else (message.html_text or html.escape(raw))\n"
+    "            emoji=next((e.custom_emoji_id for e in (message.entities or []) if e.type=='custom_emoji'),None)\n"
+    "            if p['mode']=='template':\n"
+    "                if p['key'].startswith('btn_'):text=raw\n"
+    "                validate_template(text,p['key'].startswith('btn_'))\n"
+    "                translator=self.g.get('safe_translate_for_cms')\n"
+    "                translated=translator(text,'en') if callable(translator) else text\n"
+    "                values={'emoji_id':emoji,'updated_by':uid}\n"
+    "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'ar'},{'$set':{**values,'value':text}},upsert=True)\n"
+    "                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':'en'},{'$set':{**values,'value':translated}},upsert=True)\n"
+    "            elif p['mode']=='product':\n"
+    "                if len(raw)>(100 if p['field'].startswith('name') else 2500):raise ShopError('النص طويل جدًا.')\n"
+    '                # Product text is not a template: escape braces during validation only.\n'
+    "                validate_template(text.replace('{','{{').replace('}','}}'))\n"
+    "                update={p['field']:text}\n"
+    "                if p['field'] in ('name','desc'):\n"
+    "                    translator=self.g.get('safe_translate_for_cms')\n"
+    "                    translated=translator(text,'en') if callable(translator) else text\n"
+    "                    update[p['field']+'_en']=translated\n"
+    "                if p['field']=='name':update['custom_emoji_id']=emoji\n"
+    "                self.db.cgpt_products.update_one({'_id':ObjectId(p['pid'])},{'$set':update})\n"
+    '                # Update existing shop projection, not just the separate product collection.\n'
+    "                projection={'name':'name_ar','name_en':'name_en','desc':'desc_ar','desc_en':'desc_en'}\n"
+    '                projected={projection[field]:value for field,value in update.items() if field in projection}\n'
+    "                self.db.products.update_many({'$or':[{'cgpt_product_id':p['pid']},{'_id':'cgpt_main_'+p['pid']}]},{'$set':projected})\n"
+    "        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self._invalidate_custom_texts_cache();self._invalidate_products_cache();self.g['_PRODUCTS_CACHE']=None\n"
+    "        self.send(uid,'✅ تم الحفظ. التغييرات تظهر في الرسائل التالية.',reply_markup=self.markup([('✏️ تخصيص ChatGPT','cgx_cms')]))\n"
+    '    def jobs_ui(self,uid):\n'
+    "        jobs=list(self.db.external_jobs.find({'status':{'$in':['queued','processing','unknown','pending_provider']}}).sort('created_at',-1).limit(30))\n"
+    '        self.send(uid,\'📋 الطلبات التي تحتاج متابعة:\' if jobs else \'✅ لا توجد طلبات تحتاج متابعة.\',reply_markup=self.markup([(f"{j[\'kind\']} — {j[\'status\']} — {j[\'order_id\'][:8]}",\'cgx_job_\'+j[\'order_id\']) for j in jobs]))\n'
+    '    def resolve_input(self,message):\n'
+    '        uid=message.from_user.id\n'
+    "        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)\n"
+    "        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'resolve','expires':{'$gt':time.time()}})\n"
+    "        action,sep,note=(message.text or '').partition(' ')\n"
+    "        if not p or action not in ('refund','delivered') or len(note.strip())<12:raise ShopError('أرسل الإجراء وسببًا موثقًا من 12 حرفًا على الأقل.')\n"
+    "        job=self.db.external_jobs.find_one({'order_id':p['oid']})\n"
+    "        if not job or job['status'] in ('completed','refunded'):raise ShopError('الطلب منتهٍ بالفعل.')\n"
+    '        # Administrator explicitly attests remote outcome; record immutable evidence.\n'
+    "        self.db.job_resolutions.insert_one({'job_id':job['_id'],'admin_id':uid,'action':action,'note':note,'created_at':dt.datetime.utcnow()})\n"
+    "        if action=='refund':\n"
+    "            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'rejected'}})\n"
+    "            self.finance.refund(job['_id'],'admin_verified_rejection')\n"
+    "        else:self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed','resolution_note':note}})\n"
+    "        self._invalidate_user_cache(job['user_id']);self.db.cgpt_admin_inputs.delete_one({'_id':uid})\n"
+    "        self.send(uid,'✅ سُجلت التسوية مرة واحدة.');self.send(job['user_id'],'تمت مراجعة طلبك '+job['order_id']+' وتحديث حالته.')\n"
+    "        if job['kind']=='gemini':\n"
+    "            self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
+    '    def customer_orders(self,uid):\n'
+    "        jobs=list(self.db.external_jobs.find({'user_id':uid}).sort('created_at',-1).limit(15))\n"
+    '        rows=[f"<code>{html.escape(j[\'order_id\'])}</code> — {html.escape(j[\'status\'])}" for j in jobs]\n'
+    "        buttons=[('📦 عرض الطلب '+j['order_id'][:8],'cgb_order_'+j['order_id']) for j in jobs if j.get('kind')=='external']\n"
+    "        buttons.append(('🔙 الرئيسية','main_menu_refresh'))\n"
+    "        self.send(uid,'📋 آخر طلبات الخدمات:\\n'+'\\n'.join(rows) if rows else 'لا توجد طلبات خدمات بعد.',reply_markup=self.markup(buttons))\n"
+    '\n'
+    '    def reconcile_job(self,job):\n'
+    "        if job['kind']=='chatgpt':\n"
+    "            doc=self.account_doc(job['details']['account_key'])\n"
+    '            if doc:\n'
+    "                mgr=SeatManager.from_doc(doc);inv=mgr.invites_data['invites'].get(job['details']['email'],{})\n"
+    "                if inv.get('last_job_id')==job['_id']:\n"
+    "                    if job['status']!='refunded':self.finish_cgpt_order(job,{'ok':True,'expires_at':inv['expires_at']})\n"
+    '                    return\n'
+    "        if job['kind']=='github' and job.get('provider_job_id'):\n"
+    '            self.github_poll(job);return\n'
+    "        if job['kind']=='external' and job.get('provider_order_id'):\n"
+    "            d=job['details'];store=self.db.ext_stores.find_one({'_id':ObjectId(d['store_id'])})\n"
+    '            if store:\n'
+    "                resp=self._ext_api_get(store,'/orders/'+str(job['provider_order_id']))\n"
+    '                if resp:self.complete_external(job,resp)\n'
+    '\n'
+    '    def ext_post(self,store,path,body,idem_key=None):\n'
+    "        base=str(store.get('base_url','')).rstrip('/');prefix=store.get('api_prefix','')\n"
+    "        if not prefix and '/api/v1' not in base and '/shop-api/v1' not in base:\n"
+    "            raise ShopError('افحص اتصال المتجر لاكتشاف مسار API قبل أول شراء.')\n"
+    '        headers=self._ext_api_headers(store)\n'
+    "        if idem_key:headers['Idempotency-Key']=idem_key\n"
+    '        try:\n'
+    '            r=self.requests.post(base+prefix+path,headers=headers,json=body,timeout=25,allow_redirects=False)\n'
+    '            try:obj=r.json()\n'
+    '            except ValueError:obj={}\n'
+    '            if r.status_code in (200,201,202):return True,obj\n'
+    "            return False,{'definitive':r.status_code in (400,401,403,404,422),'status_code':r.status_code}\n"
+    "        except Exception:return False,{'definitive':False,'error':'response_unknown'}\n"
+    '    def buy_external(self,uid,epid,qty,idem):\n'
+    '        qty=quantity(qty)\n'
+    "        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})\n"
+    '        if previous:\n'
+    "            if previous['kind']!='external' or (previous['details'].get('epid'),previous['details'].get('qty'))!=(epid,qty):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)\n"
+    '            return previous\n'
+    "        qty=quantity(qty);ep=self.db.ext_products.find_one({'_id':ObjectId(epid),'hidden':{'$ne':True}})\n"
+    "        if not ep:raise ShopError('المنتج غير متاح.',404)\n"
+    "        store=self.db.ext_stores.find_one({'_id':ObjectId(ep['store_id'])})\n"
+    "        if not store:raise ShopError('المتجر غير متاح.',404)\n"
+    "        if not store.get('api_prefix') and '/api/v1' not in store.get('base_url','') and '/shop-api/v1' not in store.get('base_url',''):\n"
+    "            self._ext_api_get(store,'/products')\n"
+    "            if not store.get('api_prefix'):raise ShopError('تعذر تأكيد مسار API للمتجر قبل الخصم.')\n"
+    "        details={'epid':epid,'store_id':str(ep['store_id']),'ext_id':ep['ext_id'],'qty':qty,'product':ep.get('name','')}\n"
+    "        job=self.finance.reserve_external(uid,cents(ep.get('sell_price',ep.get('base_price')),minimum=1)*qty/100,idem,'external',details)\n"
+    "        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
+    '        if claimed:\n'
+    "            ok,resp=self.ext_post(store,'/orders',{'product_id':self._ext_int_or_str(ep['ext_id']),'quantity':qty},job['_id'])\n"
+    '            if ok:self.complete_external(job,resp)\n'
+    '            else:\n'
+    "                state='rejected' if resp.get('definitive') else 'unknown'\n"
+    "                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state}})\n"
+    "                if state=='rejected':self.finance.refund(job['_id'],'provider_rejected')\n"
+    '        self._invalidate_user_cache(uid)\n'
+    "        return self.db.external_jobs.find_one({'_id':job['_id']})\n"
+    '    def complete_external(self,job,resp):\n'
+    "        codes=self._ext_extract_codes(resp);obj=resp.get('order',resp) if isinstance(resp,dict) else {}\n"
+    "        state='completed' if len(codes)==job['details']['qty'] else 'pending_provider'\n"
+    "        oid=obj.get('id',obj.get('order_id',''))\n"
+    '        def save(s):\n'
+    "            j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)\n"
+    "            if not j or j['status'] in ('refunded','completed'):return\n"
+    "            saved_oid=str(oid or j.get('provider_order_id',''))\n"
+    "            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'codes':codes,'provider_order_id':saved_oid}},session=s)\n"
+    "            self.db.ext_orders.update_one({'idempotency_key':job['_id']},{'$set':{'store_id':job['details']['store_id'],'user_id':job['user_id'],\n"
+    "                'product_name':job['details']['product'],'price':job['amount_cents']/100,'quantity':job['details']['qty'],\n"
+    "                'codes':codes,'status':state,'ext_order_id':saved_oid,'created_at':int(time.time())}},upsert=True,session=s)\n"
+    "            if state=='completed':\n"
+    "                self.db.notifications.update_one({'_id':digest('external-ready',job['_id'])},{'$setOnInsert':{\n"
+    "                    'uids':[job['user_id']],'text':'✅ اكتمل طلبك. اضغط لعرض الأكواد: '+html.escape(job['order_id']),\n"
+    "                    'markup':self.markup([('📦 استلام الطلب','cgb_order_'+job['order_id'])]).to_json(),\n"
+    "                    'sent':False,'created':time.time(),'next_at':time.time()}},upsert=True,session=s)\n"
+    '                for index,code in enumerate(codes):\n'
+    "                    self.db.orders.update_one({'order_id':job['order_id'],'code_index':index},{'$setOnInsert':{'order_id':job['order_id'],'code_index':index,\n"
+    "                        'user_id':job['user_id'],'product_id':'ext_'+job['details']['epid'],'code_delivered':code,'qty':1,\n"
+    "                        'price':job['amount_cents']/100/job['details']['qty'],'status':'completed'}},upsert=True,session=s)\n"
+    '        self.finance.atomic(save)\n'
+    '    def ext_result(self,uid,job):\n'
+    "        if job['status']=='completed':\n"
+    "            f=io.BytesIO('\\n'.join(job.get('codes',[])).encode());f.name='order_'+job['order_id']+'.txt'\n"
+    "            try:self.bot.send_document(uid,f,caption='✅ طلب '+job['order_id'])\n"
+    "            except Exception:self.send(uid,'الأكواد محفوظة في سجل مشترياتك.')\n"
+    "        elif job['status']=='refunded':self.send(uid,'رُفض الطلب وأُعيد رصيدك. '+job['order_id'])\n"
+    "        else:self.send(uid,'⏳ الطلب محفوظ وقيد التحقق؛ لا تعِد شراءه.\\n<code>'+job['order_id']+'</code>')\n"
+    '    def ext_buy_callback(self,call):\n'
+    "        self.ext_result(call.from_user.id,self.buy_external(call.from_user.id,call.data.removeprefix('buyext_'),1,f'tg:{call.message.chat.id}:{call.message.message_id}'))\n"
+    '    def ext_buy_message(self,message,epid,lang):\n'
+    "        self.ext_result(message.from_user.id,self.buy_external(message.from_user.id,epid,quantity((message.text or '').strip()),f'tg:{message.chat.id}:{message.message_id}'))\n"
+    '\n'
+    '    def github_begin(self,message):\n'
+    '        uid=message.from_user.id;data=self.temp_github_data.pop(uid,None)\n'
+    "        if not data:raise ShopError('انتهت جلسة الطلب.')\n"
+    "        credentials={'github_username':self.decrypt_sensitive(data['user']),'github_password':self.decrypt_sensitive(data['pass']),'totp_secret':(message.text or '').strip()}\n"
+    "        if not self.GITHUB_API_KEY:raise ShopError('مزود الخدمة غير مهيأ.')\n"
+    "        job=self.finance.reserve_external(uid,data['price'],f'github:{message.chat.id}:{message.message_id}','github',{'product':'GitHub Student'})\n"
+    "        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
+    '        try:self.bot.delete_message(uid,message.message_id)\n'
+    '        except Exception:pass\n'
+    '        if claim:\n'
+    '            try:\n'
+    "                r=self.requests.post(self.GITHUB_BASE_URL+'/api/run',headers={'X-API-Key':self.GITHUB_API_KEY,'Idempotency-Key':job['_id']},json=credentials,timeout=30)\n"
+    '                if r.status_code in (200,201,202):\n'
+    "                    obj=r.json();jid=obj.get('job_id')\n"
+    "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'pending_provider' if jid else 'unknown','provider_job_id':jid}})\n"
+    '                elif r.status_code in (400,401,403,404,422):\n'
+    "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'rejected'}});self.finance.refund(job['_id'],'github_rejected')\n"
+    "                else:self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'unknown'}})\n"
+    "            except Exception:self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'unknown'}})\n"
+    '            finally:credentials.clear();self.secure_wipe(data)\n'
+    '        self._release_purchase_lock(uid);self._invalidate_user_cache(uid)\n'
+    "        self.send(uid,'طلبك محفوظ. ستصلك النتيجة بعد تحقق المزود.\\n<code>'+job['order_id']+'</code>')\n"
+    '    def github_poll(self,job):\n'
+    "        r=self.requests.get(self.GITHUB_BASE_URL+'/api/job/'+str(job['provider_job_id']),headers={'X-API-Key':self.GITHUB_API_KEY},timeout=15)\n"
+    '        if r.status_code!=200:return\n'
+    "        obj=r.json();state=str(obj.get('status','')).lower()\n"
+    "        if state=='submitted':\n"
+    '            def save(s):\n'
+    "                self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed'}},session=s)\n"
+    "                self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],\n"
+    "                    'product_id':'GitHub_Student','code_delivered':'AppID: '+str(obj.get('app_id','')),'qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)\n"
+    "            self.finance.atomic(save);self.send(job['user_id'],'✅ اكتمل طلب GitHub '+job['order_id'])\n"
+    "        elif state in ('failed','error'):\n"
+    "            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['refunded','completed']}},{'$set':{'status':'rejected'}})\n"
+    "            self.finance.refund(job['_id'],'github_failed');self._invalidate_user_cache(job['user_id'])\n"
+    "            self.send(job['user_id'],'لم يُنفذ طلب GitHub وأُعيد رصيدك.')\n"
+    '\n'
+    '    def queue_sale_notifications(self,order):\n'
+    "        uid=order['user_id'];oid=str(order['order_id'])\n"
+    "        details=order.get('details',{})\n"
+    "        name=str(order.get('product_name') or details.get('product') or order.get('kind') or 'Product')\n"
+    "        user=self.db.users.find_one({'user_id':uid}) or {}\n"
+    "        buyer=str(user.get('username') or uid)\n"
+    '        masked=self.obscure_text(buyer)\n'
+    "        qty=order.get('qty',details.get('qty',1))\n"
+    "        amount=order['amount_cents']/100 if 'amount_cents' in order else order['total_price']\n"
+    "        admins={self.OWNER_ID}|{u['user_id'] for u in self.db.users.find({'is_admin':1,'is_banned':{'$ne':1}})}\n"
+    '        admins.discard(None);admins.discard(0)\n'
+    "        text=(('⏳ طلب شراء للتسليم اليدوي\\nالمشتري: ' if order['status']=='pending_manual' else '✅ عملية شراء مكتملة\\nالمشتري: ')+str(uid)+'\\nالمعرف: '+html.escape(buyer)+'\\nالمنتج: '+html.escape(name)+\n"
+    "              '\\nالكمية: '+str(qty)+'\\nالمبلغ: $'+format(amount,'.2f')+'\\nالطلب: '+html.escape(oid))\n"
+    '        now=time.time()\n'
+    "        self.db.notifications.update_one({'_id':'sale-admin:'+oid},{'$setOnInsert':{\n"
+    "            'uids':sorted(admins),'text':text,'sent':False,'created':now,'next_at':now}},upsert=True)\n"
+    "        channel=self.get_setting('log_channel')\n"
+    "        if channel and str(channel)!='Not Set':\n"
+    "            template=self.g['LANG']['en']['log_purchase']\n"
+    "            custom=self.db.custom_texts.find_one({'lang':'en','key':'log_purchase'}) or {}\n"
+    "            try:public=custom.get('value',template).format(html.escape(masked),'📦 <b>'+html.escape(name)+'</b>',qty)\n"
+    "            except (ValueError,KeyError,IndexError):public=template.format(html.escape(masked),'📦 <b>'+html.escape(name)+'</b>',qty)\n"
+    "            self.db.notifications.update_one({'_id':'sale-channel:'+oid},{'$setOnInsert':{\n"
+    "                'uids':[channel],'text':public,'sent':False,'created':now,'next_at':now}},upsert=True)\n"
+    '\n'
+    "        if order.get('status')=='completed' and 'amount_cents' not in order and order.get('kind')!='chatgpt':\n"
+    "            remaining=self.get_product_stock_count(order['product_id'])\n"
+    '            if remaining<=2:\n'
+    "                text=('🚨 نفد المخزون: ' if remaining==0 else '⚠️ المخزون منخفض: ')+html.escape(name)+'\\nالمتبقي: '+str(remaining)\n"
+    "                self.db.notifications.update_one({'_id':'stock-alert:'+oid},{'$setOnInsert':{\n"
+    "                    'uids':sorted(admins),'text':text,'sent':False,'created':now,'next_at':now}},upsert=True)\n"
+    '\n'
+    '    def collect_sale_notifications(self):\n'
+    '        for collection in (self.db.shop_orders,self.db.external_jobs):\n'
+    "            for order in collection.find({'status':{'$in':['completed','pending_manual']},'sale_notification_pending':True}).limit(25):\n"
+    "                if order.get('kind')=='chatgpt':\n"
+    "                    self.cgpt_result(order['user_id'],order)\n"
+    '                else:self.queue_sale_notifications(order)\n'
+    "                collection.update_one({'_id':order['_id']},{'$set':{'sale_notification_pending':False}})\n"
+    '\n'
+    '    def notification_worker(self):\n'
+    '        while not self._stop.wait(2):\n'
+    '            try:\n'
+    '                self.collect_sale_notifications()\n'
+    '                for _ in range(20):\n'
+    "                    now=time.time();n=self.db.notifications.find_one_and_update({'sent':False,'next_at':{'$lte':now}},\n"
+    "                        {'$set':{'next_at':now+60}},return_document=True)\n"
+    '                    if not n:break\n'
+    '                    if n:\n'
+    "                        remaining=[];markup=self.InlineKeyboardMarkup.de_json(n['markup']) if n.get('markup') else None\n"
+    "                        for uid in n.get('uids',[]):\n"
+    "                            if not self.send(uid,n['text'],reply_markup=markup):remaining.append(uid)\n"
+    "                        self.db.notifications.update_one({'_id':n['_id']},{'$set':{'uids':remaining,'sent':not remaining,'next_at':time.time()+300}})\n"
+    "                for job in self.db.external_jobs.find({'kind':'chatgpt','status':'completed','purchase_effects_pending':True}).limit(10):\n"
+    '                    self.business_purchase_effects(job)\n'
+    '                self.reconcile_pending_once()\n'
+    "            except Exception:self.logger.exception('Background reconciliation failed')\n"
+    '            self._stop.wait(20)\n'
+    '\n'
+    '    def csv_orders(self,call):\n'
+    '        import csv\n'
+    '        f=io.StringIO();writer=csv.writer(f)\n'
+    "        writer.writerow(['التاريخ','المستخدم','رقم الطلب','المنتج','الكمية','السعر المدفوع للوحدة','الإجمالي المحفوظ','الحالة'])\n"
+    "        for r in self.db.orders.find().sort('_id',-1):\n"
+    "            qty=r.get('qty',r.get('quantity',1));total=r.get('total_price');unit=r.get('price')\n"
+    '            # Historical unknowns stay blank; never recompute from current catalog price.\n'
+    '            if total is None and unit is not None:total=unit*qty\n'
+    '            if unit is None and total is not None and qty:unit=total/qty\n'
+    '            def safe(v):\n'
+    "                text=str(v if v is not None else '')\n"
+    '                return "\'"+text if text.startswith((\'=\',\'+\',\'-\',\'@\')) else text\n'
+    "            writer.writerow([safe(r.get('created_at',getattr(r.get('_id'),'generation_time',''))),r.get('user_id'),r.get('order_id',''),safe(r.get('product_id','')),qty,unit if unit is not None else '',total if total is not None else '',r.get('status','legacy_unverified')])\n"
+    "        file=io.BytesIO(f.getvalue().encode('utf-8-sig'));file.name='orders.csv';self.bot.send_document(call.from_user.id,file)\n"
+    '\n'
+    '    def gemini_buy(self,call):\n'
+    '        uid=call.from_user.id\n'
+    "        if not self.g.get('client') or not self.g.get('USERBOT_LOOP'):raise ShopError('مزود Gemini غير متصل؛ لم يُخصم رصيد.')\n"
+    "        price=cents(self.get_setting('gemini_price'),minimum=1)/100\n"
+    "        job=self.finance.reserve_external(uid,price,f'gemini:{call.message.chat.id}:{call.message.message_id}','gemini',{'product':'Gemini Advanced'})\n"
+    "        self._invalidate_user_cache(uid);self.send(uid,'طلب Gemini محفوظ في الطابور.\\n<code>'+job['order_id']+'</code>')\n"
+    '        self.gemini_next()\n'
+    '    def gemini_next(self):\n'
+    '        import asyncio\n'
+    '        # One durable provider stream. An uncertain job blocks reuse until reconciliation.\n'
+    "        if self.db.external_jobs.find_one({'kind':'gemini','status':{'$in':['processing','unknown']}}):return\n"
+    "        job=self.db.external_jobs.find_one({'kind':'gemini','status':'queued'},sort=[('created_at',1)])\n"
+    '        if not job:return\n'
+    "        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)\n"
+    '        if not claim:return\n'
+    "        self.g['ACTIVE_GEMINI_SESSION']={'uid':job['user_id'],'price':job['amount_cents']/100,'job_id':job['_id'],'ready':False,'msg_map':{}}\n"
+    '        async def begin():\n'
+    '            try:\n'
+    "                provider=self.get_setting('provider_bot','').replace('@','')\n"
+    "                await self.client.send_message(provider,'/start');await self.asyncio.sleep(3)\n"
+    "                self.g['ACTIVE_GEMINI_SESSION']['ready']=True\n"
+    '                messages=await self.client.get_messages(provider,limit=5)\n'
+    '                for msg in messages:\n'
+    "                    if msg.reply_markup and hasattr(msg.reply_markup,'rows'):\n"
+    '                        for ri,row in enumerate(msg.reply_markup.rows):\n'
+    '                            for ci,button in enumerate(row.buttons):\n'
+    "                                if 'Create verify' in (button.text or ''):\n"
+    '                                    await msg.click(ri,ci);return\n'
+    "                await self.client.send_message(provider,'✨ Create verify')\n"
+    '            except Exception:\n'
+    "                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})\n"
+    "                self.send(job['user_id'],'تعذر حسم اتصال المزود. طلبك محفوظ للمراجعة؛ لن يُكرر تلقائيًا.')\n"
+    '        asyncio.run_coroutine_threadsafe(begin(),self.USERBOT_LOOP)\n'
+    '    def userbot_start(self):\n'
+    '        import os,asyncio\n'
+    "        session=self.get_setting('userbot_session','');provider=self.get_setting('provider_bot','').replace('@','')\n"
+    "        if not session or session=='Not Set' or not provider or provider=='Not Set':return False\n"
+    "        api_id=os.environ.get('TELEGRAM_API_ID');api_hash=os.environ.get('TELEGRAM_API_HASH')\n"
+    '        if not api_id or not api_hash:\n'
+    "            self.logger.warning('Gemini userbot needs TELEGRAM_API_ID and TELEGRAM_API_HASH');return False\n"
+    "        if self.g.get('client'):return True\n"
+    '        loop=asyncio.new_event_loop();asyncio.set_event_loop(loop);client=self.TelegramClient(self.StringSession(session),int(api_id),api_hash)\n'
+    "        self.g['USERBOT_LOOP']=loop;self.g['client']=client\n"
+    '        @client.on(self.events.NewMessage(chats=provider))\n'
+    '        @client.on(self.events.MessageEdited(chats=provider))\n'
+    '        async def event_handler(event):\n'
+    "            active=self.g.get('ACTIVE_GEMINI_SESSION')\n"
+    "            if not active or not active.get('ready'):return\n"
+    "            job=self.db.external_jobs.find_one({'_id':active['job_id'],'status':'processing'})\n"
+    '            if not job:return\n'
+    '            event_time=event.message.date.timestamp() if event.message.date else 0\n'
+    "            if event_time<job.get('started_at',0)-1:return\n"
+    "            text=event.raw_text or '';self.send(job['user_id'],'📩 '+html.escape(text[:3500]))\n"
+    "            if '✅ Status: SUCCEEDED' in text:\n"
+    '                def complete(s):\n'
+    "                    j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)\n"
+    "                    if j['status']!='processing':return\n"
+    "                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed'}},session=s)\n"
+    "                    self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],'product_id':'Gemini_Activation','code_delivered':'تم التفعيل','qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)\n"
+    "                self.finance.atomic(complete);self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
+    "            elif '❌ Status: FAILED' in text or '❌ Error' in text:\n"
+    "                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'rejected'}})\n"
+    "                self.finance.refund(job['_id'],'gemini_failed');self._invalidate_user_cache(job['user_id'])\n"
+    "                self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()\n"
+    '        def run():\n'
+    '            asyncio.set_event_loop(loop)\n'
+    '            async def connect():\n'
+    '                await client.connect()\n'
+    "                if not await client.is_user_authorized():raise RuntimeError('Userbot session unauthorized')\n"
+    '                self.gemini_next();await client.run_until_disconnected()\n'
+    '            try:loop.run_until_complete(connect())\n'
+    '            except Exception:\n'
+    "                self.logger.exception('Userbot stopped');self.g['client']=None\n"
+    "        threading.Thread(target=run,name='gemini-userbot',daemon=True).start();return True\n"
+    '\n'
+    '    def start(self):\n'
+    '        import os\n'
+    "        if not self.TOKEN or not self.MONGO_URI or not self.OWNER_ID:raise RuntimeError('TOKEN, MONGO_URI and OWNER_ID must be configured.')\n"
+    '        self.secret_cipher()  # Validate encryption configuration before accepting requests.\n'
+    "        self.initialize();self.register_ui();self.install_handlers(set(self.g['_SAFE_ADMIN_NAMES'])|{'cgx_admin_route'})\n"
+    '        self.bot.delete_webhook(drop_pending_updates=False)\n'
+    '        self.userbot_start()\n'
+    "        workers=[('http',self.keep_alive),('deposits',self.auto_deposit_monitor_thread),('chatgpt',self.cgpt_daemon),\n"
+    "                 ('notifications',self.notification_worker),('referrals',self.background_referral_checker_v2)]\n"
+    "        workers.append(('restock-digests',self.g['_ops'].restock_worker))\n"
+    "        for i in range(1):workers.append(('webhook-'+str(i),self.webhook_worker))\n"
+    '        for name,fn in workers:threading.Thread(target=self.run_worker,args=(fn,),name=name,daemon=True).start()\n'
+    "        self.logger.info('Runtime ready; pending Telegram updates will be processed.')\n"
+    "        self.bot.infinity_polling(skip_pending=False,timeout=30,long_polling_timeout=30,allowed_updates=['message','callback_query','pre_checkout_query'])\n"
+    '\n'
+    '    def stars_invoice(self,message,lang):\n'
+    "        uid=message.from_user.id;value=cents((message.text or '').replace('$','').replace(',','.'),minimum=10,maximum=100000)\n"
+    '        stars=max(1,(value*quantity(self.STARS_RATE,100000)+99)//100)\n'
+    '        ident=uuid.uuid4().hex\n'
+    "        self.db.star_invoices.insert_one({'_id':ident,'user_id':uid,'amount_cents':value,'stars':stars,'status':'created','created_at':dt.datetime.utcnow()})\n"
+    "        self.bot.send_invoice(uid,'شحن رصيد المتجر','شحن رصيد المتجر باستخدام النجوم',payload='invoice:'+ident,\n"
+    "            provider_token='',currency='XTR',prices=[self.LabeledPrice(label='رصيد المتجر',amount=stars)])\n"
+    '    def stars_checkout(self,query):\n'
+    "        inv=self.db.star_invoices.find_one({'_id':str(query.invoice_payload).removeprefix('invoice:'),'user_id':query.from_user.id})\n"
+    "        ok=bool(inv and inv['stars']==query.total_amount and query.currency=='XTR' and inv['status'] in ('created','paid'))\n"
+    "        self.bot.answer_pre_checkout_query(query.id,ok=ok,error_message=None if ok else 'الفاتورة غير صالحة؛ أنشئ فاتورة جديدة.')\n"
+    '    def stars_paid(self,message):\n'
+    '        payment=message.successful_payment;uid=message.from_user.id\n'
+    "        inv=self.db.star_invoices.find_one({'_id':str(payment.invoice_payload).removeprefix('invoice:'),'user_id':uid})\n"
+    "        if not inv or inv['stars']!=payment.total_amount or payment.currency!='XTR':\n"
+    "            self.notice_once('stars-review:'+payment.telegram_payment_charge_id,86400,'⚠️ دفعة نجوم قديمة أو غير مطابقة تحتاج تسوية. المستخدم: '+str(uid));return\n"
+    "        result=self.credit_user(uid,inv['amount_cents']/100,payment.telegram_payment_charge_id,self.get_lang(uid),'Telegram Stars')\n"
+    "        if result.get('ok'):self.db.star_invoices.update_one({'_id':inv['_id']},{'$set':{'status':'paid','charge_id':payment.telegram_payment_charge_id}})\n"
+    '\n'
+    '    def run_worker(self,fn):\n'
+    '        while not self._stop.is_set():\n'
+    '            try:\n'
+    '                fn()\n'
+    '                return\n'
+    '            except Exception:\n'
+    "                self.logger.exception('Worker interrupted; will resume')\n"
+    '                self._stop.wait(5)\n'
+    '\n'
+    '    def all_accounts(self):\n'
+    '        accounts=list(self.db.cgpt_accounts.find())\n'
+    "        main=self.db.cgpt_cookies.find_one({'_id':'main'})\n"
+    "        if main and (main.get('data') or main.get('sealed_data')) and not any(str(a['_id'])=='main' for a in accounts):\n"
+    "            accounts.append({**main,'name':main.get('name','الحساب الرئيسي')})\n"
+    '        return accounts\n'
+    '\n'
+    '    def reconcile_pending_once(self):\n'
+    '        for _ in range(20):\n'
+    '            now=time.time()\n'
+    "            job=self.db.external_jobs.find_one_and_update({'status':{'$in':['processing','pending_provider','unknown']},\n"
+    "                '$or':[{'next_reconcile_at':{'$exists':False}},{'next_reconcile_at':{'$lte':now}}]},\n"
+    "                {'$set':{'next_reconcile_at':now+300}},sort=[('next_reconcile_at',1),('created_at',1)],return_document=True)\n"
+    '            if not job:return\n'
+    "            if job.get('started_at',0)>now-60:continue\n"
+    '            try:\n'
+    '                self.reconcile_job(job)\n'
+    "                current=self.db.external_jobs.find_one({'_id':job['_id']}) or {}\n"
+    "                if current.get('status') in ('completed','refunded'):\n"
+    "                    if current.get('kind')=='chatgpt':self.cgpt_result(current['user_id'],current)\n"
+    '                    continue\n'
+    "                if job.get('started_at',0)<now-300:\n"
+    "                    self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})\n"
+    "                    if not job.get('provider_order_id') and not job.get('provider_job_id'):\n"
+    "                        self.notice_once('job:'+job['_id'],86400,'⚠️ طلب يحتاج مطابقة النتيجة: '+job['order_id'],self.markup([('متابعة الطلب','cgx_job_'+job['order_id'])]))\n"
+    '            except Exception:\n'
+    "                self.logger.exception('Reconciliation failed for one job: %s',job['_id'])\n"
+),
+'refund_review': (
+    '"""Review amounts only when an expired workspace has no verified alternative seat."""\n'
+    'import datetime as dt\n'
+    'from decimal import Decimal, ROUND_HALF_UP\n'
+    'from chatgpt_service import date\n'
+    'from domain import digest\n'
+    '\n'
+    '\n'
+    'def refund_quote(db,uid,email,expires_at,cutoff):\n'
+    '    end=date(expires_at);start=date(cutoff)\n'
+    '    if not isinstance(uid,int) or not end or not start or start>=end:\n'
+    "        return {'amount_cents':None,'reason':'بيانات المدة أو المستخدم غير مكتملة.'}\n"
+    '    segments=[]\n'
+    "    for job in db.external_jobs.find({'kind':'chatgpt','status':'completed','user_id':uid,'details.email':email}):\n"
+    "        finish=date(job.get('result',{}).get('expires_at'))\n"
+    "        minutes=job.get('details',{}).get('minutes');paid=job.get('amount_cents')\n"
+    '        if not finish or type(minutes)!=int or minutes<=0 or type(paid)!=int or paid<0:continue\n'
+    '        begin=finish-dt.timedelta(minutes=minutes)\n'
+    '        a=max(start,begin);b=min(end,finish)\n'
+    "        if b>a:segments.append((a,b,paid,minutes,job.get('order_id','')))\n"
+    '    segments.sort(key=lambda s:s[0]);cursor=start;total=Decimal(0);orders=[]\n'
+    '    for a,b,paid,minutes,oid in segments:\n'
+    '        if abs((a-cursor).total_seconds())>0.01:\n'
+    "            return {'amount_cents':None,'reason':'سجل الدفع لا يغطي كامل المدة أو يتضمن تداخلًا؛ راجع الطلبات.'}\n"
+    '        total+=Decimal(paid)*Decimal(str((b-a).total_seconds()))/Decimal(minutes*60)\n'
+    '        cursor=b;orders.append(oid)\n'
+    '    if abs((end-cursor).total_seconds())>0.01:\n'
+    "        return {'amount_cents':None,'reason':'لا توجد بيانات دفع كافية لحساب المتبقي.'}\n"
+    "    return {'amount_cents':int(total.quantize(Decimal('1'),rounding=ROUND_HALF_UP)),'order_ids':orders,\n"
+    "            'reason':'قيمة المدة غير المستخدمة من مبالغ الشراء والتجديد الفعلية.'}\n"
+    '\n'
+    '\n'
+    'def queue_no_seat_refund(runtime,source,email,info,report):\n'
+    "    uid=info.get('telegram_uid');now=dt.datetime.utcnow()\n"
+    '    # Freeze the first observed outage, unless the provider supplies a verified expiry.\n'
+    "    cutoff=date(report.get('expires_at')) or now\n"
+    '    if cutoff>now:cutoff=now\n'
+    "    ident=digest('no_seat_refund',source._account_key,email,info.get('expires_at'),info.get('last_job_id'))\n"
+    "    runtime.db.cgpt_refund_reviews.update_one({'_id':ident},{'$setOnInsert':{'account':source._account_key,'email':email,\n"
+    "        'user_id':uid,'cutoff':cutoff.isoformat(),'subscription_expires_at':info.get('expires_at'),'status':'review','created_at':now}},upsert=True)\n"
+    "    rec=runtime.db.cgpt_refund_reviews.find_one({'_id':ident})\n"
+    "    quote=refund_quote(runtime.db,uid,email,info.get('expires_at'),rec['cutoff'])\n"
+    "    user=runtime.db.users.find_one({'user_id':uid}) or {}\n"
+    "    amount=quote['amount_cents']\n"
+    "    details={'السبب':'انتهى اشتراك الحساب ولا يوجد مقعد بديل مؤكد.',\n"
+    "             'المستخدم':str(uid) if uid is not None else 'غير مرتبط','يوزر':user.get('username') or 'غير متاح',\n"
+    "             'المستحق بالدولار':f'{amount/100:.2f}' if amount is not None else 'يحتاج حسابًا يدويًا: سجل الدفع غير مكتمل',\n"
+    "             'بداية التعطل UTC':rec['cutoff'],'نهاية اشتراك العميل UTC':info.get('expires_at'),\n"
+    "             'المتبقي بالساعات':round(max(0,(date(info.get('expires_at'))-date(rec['cutoff'])).total_seconds())/3600,2),\n"
+    "             'طريقة الحساب':quote['reason'],'ملاحظة':'للمراجعة والإرجاع يدويًا؛ لم يُنفذ تحويل أو تعديل رصيد.'}\n"
+    "    runtime.db.cgpt_refund_reviews.update_one({'_id':ident},{'$set':{'quote':quote,'updated_at':now}})\n"
+    "    issue=runtime.issue('no_seat_refund',source._account_key,email,uid,details)\n"
+    "    runtime.notice_once('refund-review:'+ident,86400,'💰 يوجد عميل يحتاج مراجعة مبلغ استرجاع بسبب انتهاء الحساب وعدم وجود مقعد بديل.',runtime.markup([('عرض الحالة','cgx_issue_'+issue[:40])]))\n"
+),
+'broadcast_service': (
+    '"""Bounded Telegram broadcast retry; never silently drop a rate-limited recipient."""\n'
+    'import time\n'
+    '\n'
+    '\n'
+    'def deliver(send,uid,db,wait=time.sleep):\n'
+    "    user=db.users.find_one({'user_id':uid}) or {}\n"
+    "    if user.get('is_banned')==1 or user.get('broadcast_disabled'):return 'skipped'\n"
+    '    for attempt in range(4):\n'
+    '        try:\n'
+    "            send();wait(.1);return 'sent'\n"
+    '        except Exception as exc:\n'
+    "            code=getattr(exc,'error_code',None)\n"
+    '            if code==403:\n'
+    "                db.users.update_one({'user_id':uid},{'$set':{'broadcast_disabled':True}})\n"
+    "                return 'blocked'\n"
+    "            params=getattr(exc,'result_json',{}) or {}\n"
+    "            retry=params.get('parameters',{}).get('retry_after')\n"
+    '            if code==429 and retry and attempt<3:\n'
+    '                # Telegram rejection confirms this recipient has not received it.\n'
+    '                delay=min(3600,max(1,float(retry)))+1\n'
+    '                wait(delay);continue\n'
+    '            # Network timeout is ambiguous; do not duplicate a possibly delivered message.\n'
+    "            return 'failed'\n"
+    "    return 'failed'\n"
+),
+'http_api': (
+    'import json\n'
+    'import math\n'
+    'import time\n'
+    'from urllib.parse import urlparse,parse_qs\n'
+    'from domain import ShopError,quantity,digest\n'
+    'from network import public_endpoint\n'
+    '\n'
+    'MAX_BODY=262144\n'
+    '\n'
+    'def read_body(handler):\n'
+    "    if handler.headers.get('Transfer-Encoding'):raise ShopError('Chunked requests are not supported; send Content-Length.',411)\n"
+    "    try:size=int(handler.headers.get('Content-Length','0'))\n"
+    "    except ValueError:raise ShopError('Invalid Content-Length')\n"
+    "    if not 0<size<=MAX_BODY:raise ShopError('Request body exceeds limit or is empty.',413)\n"
+    '    raw=handler.rfile.read(size)\n'
+    "    if len(raw)!=size:raise ShopError('Incomplete body')\n"
+    '    try:\n'
+    '        obj=json.loads(raw,parse_constant=lambda s:(_ for _ in ()).throw(ValueError(s)))\n'
+    '        if not isinstance(obj,dict):raise ValueError()\n'
+    "    except (ValueError,UnicodeDecodeError):raise ShopError('JSON object required')\n"
+    "    if urlparse(handler.path).path.endswith('/set_webhook'):public_endpoint(str(obj.get('url','')))\n"
+    "    return raw.decode('utf-8')\n"
+    '\n'
+    '\n'
+    'def make_handler(base,rt):\n'
+    '    class APIHandler(base):\n'
+    '        def setup(self):\n'
+    '            super().setup();self.connection.settimeout(15)\n'
+    '        def do_GET(self):\n'
+    '            try:\n'
+    "                p=urlparse(self.path);route=p.path.rstrip('/');gw='/'+rt._get_api_gateway()\n"
+    "                if route in ('','/'):\n"
+    "                    return rt._json_resp(self,200 if rt.ready else 503,{'status':'online' if rt.ready else 'initializing'})\n"
+    "                if not rt.ready:raise ShopError('Service initializing',503)\n"
+    "                if route==gw+'/changes':return self.changes(parse_qs(p.query))\n"
+    "                if route.startswith(gw+'/order/'):\n"
+    '                    doc,user=self._auth()\n'
+    "                    if not doc:raise ShopError('Invalid API key',401)\n"
+    "                    oid=route.rsplit('/',1)[1]\n"
+    "                    job=rt.db.external_jobs.find_one({'order_id':oid,'user_id':doc['user_id']})\n"
+    '                    if job:return rt._json_resp(self,200,job_response(job))\n'
+    '                return super().do_GET()\n'
+    "            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})\n"
+    '            except Exception:\n'
+    "                rt.logger.exception('API GET failed');return rt._json_resp(self,500,{'error':'Internal error'})\n"
+    '        def changes(self,params):\n'
+    '            doc,user=self._auth()\n'
+    "            if not doc:raise ShopError('Invalid API key',401)\n"
+    "            if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)\n"
+    "            limit=quantity(params.get('limit',['100'])[0],500)\n"
+    "            since=params.get('since',['s:0'])[0]\n"
+    "            q={'$or':[{'owner_uid':None},{'owner_uid':doc['user_id']}],'sequence':{'$exists':True}}\n"
+    "            if since.startswith('s:'):\n"
+    '                try:n=int(since[2:])\n'
+    "                except ValueError:raise ShopError('Invalid cursor')\n"
+    "                q['sequence']={'$gt':max(0,n)}\n"
+    '            else:\n'
+    "                try:q['timestamp']={'$gte':int(since)}\n"
+    "                except ValueError:raise ShopError('Invalid cursor')\n"
+    "            events=list(rt.db.api_events.find(q).sort('sequence',1).limit(limit))\n"
+    "            cursor='s:'+str(events[-1]['sequence']) if events else since\n"
+    "            out=[{k:v for k,v in e.items() if k not in ('_id','created_at','owner_uid')} for e in events]\n"
+    "            return rt._json_resp(self,200,{'success':True,'events':out,'cursor':cursor,'count':len(out)})\n"
+    '        def do_POST(self):\n'
+    '            try:\n'
+    "                if not rt.ready:raise ShopError('Service initializing',503)\n"
+    "                path=urlparse(self.path).path.rstrip('/');gw='/'+rt._get_api_gateway()\n"
+    "                if path!=gw+'/purchase':return super().do_POST()\n"
+    '                doc,user=self._auth()\n'
+    "                if not doc:raise ShopError('Invalid API key',401)\n"
+    "                if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)\n"
+    "                body=json.loads(read_body(self));uid=doc['user_id'];pid=str(body.get('product_id',''))\n"
+    "                qty=quantity(body.get('qty',1));idem=self.headers.get('Idempotency-Key','').strip()\n"
+    "                if not 8<=len(idem)<=128:raise ShopError('Idempotency-Key header required (8–128 characters)')\n"
+    "                if pid.startswith('cgpt_'):\n"
+    "                    if qty!=1:raise ShopError('ChatGPT purchase requires qty=1 and one email')\n"
+    "                    product,duration=pid[5:].split('_',1);email=str(body.get('email','')).strip().lower()\n"
+    "                    job=rt.buy_cgpt(uid,product,duration,email,'api:'+idem)\n"
+    '                    result=job_response(job)\n'
+    "                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':1,'total_price':job['amount_cents']/100}},upsert=True)\n"
+    "                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)\n"
+    "                if pid.startswith('ext_'):\n"
+    "                    job=rt.buy_external(uid,pid[4:],qty,'api:'+idem);result=job_response(job)\n"
+    "                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':qty,'total_price':job['amount_cents']/100}},upsert=True)\n"
+    "                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)\n"
+    "                order=rt.finance.buy_stock(uid,pid,qty,'api:'+idem,True,str(body.get('buyer_info',''))[:200])\n"
+    '                rt._invalidate_user_cache(uid);rt._invalidate_products_cache()\n'
+    "                rt.emit_event('order.completed' if order['status']=='completed' else 'order.pending',{'api_user_id':uid,'order_id':order['order_id'],'status':order['status']},pid)\n"
+    "                rt.emit_event('stock.sold',{'product_id':pid,'order_id':order['order_id'],'qty_sold':qty,'remaining_stock':rt.get_product_stock_count(pid)},pid)\n"
+    '                rt.reward_once(order)\n'
+    "                return rt._json_resp(self,200,{k:v for k,v in order.items() if k not in ('_id','created_at','request_hash')})\n"
+    "            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})\n"
+    "            except (ValueError,TypeError,KeyError):return rt._json_resp(self,400,{'error':'Invalid input'})\n"
+    '            except Exception:\n'
+    "                rt.logger.exception('API purchase failed; retry with SAME Idempotency-Key')\n"
+    "                return rt._json_resp(self,503,{'error':'Result uncertain; retry with the same Idempotency-Key'})\n"
+    '    return APIHandler\n'
+    '\n'
+    '\n'
+    'def job_response(job):\n'
+    "    return {'success':job['status']=='completed','order_id':job['order_id'],'status':job['status'],\n"
+    "            'total_price':job['amount_cents']/100,'codes':job.get('codes',[]),\n"
+    "            'email':job['details'].get('email'),'expires_at':job.get('result',{}).get('expires_at')}\n"
+    '\n'
+    '\n'
+    'def encode_response(data, accept_encoding, path):\n'
+    '    import gzip\n'
+    "    raw=json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')\n"
+    '    supports=False\n'
+    "    for part in accept_encoding.lower().split(','):\n"
+    "        fields=[x.strip() for x in part.split(';')]\n"
+    "        if fields[0]!='gzip':continue\n"
+    "        try:supports=all(float(x[2:])>0 for x in fields[1:] if x.startswith('q='))\n"
+    '        except ValueError:supports=False\n'
+    "    if supports and len(raw)>1024 and urlparse(path).path.rstrip('/').endswith('/products'):\n"
+    "        return gzip.compress(raw,compresslevel=4,mtime=0),'gzip'\n"
+    '    return raw,None\n'
+),
+'operations': (
+    '"""Bounded catalog sync, restock digests and referral work."""\n'
+    'import datetime as dt\n'
+    'import html\n'
+    'import os\n'
+    'import threading\n'
+    'import time\n'
+    'from bson import ObjectId\n'
+    'from pymongo.errors import DuplicateKeyError\n'
+    'from domain import ShopError, finite_float\n'
+    '\n'
+    '\n'
+    'def seconds(name, default, minimum=30):\n'
+    '    try:return max(minimum, int(os.getenv(name, str(default))))\n'
+    '    except ValueError:return default\n'
+    '\n'
+    '\n'
+    'def product_list(data):\n'
+    '    """None means invalid, never an empty successful catalog."""\n'
+    '    if isinstance(data, list):return data if all(isinstance(p, dict) for p in data) else None\n'
+    '    if isinstance(data, dict):\n'
+    "        if data.get('success') is False or data.get('error'):return None\n"
+    "        for key in ('products','data','items','result','results','catalog','list','response'):\n"
+    '            value=data.get(key)\n'
+    '            if isinstance(value,(dict,list)):\n'
+    '                result=product_list(value)\n'
+    '                if result is not None:return result\n'
+    '    return None\n'
+    '\n'
+    '\n'
+    'class Operations:\n'
+    '    def __init__(self, g):\n'
+    '        self.g=g\n'
+    '        self.stop=threading.Event()\n'
+    '        self.sub_cache={};self.channels=(0,[]);self.seat_snapshot=(0,None)\n'
+    '        self.locks=[threading.Lock() for _ in range(64)]\n'
+    '        self.sync_lock=threading.Lock()\n'
+    '    def __getattr__(self,name):return self.g[name]\n'
+    '    def initialize(self):\n'
+    "        self.db.referral_work.create_index('due')\n"
+    "        self.db.referrals_v2.create_index([('status',1),('next_check',1)])\n"
+    "        self.db.referrals_v2.create_index([('referrer_id',1),('created_at',1)])\n"
+    "        self.db.ext_products.create_index([('store_id',1),('ext_id',1)])\n"
+    "        self.db.ext_products.create_index('catalog_id')\n"
+    "        self.db.restock_events.create_index([('status',1),('ready_at',1)])\n"
+    "        self.db.restock_events.create_index('expires',expireAfterSeconds=0)\n"
+    "        self.db.restock_recipients.create_index('expires',expireAfterSeconds=0)\n"
+    "        self.db.restock_events.update_many({'status':'sending'}, {'$set':{'status':'sent','delivery_uncertain':True}})\n"
+    "        self.db.referrals_v2.update_many({'next_check':{'$exists':False}}, {'$set':{'next_check':0}})\n"
+    '        # Repair conflicting legacy ChatGPT folder memberships without deleting products.\n'
+    '        catalogs=list(self.db.catalogs.find())\n'
+    "        valid={str(c['_id']) for c in catalogs}\n"
+    "        for p in self.db.products.find({'product_type':'cgpt_main'}):\n"
+    "            target=str(p.get('catalog_id') or '')\n"
+    '            if target not in valid:\n'
+    "                target=next((str(c['_id']) for c in catalogs if str(p['_id']) in {str(x) for x in c.get('product_ids',[])}),None)\n"
+    '            self.move_product(p,target)\n'
+    '\n'
+    '    def move_product(self, product, cat_id):\n'
+    "        pid=product['_id'];cat_id=None if cat_id in (None,'','none') else str(cat_id)\n"
+    "        cat=self.db.catalogs.find_one({'_id':ObjectId(cat_id)}) if cat_id else None\n"
+    "        if cat_id and not cat:raise ShopError('المجلد غير موجود.')\n"
+    '        aliases=[pid,str(pid)]\n'
+    "        if product.get('id') is not None:aliases += [product['id'],str(product['id'])]\n"
+    "        self.db.catalogs.update_many({'product_ids':{'$in':aliases}}, {'$pull':{'product_ids':{'$in':aliases}}})\n"
+    "        self.db.products.update_one({'_id':pid},{'$set':{'catalog_id':cat_id}})\n"
+    "        if cat:self.db.catalogs.update_one({'_id':cat['_id']},{'$push':{'product_ids':{'$each':[pid],'$position':0}}})\n"
+    '        self._invalidate_products_cache()\n'
+    '    def display_seats(self):\n'
+    '        # Display uses monitor snapshots. Checkout still validates live capacity.\n'
+    '        if self.seat_snapshot[0]>time.time():return self.seat_snapshot[1]\n'
+    '        total=0;known=False\n'
+    "        for report in self.db.cgpt_account_status.find({'checked_at':{'$gt':dt.datetime.utcnow()-dt.timedelta(minutes=15)}}):\n"
+    "            if report.get('connected') and report.get('available_seats') is not None:\n"
+    "                total+=max(0,int(report['available_seats']));known=True\n"
+    '        value=total if known else None\n'
+    '        self.seat_snapshot=(time.time()+15,value)\n'
+    '        return value\n'
+    '    def queue_referrer(self,rid,progress=False):\n'
+    "        self.db.referral_work.update_one({'_id':int(rid)},\n"
+    "            {'$setOnInsert':{'due':time.time()+10},'$inc':{'generation':1},'$max':{'progress':int(progress)}},upsert=True)\n"
+    '    def register_referral(self,invited,rid):\n'
+    '        invited=int(invited);rid=int(rid)\n'
+    "        if invited==rid or not self.db.users.find_one({'user_id':rid},{'_id':1}):return False\n"
+    "        try:self.db.referrals_v2.insert_one({'invited_id':invited,'referrer_id':rid,'status':'pending',\n"
+    "            'created_at':int(time.time()),'updated_at':int(time.time()),'next_check':time.time()+300})\n"
+    '        except DuplicateKeyError:return False\n'
+    '        self.queue_referrer(rid);return True\n'
+    '    def mark_referral(self,uid,status):\n'
+    "        if status not in ('pending','active','left'):raise ValueError('Invalid referral status')\n"
+    "        old=self.db.referrals_v2.find_one_and_update({'invited_id':int(uid),'status':{'$ne':status}},\n"
+    "            {'$set':{'status':status,'updated_at':int(time.time()),'next_check':time.time()+300}})\n"
+    "        if old:self.queue_referrer(old['referrer_id'],status=='active')\n"
+    '    def forced_sub(self,uid,use_cache=True):\n'
+    '        if uid==self.OWNER_ID:return True\n'
+    '        with self.locks[int(uid)%64]:\n'
+    '            now=time.time();cached=self.sub_cache.get(uid)\n'
+    '            if use_cache and cached and cached[0]>now:return cached[1]\n'
+    '            user=self.get_user_data_full(uid)\n'
+    "            if user and user.get('is_admin')==1:return True\n"
+    '            if self.channels[0]<now:self.channels=(now+30,list(self.db.required_channels.find()))\n'
+    '            result=True\n'
+    '            for channel in self.channels[1]:\n'
+    '                try:\n'
+    "                    member=self.bot.get_chat_member(channel['channel_id'],uid)\n"
+    "                    if member.status in ('left','kicked') or (member.status=='restricted' and not getattr(member,'is_member',False)):\n"
+    '                        result=False;break\n'
+    '                except Exception:result=None\n'
+    '            if len(self.sub_cache)>=10000:self.sub_cache.clear()\n'
+    '            self.sub_cache[uid]=(now+(300 if result is True else 3),result)\n'
+    '            return result\n'
+    '    def referral_cycle(self):\n'
+    '        now=time.time()\n'
+    '        # Fixed budget; indexed schedule avoids re-scanning all members every minute.\n'
+    '        for _ in range(10):\n'
+    "            ref=self.db.referrals_v2.find_one_and_update({'status':{'$in':['pending','active','left']},'next_check':{'$lte':now}},\n"
+    "                {'$set':{'next_check':now+300}},sort=[('next_check',1)],return_document=False)\n"
+    '            if not ref:break\n'
+    "            result=self.forced_sub(ref['invited_id'],use_cache=False)\n"
+    '            if result is None:continue\n'
+    "            misses=0 if result else ref.get('left_checks',0)+1\n"
+    "            if result:self.mark_referral(ref['invited_id'],'active')\n"
+    "            elif misses>=3 and ref['status']=='active':self.mark_referral(ref['invited_id'],'left')\n"
+    "            self.db.referrals_v2.update_one({'_id':ref['_id']},{'$set':{'left_checks':misses,\n"
+    "                'next_check':now+(21600 if result else 300 if misses<3 else 3600)}})\n"
+    '            if self.stop.wait(.2):break\n'
+    '    def referral_work_once(self):\n'
+    "        job=self.db.referral_work.find_one_and_update({'due':{'$lte':time.time()}},\n"
+    "            {'$set':{'due':time.time()+60}},sort=[('due',1)],return_document=True)\n"
+    '        if not job:return\n'
+    "        rid=job['_id']\n"
+    '        self.update_referrer_balance(rid)\n'
+    '        self._check_referral_spam(rid)\n'
+    "        if job.get('progress'):\n"
+    '            now=time.time()\n'
+    "            claimed=self.db.users.update_one({'user_id':rid,'$or':[{'ref_progress_at':{'$lte':now-300}},{'ref_progress_at':{'$exists':False}}]},\n"
+    "                {'$set':{'ref_progress_at':now}})\n"
+    '            if claimed.modified_count:self.send_progress_log_notification(rid)\n'
+    '        # New joins during work are retained for the next iteration.\n'
+    "        self.db.referral_work.delete_one({'_id':rid,'generation':job.get('generation')})\n"
+    '    def referral_worker(self):\n'
+    '        next_check=time.time()+60\n'
+    '        while not self.stop.wait(2):\n'
+    '            try:\n'
+    '                self.referral_work_once()\n'
+    '                if time.time()>=next_check:\n'
+    '                    self.referral_cycle();next_check=time.time()+60\n'
+    "            except Exception:self.logger.exception('Referral background work failed')\n"
+    '    def queue_restock(self,ep,old_stock):\n'
+    "        if old_stock!=0 or ep.get('stock',0)<=0 or ep.get('hidden'):return False\n"
+    "        now=time.time();pid=ep['_id']\n"
+    "        if self.db.restock_events.find_one({'_id':pid,'status':{'$in':['pending','sending']}}):return False\n"
+    "        claimed=self.db.ext_products.update_one({'_id':pid,'$or':[{'last_stock_broadcast':{'$lte':now-21600}},{'last_stock_broadcast':{'$exists':False}}]},\n"
+    "            {'$set':{'last_stock_broadcast':now}})\n"
+    '        if not claimed.modified_count:return False\n'
+    "        self.db.restock_events.update_one({'_id':pid},{'$set':{'status':'pending','ready_at':now+120,\n"
+    "            'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True)\n"
+    '        return True\n'
+    '    def sync_external(self):\n'
+    '        if not self.sync_lock.acquire(blocking=False):return\n'
+    '        try:\n'
+    '            for store in self.db.ext_stores.find():\n'
+    '                now=time.time()\n'
+    "                if store.get('sync_next_at',0)>now:continue\n"
+    "                sid=str(store['_id'])\n"
+    '                try:\n'
+    "                    products=product_list(self._ext_api_get(store,'/products'))\n"
+    "                    if products is None:raise ValueError('Invalid catalog response')\n"
+    '                    self.sync_products(sid,products)\n'
+    "                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':0,'sync_next_at':now+seconds('EXT_SYNC_SECONDS',300),'last_sync_at':now}})\n"
+    '                except Exception:\n'
+    "                    failures=min(6,store.get('sync_failures',0)+1)\n"
+    "                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':failures,'sync_next_at':now+min(3600,60*2**failures)}})\n"
+    "                    self.logger.warning('External catalog sync failed; backing off (%s)',sid)\n"
+    '        finally:self.sync_lock.release()\n'
+    '    def sync_products(self,sid,products):\n'
+    "        existing={str(p.get('ext_id')):p for p in self.db.ext_products.find({'store_id':sid})}\n"
+    "        pending={str(p.get('ext_id')) for p in self.db.ext_pending_new.find({'store_id':sid},{'ext_id':1})}\n"
+    '        changed=False\n'
+    '        for raw in products:\n'
+    "            f=self._ext_extract_fields(raw);eid=f['ext_id']\n"
+    '            if not eid:continue\n'
+    '            old=existing.get(eid)\n'
+    '            if not old:\n'
+    '                if eid not in pending:\n'
+    "                    self.db.ext_pending_new.insert_one({'store_id':sid,'ext_id':eid,'name':f['name'],'raw':raw,'created_at':int(time.time())});pending.add(eid)\n"
+    '                continue\n'
+    "            stock=max(0,int(f['stock'])) if f['available'] is not False else 0\n"
+    '            updates={}\n'
+    "            if stock!=old.get('stock',0):updates['stock']=stock\n"
+    "            cost=finite_float(f['cost_price'])\n"
+    "            if cost>0 and abs(cost-finite_float(old.get('cost_price',old.get('base_price',0)) or 0))>.001:\n"
+    '                updates.update(cost_price=cost,base_price=cost,\n'
+    "                    sell_price=self._ext_compute_sell_price(cost,old.get('markup_type','percent'),old.get('markup_value',0)))\n"
+    '            if not updates:continue\n'
+    '            # One compare-and-set prevents repeated restock transitions from concurrent sync.\n'
+    "            result=self.db.ext_products.update_one({'_id':old['_id'],'stock':old.get('stock',0)}, {'$set':updates})\n"
+    '            if result.modified_count:\n'
+    '                changed=True;updated={**old,**updates}\n'
+    "                if stock>0 and old.get('stock',0)==0:self.queue_restock(updated,0)\n"
+    '                existing[eid]=updated\n'
+    '        # Missing IDs may mean pagination/filtering. Never infer sell-out from omission.\n'
+    '        if changed:self._invalidate_products_cache()\n'
+    '    def restock_once(self):\n'
+    "        now=time.time();window=seconds('RESTOCK_DIGEST_SECONDS',1800,300)\n"
+    '        # One digest globally per window, persistent across restarts.\n'
+    "        state=self.db.operational_state.find_one({'_id':'restock'}) or {}\n"
+    "        if state.get('next_at',0)>now:return\n"
+    "        events=list(self.db.restock_events.find({'status':'pending','ready_at':{'$lte':now}}).limit(500))\n"
+    '        if not events:return\n'
+    '        try:\n'
+    "            claim=self.db.operational_state.find_one_and_update({'_id':'restock','$or':[{'next_at':{'$lte':now}},{'next_at':{'$exists':False}}]},\n"
+    "                {'$set':{'next_at':now+window}},upsert=True,return_document=True)\n"
+    '        except DuplicateKeyError:return\n'
+    '        if not claim:return\n'
+    "        ids=[e['_id'] for e in events]\n"
+    "        products=list(self.db.ext_products.find({'_id':{'$in':ids},'hidden':{'$ne':True},'stock':{'$gt':0}}))\n"
+    "        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sending'}})\n"
+    '        if products:\n'
+    "            for user in self.db.users.find({'is_banned':{'$ne':1},'broadcast_disabled':{'$ne':True}},{'user_id':1,'lang':1,'lang_chosen':1}).batch_size(100):\n"
+    "                uid=user['user_id'];ar=user.get('lang')=='ar'\n"
+    '                # Reserve recipient BEFORE send: avoid replay storms after uncertain delivery.\n'
+    '                try:\n'
+    "                    recipient=self.db.restock_recipients.find_one_and_update({'_id':uid,'$or':[{'next_at':{'$lte':time.time()}},{'next_at':{'$exists':False}}]},\n"
+    "                        {'$set':{'next_at':time.time()+window,'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True,return_document=True)\n"
+    '                except DuplicateKeyError:continue\n'
+    '                if not recipient:continue\n'
+    "                lines=['📦 <b>منتجات عادت للتوفر</b>' if ar else '📦 <b>Back in stock</b>']\n"
+    "                for p in products[:12]:lines.append('• '+html.escape(str(p.get('name',''))[:90]))\n"
+    '                if len(products)>12:lines.append(f"+ {len(products)-12} "+(\'منتج آخر\' if ar else \'more products\'))\n'
+    "                markup=self.InlineKeyboardMarkup();markup.add(self.InlineKeyboardButton('🛒 المتجر' if ar else '🛒 Shop',callback_data='open_shop'))\n"
+    "                try:self.bot.send_message(uid,'\\n'.join(lines),parse_mode='HTML',reply_markup=markup)\n"
+    '                except Exception as exc:\n'
+    "                    params=getattr(exc,'result_json',{}) or {}\n"
+    "                    retry=params.get('parameters',{}).get('retry_after',0)\n"
+    '                    if retry:\n'
+    '                        # Leave pending for a later digest, avoid sleeping/looping on a rate limit.\n'
+    "                        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'pending','ready_at':time.time()+max(window,retry)}})\n"
+    '                        return\n'
+    "                    if getattr(exc,'error_code',None)==403:self.db.users.update_one({'user_id':uid},{'$set':{'broadcast_disabled':True}})\n"
+    '                if self.stop.wait(.2):return\n'
+    "        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sent'}})\n"
+    '    def restock_worker(self):\n'
+    '        while not self.stop.wait(30):\n'
+    '            try:self.restock_once()\n'
+    '            except Exception:\n'
+    "                self.logger.exception('Restock digest interrupted')\n"
+    "                self.db.restock_events.update_many({'status':'sending'},{'$set':{'status':'sent','delivery_uncertain':True}})\n"
+),
+'cms': (
+    'import html\n'
+    'import string\n'
+    'from html.parser import HTMLParser\n'
+    'from domain import ShopError\n'
+    '\n'
+    'TEMPLATES={\n'
+    "'ask_email':('طلب البريد','📧 أرسل بريد حساب ChatGPT لباقة {product}.\\n💰 السعر: ${price}\\nلن يُخصم الرصيد حتى التأكيد.','📧 Send your ChatGPT email for {product}.\\n💰 Price: ${price}\\nYour balance is charged after confirmation.'),\n"
+    "'confirm_email':('تأكيد البريد','📧 البريد: <code>{email}</code>\\n📦 {product}\\n⏱ {duration}\\n💰 ${price}\\nهل تؤكد الشراء؟','📧 Email: <code>{email}</code>\\n📦 {product}\\n⏱ {duration}\\n💰 ${price}\\nConfirm purchase?'),\n"
+    "'invite_success':('نجاح الدعوة','✅ اشتراكك جاهز!\\n📧 <code>{email}</code>\\n⏱ ينتهي: {expires}\\n📩 اقبل الدعوة من بريدك إذا كانت جديدة.','✅ Your subscription is ready!\\n📧 <code>{email}</code>\\n⏱ Expires: {expires}\\n📩 Accept the email invitation if this is a new subscription.'),\n"
+    "'reminder':('تذكير قبل الانتهاء','⏳ اشتراكك يقترب من الانتهاء.\\n📧 <code>{email}</code>\\n⏱ متبقّي نحو {hours} ساعة.\\nجدد من الزر أدناه للحفاظ على المدة المتبقية.','⏳ Your subscription expires soon.\\n📧 <code>{email}</code>\\n⏱ About {hours} hours left.\\nRenew below; your remaining time is preserved.'),\n"
+    "'expired':('انتهاء اشتراك العميل','انتهت مدة اشتراكك في ChatGPT.\\n📧 <code>{email}</code>\\nيمكنك التجديد من الزر أدناه.','Your ChatGPT subscription has expired.\\n📧 <code>{email}</code>\\nRenew using the button below.'),\n"
+    "'cookie_expired':('تنبيه الكوكيز للإدارة','🍪 انتهت جلسة حساب {account}.\\nاضغط تحديث الكوكيز وأرسل نصًا أو ملف JSON/TXT. بيانات العملاء محفوظة.','🍪 The session for {account} expired.\\nUpdate cookies using text or a JSON/TXT file. Customer subscriptions are preserved.'),\n"
+    "'account_expired':('انتهاء اشتراك الحساب للإدارة','⚠️ اشتراك حساب {account} غير نشط.\\nأوقف البوت البيع عليه. راجع التجديد أو نقل العملاء ذوي المدة المتبقية.','⚠️ Workspace subscription {account} is inactive.\\nNew sales are paused. Renew it or move customers with remaining time.'),\n"
+    "'unavailable':('تعذر الدعوة','⚠️ تعذر إكمال الدعوة الآن. طلبك محفوظ برقم {order_id}. ستراجع الإدارة نتيجته قبل أي استرجاع.','⚠️ The invitation result is not confirmed. Order {order_id} is saved for review before any refund.'),\n"
+    "'refunded':('استرجاع طلب مرفوض','أُعيد رصيد طلبك {order_id} لأن الدعوة لم تُنفذ. يمكنك المحاولة مجددًا.','Order {order_id} was refunded because the invitation was rejected. You can try again.'),\n"
+    "'no_seats':('نفاد المقاعد','لا توجد مقاعد مؤكدة متاحة الآن. حاول لاحقًا أو تواصل مع الدعم.','No verified seats are available. Please try later or contact support.'),\n"
+    "'btn_renew':('زر التجديد','🔄 تجديد الاشتراك','🔄 Renew subscription'),\n"
+    "'btn_confirm':('زر تأكيد الشراء','✅ تأكيد الشراء','✅ Confirm purchase'),\n"
+    "'btn_change':('زر تغيير البريد','✏️ تغيير البريد','✏️ Change email'),\n"
+    "'btn_cancel':('زر الإلغاء','❌ إلغاء','❌ Cancel'),\n"
+    '}\n'
+    "FIELDS={'email','product','duration','price','expires','hours','account','order_id'}\n"
+    '\n'
+    'class TelegramHTML(HTMLParser):\n'
+    "    tags={'b','strong','i','em','u','ins','s','strike','del','span','tg-spoiler','code','pre','a','tg-emoji','blockquote'}\n"
+    '    def __init__(self):super().__init__();self.stack=[]\n'
+    '    def handle_starttag(self,tag,attrs):\n'
+    "        if tag not in self.tags:raise ShopError('وسم HTML غير مدعوم: '+tag)\n"
+    '        attrs=dict(attrs)\n'
+    "        allowed={'a':{'href'},'tg-emoji':{'emoji-id'},'span':{'class'},'code':{'class'},'blockquote':{'expandable'}}.get(tag,set())\n"
+    "        if set(attrs)-allowed:raise ShopError('خصائص HTML غير مسموحة.')\n"
+    "        if tag=='a' and not str(attrs.get('href','')).startswith(('https://','tg://')):raise ShopError('الرابط غير صالح.')\n"
+    "        if tag=='tg-emoji' and not str(attrs.get('emoji-id','')).isdigit():raise ShopError('معرّف الإيموجي غير صالح.')\n"
+    '        self.stack.append(tag)\n'
+    '    def handle_endtag(self,tag):\n'
+    "        if not self.stack or self.stack.pop()!=tag:raise ShopError('تنسيق HTML غير متوازن.')\n"
+    "    def handle_startendtag(self,tag,attrs):raise ShopError('وسم غير مدعوم.')\n"
+    '\n'
+    'def validate_template(text,button=False):\n'
+    "    if not text or len(text)> (64 if button else 3000):raise ShopError('النص فارغ أو أطول من الحد المسموح.')\n"
+    '    try:\n'
+    '        for _,field,spec,conversion in string.Formatter().parse(text):\n'
+    "            if field is not None and (field not in FIELDS or spec or conversion):raise ShopError('متغير غير معروف أو تنسيق متغير غير مسموح.')\n"
+    "    except ValueError:raise ShopError('أقواس المتغيرات غير متوازنة.')\n"
+    '    if not button:\n'
+    '        parser=TelegramHTML();parser.feed(text);parser.close()\n'
+    "        if parser.stack:raise ShopError('تنسيق HTML غير مكتمل.')\n"
+    "    elif '<' in text or '>' in text:raise ShopError('نص الزر لا يستعمل وسوم HTML؛ يمكن اختيار إيموجي من الرسالة.')\n"
+    '    return text\n'
+    '\n'
+    '\n'
+    'def render(db,key,lang,**values):\n'
+    "    lang='en' if lang=='en' else 'ar'\n"
+    "    doc=db.custom_texts.find_one({'key':'cgpt_'+key,'lang':lang}) or {}\n"
+    "    default=TEMPLATES[key][2 if lang=='en' else 1]\n"
+    "    text=doc.get('value',default)\n"
+    '    try:\n'
+    "        validate_template(text,key.startswith('btn_'))\n"
+    "        return text.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})\n"
+    '    except (ShopError,ValueError,KeyError):\n'
+    "        return default.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})\n"
+),
+'ton_payments': (
+    '"""Native TON receipt verification, using documented TON Center v3 queries.\n'
+    'https://docs.ton.org/api/v3/blockchain-data/get-transactions\n'
+    'https://docs.ton.org/api/v3/blockchain-data/get-transactions-by-message\n'
+    'https://docs.ton.org/foundations/addresses/formats\n'
+    '"""\n'
+    'import base64,binascii,re,os,time,threading\n'
+    'from urllib.parse import urlparse,unquote\n'
+    'from domain import ShopError\n'
+    '\n'
+    '\n'
+    'def hash_hex(value):\n'
+    "    value=str(value or '').strip()\n"
+    "    if value.startswith(('https://','http://')):\n"
+    '        parsed=urlparse(value)\n'
+    "        if parsed.hostname not in ('tonviewer.com','tonscan.org'):raise ShopError('رابط مستكشف TON غير مدعوم؛ أرسل الهاش فقط.')\n"
+    "        value=unquote(parsed.path).removeprefix('/transaction/').removeprefix('/tx/').strip('/')\n"
+    "    if re.fullmatch(r'(?:0x)?[a-fA-F0-9]{64}',value):return value.removeprefix('0x').lower()\n"
+    "    if re.fullmatch(r'[A-Za-z0-9_+/=-]{43,44}',value):\n"
+    '        try:\n'
+    "            raw=base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True)\n"
+    '            if len(raw)==32:return raw.hex()\n'
+    '        except (ValueError,binascii.Error):pass\n'
+    "    raise ShopError('أرسل هاش TON كاملًا بصيغة hex أو Base64 أو رابط المعاملة.')\n"
+    '\n'
+    '\n'
+    'def address(value):\n'
+    "    if isinstance(value,dict):value=value.get('address','')\n"
+    "    value=str(value or '').strip()\n"
+    "    if re.fullmatch(r'-?\\d+:[a-fA-F0-9]{64}',value):\n"
+    "        wc,h=value.split(':');return str(int(wc))+':'+h.lower()\n"
+    '    try:\n'
+    "        raw=base64.b64decode(value+'='*(-len(value)%4),altchars=b'-_',validate=True)\n"
+    '        if len(raw)!=36 or raw[0] not in (0x11,0x51):return None\n'
+    "        if binascii.crc_hqx(raw[:34],0).to_bytes(2,'big')!=raw[34:]:return None\n"
+    "        return str(int.from_bytes(raw[1:2],'big',signed=True))+':'+raw[2:34].hex()\n"
+    '    except (ValueError,binascii.Error):return None\n'
+    '\n'
+    '\n'
+    'def receipt(tx,wallet):\n'
+    "    target=address(wallet);msg=tx.get('in_msg') or {};desc=tx.get('description') or {}\n"
+    "    if not target or address(tx.get('account'))!=target or address(msg.get('destination'))!=target:return None\n"
+    "    if not address(msg.get('source')) or address(msg.get('source'))==target:return None\n"
+    "    if tx.get('emulated') is True or desc.get('aborted') is not False or msg.get('bounced') is True:return None\n"
+    "    if desc.get('compute_ph',{}).get('success') is False or desc.get('action',{}).get('success') is False:return None\n"
+    "    units=int(msg.get('value') or 0);stamp=int(tx.get('now') or 0)\n"
+    '    if units<=0 or stamp<=0 or stamp>time.time()+60:return None\n'
+    "    return {'hash':hash_hex(tx['hash']),'units':units,'received_ton':units/10**9,'utime':stamp,'source_addr':msg.get('source','')}\n"
+    '\n'
+    '\n'
+    'class TonClient:\n'
+    '    _lock=threading.Lock();_last=0\n'
+    '    def __init__(self,requests,wallet):\n'
+    "        if not address(wallet):raise ShopError('عنوان محفظة TON غير صالح أو ليس عنوان mainnet.')\n"
+    '        self.requests=requests;self.wallet=wallet\n'
+    '    def query(self,path,**params):\n'
+    '        # Shared spacing avoids exhausting the unauthenticated 1 RPS allowance.\n'
+    '        with self._lock:\n'
+    '            delay=1.05-(time.monotonic()-type(self)._last)\n'
+    '            if delay>0:time.sleep(delay)\n'
+    '            type(self)._last=time.monotonic()\n'
+    "        headers={};key=os.getenv('TONCENTER_API_KEY','').strip()\n"
+    "        if key:headers['X-API-Key']=key\n"
+    "        try:r=self.requests.get('https://toncenter.com/api/v3/'+path,params=params,headers=headers,timeout=15)\n"
+    "        except Exception:raise ShopError('تعذر الاتصال بمصدر TON؛ حاول لاحقًا. لم يتغير رصيدك.',503)\n"
+    "        if r.status_code!=200:raise ShopError('مصدر TON غير متاح الآن (HTTP '+str(r.status_code)+')؛ لا يعني ذلك أن الحوالة غير موجودة.',503)\n"
+    '        data=r.json()\n'
+    "        if not isinstance(data,dict) or not isinstance(data.get('transactions'),list):raise ShopError('استجابة TON غير معروفة.',503)\n"
+    "        return data['transactions']\n"
+    '    def lookup(self,query):\n'
+    "        h=hash_hex(query);matches={};direct=self.query('transactions',hash=h,limit=10)\n"
+    '        for tx in direct:\n'
+    "            if hash_hex(tx.get('hash'))!=h:continue\n"
+    '            hit=receipt(tx,self.wallet)\n'
+    "            if hit:matches[hit['hash']]=hit\n"
+    '            # A sender-side transaction has a different hash from its receipt.\n'
+    "            for msg in tx.get('out_msgs',[]):\n"
+    "                if address(msg.get('destination'))!=address(self.wallet) or not msg.get('hash'):continue\n"
+    "                mh=hash_hex(msg['hash'])\n"
+    "                for incoming in self.query('transactionsByMessage',msg_hash=mh,direction='in',limit=10):\n"
+    "                    if hash_hex((incoming.get('in_msg') or {}).get('hash',''))!=mh:continue\n"
+    '                    hit=receipt(incoming,self.wallet)\n'
+    "                    if hit:matches[hit['hash']]=hit\n"
+    '        if not direct:\n'
+    "            for tx in self.query('transactionsByMessage',msg_hash=h,direction='in',limit=10):\n"
+    "                if hash_hex((tx.get('in_msg') or {}).get('hash',''))!=h:continue\n"
+    '                hit=receipt(tx,self.wallet)\n'
+    "                if hit:matches[hit['hash']]=hit\n"
+    "        if len(matches)>1:raise ShopError('الهاش يتضمن عدة تحويلات؛ أرسل هاش الاستلام المحدد أو راجع الدعم.',409)\n"
+    '        return next(iter(matches.values()),None)\n'
+    '    def recent(self,since):\n'
+    '        for page in range(10):\n'
+    "            rows=self.query('transactions',account=self.wallet,start_utime=int(since),limit=100,offset=page*100,sort='desc')\n"
+    '            for tx in rows:\n'
+    '                hit=receipt(tx,self.wallet)\n'
+    '                if hit:yield hit\n'
+    '            if len(rows)<100:return\n'
+    '\n'
+    '\n'
+    'def verify_customer(rt,message,wallet):\n'
+    '    uid=message.from_user.id\n'
+    '    if rt.is_user_banned(uid):return\n'
+    "    raw=(message.text or '').strip()\n"
+    "    if raw in ('/cancel','إلغاء','الغاء','cancel'):return rt.cancel_deposit_handler(NS_call(message))\n"
+    '    try:\n'
+    '        hit=TonClient(rt.requests,wallet).lookup(raw)\n'
+    "        if not hit:raise ShopError('لم يظهر إيداع TON مؤكد لهذه المحفظة بهذا الهاش؛ تحقق من اكتماله أو أرسل هاش الاستلام.')\n"
+    "        p=rt.native_pending('TON',hit['units'],hit['utime'])\n"
+    "        if not p or p['user_id']!=uid:raise ShopError('الحوالة لا تطابق طلب إيداعك الحالي في المبلغ أو الوقت. راجع الدعم؛ لن يتغير الرصيد.')\n"
+    "        result=rt.auto_credit_from_pending(p,hit['hash'],'Toncoin (TON)')\n"
+    "        if not result:raise ShopError('تعذر إضافة الإيداع؛ راجع السجل أو الدعم قبل إعادة المحاولة.')\n"
+    "    except ShopError as e:rt.send(uid,str(e),reply_markup=rt.markup([('الدعم','cgb_support'),('إلغاء الإيداع','cancel_deposit')]))\n"
+    '\n'
+    '\n'
+    'def NS_call(message):\n'
+    '    from types import SimpleNamespace\n'
+    "    return SimpleNamespace(from_user=message.from_user,message=message,id='cancel',data='cancel_deposit')\n"
+),
+'network': (
+    '"""Outbound webhook client with DNS pinning, TLS verification and no redirects."""\n'
+    'import http.client\n'
+    'import ipaddress\n'
+    'import json\n'
+    'import socket\n'
+    'import ssl\n'
+    'from urllib.parse import urlsplit\n'
+    'from domain import ShopError\n'
+    '\n'
+    '\n'
+    'def public_endpoint(url):\n'
+    '    p=urlsplit(url)\n'
+    "    if p.scheme!='https' or not p.hostname or p.username or p.password or p.fragment:\n"
+    "        raise ShopError('رابط webhook يجب أن يكون HTTPS عامًا بلا بيانات دخول.')\n"
+    "    if p.port not in (None,443):raise ShopError('webhook يدعم المنفذ 443 فقط.')\n"
+    '    try:\n'
+    '        addresses={x[4][0] for x in socket.getaddrinfo(p.hostname,443,type=socket.SOCK_STREAM)}\n'
+    '        if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):raise ValueError()\n'
+    "    except (OSError,ValueError):raise ShopError('وجهة webhook غير متاحة أو غير عامة.')\n"
+    '    return p,sorted(addresses)[0]\n'
+    '\n'
+    '\n'
+    'def post_webhook(url,body,headers):\n'
+    '    p,address=public_endpoint(url)\n'
+    '    conn=http.client.HTTPSConnection(p.hostname,443,timeout=8,context=ssl.create_default_context())\n'
+    '    # Connect to the validated address; TLS still authenticates the original hostname.\n'
+    '    raw=socket.create_connection((address,443),timeout=8)\n'
+    '    try:\n'
+    '        conn.sock=ssl.create_default_context().wrap_socket(raw,server_hostname=p.hostname)\n'
+    "        conn.request('POST',p.path or '/' if not p.query else (p.path or '/')+'?'+p.query,body=body,headers=headers)\n"
+    '        response=conn.getresponse();status=response.status;response.read(1024)\n'
+    '        return 200<=status<300\n'
+    '    finally:\n'
+    '        conn.close();raw.close()\n'
+),
+'subscription_lifecycle': (
+    '"""Resumable migration. An ambiguous remote write requires review, never replay."""\n'
+    'import copy\n'
+    'import datetime as dt\n'
+    'import html\n'
+    'import time\n'
+    'from chatgpt_service import SeatManager, account_lock, date\n'
+    'from domain import digest\n'
+    '\n'
+    '\n'
+    'def migrate(runtime, source):\n'
+    '    db=runtime.db\n'
+    '    with account_lock(db,source._account_key):\n'
+    '        source.reload_data()\n'
+    '        # Revalidate inside the lock; expired cookies/network errors are not expiry.\n'
+    '        source_report=source.diagnose()\n'
+    "        if source_report.get('status')!='deactivated':return\n"
+    "        for email,info in list(source.invites_data['invites'].items()):\n"
+    "            exp=date(info.get('expires_at'))\n"
+    "            if info.get('status') not in ('active','transferred') or not exp:continue\n"
+    "            if info.get('status')=='active' and exp<=dt.datetime.utcnow():continue\n"
+    "            ident=digest('migration',source._account_key,email,info['expires_at'])\n"
+    "            job=db.cgpt_migrations.find_one({'_id':ident})\n"
+    "            if job and job['status']=='completed':continue\n"
+    "            if job and job['status'] in ('sending','review'):\n"
+    "                runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'نتيجة الدعوة غير مؤكدة؛ تحقق من الحساب الهدف قبل إعادة الإرسال.','target':job.get('target')})\n"
+    '                continue\n'
+    '            if not job:\n'
+    "                if info.get('status')!='active':continue\n"
+    '                candidates=[];capacity_unknown=False;has_capacity=False\n'
+    '                for doc in runtime._cgpt_all_accounts():\n'
+    "                    if str(doc['_id'])==source._account_key:continue\n"
+    '                    try:\n'
+    '                        target=SeatManager.from_doc(doc);rep=target.diagnose()\n'
+    "                        if rep.get('status')!='deactivated' and (not rep.get('connected') or rep.get('available_seats') is None):capacity_unknown=True\n"
+    "                        if rep.get('connected') and rep.get('status')=='active' and (rep.get('available_seats') or 0)>0:\n"
+    '                            has_capacity=True\n'
+    '                            candidates.append(target)\n'
+    '                    except Exception:capacity_unknown=True;continue\n'
+    "                target=next((t for t in candidates if email not in t.invites_data['invites']),None)\n"
+    '                if not target:\n'
+    '                    if not capacity_unknown and not has_capacity:\n'
+    '                        from refund_review import queue_no_seat_refund\n'
+    '                        queue_no_seat_refund(runtime,source,email,info,source_report)\n'
+    "                    runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'لا يوجد حساب بديل بسعة مؤكدة.'});continue\n"
+    "                job={'_id':ident,'source':source._account_key,'target':target._account_key,'email':email,'status':'prepared','created_at':dt.datetime.utcnow()}\n"
+    '                db.cgpt_migrations.insert_one(job)\n'
+    "            target_doc=runtime.account_doc(job['target'])\n"
+    '            if not target_doc:\n'
+    "                runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'الحساب الهدف غير موجود.'});continue\n"
+    '            target=SeatManager.from_doc(target_doc)\n'
+    '            with account_lock(db,target._account_key):\n'
+    "                target.reload_data();existing=target.invites_data['invites'].get(email)\n"
+    "                if job['status']!='invited':\n"
+    '                    rep=target.diagnose()\n'
+    "                    if not rep.get('connected') or rep.get('status')!='active' or not (rep.get('available_seats') or 0)>0:continue\n"
+    "                    if existing or email in rep.get('user_emails',[]) or email in rep.get('pending_emails',[]):\n"
+    "                        db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'review'}})\n"
+    "                        runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'البريد موجود مسبقًا في الحساب الهدف.'});continue\n"
+    "                    db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'sending'}})\n"
+    "                    try:r=target.request('POST',f'/backend-api/accounts/{target.account_id}/invites',json={'email_addresses':[email],'role':'standard-user'})\n"
+    '                    except Exception:r=None\n'
+    '                    if r is None or r.status_code not in (200,201):\n'
+    "                        db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'review'}})\n"
+    "                        runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'تعذر تأكيد دعوة الحساب البديل.','target':target._account_key});continue\n"
+    "                    db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'invited'}})\n"
+    "                if existing and existing.get('migration_id')!=ident:\n"
+    "                    runtime.issue('migration',source._account_key,email,info.get('telegram_uid'),{'reason':'تعارض سجل الحساب الهدف.'});continue\n"
+    '                if not existing:\n'
+    "                    target.invites_data['invites'][email]={**copy.deepcopy(info),'migration_id':ident,'migrated_from':source._account_key,\n"
+    "                        'invite_status':'pending','invite_checked_at':dt.datetime.utcnow().isoformat()}\n"
+    '                    target.allowed_emails.add(email);target._save_data()\n'
+    '                # Save target first, retain source history, preserve exact expiration.\n'
+    "                info['status']='transferred';info['transferred_to']=target._account_key\n"
+    '                source.allowed_emails.discard(email);source._save_data()\n'
+    "                uid=info.get('telegram_uid')\n"
+    '                if isinstance(uid,int):\n'
+    "                    text=('🔄 تم تغيير حساب مساحة العمل لاشتراكك.\\nالبريد: <code>'+html.escape(email)+'</code>\\n'\n"
+    "                          'افتح بريدك واقبل الدعوة الجديدة. لم يتغير موعد انتهاء اشتراكك (UTC): '+html.escape(info['expires_at']))\n"
+    "                    db.notifications.update_one({'_id':ident},{'$setOnInsert':{'uids':[uid],'text':text,'sent':False,'next_at':time.time(),'created':time.time(),\n"
+    "                        'markup':runtime.markup([('اشتراكي','cgb_portal')]).to_json()}},upsert=True)\n"
+    "                db.cgpt_migrations.update_one({'_id':ident},{'$set':{'status':'completed'}})\n"
+    "                db.cgpt_interventions.update_many({'kind':'no_seat_refund','account':source._account_key,'email':email},{'$set':{'status':'resolved'}})\n"
+    "                db.cgpt_refund_reviews.update_many({'account':source._account_key,'email':email,'status':'review'},{'$set':{'status':'transferred_review_outage'}})\n"
+    "                db.cgpt_interventions.update_many({'kind':'migration','account':source._account_key,'email':email},{'$set':{'status':'resolved'}})\n"
+),
+'chatgpt_service': (
+    '"""Account-scoped ChatGPT adapter. Backend availability is checked, never assumed."""\n'
+    'import copy\n'
+    'import datetime as dt\n'
+    'import json\n'
+    'import re\n'
+    'import time\n'
+    'import uuid\n'
+    'from contextlib import contextmanager\n'
+    'from http.cookies import SimpleCookie\n'
+    'from bson import ObjectId\n'
+    'from pymongo.errors import DuplicateKeyError\n'
+    'from domain import ShopError\n'
+    '\n'
+    'G=None\n'
+    '\n'
+    'def configure(g):\n'
+    '    global G\n'
+    '    G=g\n'
+    '\n'
+    '\n'
+    'def date(value):\n'
+    '    if not value: return None\n'
+    '    try:\n'
+    '        if isinstance(value,(int,float)):\n'
+    '            return dt.datetime.utcfromtimestamp(value/1000 if value>10**12 else value)\n'
+    "        parsed=dt.datetime.fromisoformat(str(value).replace('Z','+00:00'))\n"
+    '        return parsed.astimezone(dt.timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed\n'
+    '    except (ValueError,TypeError,OverflowError): return None\n'
+    '\n'
+    '\n'
+    'def parse_cookies(raw):\n'
+    '    """Accept session JSON, browser cookie exports, Cookie headers, or session token."""\n'
+    "    if len(raw.encode())>262144: raise ShopError('ملف الكوكيز أكبر من 256KB.')\n"
+    "    raw=raw.strip().removeprefix('\\ufeff')\n"
+    "    if raw.startswith('```'):\n"
+    "        raw=re.sub(r'^```(?:json)?\\s*|\\s*```$','',raw)\n"
+    '    try: obj=json.loads(raw)\n'
+    '    except json.JSONDecodeError: obj=None\n'
+    "    result={'cookies':{}}\n"
+    '    if isinstance(obj,dict):\n'
+    "        for k in ('accessToken','sessionToken','account','user'):\n"
+    '            if k in obj: result[k]=obj[k]\n'
+    "        exported=obj.get('cookies',[])\n"
+    "        if isinstance(exported,dict): result['cookies'].update({str(k):str(v) for k,v in exported.items()})\n"
+    '        elif isinstance(exported,list): obj_list=exported\n'
+    "        else: raise ShopError('صيغة cookies غير صالحة.')\n"
+    "        if 'obj_list' in locals():\n"
+    '            for c in obj_list:\n'
+    "                if isinstance(c,dict) and c.get('name') and c.get('value'):\n"
+    "                    domain=str(c.get('domain','chatgpt.com')).lstrip('.')\n"
+    "                    if domain=='chatgpt.com' or domain.endswith('.chatgpt.com'):\n"
+    "                        result['cookies'][c['name']]=str(c['value'])\n"
+    '        for k,v in obj.items():\n'
+    "            if 'session-token' in k and isinstance(v,str):result['cookies'][k]=v\n"
+    '    elif isinstance(obj,list):\n'
+    "        return parse_cookies(json.dumps({'cookies':obj}))\n"
+    "    elif obj is not None: raise ShopError('أرسل كائن JSON أو قائمة كوكيز.')\n"
+    '    else:\n'
+    '        cookie=SimpleCookie()\n'
+    "        try: cookie.load(raw.removeprefix('Cookie:').strip())\n"
+    '        except Exception: pass\n'
+    "        result['cookies']={k:v.value for k,v in cookie.items()}\n"
+    "        if not result['cookies'] and raw and not re.search(r'\\s',raw):result['sessionToken']=raw\n"
+    "    for prefix in ('__Secure-next-auth.session-token','__Secure-authjs.session-token'):\n"
+    "        token=result['cookies'].get(prefix)\n"
+    '        chunks=[]\n'
+    "        for k,v in result['cookies'].items():\n"
+    "            if k.startswith(prefix+'.') and k.rsplit('.',1)[1].isdigit(): chunks.append((int(k.rsplit('.',1)[1]),v))\n"
+    '        if not token and chunks:\n'
+    '            chunks.sort()\n'
+    "            if [n for n,v in chunks]!=list(range(len(chunks))):raise ShopError('أجزاء الكوكيز غير مكتملة.')\n"
+    "            token=''.join(v for n,v in chunks)\n"
+    "        if token: result['sessionToken']=token\n"
+    "    if result.get('sessionToken') and not result['cookies']:\n"
+    "        result['cookies']['__Secure-next-auth.session-token']=str(result['sessionToken'])\n"
+    "    if not result.get('sessionToken') and not result.get('accessToken'):\n"
+    "        raise ShopError('لم أجد كوكيز جلسة صالحة أو accessToken في الملف.')\n"
+    "    for token in [result.get('accessToken',''),*result['cookies'].values()]:\n"
+    "        if not isinstance(token,str) or '\\r' in token or '\\n' in token:raise ShopError('قيمة كوكيز غير صالحة.')\n"
+    '    return result\n'
+    '\n'
+    '\n'
+    'def account_candidates(payload):\n'
+    "    accounts=payload.get('accounts',{}) if isinstance(payload,dict) else {}\n"
+    '    out=[]\n'
+    '    for key,val in accounts.items():\n'
+    '        if not isinstance(val,dict):continue\n'
+    "        acc=val.get('account',val)\n"
+    "        aid=acc.get('account_id') or acc.get('id') or (key if key!='default' else None)\n"
+    "        plan=str(acc.get('plan_type',acc.get('structure',''))).lower()\n"
+    "        if aid and (plan in ('team','business','enterprise') or acc.get('is_business')):\n"
+    "            out.append({'id':aid,'name':acc.get('name',aid),'raw':val})\n"
+    '    return out\n'
+    '\n'
+    '\n'
+    'def extract_capacity(payload):\n'
+    '    """Read explicit, account-scoped fields, not unrelated nested accounts."""\n'
+    '    candidates=[]\n'
+    "    def walk(obj,path='',depth=0):\n"
+    '        if not isinstance(obj,dict) or depth>5:return\n'
+    "        for k in ('total_seats','seat_count','paid_seats','subscription_seats','max_member_count','max_seats','member_limit','num_seats'):\n"
+    '            v=obj.get(k)\n'
+    '            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:\n'
+    '                candidates.append((int(v),path+k))\n'
+    "        for k in ('subscription','billing','plan','workspace','limits','account'):\n"
+    "            if isinstance(obj.get(k),dict):walk(obj[k],path+k+'.',depth+1)\n"
+    "        if path.startswith(('subscription.','billing.')):\n"
+    "            v=obj.get('quantity')\n"
+    "            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:candidates.append((int(v),path+'quantity'))\n"
+    '    walk(payload)\n'
+    '    if not candidates:return None,None\n'
+    '    # If fields disagree, use the smaller verified allowance, expose provenance.\n'
+    '    value,path=min(candidates)\n'
+    '    return value,path\n'
+    '\n'
+    '\n'
+    'def subscription_dates(payload):\n'
+    "    out={'renews_at':None,'expires_at':None}\n"
+    '    def walk(obj,depth=0):\n'
+    '        if not isinstance(obj,dict) or depth>4:return\n'
+    "        for k in ('subscription_end','subscription_expires_at','expires_at'):\n"
+    '            d=date(obj.get(k))\n'
+    "            if d and out['expires_at'] is None:out['expires_at']=d.isoformat()\n"
+    "        period=date(obj.get('current_period_end') or obj.get('next_billing_date'))\n"
+    '        if period:\n'
+    "            out['renews_at']=period.isoformat()\n"
+    "            if obj.get('cancel_at_period_end') is True:out['expires_at']=period.isoformat()\n"
+    "        for k in ('subscription','billing','account','plan'):walk(obj.get(k),depth+1)\n"
+    '    walk(payload)\n'
+    '    return out\n'
+    '\n'
+    '\n'
+    '@contextmanager\n'
+    'def account_lock(db,key):\n'
+    '    token=uuid.uuid4().hex; now=time.time()\n'
+    '    try:\n'
+    "        r=db.cgpt_account_locks.find_one_and_update({'_id':str(key),'expires':{'$lt':now}},\n"
+    "            {'$set':{'token':token,'expires':now+300}},upsert=True,return_document=True)\n"
+    "    except DuplicateKeyError:raise ShopError('الحساب يعالج طلبًا آخر، أعد المحاولة بعد قليل.',409)\n"
+    '    try:yield token\n'
+    "    finally:db.cgpt_account_locks.delete_one({'_id':str(key),'token':token})\n"
+    '\n'
+    '\n'
+    'class SeatManager:\n'
+    '    def __init__(self):\n'
+    "        doc=G['db'].cgpt_cookies.find_one({'_id':'main'}) or {'_id':'main','data':{}}\n"
+    '        self._init(doc)\n'
+    '\n'
+    '    @classmethod\n'
+    '    def from_doc(cls,doc):\n'
+    '        obj=cls.__new__(cls);obj._init(doc);return obj\n'
+    '\n'
+    '    def _init(self,doc):\n'
+    "        self.doc=copy.deepcopy(doc);self._account_key=str(doc.get('_id','main'))\n"
+    "        if doc.get('sealed_data'):\n"
+    '            doc=copy.deepcopy(doc)\n'
+    "            doc['data']=json.loads(G['_safe'].secret_cipher().decrypt(doc['sealed_data'].encode()))\n"
+    '            self.doc=doc\n'
+    "        c=doc.get('data',{});self.access_token=c.get('accessToken');self.session_token=c.get('sessionToken')\n"
+    "        self.cookies=c.get('cookies',{})\n"
+    "        self.account_id=c.get('account',{}).get('id');self.org_id=c.get('account',{}).get('organizationId')\n"
+    "        self.owner_email=c.get('user',{}).get('email','').lower()\n"
+    '        self._loaded=bool(self.access_token and self.account_id)\n'
+    "        self.token_file='';self.data_file='';self._last_fetch_failed=False\n"
+    '        self.reload_data()\n'
+    '\n'
+    '    def reload_data(self):\n'
+    "        rec=G['db'].cgpt_invites_data.find_one({'_id':self._account_key}) or {}\n"
+    "        self.invites_data=copy.deepcopy(rec.get('data',{'invites':{},'allowed_emails':[]}))\n"
+    "        self.invites_data.setdefault('invites',{})\n"
+    "        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))\n"
+    '        if self.owner_email:self.allowed_emails.add(self.owner_email)\n'
+    '        self._baseline=copy.deepcopy(self.invites_data)\n'
+    '\n'
+    '    def _save_data(self):\n'
+    '        current=copy.deepcopy(self.invites_data);base=self._baseline\n'
+    "        changed={k:v for k,v in current['invites'].items() if base.get('invites',{}).get(k)!=v}\n"
+    "        removed=set(base.get('invites',{}))-set(current['invites'])\n"
+    "        added_allowed=self.allowed_emails-set(base.get('allowed_emails',[]))\n"
+    "        removed_allowed=set(base.get('allowed_emails',[]))-self.allowed_emails\n"
+    '        def save(session):\n'
+    "            record=G['db'].cgpt_invites_data.find_one({'_id':self._account_key},session=session) or {}\n"
+    "            data=record.get('data',{'invites':{},'allowed_emails':[]});data.setdefault('invites',{})\n"
+    '            for email in set(changed)|removed:\n'
+    "                if data['invites'].get(email)!=base.get('invites',{}).get(email):\n"
+    "                    raise ShopError('تغير الاشتراك بالتزامن؛ أعد المحاولة.',409)\n"
+    "            data['invites'].update(changed)\n"
+    "            for email in removed:data['invites'].pop(email,None)\n"
+    "            data['allowed_emails']=list((set(data.get('allowed_emails',[]))|added_allowed)-removed_allowed)\n"
+    "            G['db'].cgpt_invites_data.update_one({'_id':self._account_key},{'$set':{'data':data},'$inc':{'revision':1}},upsert=True,session=session)\n"
+    '            return data\n'
+    "        self.invites_data=G['_safe'].finance.atomic(save);self._baseline=copy.deepcopy(self.invites_data)\n"
+    "        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))\n"
+    '\n'
+    '    def _headers(self):\n'
+    '        cookies=dict(self.cookies)\n'
+    "        if not cookies and self.session_token:cookies['__Secure-next-auth.session-token']=self.session_token\n"
+    "        h={'Accept':'application/json','Content-Type':'application/json','ChatGPT-Account-ID':str(self.account_id or '')}\n"
+    "        if self.access_token:h['Authorization']='Bearer '+self.access_token\n"
+    "        if cookies:h['Cookie']='; '.join(k+'='+v for k,v in cookies.items())\n"
+    '        return h\n'
+    '\n'
+    '    def request(self,method,path,**kwargs):\n'
+    "        if not G.get('CFFI_AVAILABLE'):raise ShopError('مكتبة curl_cffi غير مثبتة.',503)\n"
+    '        def send():\n'
+    "            return G['cffi_requests'].request(method,'https://chatgpt.com'+path,headers=self._headers(),\n"
+    "                impersonate='chrome',timeout=12,allow_redirects=False,**kwargs)\n"
+    '        r=send()\n'
+    "        if r.status_code==401 and path!='/api/auth/session' and (self.cookies or self.session_token):\n"
+    "            session=G['cffi_requests'].request('GET','https://chatgpt.com/api/auth/session',headers=self._headers(),\n"
+    "                impersonate='chrome',timeout=12,allow_redirects=False)\n"
+    '            if session.status_code==200:\n'
+    "                obj=session.json();access=obj.get('accessToken')\n"
+    '                if access and access!=self.access_token:\n'
+    '                    self.access_token=access\n'
+    '                    r=send()\n'
+    '        return r\n'
+    '\n'
+    '    def hydrate(self):\n'
+    '        if not self.access_token:\n'
+    "            r=self.request('GET','/api/auth/session')\n"
+    "            if r.status_code!=200:raise ShopError('الجلسة غير صالحة؛ أرسل كوكيز جلسة جديدة.',401)\n"
+    "            session=r.json();self.access_token=session.get('accessToken')\n"
+    "            self.owner_email=str(session.get('user',{}).get('email',self.owner_email)).lower()\n"
+    "            if not self.access_token:raise ShopError('الكوكيز لا تعطي جلسة نشطة؛ حدّثها.',401)\n"
+    "        r=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')\n"
+    "        if r.status_code==401:raise ShopError('انتهت صلاحية الكوكيز.',401)\n"
+    "        if r.status_code!=200:raise ShopError('تعذر التحقق من الحساب الآن؛ الكوكيز السابقة لم تتغير.',503)\n"
+    '        choices=account_candidates(r.json())\n'
+    '        return choices\n'
+    '\n'
+    '    def _pages(self,kind):\n'
+    '        rows=[];offset=0;seen=set()\n'
+    '        for _ in range(20):\n'
+    "            r=self.request('GET',f'/backend-api/accounts/{self.account_id}/{kind}',params={'offset':offset,'limit':100})\n"
+    '            if r.status_code!=200:\n'
+    "                self._last_fetch_status=r.status_code;raise ShopError('تعذر قراءة '+kind,r.status_code)\n"
+    '            obj=r.json()\n'
+    "            if not isinstance(obj,dict) or ('items' not in obj and kind not in obj):\n"
+    "                raise ShopError('استجابة قائمة غير معروفة؛ لن تُنفذ عمليات حذف.',503)\n"
+    "            items=obj.get('items',obj.get(kind))\n"
+    "            if not isinstance(items,list):raise ShopError('استجابة قائمة غير معروفة.',503)\n"
+    '            signature=json.dumps(items,sort_keys=True)\n'
+    "            if signature in seen and items:raise ShopError('المصدر لم يوفر الصفحة التالية.',503)\n"
+    '            seen.add(signature);rows.extend(items);offset+=len(items)\n'
+    "            total=obj.get('total',obj.get('total_count'))\n"
+    "            more=obj.get('has_more') is True\n"
+    '            if total is not None and str(total).isdigit():\n'
+    '                if offset>=int(total):return rows\n'
+    '            elif len(items)<100 and not more:return rows\n'
+    "            if not items:raise ShopError('القائمة غير مكتملة.',503)\n"
+    "        raise ShopError('القائمة أكبر من حد الفحص؛ يلزم مراجعة الإدارة.',503)\n"
+    '\n'
+    '    def _get_org_users(self):\n'
+    '        try:\n'
+    "            rows=self._pages('users');self._last_fetch_failed=False;return rows\n"
+    '        except Exception:\n'
+    '            self._last_fetch_failed=True;return []\n'
+    '\n'
+    '    def diagnose(self):\n'
+    "        rep={'loaded':self._loaded,'owner_email':self.owner_email,'account_id':self.account_id,'org_id':self.org_id,\n"
+    "             'connected':False,'used_seats':None,'total_seats':None,'available_seats':None,'status':'unknown'}\n"
+    "        if not self._loaded:return {**rep,'status':'cookies_expired','error':'أضف أو حدّث الكوكيز.'}\n"
+    '        try:\n'
+    "            users=self._pages('users');pending=self._pages('invites')\n"
+    "            member_keys={str(u.get('email',u.get('id',''))).lower() for u in users}\n"
+    "            pending_keys={str(u.get('email_address',u.get('email',u.get('id','')))).lower() for u in pending\n"
+    "                          if str(u.get('status','pending')).lower() not in ('revoked','expired','accepted','cancelled')}\n"
+    '            pending_count=len(pending_keys-member_keys)\n'
+    "            rep.update(connected=True,status='active',member_count=len(users),pending_invites=pending_count,\n"
+    '                       used_seats=len(users)+pending_count,user_emails=sorted(member_keys),pending_emails=sorted(pending_keys),\n'
+    "                       membership_evidence=[{k:str(v)[:254] for k,v in u.items() if k in ('id','user_id','invite_id','email','email_address','role','created_at','invited_by','inviter_email') and isinstance(v,(str,int))} for u in users+pending])\n"
+    '            account_data={};merged_dates={};cancellation_seen=False\n'
+    "            for suffix in ('','/subscription'):\n"
+    "                r=self.request('GET',f'/backend-api/accounts/{self.account_id}{suffix}')\n"
+    "                if r.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}\n"
+    "                if r.status_code==402:return {**rep,'connected':False,'status':'deactivated','error':'الاشتراك غير نشط.'}\n"
+    '                if r.status_code==200 and isinstance(r.json(),dict):\n'
+    "                    obj=r.json();account_data['account' if not suffix else 'subscription']=obj\n"
+    '                    for k,v in subscription_dates(obj).items():\n'
+    '                        if v:merged_dates[k]=v\n'
+    "                    if obj.get('status') in ('canceled','cancelled'):cancellation_seen=True\n"
+    "                    if obj.get('is_deactivated') is True or obj.get('status') in ('expired','unpaid'):\n"
+    "                        rep['status']='deactivated'\n"
+    "            check=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')\n"
+    "            if check.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}\n"
+    '            if check.status_code==200:\n'
+    "                selected=next((a for a in account_candidates(check.json()) if a['id']==self.account_id),None)\n"
+    "                if not selected: return {**rep,'status':'unknown','connected':False,'error':'الحساب المحدد غير موجود في الجلسة.'}\n"
+    "                account_data['workspace']=selected['raw']\n"
+    "                if selected['raw'].get('account',{}).get('is_deactivated'):rep['status']='deactivated'\n"
+    '            total,source=extract_capacity(account_data)\n'
+    "            if total is None and self.doc.get('manual_seats'):\n"
+    "                total=int(self.doc['manual_seats']);source='manual'\n"
+    '            rep.update(merged_dates)\n'
+    "            exp=date(rep.get('expires_at'))\n"
+    "            if exp and exp<=dt.datetime.utcnow():rep['status']='deactivated'\n"
+    "            if cancellation_seen and rep['status']=='active' and not exp:\n"
+    "                return {**rep,'status':'unknown','connected':False,'available_seats':None,'error':'أُلغي التجديد لكن موعد انتهاء الوصول غير مؤكد؛ راجع الحساب.'}\n"
+    "            rep.update(total_seats=total,capacity_source=source,available_seats=max(0,total-rep['used_seats']) if total is not None and rep['status']=='active' else 0 if rep['status']=='deactivated' else None)\n"
+    '            return rep\n'
+    '        except ShopError as e:\n'
+    "            return {**rep,'connected':False,'status':'cookies_expired' if e.status==401 else 'deactivated' if e.status==402 else 'unavailable','error':str(e),'http_status':e.status}\n"
+    '        except Exception:\n'
+    "            return {**rep,'connected':False,'status':'unavailable','error':'تعذر الاتصال؛ سنعيد الفحص تلقائيًا.'}\n"
+    '\n'
+    '    def check_subscription_status(self):\n'
+    "        rep=self.diagnose();return {'cookies_expired':'unauthorized','active':'active','deactivated':'deactivated'}.get(rep['status'],'error')\n"
+    '\n'
+    '    def invite_user(self,email,minutes_valid):\n'
+    '        email=str(email).strip().lower()\n'
+    "        if not re.fullmatch(r'[^@\\s<>]{1,64}@[^@\\s<>]+\\.[^@\\s<>]+',email) or len(email)>254:\n"
+    "            return {'ok':False,'definitive':True,'error':'بريد غير صالح.'}\n"
+    '        if not isinstance(minutes_valid,int) or not 1<=minutes_valid<=525600:\n'
+    "            return {'ok':False,'definitive':True,'error':'مدة غير صالحة.'}\n"
+    '        sent=False\n'
+    '        try:\n'
+    "            with account_lock(G['db'],self._account_key):\n"
+    "                self.reload_data();existing=self.invites_data['invites'].get(email)\n"
+    "                uid=getattr(self,'_last_buyer_uid',None)\n"
+    "                if existing and existing.get('telegram_uid') not in (None,uid):raise ShopError('البريد مرتبط بمشترك آخر.',409)\n"
+    '                rep=self.diagnose()\n'
+    "                if not rep['connected'] or rep['status']!='active':raise ShopError(rep.get('error','الحساب غير متاح.'),503)\n"
+    "                if email==self.owner_email:raise ShopError('بريد مالك الحساب غير قابل للبيع.')\n"
+    "                already=email in rep.get('user_emails',[]) or email in rep.get('pending_emails',[])\n"
+    "                if already and not existing:raise ShopError('البريد عضو سابق خارج اشتراكات البوت؛ راجع الإدارة.',409)\n"
+    '                if not already:\n'
+    "                    if rep.get('available_seats') is None:raise ShopError('لم يوفر الحساب سعة مؤكدة؛ يلزم ضبطها من الإدارة.',409)\n"
+    "                    if rep['available_seats']<=0:raise ShopError('نفدت المقاعد.',409)\n"
+    '                    sent=True\n'
+    "                    r=self.request('POST',f'/backend-api/accounts/{self.account_id}/invites',json={'email_addresses':[email],'role':'standard-user'})\n"
+    '                    if r.status_code not in (200,201):\n'
+    "                        return {'ok':False,'definitive':r.status_code in (400,401,402,403,404,409,422,429),'error':f'تعذر إرسال الدعوة (HTTP {r.status_code}).'}\n"
+    "                now=dt.datetime.utcnow();old=date(existing.get('expires_at')) if existing else None\n"
+    '                exp=max(now,old or now)+dt.timedelta(minutes=minutes_valid)\n'
+    "                self.invites_data['invites'][email]={**(existing or {}),'invited_at':now.isoformat(),'expires_at':exp.isoformat(),\n"
+    "                    'status':'active','minutes':minutes_valid,'telegram_uid':uid,'product_id':getattr(self,'_product_id',''),\n"
+    "                    'order_id':getattr(self,'_order_id',''),'last_job_id':getattr(self,'_job_id','')}\n"
+    '                self.allowed_emails.add(email);self._save_data()\n'
+    "                return {'ok':True,'expires_at':exp.isoformat(),'account_key':self._account_key}\n"
+    '        except Exception as e:\n'
+    "            return {'ok':False,'definitive':not sent,'error':str(e) if isinstance(e,ShopError) else 'تعذر حفظ نتيجة الدعوة؛ الطلب محفوظ للمراجعة.'}\n"
+    '\n'
+    '    def remove_by_email(self,email):\n'
+    "        if email.lower()==self.owner_email:return 'error'\n"
+    '        try:\n'
+    "            for kind,field in (('users','email'),('invites','email_address')):\n"
+    '                for item in self._pages(kind):\n'
+    "                    if str(item.get(field,item.get('email',''))).lower()==email.lower():\n"
+    "                        if str(item.get('role','')).lower() in ('owner','admin','account-owner','account-admin'):return 'error'\n"
+    "                        ident=item.get('id',item.get('user_id',item.get('invite_id')))\n"
+    "                        if not ident:return 'error'\n"
+    "                        r=self.request('DELETE',f'/backend-api/accounts/{self.account_id}/{kind}/{ident}')\n"
+    "                        return ('member' if kind=='users' else 'pending') if r.status_code in (200,204) else 'error'\n"
+    "            return 'not_found'\n"
+    "        except Exception:return 'error'\n"
+    '\n'
+    "    def remove_user_by_email(self,email):return self.remove_by_email(email) in ('member','pending')\n"
+    '    def _remove_user(self,user_id,email):return self.remove_user_by_email(email)\n'
+    '\n'
+    '    def check_and_cleanup(self):\n'
+    "        with account_lock(G['db'],self._account_key):\n"
+    '            self.reload_data();rep=self.diagnose()\n'
+    "            self._last_fetch_failed=not rep['connected']\n"
+    "            if not rep['connected'] or rep['status']!='active':return\n"
+    "            known=set(self.invites_data['invites'])|self.allowed_emails\n"
+    "            unknown=(set(rep.get('user_emails',[]))|set(rep.get('pending_emails',[])))-known\n"
+    '            for email in unknown:\n'
+    "                evidence=[e for e in rep.get('membership_evidence',[]) if str(e.get('email_address',e.get('email',''))).lower()==email]\n"
+    "                G['_safe'].issue('unknown_member',self._account_key,email,details={'observed':evidence,'attribution':'المصدر لم يثبت هوية مرسل الدعوة؛ لا طرد تلقائي بسبب الاشتباه.'})\n"
+    "            if unknown:G['_safe'].notice_once('unknown:'+self._account_key,3600,'هناك أعضاء خارج سجل البوت في حساب ChatGPT؛ راجعهم من لوحة الحساب. لم يُحذف أي عميل بسببهم.')\n"
+    '            now=dt.datetime.utcnow()\n'
+    "            for email,info in list(self.invites_data['invites'].items()):\n"
+    "                exp=date(info.get('expires_at'))\n"
+    "                info['invite_status']='accepted' if email in rep.get('user_emails',[]) else 'pending' if email in rep.get('pending_emails',[]) else 'missing'\n"
+    "                info['invite_checked_at']=now.isoformat()\n"
+    "                if info.get('status')=='active' and exp and exp>now and info['invite_status']=='missing':\n"
+    "                    G['_safe'].issue('missing_invite',self._account_key,email,info.get('telegram_uid'),{'reason':'البريد غير موجود في آخر فحص كامل.'})\n"
+    "                if info.get('status')=='active' and exp and exp<=now:\n"
+    '                    outcome=self.remove_by_email(email)\n'
+    "                    if outcome in ('member','pending','not_found'):\n"
+    "                        info['status']='expired';info['removed_at']=now.isoformat();self.allowed_emails.discard(email)\n"
+    "                        G['_safe'].queue_subscription_notice(self._account_key,email,info,'expired')\n"
+    '                    else:\n'
+    "                        G['_safe'].issue('removal_failed',self._account_key,email,info.get('telegram_uid'),{'reason':'تعذر تأكيد إزالة العضوية أو الدعوة.'})\n"
+    '            self._save_data()\n'
+    '\n'
+    '    def reload_token(self):\n'
+    "        coll=G['db'].cgpt_cookies if self._account_key=='main' else G['db'].cgpt_accounts\n"
+    "        doc=coll.find_one({'_id':'main' if self._account_key=='main' else ObjectId(self._account_key)})\n"
+    "        self._init(doc or {'_id':self._account_key,'data':{}});return self._loaded\n"
+    '    def _load_tokens(self):return self.reload_token()\n'
+    '    def list_active(self):\n'
+    '        now=dt.datetime.utcnow();out=[]\n'
+    "        for email,info in self.invites_data['invites'].items():\n"
+    "            exp=date(info.get('expires_at'))\n"
+    "            if info.get('status')=='active' and exp:\n"
+    "                out.append({'email':email,'expires_at':exp.isoformat(),'remaining_hours':max(0,int((exp-now).total_seconds()/3600)),'remaining_days':max(0,(exp-now).days)})\n"
+    '        return out\n'
+    '    def get_stats(self):\n'
+    "        n=len(self.invites_data['invites']);a=len(self.list_active());return {'total':n,'active':a,'expired':n-a}\n"
+    '    def purge_old_records(self,days_old=7):\n'
+    '        # Archive only; financial/subscription history is retained.\n'
+    '        return 0\n'
+),
+'domain': (
+    '"""Money and request validation; no network or database side effects."""\n'
+    'import base64\n'
+    'import hashlib\n'
+    'import json\n'
+    'import math\n'
+    'import re\n'
+    'from decimal import Decimal, InvalidOperation, ROUND_HALF_UP\n'
+    '\n'
+    'class ShopError(Exception):\n'
+    '    def __init__(self, message, status=400):\n'
+    '        super().__init__(message)\n'
+    '        self.status = status\n'
+    '\n'
+    '\n'
+    'def finite_float(value):\n'
+    '    result = float(value)\n'
+    '    if not math.isfinite(result):\n'
+    "        raise ValueError('A finite number is required')\n"
+    '    return result\n'
+    '\n'
+    '\n'
+    'def cents(value, minimum=0, maximum=5000000):\n'
+    '    try:\n'
+    '        amount = Decimal(str(value))\n'
+    '        if not amount.is_finite():\n'
+    '            raise ValueError()\n'
+    "        result = int((amount * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))\n"
+    '        if amount < Decimal(minimum) / 100 or result < minimum or result > maximum:\n'
+    '            raise ValueError()\n'
+    '        return result\n'
+    '    except (InvalidOperation, ValueError, TypeError, OverflowError):\n'
+    "        raise ShopError('المبلغ غير صالح أو خارج الحدود المسموحة.')\n"
+    '\n'
+    '\n'
+    'def quantity(value, maximum=50):\n'
+    "    if isinstance(value, bool) or not re.fullmatch(r'[0-9]{1,9}', str(value)):\n"
+    "        raise ShopError('الكمية يجب أن تكون عددًا صحيحًا موجبًا.')\n"
+    '    n = int(value)\n'
+    '    if not 1 <= n <= maximum:\n'
+    "        raise ShopError(f'الكمية المسموحة من 1 إلى {maximum}.')\n"
+    '    return n\n'
+    '\n'
+    '\n'
+    'def canonical_tx(value):\n'
+    "    raw = str(value or '').strip()\n"
+    "    if not raw or len(raw) > 512 or re.search(r'\\s', raw):\n"
+    "        raise ShopError('معرّف عملية غير صالح.')\n"
+    "    h = raw[2:] if raw.lower().startswith('0x') else raw\n"
+    "    if re.fullmatch(r'[a-fA-F0-9]{64}', h):\n"
+    '        return h.lower()\n'
+    '    if len(raw) in (43,44):\n'
+    '        try:\n'
+    "            data = base64.b64decode(raw + '=' * (-len(raw) % 4), altchars=b'-_', validate=True)\n"
+    '            if len(data) == 32:\n'
+    '                return data.hex()\n'
+    '        except ValueError:\n'
+    '            pass\n'
+    '    return raw  # Opaque provider IDs are case-sensitive; preserve punctuation.\n'
+    '\n'
+    '\n'
+    'def payment_namespace(method):\n'
+    '    text = method.lower()\n'
+    "    if 'star' in text: return 'telegram-stars'\n"
+    "    if 'litecoin' in text or 'ltc' in text: return 'ltc'\n"
+    "    if 'ton' in text: return 'ton'\n"
+    "    if 'bep' in text or 'bsc' in text: return 'bsc-usdt'\n"
+    "    if 'trc' in text or 'tron' in text: return 'tron-usdt'\n"
+    "    if 'bybit' in text: return 'bybit'\n"
+    "    if 'binance' in text: return 'binance'\n"
+    '    return text.strip()\n'
+    '\n'
+    '\n'
+    'def digest(*parts):\n'
+    '    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()\n'
+),
 }
 class _ShopbotModuleLoader(_bundle_abc.MetaPathFinder, _bundle_abc.Loader):
     def find_spec(self, fullname, path=None, target=None):
@@ -2646,7 +2748,7 @@ except ImportError:
     sys.exit(1)
 
 from binance.client import Client as BinanceClient
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 # ===== ChatGPT Business Seat Manager =====
 try:
@@ -6511,12 +6613,6 @@ def _is_bad_translation(src_text, result):
     return False
 
 
-def _translate_text_raw(text, target_lang, tries=3):
-    """يترجم نصاً خالصاً (بلا وسوم) مع رفض الردود الفاسدة.
-    يرجّع الترجمة أو None (فيبقى النص الأصلي بدل نص مشوّه)."""
-    if not text or not text.strip():
-        return None
-
 def _translate_text_raw(text, target_lang, tries=1):
     """يترجم نصاً. مهم: مهلة قصيرة جداً ومحاولة واحدة فقط لتجنّب تعليق الواجهة.
     لو الترجمة فشلت، نرجّع None فوراً ويُستخدم النص الأصلي — أفضل من تعليق 30 ثانية."""
@@ -6530,7 +6626,15 @@ def _translate_text_raw(text, target_lang, tries=1):
             logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
     except Exception as e:
         logger.debug(f"translate direct err: {e}")
-    # لا بروكسيات (كانت تعلّق حتى 32 ثانية عند الفشل) — نرجّع None فوراً
+    # مزود احتياطي: Render قد يتلقى حظراً مؤقتاً من Google Translate.
+    try:
+        source_lang = 'ar' if target_lang == 'en' else 'en'
+        r = MyMemoryTranslator(source=source_lang, target=target_lang).translate(text=text)
+        if r and not _is_bad_translation(text, r):
+            return str(r)
+    except Exception as e:
+        logger.debug(f"translate fallback err: {e}")
+    # لا بروكسيات بطيئة — نرجّع None ويحتفظ المستدعي بالنص الأصلي.
     return None
 
 
@@ -7633,17 +7737,20 @@ def start_handler(message):
         args = full_text.split()
         ref_candidate = args[1] if len(args) > 1 and args[1].isdigit() else None
         
-        db.users.insert_one({
-            'user_id': uid, 'name': from_user.first_name, 'username': uname, 
-            'balance': 0.0, 'ref_v2_earned': 0.0,
-            'lang_chosen': False, 'lang': 'ar', 'is_admin': 0, 'is_banned': 0
-        })
+        try:
+            result=db.users.update_one({'user_id':uid},{'$setOnInsert':{
+                'name':from_user.first_name,'balance':0.0,'ref_v2_earned':0.0,
+                'lang_chosen':False,'lang':'ar','is_admin':0,'is_banned':0},
+                '$set':{'username':uname}},upsert=True)
+            user_was_new=result.upserted_id is not None
+        except __import__('pymongo.errors',fromlist=['DuplicateKeyError']).DuplicateKeyError:
+            user_was_new=False
         _invalidate_user_cache(uid)
         user = get_user_data_full(uid, use_cache=False)
         
         # 🎯 تسجيل الإحالة فقط لو المستخدم جديد كلياً
         # المستخدم الموجود مسبقاً لا يُحسب أبداً
-        if ref_candidate:
+        if ref_candidate and user_was_new:
             try:
                 referrer_id = int(ref_candidate)
                 if referrer_id != uid:
@@ -7719,7 +7826,6 @@ def start_handler(message):
                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
     markup.add(create_btn(uid, 'btn_invite', callback_data="open_invite"),
                create_btn(uid, 'btn_support', callback_data="cgb_support"))
-    markup.add(InlineKeyboardButton("🤖 اشتراكي في ChatGPT", callback_data="cgb_portal"))
     # ⚙️ الإعدادات: يجمع الملف الشخصي واللغة (نص قابل للتعديل من CMS)
     markup.add(create_btn(uid, 'btn_settings', callback_data="open_settings"))
 
@@ -12361,7 +12467,35 @@ def cmd_bybit_match(message):
 
 
 def _ext_broadcast_new_product(ep):
-    return  # Automatic external-product announcements are disabled.
+    """يبثّ رسالة 'منتج جديد' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    if not ep:
+        return
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+        stk = ep.get('stock', 0)
+        users = list(db.users.find({'is_banned':{'$ne':1},'broadcast_disabled':{'$ne':True}}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                delivery = "تلقائي ⚡" if u_lang == 'ar' else "Auto ⚡"
+                p_desc = str(ep.get('desc', ''))[:200]
+                alert_msg = get_text(uid_u, 'new_product', p_name, f"{price:.2f}", delivery, p_desc)
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                db.notifications.update_one({'_id':'ext-new:'+epid+':'+str(uid_u)},{'$setOnInsert':{'uids':[uid_u],'text':alert_msg,'markup':markup.to_json(),'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)
+                pass
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_new_product err: {_e}")  # Automatic external-product announcements are disabled.
 
 
 def _ext_broadcast_stock(ep):
@@ -12369,7 +12503,36 @@ def _ext_broadcast_stock(ep):
 
 
 def _ext_broadcast_price_drop(ep, old_price, new_price):
-    return  # Price changes are silent.
+    """يبثّ رسالة 'تخفيض السعر' لكل مستخدمي البوت لمنتج API."""
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        users = list(db.users.find({'is_banned':{'$ne':1},'broadcast_disabled':{'$ne':True}}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                if u_lang == 'ar':
+                    msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>سارع بالشراء الآن!</i>")
+                else:
+                    msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>Buy now!</i>")
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                db.notifications.update_one({'_id':'ext-price:'+epid+':'+str(old_price)+':'+str(new_price)+':'+str(uid_u)},{'$setOnInsert':{'uids':[uid_u],'text':msg,'markup':markup.to_json(),'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)
+                pass
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_price_drop err: {_e}")  # Price changes are silent.
 
 
 def _auto_sync_ext_stores():
@@ -14448,6 +14611,8 @@ def ext_add_new_product(call):
         'sell_price': _sell0, 'hidden': False, 'raw': p,
     }
     res = db.ext_products.insert_one(doc)
+    if not doc.get('hidden'):
+        threading.Thread(target=_ext_broadcast_new_product,args=({**doc,'_id':res.inserted_id},),daemon=True).start()
     db.ext_pending_new.delete_many({'store_id': sid, 'ext_id': ext_id})
     # برودكاست منتج جديد — للعملاء عبر API + لمستخدمي البوت
     try:
@@ -14933,6 +15098,8 @@ def _ext_save_price(message, pid, ptype):
     sell = _ext_compute_sell_price(_cost, ptype, val)
     db.ext_products.update_one({'_id': p['_id']},
         {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
+    if old_sell>0 and sell<old_sell and not p.get('hidden'):
+        threading.Thread(target=_ext_broadcast_price_drop,args=(p,old_sell,sell),daemon=True).start()
     bot.send_message(message.chat.id,
         f"✅ تم التسعير!\n💵 سعر API: ${finite_float(p.get('base_price',0)):.2f}\n"
         f"💰 سعر البيع: <b>${sell:.2f}</b>", parse_mode="HTML")
@@ -18171,12 +18338,22 @@ def cgpt_diagnose(call):
     return _safe.accounts_ui(call)
 
 
+
+def _recorded_order_unit_price(order):
+    qty=max(1,int(order.get('qty',order.get('quantity',1))))
+    if order.get('total_price') is not None:return finite_float(order['total_price'])/qty
+    if order.get('price') is not None:return finite_float(order['price'])
+    return 0.0
+
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_customers")
 @admin_required
 def cgpt_customers(call):
     bot.answer_callback_query(call.id)
-    mgr = get_cgpt_manager()
-    stats = mgr.get_stats()
+    stats={'active':0,'expired':0}
+    for record in db.cgpt_invites_data.find({}):
+        for info in record.get('data',{}).get('invites',{}).values():
+            state=info.get('status')
+            if state in stats:stats[state]+=1
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("\U0001f7e2 \u0627\u0644\u0646\u0634\u0637\u0648\u0646", callback_data="cgpt_cust_active"),
@@ -18193,25 +18370,22 @@ def cgpt_customers(call):
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
     except:
         bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
-@bot.callback_query_handler(func=lambda call: call.data in ["cgpt_cust_active", "cgpt_cust_expired", "cgpt_cust_violated"])
+@bot.callback_query_handler(func=lambda call: bool(re.fullmatch(r"cgpt_cust_(active|expired|violated)(?:_\d+)?", call.data or "")))
 @admin_required
 def cgpt_cust_view(call):
     """يعرض العملاء (عبر كل الحسابات) مع زر حذف لكل واحد."""
     try: bot.answer_callback_query(call.id)
     except Exception: pass
-    mode = call.data.replace("cgpt_cust_", "")
+    parts=call.data.removeprefix("cgpt_cust_").split("_")
+    mode=parts[0];page=int(parts[1]) if len(parts)>1 else 0
     titles = {"active": "🟢 النشطون", "expired": "🔴 المنتهون", "violated": "⛔️ المخالفون"}
     title = titles.get(mode, "")
     # نجمع من كل الحسابات
     all_items = []  # (email, info, account_id, account_email)
-    for doc in _cgpt_all_accounts():
-        acc_id = str(doc.get('_id'))
-        try:
-            idata = db.cgpt_invites_data.find_one({'_id': acc_id})
-            invites = (idata.get('data', {}).get('invites', {})) if idata else {}
-        except Exception:
-            invites = {}
-        acc_email = doc.get('data', {}).get('user', {}).get('email', 'حساب')
+    for idata in db.cgpt_invites_data.find({}):
+        acc_id = str(idata['_id'])
+        invites = idata.get('data', {}).get('invites', {})
+        acc_email = acc_id
         for email, info in invites.items():
             if info.get('status') == mode:
                 all_items.append((email, info, acc_id, acc_email))
@@ -18220,7 +18394,9 @@ def cgpt_cust_view(call):
         txt = title + "\n\nلا يوجد."
     else:
         txt = title + f"\n\nالعدد: {len(all_items)}\n\n"
-        for idx, (email, info, acc_id, acc_email) in enumerate(all_items[:25], 1):
+        all_items.sort(key=lambda row: row[1].get("invited_at", ""), reverse=True)
+        page=min(page,(len(all_items)-1)//25)
+        for idx, (email, info, acc_id, acc_email) in enumerate(all_items[page*25:(page+1)*25], page*25+1):
             exp = info.get('expires_at', '')[:10]
             uid_tg = info.get('telegram_uid', '')
             line = f"{idx}. <code>{email}</code>"
@@ -18240,6 +18416,8 @@ def cgpt_cust_view(call):
                     'snapshot':{k:info.get(k) for k in ('status','expires_at','telegram_uid','last_job_id')},
                     'expires':time.time()+900,'status':'ready'})
                 markup.add(InlineKeyboardButton(f"🚫 طرد: {email[:28]}",callback_data='cgptdel_v2_'+token))
+    if page>0:markup.add(InlineKeyboardButton("⬅️ السابق",callback_data=f"cgpt_cust_{mode}_{page-1}"))
+    if (page+1)*25<len(all_items):markup.add(InlineKeyboardButton("التالي ➡️",callback_data=f"cgpt_cust_{mode}_{page+1}"))
     # نحفظ القائمة مؤقتاً للحذف
     try:
         db.cgpt_del_cache.update_one({'_id': f"{call.from_user.id}_{mode}"},
@@ -20262,8 +20440,8 @@ def ad_uh_buy_handler(call):
     for r in recs:
         try:
             p = find_product(str(r.get('product_id', '')))
-            price = finite_float(p.get('price', 0)) if p else 0
-            qty = int(r.get('quantity', 1))
+            price = _recorded_order_unit_price(r)
+            qty = int(r.get('qty', r.get('quantity', 1)))
             total_spent += price * qty
         except: pass
     
@@ -20280,15 +20458,15 @@ def ad_uh_buy_handler(call):
         try:
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
             pid = str(r.get('product_id', ''))
-            qty = int(r.get('quantity', 1))
+            qty = int(r.get('qty', r.get('quantity', 1)))
             
             if pid in ['GitHub_Student', 'Gemini_Activation']:
                 p_name = pid.replace('_', ' ')
-                price = 0
+                price = _recorded_order_unit_price(r)
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0
+                price = _recorded_order_unit_price(r)
             
             text += (
                 f"\n#{i} 📦 <b>{p_name}</b>\n"
@@ -20330,15 +20508,15 @@ def ad_dlbuy_handler(call):
         try:
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
             pid = str(r.get('product_id', ''))
-            qty = int(r.get('quantity', 1))
+            qty = int(r.get('qty', r.get('quantity', 1)))
             
             if pid in ['GitHub_Student', 'Gemini_Activation']:
                 p_name = pid.replace('_', ' ')
-                price = 0
+                price = _recorded_order_unit_price(r)
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0
+                price = _recorded_order_unit_price(r)
             
             subtotal = price * qty
             total_spent += subtotal
@@ -20469,13 +20647,13 @@ def ad_full_history_handler(call):
         try:
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
             pid = str(r.get('product_id', ''))
-            qty = int(r.get('quantity', 1))
+            qty = int(r.get('qty', r.get('quantity', 1)))
             if pid in ['GitHub_Student', 'Gemini_Activation']:
-                p_name = pid.replace('_', ' '); price = 0.0
+                p_name = pid.replace('_', ' '); price = _recorded_order_unit_price(r)
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'محذوف'))) if p else 'محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0.0
+                price = _recorded_order_unit_price(r)
             subtotal = price * qty; total_spent += subtotal
             
             # نجمع كل الأكواد من هذا الطلب
