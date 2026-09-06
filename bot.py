@@ -1,5 +1,4 @@
-# [merged] from domain import finite_float, ShopError
-# [merged] from runtime import Runtime
+# ===== BOT VERSION: FULL-COMPLETE (كل القوالب والميزات) — 2026-09-06 =====
 import sys
 import os
 import functools
@@ -51,2028 +50,6 @@ except ImportError:
 import uuid as _uuid_mod
 import datetime as _dt_mod
 from pymongo import MongoClient
-
-# ======================================================================
-# ابدأ الوحدات المدموجة (كانت ملفات منفصلة، دُمجت في bot.py)
-# ======================================================================
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: domain.py ──
-# ────────────────────────────────────────────────────────────
-"""Money and request validation; no network or database side effects."""
-import base64
-import hashlib
-import json
-import math
-import re
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-
-class ShopError(Exception):
-    def __init__(self, message, status=400):
-        super().__init__(message)
-        self.status = status
-
-
-def finite_float(value):
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError('A finite number is required')
-    return result
-
-
-def cents(value, minimum=0, maximum=5000000):
-    try:
-        amount = Decimal(str(value))
-        if not amount.is_finite():
-            raise ValueError()
-        result = int((amount * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
-        if amount < Decimal(minimum) / 100 or result < minimum or result > maximum:
-            raise ValueError()
-        return result
-    except (InvalidOperation, ValueError, TypeError, OverflowError):
-        raise ShopError('المبلغ غير صالح أو خارج الحدود المسموحة.')
-
-
-def quantity(value, maximum=50):
-    if isinstance(value, bool) or not re.fullmatch(r'[0-9]{1,9}', str(value)):
-        raise ShopError('الكمية يجب أن تكون عددًا صحيحًا موجبًا.')
-    n = int(value)
-    if not 1 <= n <= maximum:
-        raise ShopError(f'الكمية المسموحة من 1 إلى {maximum}.')
-    return n
-
-
-def canonical_tx(value):
-    raw = str(value or '').strip()
-    if not raw or len(raw) > 512 or re.search(r'\s', raw):
-        raise ShopError('معرّف عملية غير صالح.')
-    h = raw[2:] if raw.lower().startswith('0x') else raw
-    if re.fullmatch(r'[a-fA-F0-9]{64}', h):
-        return h.lower()
-    if len(raw) in (43,44):
-        try:
-            data = base64.b64decode(raw + '=' * (-len(raw) % 4), altchars=b'-_', validate=True)
-            if len(data) == 32:
-                return data.hex()
-        except ValueError:
-            pass
-    return raw  # Opaque provider IDs are case-sensitive; preserve punctuation.
-
-
-def payment_namespace(method):
-    text = method.lower()
-    if 'star' in text: return 'telegram-stars'
-    if 'litecoin' in text or 'ltc' in text: return 'ltc'
-    if 'ton' in text: return 'ton'
-    if 'bep' in text or 'bsc' in text: return 'bsc-usdt'
-    if 'trc' in text or 'tron' in text: return 'tron-usdt'
-    if 'bybit' in text: return 'bybit'
-    if 'binance' in text: return 'binance'
-    return text.strip()
-
-
-def digest(*parts):
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: network.py ──
-# ────────────────────────────────────────────────────────────
-"""Outbound webhook client with DNS pinning, TLS verification and no redirects."""
-import http.client
-import ipaddress
-import json
-import socket
-import ssl
-from urllib.parse import urlsplit
-# [merged] from domain import ShopError
-
-
-def public_endpoint(url):
-    p=urlsplit(url)
-    if p.scheme!='https' or not p.hostname or p.username or p.password or p.fragment:
-        raise ShopError('رابط webhook يجب أن يكون HTTPS عامًا بلا بيانات دخول.')
-    if p.port not in (None,443):raise ShopError('webhook يدعم المنفذ 443 فقط.')
-    try:
-        addresses={x[4][0] for x in socket.getaddrinfo(p.hostname,443,type=socket.SOCK_STREAM)}
-        if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):raise ValueError()
-    except (OSError,ValueError):raise ShopError('وجهة webhook غير متاحة أو غير عامة.')
-    return p,sorted(addresses)[0]
-
-
-def post_webhook(url,body,headers):
-    p,address=public_endpoint(url)
-    conn=http.client.HTTPSConnection(p.hostname,443,timeout=8,context=ssl.create_default_context())
-    # Connect to the validated address; TLS still authenticates the original hostname.
-    raw=socket.create_connection((address,443),timeout=8)
-    try:
-        conn.sock=ssl.create_default_context().wrap_socket(raw,server_hostname=p.hostname)
-        conn.request('POST',p.path or '/' if not p.query else (p.path or '/')+'?'+p.query,body=body,headers=headers)
-        response=conn.getresponse();status=response.status;response.read(1024)
-        return 200<=status<300
-    finally:
-        conn.close();raw.close()
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: finance.py ──
-# ────────────────────────────────────────────────────────────
-"""Durable financial operations. MongoDB replica-set transactions are required."""
-import datetime as dt
-import time
-import uuid
-from pymongo import ReturnDocument
-from pymongo.read_concern import ReadConcern
-from pymongo.write_concern import WriteConcern
-# [merged] from domain import ShopError, cents, quantity, canonical_tx, payment_namespace, digest
-
-class Finance:
-    def __init__(self, db): self.db = db
-
-    def atomic(self, callback):
-        with self.db.client.start_session() as session:
-            return session.with_transaction(callback, read_concern=ReadConcern('snapshot'), write_concern=WriteConcern('majority'))
-
-    def user(self, uid, session):
-        u = self.db.users.find_one({'user_id': uid}, session=session)
-        if not u or u.get('is_banned') == 1:
-            raise ShopError('الحساب غير متاح.', 403)
-        return u
-
-    def change(self, uid, amount_cents, key, session, reason):
-        old = self.db.wallet_ledger.find_one({'_id': key}, session=session)
-        if old:
-            if old['user_id'] != uid or old['amount_cents'] != amount_cents:
-                raise ShopError('تعارض في هوية العملية المالية.', 409)
-            return old
-        u = self.user(uid, session) if amount_cents < 0 else self.db.users.find_one({'user_id':uid},session=session)
-        if not u:raise ShopError('الحساب غير موجود.',404)
-        balance = cents(u.get('balance', 0), minimum=-5000000, maximum=100000000000)
-        if balance + amount_cents < 0: raise ShopError('رصيدك غير كافٍ.', 402)
-        updated = self.db.users.update_one({'_id': u['_id'], 'balance': u.get('balance', 0)},
-            {'$set': {'balance': (balance + amount_cents)/100}}, session=session)
-        if updated.matched_count != 1: raise ShopError('تغير الرصيد، أعد المحاولة.',409)
-        rec = {'_id':key, 'user_id':uid, 'amount_cents':amount_cents,
-               'balance_after_cents':balance+amount_cents, 'reason':reason, 'created_at':dt.datetime.utcnow()}
-        self.db.wallet_ledger.insert_one(rec, session=session)
-        return rec
-
-    def credit(self, uid, amount, txid, method, pending_id=None):
-        value=cents(amount,minimum=10)
-        tx=canonical_tx(txid)
-        # Blockchain transaction hashes must not be reused via another provider/label.
-        ns=payment_namespace(method)
-        key=digest('credit', 'chain' if len(tx)==64 and all(c in '0123456789abcdef' for c in tx) else ns,tx)
-        def work(s):
-            old=self.db.wallet_ledger.find_one({'_id':key},session=s)
-            if old:
-                if old['user_id'] != uid: raise ShopError('العملية مسجلة لحساب آخر؛ راجع الإدارة.',409)
-                return {'ok':True,'already':True,'amount':old['amount_cents']/100}
-            # Preserve historical records. Never guess whether an old split write credited a user.
-            legacy=self.db.used_transactions.find_one({'transaction_id':{'$in':[tx,str(txid).strip(),str(txid).strip().lower(),str(txid).replace('0x','').lower()]}},session=s)
-            if legacy:
-                raise ShopError('عملية قديمة مسجلة؛ يلزم مطابقة السجل المالي من الإدارة.',409)
-            p=None
-            if pending_id:
-                p=self.db.pending_deposits.find_one({'pending_id':pending_id,'user_id':uid,'status':{'$in':['pending','processing']}},session=s)
-                if not p: raise ShopError('طلب الإيداع غير متاح.',409)
-            self.change(uid,value,key,s,'deposit')
-            self.db.used_transactions.insert_one({'transaction_id':tx,'namespace':ns,'ledger_id':key,
-                'amount':value/100,'user_id':uid,'method':method,'created_at':int(time.time())},session=s)
-            if p:
-                self.db.pending_deposits.update_one({'_id':p['_id']},{'$set':{'status':'completed','credited_usd':value/100,'tx_id_detected':tx,'completed_at':int(time.time())}},session=s)
-                self.db.users.update_one({'user_id':uid,'deposit_lock_pending_id':pending_id},{'$set':{'deposit_locked':False},'$unset':{'deposit_lock_pending_id':'','deposit_lock_expires':''}},session=s)
-            return {'ok':True,'already':False,'amount':value/100}
-        return self.atomic(work)
-
-    def buy_stock(self,uid,pid,qty,idem,via_api=False,buyer_info=''):
-        qty=quantity(qty); pid=str(pid)
-        key=digest('order',uid,idem); request=digest(pid,qty,buyer_info)
-        oid=uuid.uuid4().hex
-        def work(s):
-            self.user(uid,s)
-            old=self.db.shop_orders.find_one({'_id':key},session=s)
-            if old:
-                if old['request_hash']!=request: raise ShopError('مفتاح الطلب مستعمل لطلب مختلف.',409)
-                return old
-            qs=[{'id':pid},{'_id':pid}]
-            if pid.isdigit(): qs.extend([{'id':int(pid)},{'id':float(pid)}])
-            from bson import ObjectId
-            if ObjectId.is_valid(pid): qs.append({'_id':ObjectId(pid)})
-            p=self.db.products.find_one({'$or':qs,'is_hidden':{'$ne':True}},session=s)
-            if not p: raise ShopError('المنتج غير متاح.',404)
-            if p.get('product_type') in ('chatgpt_seat','cgpt_main'):
-                raise ShopError('اختر باقة ChatGPT وأدخل البريد من شاشة الاشتراكات.')
-            unit=cents(p.get('price',0),minimum=1)
-            for t in sorted(p.get('discount_tiers',[]),key=lambda x:x.get('min_qty',0),reverse=True):
-                if qty>=quantity(t.get('min_qty',1),1000):
-                    unit=cents(t.get('price',unit/100),minimum=1); break
-            total=unit*qty
-            if total>5000000: raise ShopError('قيمة الطلب أعلى من الحد المسموح.')
-            canonical=str(p.get('id',p['_id'])); codes=[]
-            if not p.get('is_manual'):
-                values=[canonical]
-                if canonical.isdigit(): values.extend([int(canonical),float(canonical)])
-                for _ in range(qty):
-                    item=self.db.product_stock.find_one_and_update({'product_id':{'$in':values},'is_sold':False},
-                        {'$set':{'is_sold':True,'order_id':oid,'sold_at':int(time.time())}},return_document=ReturnDocument.AFTER,session=s)
-                    if not item or not item.get('code_line'): raise ShopError('المخزون غير كافٍ؛ لم يُخصم رصيد.',409)
-                    codes.append(item['code_line'])
-            ledger=self.change(uid,-total,'debit:'+key,s,'purchase')
-            rec={'_id':key,'order_id':oid,'user_id':uid,'product_id':canonical,'product_name':p.get('name_ar',p.get('name_en','')),
-                'qty':qty,'unit_price':unit/100,'total_price':total/100,'codes':codes,'request_hash':request,
-                'status':'pending_manual' if p.get('is_manual') else 'completed','delivery_status':'pending',
-                'via_api':via_api,'buyer_info':buyer_info,'created_at':dt.datetime.utcnow(),'new_balance':ledger['balance_after_cents']/100}
-            self.db.shop_orders.insert_one(rec,session=s)
-            for code in codes or ['طلب يدوي: '+oid]:
-                self.db.orders.insert_one({'user_id':uid,'order_id':oid,'product_id':canonical,'code_delivered':code,
-                    'qty':1 if codes else qty,'price':unit/100,'total_price':unit/100 if codes else total/100,
-                    'status':rec['status'],'via_api':via_api,'created_at':dt.datetime.utcnow()},session=s)
-            if via_api:
-                self.db.api_orders.insert_one({k:v for k,v in {**rec,'api_user_id':uid}.items() if k!='_id'},session=s)
-            return rec
-        return self.atomic(work)
-
-    def reserve_external(self,uid,amount,idem,kind,details):
-        value=cents(amount,minimum=1); key=digest('external',uid,idem); signature=digest(kind,details,value)
-        def work(s):
-            self.user(uid,s)
-            old=self.db.external_jobs.find_one({'_id':key},session=s)
-            if old:
-                if old['signature']!=signature: raise ShopError('مفتاح الطلب مستخدم لعملية مختلفة.',409)
-                return old
-            self.change(uid,-value,'debit:'+key,s,kind)
-            doc={'_id':key,'order_id':uuid.uuid4().hex,'user_id':uid,'amount_cents':value,'signature':signature,
-                 'kind':kind,'details':details,'status':'queued','created_at':dt.datetime.utcnow()}
-            self.db.external_jobs.insert_one(doc,session=s)
-            return doc
-        return self.atomic(work)
-
-    def refund(self,jobid,reason):
-        def work(s):
-            j=self.db.external_jobs.find_one({'_id':jobid},session=s)
-            if not j: raise ShopError('الطلب غير موجود.',404)
-            if j['status']=='refunded': return j
-            if j['status'] not in ('queued','rejected'): raise ShopError('نتيجة الطلب غير محسومة؛ يلزم التحقق قبل الاسترجاع.',409)
-            self.change(j['user_id'],j['amount_cents'],'refund:'+jobid,s,reason)
-            self.db.external_jobs.update_one({'_id':jobid},{'$set':{'status':'refunded','refund_reason':reason}},session=s)
-            return {**j,'status':'refunded'}
-        return self.atomic(work)
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: cms.py ──
-# ────────────────────────────────────────────────────────────
-import html
-import string
-from html.parser import HTMLParser
-# [merged] from domain import ShopError
-
-TEMPLATES={
-'ask_email':('طلب البريد','📧 أرسل بريد حساب ChatGPT لباقة {product}.\n💰 السعر: ${price}\nلن يُخصم الرصيد حتى التأكيد.','📧 Send your ChatGPT email for {product}.\n💰 Price: ${price}\nYour balance is charged after confirmation.'),
-'confirm_email':('تأكيد البريد','📧 البريد: <code>{email}</code>\n📦 {product}\n⏱ {duration}\n💰 ${price}\nهل تؤكد الشراء؟','📧 Email: <code>{email}</code>\n📦 {product}\n⏱ {duration}\n💰 ${price}\nConfirm purchase?'),
-'invite_success':('نجاح الدعوة','✅ اشتراكك جاهز!\n📧 <code>{email}</code>\n⏱ ينتهي: {expires}\n📩 اقبل الدعوة من بريدك إذا كانت جديدة.\n\n🔎 لعرض اشتراكاتك والتجديد اكتب: /my_chatgpt','✅ Your subscription is ready!\n📧 <code>{email}</code>\n⏱ Expires: {expires}\n📩 Accept the email invitation if this is a new subscription.\n\n🔎 To view your subscriptions & renew, type: /my_chatgpt'),
-'reminder':('تذكير قبل الانتهاء','⏳ اشتراكك يقترب من الانتهاء.\n📧 <code>{email}</code>\n⏱ متبقّي نحو {hours} ساعة.\nجدد من الزر أدناه للحفاظ على المدة المتبقية.','⏳ Your subscription expires soon.\n📧 <code>{email}</code>\n⏱ About {hours} hours left.\nRenew below; your remaining time is preserved.'),
-'expired':('انتهاء اشتراك العميل','انتهت مدة اشتراكك في ChatGPT.\n📧 <code>{email}</code>\nيمكنك التجديد من الزر أدناه.','Your ChatGPT subscription has expired.\n📧 <code>{email}</code>\nRenew using the button below.'),
-'cookie_expired':('تنبيه الكوكيز للإدارة','🍪 انتهت جلسة حساب {account}.\nاضغط تحديث الكوكيز وأرسل نصًا أو ملف JSON/TXT. بيانات العملاء محفوظة.','🍪 The session for {account} expired.\nUpdate cookies using text or a JSON/TXT file. Customer subscriptions are preserved.'),
-'account_expired':('انتهاء اشتراك الحساب للإدارة','⚠️ اشتراك حساب {account} غير نشط.\nأوقف البوت البيع عليه. راجع التجديد أو نقل العملاء ذوي المدة المتبقية.','⚠️ Workspace subscription {account} is inactive.\nNew sales are paused. Renew it or move customers with remaining time.'),
-'unavailable':('تعذر الدعوة','⚠️ تعذر إكمال الدعوة الآن. طلبك محفوظ برقم {order_id}. ستراجع الإدارة نتيجته قبل أي استرجاع.','⚠️ The invitation result is not confirmed. Order {order_id} is saved for review before any refund.'),
-'refunded':('استرجاع طلب مرفوض','أُعيد رصيد طلبك {order_id} لأن الدعوة لم تُنفذ. يمكنك المحاولة مجددًا.','Order {order_id} was refunded because the invitation was rejected. You can try again.'),
-'no_seats':('نفاد المقاعد','لا توجد مقاعد مؤكدة متاحة الآن. حاول لاحقًا أو تواصل مع الدعم.','No verified seats are available. Please try later or contact support.'),
-'btn_renew':('زر التجديد','🔄 تجديد الاشتراك','🔄 Renew subscription'),
-'btn_confirm':('زر تأكيد الشراء','✅ تأكيد الشراء','✅ Confirm purchase'),
-'btn_change':('زر تغيير البريد','✏️ تغيير البريد','✏️ Change email'),
-'btn_cancel':('زر الإلغاء','❌ إلغاء','❌ Cancel'),
-}
-FIELDS={'email','product','duration','price','expires','hours','account','order_id'}
-
-class TelegramHTML(HTMLParser):
-    tags={'b','strong','i','em','u','ins','s','strike','del','span','tg-spoiler','code','pre','a','tg-emoji','blockquote'}
-    def __init__(self):super().__init__();self.stack=[]
-    def handle_starttag(self,tag,attrs):
-        if tag not in self.tags:raise ShopError('وسم HTML غير مدعوم: '+tag)
-        attrs=dict(attrs)
-        allowed={'a':{'href'},'tg-emoji':{'emoji-id'},'span':{'class'},'code':{'class'},'blockquote':{'expandable'}}.get(tag,set())
-        if set(attrs)-allowed:raise ShopError('خصائص HTML غير مسموحة.')
-        if tag=='a' and not str(attrs.get('href','')).startswith(('https://','tg://')):raise ShopError('الرابط غير صالح.')
-        if tag=='tg-emoji' and not str(attrs.get('emoji-id','')).isdigit():raise ShopError('معرّف الإيموجي غير صالح.')
-        self.stack.append(tag)
-    def handle_endtag(self,tag):
-        if not self.stack or self.stack.pop()!=tag:raise ShopError('تنسيق HTML غير متوازن.')
-    def handle_startendtag(self,tag,attrs):raise ShopError('وسم غير مدعوم.')
-
-def validate_template(text,button=False):
-    if not text or len(text)> (64 if button else 3000):raise ShopError('النص فارغ أو أطول من الحد المسموح.')
-    try:
-        for _,field,spec,conversion in string.Formatter().parse(text):
-            if field is not None and (field not in FIELDS or spec or conversion):raise ShopError('متغير غير معروف أو تنسيق متغير غير مسموح.')
-    except ValueError:raise ShopError('أقواس المتغيرات غير متوازنة.')
-    if not button:
-        parser=TelegramHTML();parser.feed(text);parser.close()
-        if parser.stack:raise ShopError('تنسيق HTML غير مكتمل.')
-    elif '<' in text or '>' in text:raise ShopError('نص الزر لا يستعمل وسوم HTML؛ يمكن اختيار إيموجي من الرسالة.')
-    return text
-
-
-def render(db,key,lang,**values):
-    lang='en' if lang=='en' else 'ar'
-    doc=db.custom_texts.find_one({'key':'cgpt_'+key,'lang':lang}) or {}
-    default=TEMPLATES[key][2 if lang=='en' else 1]
-    text=doc.get('value',default)
-    try:
-        validate_template(text,key.startswith('btn_'))
-        return text.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})
-    except (ShopError,ValueError,KeyError):
-        return default.format_map({f:html.escape(str(values.get(f,''))) for f in FIELDS})
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: chatgpt_service.py ──
-# ────────────────────────────────────────────────────────────
-"""Account-scoped ChatGPT adapter. Backend availability is checked, never assumed."""
-import copy
-import datetime as dt
-import json
-import re
-import time
-import uuid
-from contextlib import contextmanager
-from http.cookies import SimpleCookie
-from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
-# [merged] from domain import ShopError
-
-G=None
-
-def configure(g):
-    global G
-    G=g
-
-
-def date(value):
-    if not value: return None
-    try:
-        if isinstance(value,(int,float)):
-            return dt.datetime.utcfromtimestamp(value/1000 if value>10**12 else value)
-        parsed=dt.datetime.fromisoformat(str(value).replace('Z','+00:00'))
-        return parsed.astimezone(dt.timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
-    except (ValueError,TypeError,OverflowError): return None
-
-
-def parse_cookies(raw):
-    """Accept session JSON, browser cookie exports, Cookie headers, or session token."""
-    if len(raw.encode())>262144: raise ShopError('ملف الكوكيز أكبر من 256KB.')
-    raw=raw.strip().removeprefix('\ufeff')
-    if raw.startswith('```'):
-        raw=re.sub(r'^```(?:json)?\s*|\s*```$','',raw)
-    try: obj=json.loads(raw)
-    except json.JSONDecodeError: obj=None
-    result={'cookies':{}}
-    if isinstance(obj,dict):
-        for k in ('accessToken','sessionToken','account','user'):
-            if k in obj: result[k]=obj[k]
-        exported=obj.get('cookies',[])
-        if isinstance(exported,dict): result['cookies'].update({str(k):str(v) for k,v in exported.items()})
-        elif isinstance(exported,list): obj_list=exported
-        else: raise ShopError('صيغة cookies غير صالحة.')
-        if 'obj_list' in locals():
-            for c in obj_list:
-                if isinstance(c,dict) and c.get('name') and c.get('value'):
-                    domain=str(c.get('domain','chatgpt.com')).lstrip('.')
-                    if domain=='chatgpt.com' or domain.endswith('.chatgpt.com'):
-                        result['cookies'][c['name']]=str(c['value'])
-        for k,v in obj.items():
-            if 'session-token' in k and isinstance(v,str):result['cookies'][k]=v
-    elif isinstance(obj,list):
-        return parse_cookies(json.dumps({'cookies':obj}))
-    elif obj is not None: raise ShopError('أرسل كائن JSON أو قائمة كوكيز.')
-    else:
-        cookie=SimpleCookie()
-        try: cookie.load(raw.removeprefix('Cookie:').strip())
-        except Exception: pass
-        result['cookies']={k:v.value for k,v in cookie.items()}
-        if not result['cookies'] and raw and not re.search(r'\s',raw):result['sessionToken']=raw
-    for prefix in ('__Secure-next-auth.session-token','__Secure-authjs.session-token'):
-        token=result['cookies'].get(prefix)
-        chunks=[]
-        for k,v in result['cookies'].items():
-            if k.startswith(prefix+'.') and k.rsplit('.',1)[1].isdigit(): chunks.append((int(k.rsplit('.',1)[1]),v))
-        if not token and chunks:
-            chunks.sort()
-            if [n for n,v in chunks]!=list(range(len(chunks))):raise ShopError('أجزاء الكوكيز غير مكتملة.')
-            token=''.join(v for n,v in chunks)
-        if token: result['sessionToken']=token
-    if result.get('sessionToken') and not result['cookies']:
-        result['cookies']['__Secure-next-auth.session-token']=str(result['sessionToken'])
-    if not result.get('sessionToken') and not result.get('accessToken'):
-        raise ShopError('لم أجد كوكيز جلسة صالحة أو accessToken في الملف.')
-    for token in [result.get('accessToken',''),*result['cookies'].values()]:
-        if not isinstance(token,str) or '\r' in token or '\n' in token:raise ShopError('قيمة كوكيز غير صالحة.')
-    return result
-
-
-def account_candidates(payload):
-    accounts=payload.get('accounts',{}) if isinstance(payload,dict) else {}
-    out=[]
-    for key,val in accounts.items():
-        if not isinstance(val,dict):continue
-        acc=val.get('account',val)
-        aid=acc.get('account_id') or acc.get('id') or (key if key!='default' else None)
-        plan=str(acc.get('plan_type',acc.get('structure',''))).lower()
-        if aid and (plan in ('team','business','enterprise') or acc.get('is_business')):
-            out.append({'id':aid,'name':acc.get('name',aid),'raw':val})
-    return out
-
-
-def extract_capacity(payload):
-    """Read explicit, account-scoped fields, not unrelated nested accounts."""
-    candidates=[]
-    def walk(obj,path='',depth=0):
-        if not isinstance(obj,dict) or depth>5:return
-        for k in ('total_seats','seat_count','paid_seats','subscription_seats','max_member_count','max_seats','member_limit','num_seats'):
-            v=obj.get(k)
-            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:
-                candidates.append((int(v),path+k))
-        for k in ('subscription','billing','plan','workspace','limits','account'):
-            if isinstance(obj.get(k),dict):walk(obj[k],path+k+'.',depth+1)
-        if path.startswith(('subscription.','billing.')):
-            v=obj.get('quantity')
-            if not isinstance(v,bool) and str(v).isdigit() and 0<int(v)<=100000:candidates.append((int(v),path+'quantity'))
-    walk(payload)
-    if not candidates:return None,None
-    # If fields disagree, use the smaller verified allowance, expose provenance.
-    value,path=min(candidates)
-    return value,path
-
-
-def subscription_dates(payload):
-    out={'renews_at':None,'expires_at':None}
-    def walk(obj,depth=0):
-        if not isinstance(obj,dict) or depth>4:return
-        for k in ('subscription_end','subscription_expires_at','expires_at'):
-            d=date(obj.get(k))
-            if d and out['expires_at'] is None:out['expires_at']=d.isoformat()
-        period=date(obj.get('current_period_end') or obj.get('next_billing_date'))
-        if period:
-            out['renews_at']=period.isoformat()
-            if obj.get('cancel_at_period_end') is True:out['expires_at']=period.isoformat()
-        for k in ('subscription','billing','account','plan'):walk(obj.get(k),depth+1)
-    walk(payload)
-    return out
-
-
-@contextmanager
-def account_lock(db,key):
-    token=uuid.uuid4().hex; now=time.time()
-    try:
-        r=db.cgpt_account_locks.find_one_and_update({'_id':str(key),'expires':{'$lt':now}},
-            {'$set':{'token':token,'expires':now+300}},upsert=True,return_document=True)
-    except DuplicateKeyError:raise ShopError('الحساب يعالج طلبًا آخر، أعد المحاولة بعد قليل.',409)
-    try:yield token
-    finally:db.cgpt_account_locks.delete_one({'_id':str(key),'token':token})
-
-
-class SeatManager:
-    def __init__(self):
-        doc=G['db'].cgpt_cookies.find_one({'_id':'main'}) or {'_id':'main','data':{}}
-        self._init(doc)
-
-    @classmethod
-    def from_doc(cls,doc):
-        obj=cls.__new__(cls);obj._init(doc);return obj
-
-    def _init(self,doc):
-        self.doc=copy.deepcopy(doc);self._account_key=str(doc.get('_id','main'))
-        if doc.get('sealed_data'):
-            doc=copy.deepcopy(doc)
-            doc['data']=json.loads(G['_safe'].secret_cipher().decrypt(doc['sealed_data'].encode()))
-            self.doc=doc
-        c=doc.get('data',{});self.access_token=c.get('accessToken');self.session_token=c.get('sessionToken')
-        self.cookies=c.get('cookies',{})
-        self.account_id=c.get('account',{}).get('id');self.org_id=c.get('account',{}).get('organizationId')
-        self.owner_email=c.get('user',{}).get('email','').lower()
-        self._loaded=bool(self.access_token and self.account_id)
-        self.token_file='';self.data_file='';self._last_fetch_failed=False
-        self.reload_data()
-
-    def reload_data(self):
-        rec=G['db'].cgpt_invites_data.find_one({'_id':self._account_key}) or {}
-        self.invites_data=copy.deepcopy(rec.get('data',{'invites':{},'allowed_emails':[]}))
-        self.invites_data.setdefault('invites',{})
-        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))
-        if self.owner_email:self.allowed_emails.add(self.owner_email)
-        self._baseline=copy.deepcopy(self.invites_data)
-
-    def _save_data(self):
-        current=copy.deepcopy(self.invites_data);base=self._baseline
-        changed={k:v for k,v in current['invites'].items() if base.get('invites',{}).get(k)!=v}
-        removed=set(base.get('invites',{}))-set(current['invites'])
-        added_allowed=self.allowed_emails-set(base.get('allowed_emails',[]))
-        removed_allowed=set(base.get('allowed_emails',[]))-self.allowed_emails
-        def save(session):
-            record=G['db'].cgpt_invites_data.find_one({'_id':self._account_key},session=session) or {}
-            data=record.get('data',{'invites':{},'allowed_emails':[]});data.setdefault('invites',{})
-            for email in set(changed)|removed:
-                if data['invites'].get(email)!=base.get('invites',{}).get(email):
-                    raise ShopError('تغير الاشتراك بالتزامن؛ أعد المحاولة.',409)
-            data['invites'].update(changed)
-            for email in removed:data['invites'].pop(email,None)
-            data['allowed_emails']=list((set(data.get('allowed_emails',[]))|added_allowed)-removed_allowed)
-            G['db'].cgpt_invites_data.update_one({'_id':self._account_key},{'$set':{'data':data},'$inc':{'revision':1}},upsert=True,session=session)
-            return data
-        self.invites_data=G['_safe'].finance.atomic(save);self._baseline=copy.deepcopy(self.invites_data)
-        self.allowed_emails=set(self.invites_data.get('allowed_emails',[]))
-
-    def _headers(self):
-        cookies=dict(self.cookies)
-        if not cookies and self.session_token:cookies['__Secure-next-auth.session-token']=self.session_token
-        h={'Accept':'application/json','Content-Type':'application/json','ChatGPT-Account-ID':str(self.account_id or '')}
-        if self.access_token:h['Authorization']='Bearer '+self.access_token
-        if cookies:h['Cookie']='; '.join(k+'='+v for k,v in cookies.items())
-        return h
-
-    def request(self,method,path,**kwargs):
-        if not G.get('CFFI_AVAILABLE'):raise ShopError('مكتبة curl_cffi غير مثبتة.',503)
-        def send():
-            return G['cffi_requests'].request(method,'https://chatgpt.com'+path,headers=self._headers(),
-                impersonate='chrome',timeout=12,allow_redirects=False,**kwargs)
-        r=send()
-        if r.status_code==401 and path!='/api/auth/session' and (self.cookies or self.session_token):
-            session=G['cffi_requests'].request('GET','https://chatgpt.com/api/auth/session',headers=self._headers(),
-                impersonate='chrome',timeout=12,allow_redirects=False)
-            if session.status_code==200:
-                obj=session.json();access=obj.get('accessToken')
-                if access and access!=self.access_token:
-                    self.access_token=access
-                    r=send()
-        return r
-
-    def hydrate(self):
-        if not self.access_token:
-            r=self.request('GET','/api/auth/session')
-            if r.status_code!=200:raise ShopError('الجلسة غير صالحة؛ أرسل كوكيز جلسة جديدة.',401)
-            session=r.json();self.access_token=session.get('accessToken')
-            self.owner_email=str(session.get('user',{}).get('email',self.owner_email)).lower()
-            if not self.access_token:raise ShopError('الكوكيز لا تعطي جلسة نشطة؛ حدّثها.',401)
-        r=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')
-        if r.status_code==401:raise ShopError('انتهت صلاحية الكوكيز.',401)
-        if r.status_code!=200:raise ShopError('تعذر التحقق من الحساب الآن؛ الكوكيز السابقة لم تتغير.',503)
-        choices=account_candidates(r.json())
-        return choices
-
-    def _pages(self,kind):
-        rows=[];offset=0;seen=set()
-        for _ in range(20):
-            r=self.request('GET',f'/backend-api/accounts/{self.account_id}/{kind}',params={'offset':offset,'limit':100})
-            if r.status_code!=200:
-                self._last_fetch_status=r.status_code;raise ShopError('تعذر قراءة '+kind,r.status_code)
-            obj=r.json();items=obj.get('items',obj.get(kind,[]))
-            if not isinstance(items,list):raise ShopError('استجابة قائمة غير معروفة.',503)
-            signature=json.dumps(items,sort_keys=True)
-            if signature in seen and items:raise ShopError('المصدر لم يوفر الصفحة التالية.',503)
-            seen.add(signature);rows.extend(items);offset+=len(items)
-            total=obj.get('total',obj.get('total_count'))
-            more=obj.get('has_more') is True
-            if total is not None and str(total).isdigit():
-                if offset>=int(total):return rows
-            elif len(items)<100 and not more:return rows
-            if not items:raise ShopError('القائمة غير مكتملة.',503)
-        raise ShopError('القائمة أكبر من حد الفحص؛ يلزم مراجعة الإدارة.',503)
-
-    def _get_org_users(self):
-        try:
-            rows=self._pages('users');self._last_fetch_failed=False;return rows
-        except Exception:
-            self._last_fetch_failed=True;return []
-
-    def diagnose(self):
-        rep={'loaded':self._loaded,'owner_email':self.owner_email,'account_id':self.account_id,'org_id':self.org_id,
-             'connected':False,'used_seats':None,'total_seats':None,'available_seats':None,'status':'unknown'}
-        if not self._loaded:return {**rep,'status':'cookies_expired','error':'أضف أو حدّث الكوكيز.'}
-        try:
-            users=self._pages('users');pending=self._pages('invites')
-            member_keys={str(u.get('email',u.get('id',''))).lower() for u in users}
-            pending_keys={str(u.get('email_address',u.get('email',u.get('id','')))).lower() for u in pending
-                          if str(u.get('status','pending')).lower() not in ('revoked','expired','accepted','cancelled')}
-            pending_count=len(pending_keys-member_keys)
-            rep.update(connected=True,status='active',member_count=len(users),pending_invites=pending_count,
-                       used_seats=len(users)+pending_count,user_emails=sorted(member_keys),pending_emails=sorted(pending_keys))
-            account_data={};merged_dates={}
-            for suffix in ('','/subscription'):
-                r=self.request('GET',f'/backend-api/accounts/{self.account_id}{suffix}')
-                if r.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}
-                if r.status_code==402:return {**rep,'connected':False,'status':'deactivated','error':'الاشتراك غير نشط.'}
-                if r.status_code==200 and isinstance(r.json(),dict):
-                    obj=r.json();account_data['account' if not suffix else 'subscription']=obj
-                    for k,v in subscription_dates(obj).items():
-                        if v:merged_dates[k]=v
-                    if obj.get('is_deactivated') is True or obj.get('status') in ('canceled','expired','unpaid'):
-                        rep['status']='deactivated'
-            check=self.request('GET','/backend-api/accounts/check/v4-2023-04-27')
-            if check.status_code==401:return {**rep,'connected':False,'status':'cookies_expired','error':'انتهت صلاحية الكوكيز.'}
-            if check.status_code==200:
-                selected=next((a for a in account_candidates(check.json()) if a['id']==self.account_id),None)
-                if not selected: return {**rep,'status':'unknown','connected':False,'error':'الحساب المحدد غير موجود في الجلسة.'}
-                account_data['workspace']=selected['raw']
-                if selected['raw'].get('account',{}).get('is_deactivated'):rep['status']='deactivated'
-            total,source=extract_capacity(account_data)
-            if total is None and self.doc.get('manual_seats'):
-                total=int(self.doc['manual_seats']);source='manual'
-            rep.update(merged_dates)
-            exp=date(rep.get('expires_at'))
-            if exp and exp<=dt.datetime.utcnow():rep['status']='deactivated'
-            rep.update(total_seats=total,capacity_source=source,available_seats=max(0,total-rep['used_seats']) if total is not None and rep['status']=='active' else 0 if rep['status']=='deactivated' else None)
-            return rep
-        except ShopError as e:
-            return {**rep,'connected':False,'status':'cookies_expired' if e.status==401 else 'deactivated' if e.status==402 else 'unavailable','error':str(e),'http_status':e.status}
-        except Exception:
-            return {**rep,'connected':False,'status':'unavailable','error':'تعذر الاتصال؛ سنعيد الفحص تلقائيًا.'}
-
-    def check_subscription_status(self):
-        rep=self.diagnose();return {'cookies_expired':'unauthorized','active':'active','deactivated':'deactivated'}.get(rep['status'],'error')
-
-    def invite_user(self,email,minutes_valid):
-        email=str(email).strip().lower()
-        if not re.fullmatch(r'[^@\s<>]{1,64}@[^@\s<>]+\.[^@\s<>]+',email) or len(email)>254:
-            return {'ok':False,'definitive':True,'error':'بريد غير صالح.'}
-        if not isinstance(minutes_valid,int) or not 1<=minutes_valid<=525600:
-            return {'ok':False,'definitive':True,'error':'مدة غير صالحة.'}
-        sent=False
-        try:
-            with account_lock(G['db'],self._account_key):
-                self.reload_data();existing=self.invites_data['invites'].get(email)
-                uid=getattr(self,'_last_buyer_uid',None)
-                if existing and existing.get('telegram_uid') not in (None,uid):raise ShopError('البريد مرتبط بمشترك آخر.',409)
-                rep=self.diagnose()
-                if not rep['connected'] or rep['status']!='active':raise ShopError(rep.get('error','الحساب غير متاح.'),503)
-                if email==self.owner_email:raise ShopError('بريد مالك الحساب غير قابل للبيع.')
-                already=email in rep.get('user_emails',[]) or email in rep.get('pending_emails',[])
-                if already and not existing:raise ShopError('البريد عضو سابق خارج اشتراكات البوت؛ راجع الإدارة.',409)
-                if not already:
-                    if rep.get('available_seats') is None:raise ShopError('لم يوفر الحساب سعة مؤكدة؛ يلزم ضبطها من الإدارة.',409)
-                    if rep['available_seats']<=0:raise ShopError('نفدت المقاعد.',409)
-                    sent=True
-                    r=self.request('POST',f'/backend-api/accounts/{self.account_id}/invites',json={'email_addresses':[email],'role':'standard-user'})
-                    if r.status_code not in (200,201):
-                        return {'ok':False,'definitive':r.status_code in (400,401,402,403,404,409,422,429),'error':f'تعذر إرسال الدعوة (HTTP {r.status_code}).'}
-                now=dt.datetime.utcnow();old=date(existing.get('expires_at')) if existing else None
-                exp=max(now,old or now)+dt.timedelta(minutes=minutes_valid)
-                self.invites_data['invites'][email]={**(existing or {}),'invited_at':now.isoformat(),'expires_at':exp.isoformat(),
-                    'status':'active','minutes':minutes_valid,'telegram_uid':uid,'product_id':getattr(self,'_product_id',''),
-                    'order_id':getattr(self,'_order_id',''),'last_job_id':getattr(self,'_job_id','')}
-                self.allowed_emails.add(email);self._save_data()
-                return {'ok':True,'expires_at':exp.isoformat(),'account_key':self._account_key}
-        except Exception as e:
-            return {'ok':False,'definitive':not sent,'error':str(e) if isinstance(e,ShopError) else 'تعذر حفظ نتيجة الدعوة؛ الطلب محفوظ للمراجعة.'}
-
-    def remove_by_email(self,email):
-        if email.lower()==self.owner_email:return 'error'
-        try:
-            for kind,field in (('users','email'),('invites','email_address')):
-                for item in self._pages(kind):
-                    if str(item.get(field,item.get('email',''))).lower()==email.lower():
-                        ident=item.get('id',item.get('user_id',item.get('invite_id')))
-                        if not ident:return 'error'
-                        r=self.request('DELETE',f'/backend-api/accounts/{self.account_id}/{kind}/{ident}')
-                        return ('member' if kind=='users' else 'pending') if r.status_code in (200,204) else 'error'
-            return 'not_found'
-        except Exception:return 'error'
-
-    def remove_user_by_email(self,email):return self.remove_by_email(email) in ('member','pending')
-    def _remove_user(self,user_id,email):return self.remove_user_by_email(email)
-
-    def check_and_cleanup(self):
-        with account_lock(G['db'],self._account_key):
-            self.reload_data();rep=self.diagnose()
-            self._last_fetch_failed=not rep['connected']
-            if not rep['connected'] or rep['status']!='active':return
-            known=set(self.invites_data['invites'])|self.allowed_emails
-            unknown=set(rep.get('user_emails',[]))-known
-            if unknown:G['_safe'].notice_once('unknown:'+self._account_key,3600,'هناك أعضاء خارج سجل البوت في حساب ChatGPT؛ راجعهم من لوحة الحساب. لم يُحذف أي عميل بسببهم.')
-            now=dt.datetime.utcnow()
-            for email,info in list(self.invites_data['invites'].items()):
-                exp=date(info.get('expires_at'))
-                if info.get('status')=='active' and exp and exp<=now:
-                    outcome=self.remove_by_email(email)
-                    if outcome in ('member','pending','not_found'):
-                        info['status']='expired';info['removed_at']=now.isoformat();self.allowed_emails.discard(email)
-                        G['_safe'].queue_subscription_notice(self._account_key,email,info,'expired')
-            self._save_data()
-
-    def reload_token(self):
-        coll=G['db'].cgpt_cookies if self._account_key=='main' else G['db'].cgpt_accounts
-        doc=coll.find_one({'_id':'main' if self._account_key=='main' else ObjectId(self._account_key)})
-        self._init(doc or {'_id':self._account_key,'data':{}});return self._loaded
-    def _load_tokens(self):return self.reload_token()
-    def list_active(self):
-        now=dt.datetime.utcnow();out=[]
-        for email,info in self.invites_data['invites'].items():
-            exp=date(info.get('expires_at'))
-            if info.get('status')=='active' and exp:
-                out.append({'email':email,'expires_at':exp.isoformat(),'remaining_hours':max(0,int((exp-now).total_seconds()/3600)),'remaining_days':max(0,(exp-now).days)})
-        return out
-    def get_stats(self):
-        n=len(self.invites_data['invites']);a=len(self.list_active());return {'total':n,'active':a,'expired':n-a}
-    def purge_old_records(self,days_old=7):
-        # Archive only; financial/subscription history is retained.
-        return 0
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: operations.py ──
-# ────────────────────────────────────────────────────────────
-"""Bounded catalog sync, restock digests and referral work."""
-import datetime as dt
-import html
-import os
-import threading
-import time
-from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
-# [merged] from domain import ShopError, finite_float
-
-
-def seconds(name, default, minimum=30):
-    try:return max(minimum, int(os.getenv(name, str(default))))
-    except ValueError:return default
-
-
-def product_list(data):
-    """None means invalid, never an empty successful catalog."""
-    if isinstance(data, list):return data if all(isinstance(p, dict) for p in data) else None
-    if isinstance(data, dict):
-        if data.get('success') is False or data.get('error'):return None
-        for key in ('products','data','items','result','results','catalog','list','response'):
-            value=data.get(key)
-            if isinstance(value,(dict,list)):
-                result=product_list(value)
-                if result is not None:return result
-    return None
-
-
-class Operations:
-    def __init__(self, g):
-        self.g=g
-        self.stop=threading.Event()
-        self.sub_cache={};self.channels=(0,[]);self.seat_snapshot=(0,None)
-        self.locks=[threading.Lock() for _ in range(64)]
-        self.sync_lock=threading.Lock()
-    def __getattr__(self,name):return self.g[name]
-    def initialize(self):
-        self.db.referral_work.create_index('due')
-        self.db.referrals_v2.create_index([('status',1),('next_check',1)])
-        self.db.referrals_v2.create_index([('referrer_id',1),('created_at',1)])
-        self.db.ext_products.create_index([('store_id',1),('ext_id',1)])
-        self.db.ext_products.create_index('catalog_id')
-        self.db.restock_events.create_index([('status',1),('ready_at',1)])
-        self.db.restock_events.create_index('expires',expireAfterSeconds=0)
-        self.db.restock_recipients.create_index('expires',expireAfterSeconds=0)
-        self.db.restock_events.update_many({'status':'sending'}, {'$set':{'status':'sent','delivery_uncertain':True}})
-        self.db.referrals_v2.update_many({'next_check':{'$exists':False}}, {'$set':{'next_check':0}})
-        # Repair conflicting legacy ChatGPT folder memberships without deleting products.
-        catalogs=list(self.db.catalogs.find())
-        valid={str(c['_id']) for c in catalogs}
-        for p in self.db.products.find({'product_type':'cgpt_main'}):
-            target=str(p.get('catalog_id') or '')
-            if target not in valid:
-                target=next((str(c['_id']) for c in catalogs if str(p['_id']) in {str(x) for x in c.get('product_ids',[])}),None)
-            self.move_product(p,target)
-
-    def move_product(self, product, cat_id):
-        pid=product['_id'];cat_id=None if cat_id in (None,'','none') else str(cat_id)
-        cat=self.db.catalogs.find_one({'_id':ObjectId(cat_id)}) if cat_id else None
-        if cat_id and not cat:raise ShopError('المجلد غير موجود.')
-        aliases=[pid,str(pid)]
-        if product.get('id') is not None:aliases += [product['id'],str(product['id'])]
-        self.db.catalogs.update_many({'product_ids':{'$in':aliases}}, {'$pull':{'product_ids':{'$in':aliases}}})
-        self.db.products.update_one({'_id':pid},{'$set':{'catalog_id':cat_id}})
-        if cat:self.db.catalogs.update_one({'_id':cat['_id']},{'$push':{'product_ids':{'$each':[pid],'$position':0}}})
-        self._invalidate_products_cache()
-    def display_seats(self):
-        # Display uses monitor snapshots. Checkout still validates live capacity.
-        if self.seat_snapshot[0]>time.time():return self.seat_snapshot[1]
-        total=0;known=False
-        for report in self.db.cgpt_account_status.find({'checked_at':{'$gt':dt.datetime.utcnow()-dt.timedelta(minutes=15)}}):
-            if report.get('connected') and report.get('available_seats') is not None:
-                total+=max(0,int(report['available_seats']));known=True
-        value=total if known else None
-        self.seat_snapshot=(time.time()+15,value)
-        return value
-    def queue_referrer(self,rid,progress=False):
-        self.db.referral_work.update_one({'_id':int(rid)},
-            {'$setOnInsert':{'due':time.time()+10},'$inc':{'generation':1},'$max':{'progress':int(progress)}},upsert=True)
-    def register_referral(self,invited,rid):
-        invited=int(invited);rid=int(rid)
-        if invited==rid or not self.db.users.find_one({'user_id':rid},{'_id':1}):return False
-        try:self.db.referrals_v2.insert_one({'invited_id':invited,'referrer_id':rid,'status':'pending',
-            'created_at':int(time.time()),'updated_at':int(time.time()),'next_check':time.time()+300})
-        except DuplicateKeyError:return False
-        self.queue_referrer(rid);return True
-    def mark_referral(self,uid,status):
-        if status not in ('pending','active','left'):raise ValueError('Invalid referral status')
-        old=self.db.referrals_v2.find_one_and_update({'invited_id':int(uid),'status':{'$ne':status}},
-            {'$set':{'status':status,'updated_at':int(time.time()),'next_check':time.time()+300}})
-        if old:self.queue_referrer(old['referrer_id'],status=='active')
-    def forced_sub(self,uid,use_cache=True):
-        if uid==self.OWNER_ID:return True
-        with self.locks[int(uid)%64]:
-            now=time.time();cached=self.sub_cache.get(uid)
-            if use_cache and cached and cached[0]>now:return cached[1]
-            user=self.get_user_data_full(uid)
-            if user and user.get('is_admin')==1:return True
-            if self.channels[0]<now:self.channels=(now+30,list(self.db.required_channels.find()))
-            result=True
-            for channel in self.channels[1]:
-                try:
-                    member=self.bot.get_chat_member(channel['channel_id'],uid)
-                    if member.status in ('left','kicked') or (member.status=='restricted' and not getattr(member,'is_member',False)):
-                        result=False;break
-                except Exception:result=None
-            if len(self.sub_cache)>=10000:self.sub_cache.clear()
-            self.sub_cache[uid]=(now+(300 if result is True else 3),result)
-            return result
-    def referral_cycle(self):
-        now=time.time()
-        # Fixed budget; indexed schedule avoids re-scanning all members every minute.
-        for _ in range(10):
-            ref=self.db.referrals_v2.find_one_and_update({'status':{'$in':['pending','active','left']},'next_check':{'$lte':now}},
-                {'$set':{'next_check':now+300}},sort=[('next_check',1)],return_document=False)
-            if not ref:break
-            result=self.forced_sub(ref['invited_id'],use_cache=False)
-            if result is None:continue
-            misses=0 if result else ref.get('left_checks',0)+1
-            if result:self.mark_referral(ref['invited_id'],'active')
-            elif misses>=3 and ref['status']=='active':self.mark_referral(ref['invited_id'],'left')
-            self.db.referrals_v2.update_one({'_id':ref['_id']},{'$set':{'left_checks':misses,
-                'next_check':now+(21600 if result else 300 if misses<3 else 3600)}})
-            if self.stop.wait(.2):break
-    def referral_work_once(self):
-        job=self.db.referral_work.find_one_and_update({'due':{'$lte':time.time()}},
-            {'$set':{'due':time.time()+60}},sort=[('due',1)],return_document=True)
-        if not job:return
-        rid=job['_id']
-        self.update_referrer_balance(rid)
-        self._check_referral_spam(rid)
-        if job.get('progress'):
-            now=time.time()
-            claimed=self.db.users.update_one({'user_id':rid,'$or':[{'ref_progress_at':{'$lte':now-300}},{'ref_progress_at':{'$exists':False}}]},
-                {'$set':{'ref_progress_at':now}})
-            if claimed.modified_count:self.send_progress_log_notification(rid)
-        # New joins during work are retained for the next iteration.
-        self.db.referral_work.delete_one({'_id':rid,'generation':job.get('generation')})
-    def referral_worker(self):
-        next_check=time.time()+60
-        while not self.stop.wait(2):
-            try:
-                self.referral_work_once()
-                if time.time()>=next_check:
-                    self.referral_cycle();next_check=time.time()+60
-            except Exception:self.logger.exception('Referral background work failed')
-    def queue_restock(self,ep,old_stock):
-        if old_stock!=0 or ep.get('stock',0)<=0 or ep.get('hidden'):return False
-        now=time.time();pid=ep['_id']
-        if self.db.restock_events.find_one({'_id':pid,'status':{'$in':['pending','sending']}}):return False
-        claimed=self.db.ext_products.update_one({'_id':pid,'$or':[{'last_stock_broadcast':{'$lte':now-21600}},{'last_stock_broadcast':{'$exists':False}}]},
-            {'$set':{'last_stock_broadcast':now}})
-        if not claimed.modified_count:return False
-        self.db.restock_events.update_one({'_id':pid},{'$set':{'status':'pending','ready_at':now+120,
-            'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True)
-        return True
-    def sync_external(self):
-        if not self.sync_lock.acquire(blocking=False):return
-        try:
-            for store in self.db.ext_stores.find():
-                now=time.time()
-                if store.get('sync_next_at',0)>now:continue
-                sid=str(store['_id'])
-                try:
-                    products=product_list(self._ext_api_get(store,'/products'))
-                    if products is None:raise ValueError('Invalid catalog response')
-                    self.sync_products(sid,products)
-                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':0,'sync_next_at':now+seconds('EXT_SYNC_SECONDS',300),'last_sync_at':now}})
-                except Exception:
-                    failures=min(6,store.get('sync_failures',0)+1)
-                    self.db.ext_stores.update_one({'_id':store['_id']},{'$set':{'sync_failures':failures,'sync_next_at':now+min(3600,60*2**failures)}})
-                    self.logger.warning('External catalog sync failed; backing off (%s)',sid)
-        finally:self.sync_lock.release()
-    def sync_products(self,sid,products):
-        existing={str(p.get('ext_id')):p for p in self.db.ext_products.find({'store_id':sid})}
-        pending={str(p.get('ext_id')) for p in self.db.ext_pending_new.find({'store_id':sid},{'ext_id':1})}
-        changed=False
-        for raw in products:
-            f=self._ext_extract_fields(raw);eid=f['ext_id']
-            if not eid:continue
-            old=existing.get(eid)
-            if not old:
-                if eid not in pending:
-                    self.db.ext_pending_new.insert_one({'store_id':sid,'ext_id':eid,'name':f['name'],'raw':raw,'created_at':int(time.time())});pending.add(eid)
-                continue
-            stock=max(0,int(f['stock'])) if f['available'] is not False else 0
-            updates={}
-            if stock!=old.get('stock',0):updates['stock']=stock
-            cost=finite_float(f['cost_price'])
-            if cost>0 and abs(cost-finite_float(old.get('cost_price',old.get('base_price',0)) or 0))>.001:
-                updates.update(cost_price=cost,base_price=cost,
-                    sell_price=self._ext_compute_sell_price(cost,old.get('markup_type','percent'),old.get('markup_value',0)))
-            if not updates:continue
-            # One compare-and-set prevents repeated restock transitions from concurrent sync.
-            result=self.db.ext_products.update_one({'_id':old['_id'],'stock':old.get('stock',0)}, {'$set':updates})
-            if result.modified_count:
-                changed=True;updated={**old,**updates}
-                if stock>0 and old.get('stock',0)==0:self.queue_restock(updated,0)
-                existing[eid]=updated
-        # Missing IDs may mean pagination/filtering. Never infer sell-out from omission.
-        if changed:self._invalidate_products_cache()
-    def restock_once(self):
-        now=time.time();window=seconds('RESTOCK_DIGEST_SECONDS',1800,300)
-        # One digest globally per window, persistent across restarts.
-        state=self.db.operational_state.find_one({'_id':'restock'}) or {}
-        if state.get('next_at',0)>now:return
-        events=list(self.db.restock_events.find({'status':'pending','ready_at':{'$lte':now}}).limit(500))
-        if not events:return
-        try:
-            claim=self.db.operational_state.find_one_and_update({'_id':'restock','$or':[{'next_at':{'$lte':now}},{'next_at':{'$exists':False}}]},
-                {'$set':{'next_at':now+window}},upsert=True,return_document=True)
-        except DuplicateKeyError:return
-        if not claim:return
-        ids=[e['_id'] for e in events]
-        products=list(self.db.ext_products.find({'_id':{'$in':ids},'hidden':{'$ne':True},'stock':{'$gt':0}}))
-        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sending'}})
-        if products:
-            for user in self.db.users.find({'is_banned':{'$ne':1},'broadcast_disabled':{'$ne':True}},{'user_id':1,'lang':1,'lang_chosen':1}).batch_size(100):
-                uid=user['user_id'];ar=user.get('lang')=='ar'
-                # Reserve recipient BEFORE send: avoid replay storms after uncertain delivery.
-                try:
-                    recipient=self.db.restock_recipients.find_one_and_update({'_id':uid,'$or':[{'next_at':{'$lte':time.time()}},{'next_at':{'$exists':False}}]},
-                        {'$set':{'next_at':time.time()+window,'expires':dt.datetime.utcnow()+dt.timedelta(days=7)}},upsert=True,return_document=True)
-                except DuplicateKeyError:continue
-                if not recipient:continue
-                lines=['📦 <b>منتجات عادت للتوفر</b>' if ar else '📦 <b>Back in stock</b>']
-                for p in products[:12]:lines.append('• '+html.escape(str(p.get('name',''))[:90]))
-                if len(products)>12:lines.append(f"+ {len(products)-12} "+('منتج آخر' if ar else 'more products'))
-                markup=self.InlineKeyboardMarkup();markup.add(self.InlineKeyboardButton('🛒 المتجر' if ar else '🛒 Shop',callback_data='open_shop'))
-                try:self.bot.send_message(uid,'\n'.join(lines),parse_mode='HTML',reply_markup=markup)
-                except Exception as exc:
-                    params=getattr(exc,'result_json',{}) or {}
-                    retry=params.get('parameters',{}).get('retry_after',0)
-                    if retry:
-                        # Leave pending for a later digest, avoid sleeping/looping on a rate limit.
-                        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'pending','ready_at':time.time()+max(window,retry)}})
-                        return
-                    if getattr(exc,'error_code',None)==403:self.db.users.update_one({'user_id':uid},{'$set':{'broadcast_disabled':True}})
-                if self.stop.wait(.2):return
-        self.db.restock_events.update_many({'_id':{'$in':ids}},{'$set':{'status':'sent'}})
-    def restock_worker(self):
-        while not self.stop.wait(30):
-            try:self.restock_once()
-            except Exception:
-                self.logger.exception('Restock digest interrupted')
-                self.db.restock_events.update_many({'status':'sending'},{'$set':{'status':'sent','delivery_uncertain':True}})
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: http_api.py ──
-# ────────────────────────────────────────────────────────────
-import json
-import math
-import time
-from urllib.parse import urlparse,parse_qs
-# [merged] from domain import ShopError,quantity,digest
-# [merged] from network import public_endpoint
-
-MAX_BODY=262144
-
-def read_body(handler):
-    if handler.headers.get('Transfer-Encoding'):raise ShopError('Chunked requests are not supported; send Content-Length.',411)
-    try:size=int(handler.headers.get('Content-Length','0'))
-    except ValueError:raise ShopError('Invalid Content-Length')
-    if not 0<size<=MAX_BODY:raise ShopError('Request body exceeds limit or is empty.',413)
-    raw=handler.rfile.read(size)
-    if len(raw)!=size:raise ShopError('Incomplete body')
-    try:
-        obj=json.loads(raw,parse_constant=lambda s:(_ for _ in ()).throw(ValueError(s)))
-        if not isinstance(obj,dict):raise ValueError()
-    except (ValueError,UnicodeDecodeError):raise ShopError('JSON object required')
-    if urlparse(handler.path).path.endswith('/set_webhook'):public_endpoint(str(obj.get('url','')))
-    return raw.decode('utf-8')
-
-
-def make_handler(base,rt):
-    class APIHandler(base):
-        def setup(self):
-            super().setup();self.connection.settimeout(15)
-        def do_GET(self):
-            try:
-                p=urlparse(self.path);route=p.path.rstrip('/');gw='/'+rt._get_api_gateway()
-                if route in ('','/'):
-                    return rt._json_resp(self,200 if rt.ready else 503,{'status':'online' if rt.ready else 'initializing'})
-                if not rt.ready:raise ShopError('Service initializing',503)
-                if route==gw+'/changes':return self.changes(parse_qs(p.query))
-                if route.startswith(gw+'/order/'):
-                    doc,user=self._auth()
-                    if not doc:raise ShopError('Invalid API key',401)
-                    oid=route.rsplit('/',1)[1]
-                    job=rt.db.external_jobs.find_one({'order_id':oid,'user_id':doc['user_id']})
-                    if job:return rt._json_resp(self,200,job_response(job))
-                return super().do_GET()
-            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})
-            except Exception:
-                rt.logger.exception('API GET failed');return rt._json_resp(self,500,{'error':'Internal error'})
-        def changes(self,params):
-            doc,user=self._auth()
-            if not doc:raise ShopError('Invalid API key',401)
-            if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)
-            limit=quantity(params.get('limit',['100'])[0],500)
-            since=params.get('since',['s:0'])[0]
-            q={'$or':[{'owner_uid':None},{'owner_uid':doc['user_id']}],'sequence':{'$exists':True}}
-            if since.startswith('s:'):
-                try:n=int(since[2:])
-                except ValueError:raise ShopError('Invalid cursor')
-                q['sequence']={'$gt':max(0,n)}
-            else:
-                try:q['timestamp']={'$gte':int(since)}
-                except ValueError:raise ShopError('Invalid cursor')
-            events=list(rt.db.api_events.find(q).sort('sequence',1).limit(limit))
-            cursor='s:'+str(events[-1]['sequence']) if events else since
-            out=[{k:v for k,v in e.items() if k not in ('_id','created_at','owner_uid')} for e in events]
-            return rt._json_resp(self,200,{'success':True,'events':out,'cursor':cursor,'count':len(out)})
-        def do_POST(self):
-            try:
-                if not rt.ready:raise ShopError('Service initializing',503)
-                path=urlparse(self.path).path.rstrip('/');gw='/'+rt._get_api_gateway()
-                if path!=gw+'/purchase':return super().do_POST()
-                doc,user=self._auth()
-                if not doc:raise ShopError('Invalid API key',401)
-                if not rt._check_rate_limit(doc['api_key']):raise ShopError('Rate limit exceeded',429)
-                body=json.loads(read_body(self));uid=doc['user_id'];pid=str(body.get('product_id',''))
-                qty=quantity(body.get('qty',1));idem=self.headers.get('Idempotency-Key','').strip()
-                if not 8<=len(idem)<=128:raise ShopError('Idempotency-Key header required (8–128 characters)')
-                if pid.startswith('cgpt_'):
-                    if qty!=1:raise ShopError('ChatGPT purchase requires qty=1 and one email')
-                    product,duration=pid[5:].split('_',1);email=str(body.get('email','')).strip().lower()
-                    job=rt.buy_cgpt(uid,product,duration,email,'api:'+idem)
-                    result=job_response(job)
-                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':1,'total_price':job['amount_cents']/100}},upsert=True)
-                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)
-                if pid.startswith('ext_'):
-                    job=rt.buy_external(uid,pid[4:],qty,'api:'+idem);result=job_response(job)
-                    rt.db.api_orders.update_one({'order_id':job['order_id'],'api_user_id':uid},{'$set':result|{'api_user_id':uid,'product_id':pid,'qty':qty,'total_price':job['amount_cents']/100}},upsert=True)
-                    return rt._json_resp(self,200 if job['status']=='completed' else 202,result)
-                order=rt.finance.buy_stock(uid,pid,qty,'api:'+idem,True,str(body.get('buyer_info',''))[:200])
-                rt._invalidate_user_cache(uid);rt._invalidate_products_cache()
-                rt.emit_event('order.completed' if order['status']=='completed' else 'order.pending',{'api_user_id':uid,'order_id':order['order_id'],'status':order['status']},pid)
-                rt.emit_event('stock.sold',{'product_id':pid,'qty_sold':qty,'remaining_stock':rt.get_product_stock_count(pid)},pid)
-                rt.reward_once(order)
-                return rt._json_resp(self,200,{k:v for k,v in order.items() if k not in ('_id','created_at','request_hash')})
-            except ShopError as e:return rt._json_resp(self,e.status,{'error':str(e)})
-            except (ValueError,TypeError,KeyError):return rt._json_resp(self,400,{'error':'Invalid input'})
-            except Exception:
-                rt.logger.exception('API purchase failed; retry with SAME Idempotency-Key')
-                return rt._json_resp(self,503,{'error':'Result uncertain; retry with the same Idempotency-Key'})
-    return APIHandler
-
-
-def job_response(job):
-    return {'success':job['status']=='completed','order_id':job['order_id'],'status':job['status'],
-            'total_price':job['amount_cents']/100,'codes':job.get('codes',[]),
-            'email':job['details'].get('email'),'expires_at':job.get('result',{}).get('expires_at')}
-
-
-def encode_response(data, accept_encoding, path):
-    import gzip
-    raw=json.dumps(data,ensure_ascii=False,separators=(',',':')).encode('utf-8')
-    supports=False
-    for part in accept_encoding.lower().split(','):
-        fields=[x.strip() for x in part.split(';')]
-        if fields[0]!='gzip':continue
-        try:supports=all(float(x[2:])>0 for x in fields[1:] if x.startswith('q='))
-        except ValueError:supports=False
-    if supports and len(raw)>1024 and urlparse(path).path.rstrip('/').endswith('/products'):
-        return gzip.compress(raw,compresslevel=4,mtime=0),'gzip'
-    return raw,None
-
-
-# ────────────────────────────────────────────────────────────
-# ── وحدة: runtime.py ──
-# ────────────────────────────────────────────────────────────
-"""Safe services used by the preserved Telegram UI in bot.py."""
-import contextvars
-import datetime as dt
-import functools
-import html
-import io
-import json
-import logging
-import re
-import secrets
-import threading
-import time
-import uuid
-from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
-# [merged] from domain import ShopError, cents, quantity, canonical_tx, digest, finite_float
-# [merged] from finance import Finance
-# [merged] from network import public_endpoint,post_webhook
-# [merged] from chatgpt_service import SeatManager,configure,date,parse_cookies,account_candidates
-
-_ADMIN=contextvars.ContextVar('admin_action',default=False)
-
-class Runtime:
-    def __init__(self,g):self.g=g;self.ready=False;self._stop=threading.Event()
-    def __getattr__(self,name):return self.g[name]
-    @property
-    def finance(self):return Finance(self.db)
-    def send(self,uid,text,**kwargs):
-        try:return self.bot.send_message(uid,text,parse_mode='HTML',**kwargs)
-        except Exception:
-            self.logger.warning('Notification delivery failed (uid=%s)',uid)
-            return None
-    def admin(self,uid):
-        if uid==self.OWNER_ID and uid:return True
-        u=self.db.users.find_one({'user_id':uid})
-        return bool(u and u.get('is_admin')==1 and u.get('is_banned')!=1)
-    def guard(self,func,admin=False):
-        @functools.wraps(func)
-        def wrapped(event,*a,**kw):
-            uid=event.from_user.id
-            if admin and not self.admin(uid):
-                self.send(uid,'❌ ليس لديك صلاحية.');return
-            token=_ADMIN.set(admin or _ADMIN.get())
-            try:return func(event,*a,**kw)
-            except ShopError as e:self.send(uid,'❌ '+html.escape(str(e)))
-            except (ValueError,TypeError) as e:
-                self.logger.warning('Invalid input in %s',func.__name__)
-                self.send(uid,'❌ البيانات غير صالحة. أعد فتح العملية وحاول مجددًا.')
-            except Exception:
-                self.logger.exception('Handler failed: %s',func.__name__)
-                self.send(uid,'⚠️ تعذر إكمال الإجراء. إذا كان طلب شراء فراجع سجل الطلبات قبل إعادة المحاولة.')
-            finally:_ADMIN.reset(token)
-        return wrapped
-    def install_handlers(self,admin_names):
-        for collection in (self.bot.callback_query_handlers,self.bot.message_handlers):
-            for handler in collection:
-                f=handler['function'];handler['function']=self.guard(f,f.__name__ in admin_names)
-        original=self.bot.register_next_step_handler
-        def register(message,callback,*args,**kwargs):
-            owner=message.chat.id;requires_admin=_ADMIN.get() or callback.__name__ in admin_names
-            def next_step(incoming,*a,**kw):
-                if incoming.from_user.id!=owner or incoming.chat.id!=owner:
-                    return
-                return self.guard(callback,requires_admin)(incoming,*a,**kw)
-            return original(message,next_step,*args,**kwargs)
-        self.bot.register_next_step_handler=register
-
-    def initialize(self):
-        configure(self.g)
-        hello=self.mongo_client.admin.command('hello')
-        if not hello.get('setName') and hello.get('msg')!='isdbgrid':
-            raise RuntimeError('MongoDB replica set/Atlas is required for financial transactions. See README_AR.md.')
-        for name in ('wallet_ledger','shop_orders','external_jobs','cgpt_invites_data','cgpt_account_locks','cgpt_checkout',
-                     'notifications','api_events','api_webhooks','webhook_jobs','counters','quote_locks','quote_slots'):
-            if name not in self.db.list_collection_names():self.db.create_collection(name)
-        self.db.users.create_index('user_id',unique=True)
-        self.db.shop_orders.create_index('order_id',unique=True)
-        self.db.external_jobs.create_index('order_id',unique=True)
-        self.db.api_webhooks.create_index('api_user_id',unique=True)
-        self.db.api_events.create_index('created_at',expireAfterSeconds=86400)
-        self.db.api_events.create_index('sequence',unique=True,sparse=True)
-        self.db.webhook_jobs.create_index([('status',1),('next_at',1)])
-        self.db.notifications.create_index([('sent',1),('next_at',1)])
-        self.db.cgpt_checkout.create_index('user_id',unique=True)
-        self.db.quote_slots.create_index('expires_at',expireAfterSeconds=0)
-        self.db.pending_deposits.create_index('pending_id',unique=True)
-        # Drop only the incorrect constraint, keep every historical financial record.
-        for name,info in self.db.used_transactions.index_information().items():
-            if list(info.get('key',[]))==[('fingerprint',1)] and info.get('unique'):
-                self.db.used_transactions.drop_index(name)
-        self.db.used_transactions.create_index('ledger_id',unique=True,sparse=True)
-        self.db.referrals_v2.create_index('invited_id',unique=True)
-        self.db.referrals_v2.create_index([('referrer_id',1),('status',1)])
-        if '_ops' in self.g:self.g['_ops'].initialize()
-        self.ready=True
-
-    def notice_once(self,key,seconds,text,markup=None):
-        now=time.time();old=self.db.notifications.find_one({'_id':key})
-        if old and old.get('created',0)>now-seconds:return
-        ids={self.OWNER_ID}|{u['user_id'] for u in self.db.users.find({'is_admin':1,'is_banned':{'$ne':1}})}
-        self.db.notifications.update_one({'_id':key},{'$set':{'created':now,'text':text,'uids':list(ids-{0}),
-            'markup':markup.to_json() if markup else None,'sent':False,'next_at':now}},upsert=True)
-
-    def normalize_tx_id(self,tx_id):
-        try:return canonical_tx(tx_id)
-        except ShopError:return ''
-    def credit_user(self,uid,amt,tx_id,lang,method,trusted_txid=False):
-        try:
-            pending=self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','base_amount_usd':cents(amt,minimum=10)/100})
-            result=self.finance.credit(uid,amt,tx_id,method,pending['pending_id'] if pending else None)
-            self._invalidate_user_cache(uid)
-            if not result['already']:self.send(uid,self.get_text(uid,'dep_success',result['amount']))
-            return result
-        except ShopError as e:
-            self.send(uid,'⚠️ '+html.escape(str(e)));return {'ok':False,'error':str(e)}
-    def auto_credit_from_pending(self,pending,tx_id_for_record,method_label,actual_usd=None):
-        amount=pending['base_amount_usd'] if actual_usd is None else actual_usd
-        try:
-            result=self.finance.credit(pending['user_id'],amount,tx_id_for_record,method_label,pending['pending_id'])
-            self._invalidate_user_cache(pending['user_id'])
-            if not result['already']:self.send(pending['user_id'],self.get_text(pending['user_id'],'dep_success',result['amount']))
-            return True
-        except Exception:
-            self.logger.exception('Deposit not credited; pending retained')
-            return False
-    def check_duplicate_transaction(self,uid,amount,method,sender_addr=None,receiver_addr=None,tx_timestamp=None,tx_id_clean=None,trusted_txid=False):
-        if not tx_id_clean:return None
-        r=self.db.used_transactions.find_one({'transaction_id':canonical_tx(tx_id_clean)})
-        return {'match_type':'tx_id','original_uid':r['user_id'],'original_amount':r.get('amount',0),'original_record':r} if r else None
-    def collision_review(self,*args,**kwargs):
-        self.notice_once('deposit-review:'+digest(args),3600,'⚠️ محاولة استخدام إيداع مسجل. يلزم التحقق من السجل؛ لم يُحظر صاحب الإيداع تلقائيًا.')
-        return False
-
-    def _do_purchase(self,uid,pid,qty,lang,idem=None):
-        qty=quantity(qty)
-        p=self._find_product_db(pid)
-        if p and p.get('product_type') in ('chatgpt_seat','cgpt_main'):
-            raise ShopError('اختر المدة من صفحة ChatGPT لإكمال الشراء بالبريد.')
-        order=self.finance.buy_stock(uid,pid,qty,idem or uuid.uuid4().hex)
-        self._invalidate_user_cache(uid);self._invalidate_products_cache()
-        self.deliver_order(order)
-        self.emit_event('stock.sold',{'product_id':order['product_id'],'qty_sold':order['qty'],'remaining_stock':self.get_product_stock_count(order['product_id'])},order['product_id'])
-        return order
-    def confirm_buy_handler(self,call):
-        uid=call.from_user.id;parts=call.data.split('_');qty=quantity(parts[-1]);pid='_'.join(parts[2:-1])
-        self.bot.answer_callback_query(call.id)
-        return self._do_purchase(uid,pid,qty,self.get_lang(uid),f'tg:{call.message.chat.id}:{call.message.message_id}')
-    def deliver_order(self,order):
-        uid=order['user_id']
-        if order['status']=='pending_manual':
-            self.send(uid,f"✅ طلبك محفوظ للتسليم اليدوي.\nرقم الطلب: <code>{order['order_id']}</code>")
-            self.notice_once('manual:'+order['order_id'],86400,f"📦 طلب يدوي جديد: <code>{order['order_id']}</code> — {order['qty']} قطعة")
-            return
-        if len(order['codes'])!=order['qty']:raise ShopError('الطلب يحتاج مراجعة، لم يُعلن اكتمال التسليم.',409)
-        f=io.BytesIO(('\n'.join(order['codes'])).encode());f.name='order_'+order['order_id']+'.txt'
-        try:
-            self.bot.send_document(uid,f,caption=f"✅ تم الشراء — {order['qty']} قطعة، ${order['total_price']:.2f}\nرقم الطلب: {order['order_id']}")
-            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'delivered'}})
-        except Exception:
-            # Delivery might have succeeded at Telegram; never refund/re-sell those codes.
-            self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'retry'}})
-            self.send(uid,'📄 الأكواد محفوظة في سجل مشترياتك. يمكنك تنزيلها مجددًا؛ لن يُخصم رصيد جديد.')
-        self.reward_once(order)
-    def reward_once(self,order):
-        if order['status']!='completed':return
-        ref=self.db.referrals_v2.find_one({'invited_id':order['user_id']})
-        if not ref or order['total_price']<=self.get_referral_min_purchase():return
-        rid=int(ref.get('referrer_id',0));reward=cents(self.get_referral_purchase_reward(),minimum=0)
-        if not rid or not reward:return
-        try:self.finance.atomic(lambda s:self.finance.change(rid,reward,'referral:'+order['order_id'],s,'purchase_referral'))
-        except ShopError:pass
-        self._invalidate_user_cache(rid)
-
-    def get_api_user(self,key):
-        doc=self.db.api_keys.find_one({'api_key':key,'is_active':True})
-        if not doc:return None,None
-        u=self.db.users.find_one({'user_id':doc['user_id'],'is_banned':{'$ne':1}})
-        return (doc,u) if u else (None,None)
-
-    def emit_event(self,event_type,data,product_id=None):
-        if data.get('source')=='external_api' and event_type in ('product.created','product.updated'):return
-        # Orders are private. Catalog events never expose buyer/order details.
-        owner=data.get('api_user_id') if event_type.startswith('order.') else None
-        if event_type.startswith('order.') and owner is None:return
-        public={k:v for k,v in data.items() if k not in ('buyer_user_id','api_user_id','order_id','total_price','codes','email')}
-        if owner is not None:public=dict(data)
-        def work(s):
-            seq=self.db.counters.find_one_and_update({'_id':'events'},{'$inc':{'value':1}},upsert=True,return_document=True,session=s)['value']
-            event={'event_id':uuid.uuid4().hex,'sequence':seq,'event_type':event_type,'timestamp':int(time.time()),
-                   'created_at':dt.datetime.utcnow(),'data':public,'product_id':str(product_id) if product_id else None,'owner_uid':owner}
-            self.db.api_events.insert_one(event,session=s)
-            for hook in self.db.api_webhooks.find({'is_active':True},session=s):
-                if owner is not None and hook['api_user_id']!=owner:continue
-                self.db.webhook_jobs.insert_one({'_id':digest(event['event_id'],hook['_id']),'hook_id':hook['_id'],'event':{k:v for k,v in event.items() if k not in ('_id','created_at','owner_uid')},'status':'pending','attempts':0,'next_at':time.time()},session=s)
-        try:self.finance.atomic(work)
-        except Exception:self.logger.exception('Event persistence failed')
-    def deliver_webhook(self,hook,event):
-        if hook.get('event_filter') and event['event_type'] not in hook['event_filter'] and event['event_type']!='webhook.test':return True
-        body=json.dumps(event,ensure_ascii=False,separators=(',',':')).encode();timestamp=str(int(time.time()))
-        sig=self._sign_webhook_body(hook.get('secret',''),body,timestamp)
-        try:return post_webhook(hook['url'],body,{'Content-Type':'application/json','X-Event-Id':event['event_id'],
-            'X-Event-Type':event['event_type'],'X-Webhook-Timestamp':timestamp,'X-Webhook-Signature':'sha256='+sig})
-        except Exception:return False
-    def webhook_worker(self):
-        while not self._stop.wait(1):
-            now=time.time()
-            job=self.db.webhook_jobs.find_one_and_update({'status':{'$in':['pending','sending']},'next_at':{'$lte':now}},
-                {'$set':{'status':'sending','next_at':now+60},'$inc':{'attempts':1}},return_document=True)
-            if not job:
-                self._stop.wait(9);continue
-            hook=self.db.api_webhooks.find_one({'_id':job['hook_id'],'is_active':True})
-            ok=not hook or self.deliver_webhook(hook,job['event'])
-            state='sent' if ok else 'failed' if job['attempts']>=8 else 'pending'
-            self.db.webhook_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'next_at':time.time()+min(3600,2**job['attempts'])}})
-            if state=='failed':self.notice_once('webhook-failed',3600,'⚠️ فشل تسليم بعض webhooks بعد إعادة المحاولة. الأحداث متاحة في API لمدة 24 ساعة.')
-
-    def generate_unique_amount_for_user(self,base_amount_usd,uid,coin):
-        base=cents(base_amount_usd,minimum=100,maximum=1000000)/100
-        group='shared-usdt' if coin in ('USDT','USDT_BEP20') or str(coin).startswith('BYBIT') else coin
-        def reserve(session):
-            # A shared write serializes quote allocation across concurrent processes.
-            self.db.quote_locks.update_one({'_id':group},{'$inc':{'revision':1}},upsert=True,session=session)
-            now=dt.datetime.utcnow();spacing=0.002 if group!='shared-usdt' else 0.0003
-            for _ in range(400):
-                extra=secrets.randbelow(95)+5 if str(coin).startswith('BYBIT') else secrets.randbelow(9900)+100
-                value=round(base+extra/(100 if str(coin).startswith('BYBIT') else 1000000),6)
-                clash=self.db.quote_slots.find_one({'group':group,'expires_at':{'$gt':now},'amount':{'$gte':value-spacing,'$lte':value+spacing}},session=session)
-                old=self.db.pending_deposits.find_one({'status':'pending','unique_amount_usd':{'$gte':value-spacing,'$lte':value+spacing},'expires_at':{'$gt':int(time.time())}},session=session)
-                if clash or old:continue
-                self.db.quote_slots.insert_one({'_id':uuid.uuid4().hex,'group':group,'uid':uid,'coin':coin,'amount':value,'expires_at':now+dt.timedelta(hours=2)},session=session)
-                return value
-            raise ShopError('مجال مبالغ الإيداع مشغول حاليًا. حاول لاحقًا.',409)
-        return self.finance.atomic(reserve)
-    def register_pending_deposit(self,uid,base_amount_usd,unique_amount_usd,coin,sender_uid=None):
-        cents(base_amount_usd,minimum=100);unique=finite_float(unique_amount_usd)
-        price=None;units=None
-        if coin in ('LTC','TON'):
-            price=self.get_ltc_price_usd() if coin=='LTC' else self.get_ton_price_usd()
-            if not price or price<=0:raise ShopError('تعذر تثبيت سعر العملة الآن.',503)
-            scale=100000000 if coin=='LTC' else 1000000000
-            units=round(unique/price*scale)
-        pending_id=uuid.uuid4().hex
-        def work(s):
-            self.finance.user(uid,s)
-            self.db.quote_locks.update_one({'_id':'user:'+str(uid)},{'$inc':{'revision':1}},upsert=True,session=s)
-            if self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','expires_at':{'$gt':int(time.time())}},session=s):
-                raise ShopError('لديك إيداع معلق؛ أكمله أو ألغِه أولًا.',409)
-            rec={'pending_id':pending_id,'user_id':uid,'base_amount_usd':cents(base_amount_usd)/100,
-                'unique_amount_usd':unique,'coin':coin,'status':'pending','created_at':int(time.time()),'expires_at':int(time.time())+7200}
-            if price:rec.update(quoted_price=price,crypto_units=units)
-            if sender_uid:rec['sender_uid']=str(sender_uid)
-            self.db.pending_deposits.insert_one(rec,session=s)
-            self.db.users.update_one({'user_id':uid},{'$set':{'deposit_locked':True,'deposit_lock_pending_id':pending_id,'deposit_lock_expires':rec['expires_at']}},session=s)
-            return rec
-        return self.finance.atomic(work)
-    def native_pending(self,coin,units,tx_time):
-        records=list(self.db.pending_deposits.find({'coin':coin,'status':'pending','crypto_units':int(units),
-            'created_at':{'$lte':int(tx_time or time.time())},'expires_at':{'$gt':int(time.time())}}))
-        return records[0] if len(records)==1 else None
-    def check_ltc_blockchain_auto(self):
-        wallet=self.get_setting('ltc_address')
-        if not wallet or wallet=='Not Set':return
-        res=self.requests.get(f'https://litecoinspace.org/api/address/{wallet}/txs',timeout=10)
-        if res.status_code!=200:return
-        for tx in res.json():
-            if not tx.get('status',{}).get('confirmed'):continue
-            if any(v.get('prevout',{}).get('scriptpubkey_address')==wallet for v in tx.get('vin',[])):continue
-            units=sum(int(v.get('value',0)) for v in tx.get('vout',[]) if v.get('scriptpubkey_address')==wallet)
-            p=self.native_pending('LTC',units,tx.get('status',{}).get('block_time'))
-            if p:self.auto_credit_from_pending(p,tx['txid'],'Litecoin (LTC) Auto')
-    def check_ton_blockchain_auto(self):
-        wallet=self.get_setting('ton_address')
-        if not wallet or wallet=='Not Set':return
-        res=self.requests.get('https://toncenter.com/api/v2/getTransactions',params={'address':wallet,'limit':100},timeout=10)
-        if res.status_code!=200:return
-        for tx in res.json().get('result',[]):
-            if tx.get('aborted') is True:continue
-            p=self.native_pending('TON',int(tx.get('in_msg',{}).get('value',0)),tx.get('utime'))
-            if p:self.auto_credit_from_pending(p,tx['transaction_id']['hash'],'Toncoin (TON) Auto')
-
-    def ct(self,uid,key,**values):
-# [merged]         from cms import render
-        return render(self.db,key,self.get_lang(uid),**values)
-    def markup(self,buttons):
-        m=self.InlineKeyboardMarkup(row_width=1)
-        for label,data in buttons:m.add(self.InlineKeyboardButton(label,callback_data=data))
-        return m
-    def cg_button(self,uid,key,data):
-        doc=self.db.custom_texts.find_one({'key':'cgpt_'+key,'lang':self.get_lang(uid)}) or {}
-        return self.InlineKeyboardButton(self.ct(uid,key),callback_data=data,icon_custom_emoji_id=doc.get('emoji_id'))
-    def account_doc(self,key):
-        if key=='main':return self.db.cgpt_cookies.find_one({'_id':'main'})
-        if not ObjectId.is_valid(key):raise ShopError('معرّف الحساب غير صالح.')
-        return self.db.cgpt_accounts.find_one({'_id':ObjectId(key)})
-    def account_info(self,doc):
-        mgr=SeatManager.from_doc(doc);rep=mgr.diagnose()
-        return {**rep,'id':str(doc['_id']),'email':mgr.owner_email,'name':doc.get('name','حساب'),'mgr':mgr,'manual':rep.get('capacity_source')=='manual'}
-    def find_account(self):
-        for doc in self._cgpt_all_accounts():
-            info=self.account_info(doc)
-            if info['connected'] and info.get('status')=='active' and info.get('available_seats') is not None and info['available_seats']>0:return info
-        return None
-    def account_report(self,key):
-        doc=self.account_doc(key)
-        if not doc:raise ShopError('الحساب غير موجود.',404)
-        rep=self.account_info(doc)
-        def show(v):return 'غير متاح من المصدر' if v is None else str(v)
-        state={'active':'✅ نشط','cookies_expired':'🍪 الكوكيز منتهية','deactivated':'⛔ الاشتراك غير نشط','unknown':'❔ غير مؤكد','unavailable':'⏳ تعذر الاتصال'}.get(rep.get('status'),'❔ غير مؤكد')
-        lines=[f"🏢 <b>{html.escape(doc.get('name',rep['email']) or 'ChatGPT Business')}</b>",state,
-               f"🪑 الإجمالي: {show(rep.get('total_seats'))}",f"👥 الأعضاء (يشمل المالك): {show(rep.get('member_count'))}",
-               f"✉️ دعوات معلقة: {show(rep.get('pending_invites'))}",f"🟢 المتاح للبيع: {show(rep.get('available_seats'))}"]
-        if rep.get('capacity_source')=='manual':lines.append('السعة مضبوطة يدويًا؛ استخدام المقاعد مقروء من الحساب.')
-        lines.append('📅 نهاية الاشتراك: '+show(rep.get('expires_at')))
-        if rep.get('renews_at'):lines.append('🧾 موعد التجديد/الفاتورة: '+rep['renews_at'])
-        buttons=[('🔄 إعادة الفحص','cgx_account_'+key),('🍪 تحديث الكوكيز','cgx_cookie_'+key),('🪑 ضبط السعة يدويًا','cgpt_setseats_'+key),('🔙 الحسابات','cgpt_accounts')]
-        return '\n'.join(lines),self.markup(buttons)
-    def accounts_ui(self,call):
-        buttons=[]
-        for doc in self._cgpt_all_accounts():buttons.append(('🏢 '+str(doc.get('name') or doc.get('data',{}).get('user',{}).get('email','حساب'))[:40],'cgx_account_'+str(doc['_id'])))
-        buttons.extend([('➕ إضافة حساب','cgx_cookie_new'),('🔙 ChatGPT','ad_cgpt_panel')])
-        self.send(call.from_user.id,'🏢 اختر الحساب لعرض المقاعد والاشتراك وتحديث الكوكيز.',reply_markup=self.markup(buttons))
-    def cookies_begin(self,call,key='main'):
-        if key not in ('main','new') and not self.account_doc(key):raise ShopError('الحساب غير موجود.')
-        uid=call.from_user.id
-        self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'cookies','account_key':key,'expires':time.time()+600}},upsert=True)
-        m=self.send(uid,'🍪 أرسل الكوكيز كنص أو ملف <b>JSON / TXT</b> حتى 256KB.\nيدعم ملف جلسة، قائمة كوكيز المتصفح، أو نص Cookie.\nلن نستبدل البيانات السابقة إلا بعد نجاح التحقق من الحساب.\nأرسل /cancel للإلغاء.')
-        if m:self.bot.register_next_step_handler(m,self.cookies_input)
-    def cookies_input(self,message):
-        uid=message.from_user.id
-        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)
-        pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'cookies','expires':{'$gt':time.time()}})
-        if not pending:raise ShopError('انتهت جلسة التحديث؛ افتح الزر مجددًا.')
-        if (message.text or '').strip() in ('/cancel','إلغاء','الغاء'):
-            self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.send(uid,'أُلغي التحديث.');return
-        raw=message.text or ''
-        if message.document:
-            doc=message.document
-            if doc.file_size is None or doc.file_size>262144 or not str(doc.file_name).lower().endswith(('.json','.txt')):raise ShopError('أرسل ملف JSON/TXT حتى 256KB.')
-            f=self.bot.get_file(doc.file_id);data=self.bot.download_file(f.file_path)
-            if len(data)>262144:raise ShopError('الملف أكبر من الحد.')
-            raw=data.decode('utf-8-sig')
-        data=parse_cookies(raw);target=pending['account_key'];old=self.account_doc(target) if target!='new' else None
-        if old:data['account']=old.get('data',{}).get('account',{})
-        mgr=SeatManager.from_doc({'_id':target,'data':data});choices=mgr.hydrate()
-        data['accessToken']=mgr.access_token;data['user']={**data.get('user',{}),'email':mgr.owner_email}
-        selected=data.get('account',{}).get('id')
-        choices=[c for c in choices if c['id']==selected] if selected else choices
-        if not choices:raise ShopError('الجلسة لا تملك حساب Business المحدد. لم تتغير الكوكيز السابقة.')
-        if len(choices)>1:
-            # Short-lived encrypted inputs are retained only until workspace selection.
-            from cryptography.fernet import Fernet
-            cipher=self.secret_cipher()
-            self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'choose_workspace','sealed':cipher.encrypt(json.dumps(data).encode()).decode(),'choices':[{k:v for k,v in c.items() if k!='raw'} for c in choices],'expires':time.time()+600}})
-            self.send(uid,'اختر مساحة Business التي تريد ربطها:',reply_markup=self.markup([(str(c['name'])[:40],f'cgx_choose_{i}') for i,c in enumerate(choices)]))
-        else:
-            data['account']={'id':choices[0]['id']};self.save_cookies(uid,target,data)
-        try:self.bot.delete_message(message.chat.id,message.message_id)
-        except Exception:pass
-    def secret_cipher(self):
-        from cryptography.fernet import Fernet
-        import os
-        key=os.environ.get('SESSION_ENCRYPTION_KEY','')
-        if not key:raise ShopError('اضبط SESSION_ENCRYPTION_KEY لحفظ جلسات الكوكيز بأمان.')
-        return Fernet(key.encode())
-    def save_cookies(self,uid,key,data):
-        mgr=SeatManager.from_doc({'_id':key,'data':data});rep=mgr.diagnose()
-        if not rep['connected'] and rep.get('status')!='deactivated':raise ShopError(rep.get('error','فشل التحقق.'))
-        # Keep the existing document, subscriptions and manual capacity.
-        coll=self.db.cgpt_cookies if key=='main' else self.db.cgpt_accounts
-        ident='main' if key=='main' else ObjectId() if key=='new' else ObjectId(key)
-        if key=='new':
-            for doc in self._cgpt_all_accounts():
-                if doc.get('data',{}).get('account',{}).get('id')==data['account']['id']:raise ShopError('الحساب مضاف مسبقًا؛ استخدم زر تحديثه.')
-        coll.update_one({'_id':ident},{'$set':{'data':{'account':data.get('account',{}),'user':data.get('user',{})},'sealed_data':self.secret_cipher().encrypt(json.dumps(data).encode()).decode(),'name':data.get('user',{}).get('email','ChatGPT Business'),'cookies_updated_at':dt.datetime.utcnow(),'last_status':rep.get('status')}},upsert=True)
-        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self.db.notifications.delete_one({'_id':'cookie:'+str(ident)})
-        self.g['_cgpt_manager_instance']=None;self.g['_CGPT_SEATS_CACHE']['exp']=0
-        text,markup=self.account_report(str(ident));self.send(uid,'✅ تم تحديث الكوكيز والتحقق من الحساب.\n\n'+text,reply_markup=markup)
-    def cgpt_begin(self,call):
-        uid=call.from_user.id;pid,durid=call.data.removeprefix('cgpt_buy_').split('_',1)
-        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid)})
-        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)
-        if not d:raise ShopError('الباقة غير متاحة.')
-        amount=cents(d['price'],minimum=1);minutes=quantity(d['minutes'],525600)
-        old=self.db.cgpt_checkout.find_one({'user_id':uid})
-        if old and old.get('state')=='processing':raise ShopError('يوجد طلب قيد المعالجة. راجع سجل الطلبات أولًا.',409)
-        checkout={'user_id':uid,'pid':pid,'dur_id':durid,'price':amount/100,'minutes':minutes,'label':d.get('label',''),
-                  'product':p.get('name','ChatGPT'),'order_id':uuid.uuid4().hex,'state':'email','created_at':time.time()}
-        self.db.cgpt_checkout.replace_one({'user_id':uid},checkout,upsert=True)
-        m=self.send(uid,self.ct(uid,'ask_email',product=checkout['product'],price=f'{amount/100:.2f}'))
-        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))
-    def cgpt_email_step(self,message,buyer_uid,lang):
-        if message.from_user.id!=buyer_uid:raise ShopError('الطلب لا يخصك.',403)
-        email=(message.text or '').strip().lower()
-        if email in ('/cancel','cancel','إلغاء','الغاء'):return self.cgpt_cancel(buyer_uid,lang)
-        if not re.fullmatch(r'[^@\s<>]{1,64}@[^@\s<>]+\.[^@\s<>]+',email) or len(email)>254:raise ShopError('البريد غير صالح؛ أعد فتح الباقة.')
-        p=self.db.cgpt_checkout.find_one_and_update({'user_id':buyer_uid,'state':{'$in':['email','confirm']}},
-            {'$set':{'email':email,'state':'confirm'}},return_document=True)
-        if not p:raise ShopError('انتهت الجلسة.')
-        markup=self.InlineKeyboardMarkup()
-        markup.add(self.cg_button(buyer_uid,'btn_confirm',f'cgpt_email_ok_{buyer_uid}'),self.cg_button(buyer_uid,'btn_change',f'cgpt_email_change_{buyer_uid}'))
-        markup.add(self.cg_button(buyer_uid,'btn_cancel',f'cgpt_cancel_buy_{buyer_uid}'))
-        self.send(buyer_uid,self.ct(buyer_uid,'confirm_email',email=email,product=p['product'],duration=p['label'],price=f"{p['price']:.2f}"),reply_markup=markup)
-    def cgpt_cancel(self,uid,lang):
-        result=self.db.cgpt_checkout.delete_one({'user_id':uid,'state':{'$in':['email','confirm']}})
-        self.bot.clear_step_handler_by_chat_id(uid)
-        self.send(uid,'أُلغي الطلب؛ لم يُخصم رصيد.' if result.deleted_count else 'لا يوجد طلب قابل للإلغاء؛ راجع سجل الطلبات.')
-    def own_callback(self,call,prefix):
-        if str(call.from_user.id)!=call.data.removeprefix(prefix):raise ShopError('الطلب لا يخصك.',403)
-        return call.from_user.id
-    def cgpt_cancel_callback(self,call):return self.cgpt_cancel(self.own_callback(call,'cgpt_cancel_buy_'),self.get_lang(call.from_user.id))
-    def cgpt_change(self,call):
-        uid=self.own_callback(call,'cgpt_email_change_')
-        m=self.send(uid,'📧 أرسل البريد الصحيح:')
-        if m:self.bot.register_next_step_handler(m,self.cgpt_email_step,uid,self.get_lang(uid))
-    def cgpt_confirm(self,call):
-        uid=self.own_callback(call,'cgpt_email_ok_')
-        p=self.db.cgpt_checkout.find_one_and_update({'user_id':uid,'state':'confirm'},{'$set':{'state':'processing'}},return_document=True)
-        if not p:raise ShopError('الطلب قيد المعالجة أو انتهت الجلسة؛ راجع سجل الطلبات.')
-        try:
-            job=self.buy_cgpt(uid,p['pid'],p['dur_id'],p['email'],p['order_id'])
-            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'done','job_id':job['_id']}})
-            self.cgpt_result(uid,job)
-        except Exception:
-            # No blind refund; durable external_jobs is the authority if debit committed.
-            self.db.cgpt_checkout.update_one({'user_id':uid,'order_id':p['order_id']},{'$set':{'state':'review'}})
-            raise
-    def buy_cgpt(self,uid,pid,durid,email,idem):
-        if not re.fullmatch(r'[^@\s<>]{1,64}@[^@\s<>]+\.[^@\s<>]+',email) or len(email)>254:raise ShopError('بريد غير صالح.')
-        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})
-        if previous:
-            d=previous['details']
-            if previous['kind']!='chatgpt' or (d.get('pid'),d.get('dur_id'),d.get('email'))!=(pid,durid,email):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)
-            return self.process_cgpt_job(previous) if previous['status']=='queued' else previous
-        p=self.db.cgpt_products.find_one({'_id':ObjectId(pid),'is_hidden':{'$ne':True}})
-        d=next((d for d in (p or {}).get('durations',[]) if d['dur_id']==durid),None)
-        if not d:raise ShopError('الباقة غير متاحة.',404)
-        # Existing owned email stays on its workspace when renewing.
-        target=None
-        for doc in self._cgpt_all_accounts():
-            mgr=SeatManager.from_doc(doc);info=mgr.invites_data['invites'].get(email)
-            if info and info.get('telegram_uid')==uid and info.get('status') in ('active','expired'):
-                target={'mgr':mgr,'id':str(doc['_id'])};break
-        if not target:target=self.find_account()
-        if not target:raise ShopError(self.ct(uid,'no_seats'),409)
-        details={'pid':pid,'dur_id':durid,'email':email,'minutes':quantity(d['minutes'],525600),'account_key':target['id'],'product':p.get('name','ChatGPT')}
-        job=self.finance.reserve_external(uid,d['price'],idem,'chatgpt',details)
-        return self.process_cgpt_job(job)
-    def process_cgpt_job(self,job):
-        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},
-            {'$set':{'status':'processing','started_at':time.time()}},return_document=True)
-        if not claimed:return self.db.external_jobs.find_one({'_id':job['_id']})
-        try:
-            d=job['details'];doc=self.account_doc(d['account_key'])
-            if not doc:result={'ok':False,'definitive':True,'error':'الحساب غير موجود.'}
-            else:
-                mgr=SeatManager.from_doc(doc);mgr._last_buyer_uid=job['user_id'];mgr._product_id=d['pid'];mgr._order_id=job['order_id'];mgr._job_id=job['_id']
-                result=mgr.invite_user(d['email'],d['minutes'])
-            if result.get('ok'):
-                def finish(s):
-                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed','result':result}},session=s)
-                    self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],
-                        'product_id':'cgpt_'+d['pid'],'code_delivered':'chatgpt_seat:'+d['email'],'qty':1,'price':job['amount_cents']/100,
-                        'total_price':job['amount_cents']/100,'status':'completed','cgpt_email':d['email'],'cgpt_expires_at':result['expires_at']}},upsert=True,session=s)
-                self.finance.atomic(finish)
-            else:
-                state='rejected' if result.get('definitive') else 'unknown'
-                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'error':result.get('error','')}})
-                if state=='rejected':self.finance.refund(job['_id'],'invite_rejected')
-                else:self.notice_once('job:'+job['_id'],86400,'⚠️ دعوة تحتاج مراجعة نتيجة المزود. رقم الطلب: '+job['order_id'])
-        except Exception:
-            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})
-            self.logger.exception('ChatGPT result not yet reconciled')
-        self._invalidate_user_cache(job['user_id']);self.g['_CGPT_SEATS_CACHE']['exp']=0
-        return self.db.external_jobs.find_one({'_id':job['_id']})
-    def cgpt_result(self,uid,job):
-        key='invite_success' if job['status']=='completed' else 'refunded' if job['status']=='refunded' else 'unavailable'
-        self.send(uid,self.ct(uid,key,email=job['details']['email'],expires=job.get('result',{}).get('expires_at',''),order_id=job['order_id']))
-    def renew_ui(self,call):
-        uid=call.from_user.id;buttons=[]
-        for p in self.db.cgpt_products.find({'is_hidden':{'$ne':True}}):
-            for d in p.get('durations',[]):
-                buttons.append((f"{re.sub('<[^>]+>','',p.get('name','ChatGPT'))[:20]} — {d['label']} — ${d['price']}",f"cgpt_buy_{p['_id']}_{d['dur_id']}"))
-        self.send(uid,'🔄 اختر مدة التجديد ثم أدخل البريد نفسه. ستُضاف المدة إلى المتبقي من اشتراكك.',reply_markup=self.markup(buttons[:80]))
-    def queue_subscription_notice(self,account,email,info,key,hours=0):
-        uid=info.get('telegram_uid')
-        if not isinstance(uid,int):return
-        ident=digest('subscription_notice',account,email,info.get('expires_at'),key,24 if hours>2 else 1 if hours else 0)
-        markup=self.markup([(self.ct(uid,'btn_renew'),'cgb_renew')])
-        self.db.notifications.update_one({'_id':ident},{'$setOnInsert':{'uids':[uid],'text':self.ct(uid,key,email=email,hours=hours),
-            'markup':markup.to_json(),'sent':False,'next_at':time.time(),'created':time.time()}},upsert=True)
-    def cgpt_cycle(self):
-        for doc in self._cgpt_all_accounts():
-            mgr=SeatManager.from_doc(doc);key=str(doc['_id']);rep=mgr.diagnose()
-            for email,info in mgr.invites_data['invites'].items():
-                exp=date(info.get('expires_at'))
-                if info.get('status')=='active' and exp:
-                    left=(exp-dt.datetime.utcnow()).total_seconds()
-                    if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))
-            self.db.cgpt_account_status.update_one({'_id':key},{'$set':{k:v for k,v in rep.items() if k not in ('user_emails','pending_emails')}|{'checked_at':dt.datetime.utcnow()}},upsert=True)
-            if rep['status']=='cookies_expired':
-                self.notice_once('cookie:'+key,86400,self.ct(self.OWNER_ID,'cookie_expired',account=mgr.owner_email),self.markup([('🍪 تحديث الكوكيز','cgx_cookie_'+key)]));continue
-            if rep['status']=='deactivated':
-                self.notice_once('inactive:'+key,86400,self.ct(self.OWNER_ID,'account_expired',account=mgr.owner_email),self.markup([('🏢 عرض الحساب','cgx_account_'+key)]));continue
-            if not rep['connected']:continue
-            mgr.check_and_cleanup()
-            for email,info in mgr.invites_data['invites'].items():
-                exp=date(info.get('expires_at'))
-                if info.get('status')!='active' or not exp:continue
-                left=(exp-dt.datetime.utcnow()).total_seconds()
-                if 0<left<=86400:self.queue_subscription_notice(key,email,info,'reminder',max(1,int(left/3600)))
-    def cgpt_daemon(self):
-        while not self._stop.is_set():
-            try:self.cgpt_cycle()
-            except Exception:self.logger.exception('ChatGPT monitor failed')
-            self._stop.wait(300)
-
-    def register_ui(self):
-# [merged]         from cms import TEMPLATES
-        def route(call):
-            uid=call.from_user.id;data=call.data;self.bot.answer_callback_query(call.id)
-            if data.startswith('cgx_account_'):
-                text,m=self.account_report(data.removeprefix('cgx_account_'));return self.send(uid,text,reply_markup=m)
-            if data.startswith('cgx_cookie_'):return self.cookies_begin(call,data.removeprefix('cgx_cookie_'))
-            if data.startswith('cgx_choose_'):
-                pending=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'choose_workspace','expires':{'$gt':time.time()}})
-                if not pending:raise ShopError('انتهت جلسة الاختيار.')
-                index=int(data.removeprefix('cgx_choose_'))
-                if not 0<=index<len(pending['choices']):raise ShopError('اختيار غير صالح.')
-                obj=json.loads(self.secret_cipher().decrypt(pending['sealed'].encode()))
-                obj['account']={'id':pending['choices'][index]['id']}
-                return self.save_cookies(uid,pending['account_key'],obj)
-            if data=='cgx_cms':
-                return self.send(uid,'✏️ اختر الرسالة أو الزر الذي تريد تخصيصه:',reply_markup=self.markup([(v[0],'cgx_tpl_'+k) for k,v in TEMPLATES.items()]+[('📦 أسماء المنتجات والوصف','cgx_products')]))
-            if data.startswith('cgx_tpl_'):
-                key=data.removeprefix('cgx_tpl_')
-                if key not in TEMPLATES:raise ShopError('النص غير موجود.')
-                return self.send(uid,'اختر لغة النص:',reply_markup=self.markup([('العربية','cgx_edit_ar_'+key),('English','cgx_edit_en_'+key)]))
-            if data.startswith('cgx_edit_'):
-                lang,key=data.removeprefix('cgx_edit_').split('_',1)
-                if key not in TEMPLATES or lang not in ('ar','en'):raise ShopError('اختيار غير صالح.')
-                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'template','key':key,'lang':lang,'expires':time.time()+900}},upsert=True)
-# [merged]                 from cms import render
-                values={k:'مثال' for k in ('email','product','duration','price','expires','hours','account','order_id')}
-                self.send(uid,'النص الحالي:\n'+render(self.db,key,lang,**values))
-                m=self.send(uid,'أرسل النص الجديد بتنسيقه وإيموجياته.\nالمتغيرات المتاحة: <code>{email} {product} {duration} {price} {expires} {hours} {account} {order_id}</code>\nأرسل /reset لاستعادة الافتراضي، أو /cancel للإلغاء.')
-                if m:self.bot.register_next_step_handler(m,self.cms_input)
-                return
-            if data=='cgx_products':
-                return self.send(uid,'📦 اختر المنتج لتعديل الاسم والوصف والإيموجي:',reply_markup=self.markup([(re.sub('<[^>]+>','',p.get('name','منتج'))[:40],'cgx_prod_'+str(p['_id'])) for p in self.db.cgpt_products.find()]))
-            if data.startswith('cgx_prod_'):
-                pid=data.removeprefix('cgx_prod_')
-                if not ObjectId.is_valid(pid):raise ShopError('منتج غير صالح.')
-                return self.send(uid,'اختر الحقل:',reply_markup=self.markup([(label,f'cgx_field_{field}_{pid}') for label,field in [('الاسم العربي','name'),('الاسم الإنجليزي','name-en'),('الوصف العربي','desc'),('الوصف الإنجليزي','desc-en')]]))
-            if data.startswith('cgx_field_'):
-                field,pid=data.removeprefix('cgx_field_').split('_',1);field=field.replace('-','_')
-                if field not in ('name','name_en','desc','desc_en') or not ObjectId.is_valid(pid):raise ShopError('اختيار غير صالح.')
-                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'product','field':field,'pid':pid,'expires':time.time()+900}},upsert=True)
-                m=self.send(uid,'أرسل النص الجديد. التنسيق والإيموجي المخصص محفوظان كما ترسلهما. أرسل /cancel للإلغاء.')
-                if m:self.bot.register_next_step_handler(m,self.cms_input)
-                return
-            if data=='cgx_jobs':return self.jobs_ui(uid)
-            if data.startswith('cgx_job_'):
-                jid=data.removeprefix('cgx_job_');job=self.db.external_jobs.find_one({'order_id':jid})
-                if not job:raise ShopError('طلب غير موجود.')
-                buttons=[('🔎 إعادة مطابقة النتيجة','cgx_recheck_'+jid),('📝 تسوية موثقة','cgx_resolve_'+jid)]
-                return self.send(uid,f"طلب <code>{jid}</code>\nالنوع: {job['kind']}\nالحالة: {job['status']}\nالمبلغ: ${job['amount_cents']/100:.2f}",reply_markup=self.markup(buttons))
-            if data.startswith('cgx_recheck_'):
-                job=self.db.external_jobs.find_one({'order_id':data.removeprefix('cgx_recheck_')})
-                if not job:raise ShopError('طلب غير موجود.')
-                self.reconcile_job(job);return self.jobs_ui(uid)
-            if data.startswith('cgx_resolve_'):
-                oid=data.removeprefix('cgx_resolve_')
-                self.db.cgpt_admin_inputs.update_one({'_id':uid},{'$set':{'mode':'resolve','oid':oid,'expires':time.time()+600}},upsert=True)
-                m=self.send(uid,'تحقق من نتيجة المزود أولًا.\nلإرجاع مال طلب مرفوض: <code>refund سبب التحقق ورقم المرجع</code>\nلطلب تم تسليمه: <code>delivered سبب التحقق ورقم المرجع</code>\nلا تستخدم الاسترجاع عند عدم معرفة النتيجة.')
-                if m:self.bot.register_next_step_handler(m,self.resolve_input)
-        route.__name__='cgx_admin_route'
-        self.bot.register_callback_query_handler(self.guard(route,True),func=lambda c:bool(c.data) and c.data.startswith('cgx_'))
-        self.bot.register_callback_query_handler(self.guard(self.renew_ui),func=lambda c:c.data=='cgb_renew')
-        self.bot.register_message_handler(self.guard(lambda m:self.customer_orders(m.from_user.id)),commands=['orders'])
-    def cms_input(self,message):
-# [merged]         from cms import validate_template
-        uid=message.from_user.id
-        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)
-        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'expires':{'$gt':time.time()}})
-        if not p:raise ShopError('انتهت جلسة التعديل.')
-        raw=(message.text or '').strip()
-        if raw=='/cancel':self.db.cgpt_admin_inputs.delete_one({'_id':uid});return self.send(uid,'أُلغي التعديل.')
-        if p['mode']=='template' and raw=='/reset':
-            self.db.custom_texts.delete_one({'key':'cgpt_'+p['key'],'lang':p['lang']})
-        else:
-            text=message.html_text or html.escape(raw)
-            emoji=next((e.custom_emoji_id for e in (message.entities or []) if e.type=='custom_emoji'),None)
-            if p['mode']=='template':
-                if p['key'].startswith('btn_'):text=raw
-                validate_template(text,p['key'].startswith('btn_'))
-                self.db.custom_texts.update_one({'key':'cgpt_'+p['key'],'lang':p['lang']},{'$set':{'value':text,'emoji_id':emoji,'updated_by':uid}},upsert=True)
-            elif p['mode']=='product':
-                if len(raw)>(100 if p['field'].startswith('name') else 2500):raise ShopError('النص طويل جدًا.')
-                # Product text is not a template: escape braces during validation only.
-                validate_template(text.replace('{','{{').replace('}','}}'))
-                update={p['field']:text}
-                if p['field']=='name':update['custom_emoji_id']=emoji
-                self.db.cgpt_products.update_one({'_id':ObjectId(p['pid'])},{'$set':update})
-                # Update existing shop projection, not just the separate product collection.
-                projection={'name':'name_ar','name_en':'name_en','desc':'desc_ar','desc_en':'desc_en'}
-                self.db.products.update_many({'$or':[{'cgpt_product_id':p['pid']},{'_id':'cgpt_main_'+p['pid']}]},{'$set':{projection[p['field']]:text}})
-        self.db.cgpt_admin_inputs.delete_one({'_id':uid});self._invalidate_custom_texts_cache();self._invalidate_products_cache();self.g['_PRODUCTS_CACHE']=None
-        self.send(uid,'✅ تم الحفظ. التغييرات تظهر في الرسائل التالية.',reply_markup=self.markup([('✏️ تخصيص ChatGPT','cgx_cms')]))
-    def jobs_ui(self,uid):
-        jobs=list(self.db.external_jobs.find({'status':{'$in':['queued','processing','unknown','pending_provider']}}).sort('created_at',-1).limit(30))
-        self.send(uid,'📋 الطلبات التي تحتاج متابعة:' if jobs else '✅ لا توجد طلبات تحتاج متابعة.',reply_markup=self.markup([(f"{j['kind']} — {j['status']} — {j['order_id'][:8]}",'cgx_job_'+j['order_id']) for j in jobs]))
-    def resolve_input(self,message):
-        uid=message.from_user.id
-        if not self.admin(uid):raise ShopError('ليس لديك صلاحية.',403)
-        p=self.db.cgpt_admin_inputs.find_one({'_id':uid,'mode':'resolve','expires':{'$gt':time.time()}})
-        action,sep,note=(message.text or '').partition(' ')
-        if not p or action not in ('refund','delivered') or len(note.strip())<12:raise ShopError('أرسل الإجراء وسببًا موثقًا من 12 حرفًا على الأقل.')
-        job=self.db.external_jobs.find_one({'order_id':p['oid']})
-        if not job or job['status'] in ('completed','refunded'):raise ShopError('الطلب منتهٍ بالفعل.')
-        # Administrator explicitly attests remote outcome; record immutable evidence.
-        self.db.job_resolutions.insert_one({'job_id':job['_id'],'admin_id':uid,'action':action,'note':note,'created_at':dt.datetime.utcnow()})
-        if action=='refund':
-            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['completed','refunded']}},{'$set':{'status':'rejected'}})
-            self.finance.refund(job['_id'],'admin_verified_rejection')
-        else:self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed','resolution_note':note}})
-        self._invalidate_user_cache(job['user_id']);self.db.cgpt_admin_inputs.delete_one({'_id':uid})
-        self.send(uid,'✅ سُجلت التسوية مرة واحدة.');self.send(job['user_id'],'تمت مراجعة طلبك '+job['order_id']+' وتحديث حالته.')
-        if job['kind']=='gemini':
-            self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()
-    def customer_orders(self,uid):
-        jobs=list(self.db.external_jobs.find({'user_id':uid}).sort('created_at',-1).limit(15))
-        rows=[f"<code>{j['order_id']}</code> — {html.escape(j['status'])}" for j in jobs]
-        self.send(uid,'📋 آخر طلبات الخدمات:\n'+'\n'.join(rows) if rows else 'لا توجد طلبات خدمات بعد.')
-    def reconcile_job(self,job):
-        if job['kind']=='chatgpt':
-            doc=self.account_doc(job['details']['account_key'])
-            if doc:
-                mgr=SeatManager.from_doc(doc);inv=mgr.invites_data['invites'].get(job['details']['email'],{})
-                if inv.get('last_job_id')==job['_id']:
-                    self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['refunded','completed']}},{'$set':{'status':'completed','result':{'ok':True,'expires_at':inv['expires_at']}}})
-                    return
-        if job['kind']=='github' and job.get('provider_job_id'):
-            self.github_poll(job);return
-        if job['kind']=='external' and job.get('provider_order_id'):
-            d=job['details'];store=self.db.ext_stores.find_one({'_id':ObjectId(d['store_id'])})
-            if store:
-                resp=self._ext_api_get(store,'/orders/'+str(job['provider_order_id']))
-                if resp:self.complete_external(job,resp)
-
-    def ext_post(self,store,path,body,idem_key=None):
-        base=str(store.get('base_url','')).rstrip('/');prefix=store.get('api_prefix','')
-        if not prefix and '/api/v1' not in base and '/shop-api/v1' not in base:
-            raise ShopError('افحص اتصال المتجر لاكتشاف مسار API قبل أول شراء.')
-        headers=self._ext_api_headers(store)
-        if idem_key:headers['Idempotency-Key']=idem_key
-        try:
-            r=self.requests.post(base+prefix+path,headers=headers,json=body,timeout=25,allow_redirects=False)
-            try:obj=r.json()
-            except ValueError:obj={}
-            if r.status_code in (200,201,202):return True,obj
-            return False,{'definitive':r.status_code in (400,401,403,404,422),'status_code':r.status_code}
-        except Exception:return False,{'definitive':False,'error':'response_unknown'}
-    def buy_external(self,uid,epid,qty,idem):
-        qty=quantity(qty)
-        previous=self.db.external_jobs.find_one({'_id':digest('external',uid,idem)})
-        if previous:
-            if previous['kind']!='external' or (previous['details'].get('epid'),previous['details'].get('qty'))!=(epid,qty):raise ShopError('مفتاح الطلب مستخدم لطلب مختلف.',409)
-            return previous
-        qty=quantity(qty);ep=self.db.ext_products.find_one({'_id':ObjectId(epid),'hidden':{'$ne':True}})
-        if not ep:raise ShopError('المنتج غير متاح.',404)
-        store=self.db.ext_stores.find_one({'_id':ObjectId(ep['store_id'])})
-        if not store:raise ShopError('المتجر غير متاح.',404)
-        if not store.get('api_prefix') and '/api/v1' not in store.get('base_url','') and '/shop-api/v1' not in store.get('base_url',''):
-            self._ext_api_get(store,'/products')
-            if not store.get('api_prefix'):raise ShopError('تعذر تأكيد مسار API للمتجر قبل الخصم.')
-        details={'epid':epid,'store_id':str(ep['store_id']),'ext_id':ep['ext_id'],'qty':qty,'product':ep.get('name','')}
-        job=self.finance.reserve_external(uid,cents(ep.get('sell_price',ep.get('base_price')),minimum=1)*qty/100,idem,'external',details)
-        claimed=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)
-        if claimed:
-            ok,resp=self.ext_post(store,'/orders',{'product_id':self._ext_int_or_str(ep['ext_id']),'quantity':qty},job['_id'])
-            if ok:self.complete_external(job,resp)
-            else:
-                state='rejected' if resp.get('definitive') else 'unknown'
-                self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state}})
-                if state=='rejected':self.finance.refund(job['_id'],'provider_rejected')
-        self._invalidate_user_cache(uid)
-        return self.db.external_jobs.find_one({'_id':job['_id']})
-    def complete_external(self,job,resp):
-        codes=self._ext_extract_codes(resp);obj=resp.get('order',resp) if isinstance(resp,dict) else {}
-        state='completed' if len(codes)==job['details']['qty'] else 'pending_provider'
-        oid=obj.get('id',obj.get('order_id',''))
-        def save(s):
-            j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)
-            if j['status']=='refunded':return
-            self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':state,'codes':codes,'provider_order_id':str(oid)}},session=s)
-            self.db.ext_orders.update_one({'idempotency_key':job['_id']},{'$set':{'store_id':job['details']['store_id'],'user_id':job['user_id'],
-                'product_name':job['details']['product'],'price':job['amount_cents']/100,'quantity':job['details']['qty'],
-                'codes':codes,'status':state,'ext_order_id':str(oid),'created_at':int(time.time())}},upsert=True,session=s)
-            if state=='completed':
-                for index,code in enumerate(codes):
-                    self.db.orders.update_one({'order_id':job['order_id'],'code_index':index},{'$setOnInsert':{'order_id':job['order_id'],'code_index':index,
-                        'user_id':job['user_id'],'product_id':'ext_'+job['details']['epid'],'code_delivered':code,'qty':1,
-                        'price':job['amount_cents']/100/job['details']['qty'],'status':'completed'}},upsert=True,session=s)
-        self.finance.atomic(save)
-    def ext_result(self,uid,job):
-        if job['status']=='completed':
-            f=io.BytesIO('\n'.join(job.get('codes',[])).encode());f.name='order_'+job['order_id']+'.txt'
-            try:self.bot.send_document(uid,f,caption='✅ طلب '+job['order_id'])
-            except Exception:self.send(uid,'الأكواد محفوظة في سجل مشترياتك.')
-        elif job['status']=='refunded':self.send(uid,'رُفض الطلب وأُعيد رصيدك. '+job['order_id'])
-        else:self.send(uid,'⏳ الطلب محفوظ وقيد التحقق؛ لا تعِد شراءه.\n<code>'+job['order_id']+'</code>')
-    def ext_buy_callback(self,call):
-        self.ext_result(call.from_user.id,self.buy_external(call.from_user.id,call.data.removeprefix('buyext_'),1,f'tg:{call.message.chat.id}:{call.message.message_id}'))
-    def ext_buy_message(self,message,epid,lang):
-        self.ext_result(message.from_user.id,self.buy_external(message.from_user.id,epid,quantity((message.text or '').strip()),f'tg:{message.chat.id}:{message.message_id}'))
-
-    def github_begin(self,message):
-        uid=message.from_user.id;data=self.temp_github_data.pop(uid,None)
-        if not data:raise ShopError('انتهت جلسة الطلب.')
-        credentials={'github_username':self.decrypt_sensitive(data['user']),'github_password':self.decrypt_sensitive(data['pass']),'totp_secret':(message.text or '').strip()}
-        if not self.GITHUB_API_KEY:raise ShopError('مزود الخدمة غير مهيأ.')
-        job=self.finance.reserve_external(uid,data['price'],f'github:{message.chat.id}:{message.message_id}','github',{'product':'GitHub Student'})
-        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)
-        try:self.bot.delete_message(uid,message.message_id)
-        except Exception:pass
-        if claim:
-            try:
-                r=self.requests.post(self.GITHUB_BASE_URL+'/api/run',headers={'X-API-Key':self.GITHUB_API_KEY,'Idempotency-Key':job['_id']},json=credentials,timeout=30)
-                if r.status_code in (200,201,202):
-                    obj=r.json();jid=obj.get('job_id')
-                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'pending_provider' if jid else 'unknown','provider_job_id':jid}})
-                elif r.status_code in (400,401,403,404,422):
-                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'rejected'}});self.finance.refund(job['_id'],'github_rejected')
-                else:self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})
-            except Exception:self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'unknown'}})
-            finally:credentials.clear();self.secure_wipe(data)
-        self._release_purchase_lock(uid);self._invalidate_user_cache(uid)
-        self.send(uid,'طلبك محفوظ. ستصلك النتيجة بعد تحقق المزود.\n<code>'+job['order_id']+'</code>')
-    def github_poll(self,job):
-        r=self.requests.get(self.GITHUB_BASE_URL+'/api/job/'+str(job['provider_job_id']),headers={'X-API-Key':self.GITHUB_API_KEY},timeout=15)
-        if r.status_code!=200:return
-        obj=r.json();state=str(obj.get('status','')).lower()
-        if state=='submitted':
-            def save(s):
-                self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$ne':'refunded'}},{'$set':{'status':'completed'}},session=s)
-                self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],
-                    'product_id':'GitHub_Student','code_delivered':'AppID: '+str(obj.get('app_id','')),'qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)
-            self.finance.atomic(save);self.send(job['user_id'],'✅ اكتمل طلب GitHub '+job['order_id'])
-        elif state in ('failed','error'):
-            self.db.external_jobs.update_one({'_id':job['_id'],'status':{'$nin':['refunded','completed']}},{'$set':{'status':'rejected'}})
-            self.finance.refund(job['_id'],'github_failed');self._invalidate_user_cache(job['user_id'])
-            self.send(job['user_id'],'لم يُنفذ طلب GitHub وأُعيد رصيدك.')
-
-    def notification_worker(self):
-        while not self._stop.wait(2):
-            try:
-                now=time.time();n=self.db.notifications.find_one_and_update({'sent':False,'next_at':{'$lte':now}},
-                    {'$set':{'next_at':now+60}},return_document=True)
-                if n:
-                    remaining=[];markup=self.InlineKeyboardMarkup.de_json(n['markup']) if n.get('markup') else None
-                    for uid in n.get('uids',[]):
-                        if not self.send(uid,n['text'],reply_markup=markup):remaining.append(uid)
-                    self.db.notifications.update_one({'_id':n['_id']},{'$set':{'uids':remaining,'sent':not remaining,'next_at':time.time()+300}})
-                for job in self.db.external_jobs.find({'status':{'$in':['processing','pending_provider','unknown']}}).limit(20):
-                    if job.get('started_at',0)>time.time()-60:continue
-                    self.reconcile_job(job)
-                    if job['status']=='processing' and job.get('started_at',0)<time.time()-300:
-                        self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})
-                        self.notice_once('job:'+job['_id'],86400,'⚠️ طلب يحتاج تسوية: '+job['order_id'],self.markup([('📋 متابعة الطلب','cgx_job_'+job['order_id'])]))
-            except Exception:self.logger.exception('Background reconciliation failed')
-            self._stop.wait(20)
-
-    def csv_orders(self,call):
-        import csv
-        f=io.StringIO();writer=csv.writer(f)
-        writer.writerow(['التاريخ','المستخدم','رقم الطلب','المنتج','الكمية','السعر المدفوع للوحدة','الإجمالي المحفوظ','الحالة'])
-        for r in self.db.orders.find().sort('_id',-1):
-            qty=r.get('qty',r.get('quantity',1));total=r.get('total_price');unit=r.get('price')
-            # Historical unknowns stay blank; never recompute from current catalog price.
-            if total is None and unit is not None:total=unit*qty
-            if unit is None and total is not None and qty:unit=total/qty
-            def safe(v):
-                text=str(v if v is not None else '')
-                return "'"+text if text.startswith(('=','+','-','@')) else text
-            writer.writerow([safe(r.get('created_at',getattr(r.get('_id'),'generation_time',''))),r.get('user_id'),r.get('order_id',''),safe(r.get('product_id','')),qty,unit if unit is not None else '',total if total is not None else '',r.get('status','legacy_unverified')])
-        file=io.BytesIO(f.getvalue().encode('utf-8-sig'));file.name='orders.csv';self.bot.send_document(call.from_user.id,file)
-
-    def gemini_buy(self,call):
-        uid=call.from_user.id
-        if not self.g.get('client') or not self.g.get('USERBOT_LOOP'):raise ShopError('مزود Gemini غير متصل؛ لم يُخصم رصيد.')
-        price=cents(self.get_setting('gemini_price'),minimum=1)/100
-        job=self.finance.reserve_external(uid,price,f'gemini:{call.message.chat.id}:{call.message.message_id}','gemini',{'product':'Gemini Advanced'})
-        self._invalidate_user_cache(uid);self.send(uid,'طلب Gemini محفوظ في الطابور.\n<code>'+job['order_id']+'</code>')
-        self.gemini_next()
-    def gemini_next(self):
-        import asyncio
-        # One durable provider stream. An uncertain job blocks reuse until reconciliation.
-        if self.db.external_jobs.find_one({'kind':'gemini','status':{'$in':['processing','unknown']}}):return
-        job=self.db.external_jobs.find_one({'kind':'gemini','status':'queued'},sort=[('created_at',1)])
-        if not job:return
-        claim=self.db.external_jobs.find_one_and_update({'_id':job['_id'],'status':'queued'},{'$set':{'status':'processing','started_at':time.time()}},return_document=True)
-        if not claim:return
-        self.g['ACTIVE_GEMINI_SESSION']={'uid':job['user_id'],'price':job['amount_cents']/100,'job_id':job['_id'],'ready':False,'msg_map':{}}
-        async def begin():
-            try:
-                provider=self.get_setting('provider_bot','').replace('@','')
-                await self.client.send_message(provider,'/start');await self.asyncio.sleep(3)
-                self.g['ACTIVE_GEMINI_SESSION']['ready']=True
-                messages=await self.client.get_messages(provider,limit=5)
-                for msg in messages:
-                    if msg.reply_markup and hasattr(msg.reply_markup,'rows'):
-                        for ri,row in enumerate(msg.reply_markup.rows):
-                            for ci,button in enumerate(row.buttons):
-                                if 'Create verify' in (button.text or ''):
-                                    await msg.click(ri,ci);return
-                await self.client.send_message(provider,'✨ Create verify')
-            except Exception:
-                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'unknown'}})
-                self.send(job['user_id'],'تعذر حسم اتصال المزود. طلبك محفوظ للمراجعة؛ لن يُكرر تلقائيًا.')
-        asyncio.run_coroutine_threadsafe(begin(),self.USERBOT_LOOP)
-    def userbot_start(self):
-        import os,asyncio
-        session=self.get_setting('userbot_session','');provider=self.get_setting('provider_bot','').replace('@','')
-        if not session or session=='Not Set' or not provider or provider=='Not Set':return False
-        api_id=os.environ.get('TELEGRAM_API_ID');api_hash=os.environ.get('TELEGRAM_API_HASH')
-        if not api_id or not api_hash:
-            self.logger.warning('Gemini userbot needs TELEGRAM_API_ID and TELEGRAM_API_HASH');return False
-        if self.g.get('client'):return True
-        loop=asyncio.new_event_loop();asyncio.set_event_loop(loop);client=self.TelegramClient(self.StringSession(session),int(api_id),api_hash)
-        self.g['USERBOT_LOOP']=loop;self.g['client']=client
-        @client.on(self.events.NewMessage(chats=provider))
-        @client.on(self.events.MessageEdited(chats=provider))
-        async def event_handler(event):
-            active=self.g.get('ACTIVE_GEMINI_SESSION')
-            if not active or not active.get('ready'):return
-            job=self.db.external_jobs.find_one({'_id':active['job_id'],'status':'processing'})
-            if not job:return
-            event_time=event.message.date.timestamp() if event.message.date else 0
-            if event_time<job.get('started_at',0)-1:return
-            text=event.raw_text or '';self.send(job['user_id'],'📩 '+html.escape(text[:3500]))
-            if '✅ Status: SUCCEEDED' in text:
-                def complete(s):
-                    j=self.db.external_jobs.find_one({'_id':job['_id']},session=s)
-                    if j['status']!='processing':return
-                    self.db.external_jobs.update_one({'_id':job['_id']},{'$set':{'status':'completed'}},session=s)
-                    self.db.orders.update_one({'order_id':job['order_id']},{'$setOnInsert':{'order_id':job['order_id'],'user_id':job['user_id'],'product_id':'Gemini_Activation','code_delivered':'تم التفعيل','qty':1,'total_price':job['amount_cents']/100,'status':'completed'}},upsert=True,session=s)
-                self.finance.atomic(complete);self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()
-            elif '❌ Status: FAILED' in text or '❌ Error' in text:
-                self.db.external_jobs.update_one({'_id':job['_id'],'status':'processing'},{'$set':{'status':'rejected'}})
-                self.finance.refund(job['_id'],'gemini_failed');self._invalidate_user_cache(job['user_id'])
-                self.g['ACTIVE_GEMINI_SESSION']=None;self.gemini_next()
-        def run():
-            asyncio.set_event_loop(loop)
-            async def connect():
-                await client.connect()
-                if not await client.is_user_authorized():raise RuntimeError('Userbot session unauthorized')
-                self.gemini_next();await client.run_until_disconnected()
-            try:loop.run_until_complete(connect())
-            except Exception:
-                self.logger.exception('Userbot stopped');self.g['client']=None
-        threading.Thread(target=run,name='gemini-userbot',daemon=True).start();return True
-
-    def start(self):
-        import os
-        if not self.TOKEN or not self.MONGO_URI or not self.OWNER_ID:raise RuntimeError('TOKEN, MONGO_URI and OWNER_ID must be configured.')
-        self.secret_cipher()  # Validate encryption configuration before accepting requests.
-        self.initialize();self.register_ui();self.install_handlers(set(self.g['_SAFE_ADMIN_NAMES'])|{'cgx_admin_route'})
-        self.bot.delete_webhook(drop_pending_updates=False)
-        self.userbot_start()
-        workers=[('http',self.keep_alive),('deposits',self.auto_deposit_monitor_thread),('chatgpt',self.cgpt_daemon),
-                 ('notifications',self.notification_worker),('referrals',self.background_referral_checker_v2)]
-        workers.append(('restock-digests',self.g['_ops'].restock_worker))
-        for i in range(1):workers.append(('webhook-'+str(i),self.webhook_worker))
-        for name,fn in workers:threading.Thread(target=self.run_worker,args=(fn,),name=name,daemon=True).start()
-        self.logger.info('Runtime ready; pending Telegram updates will be processed.')
-        self.bot.infinity_polling(skip_pending=False,timeout=30,long_polling_timeout=30,allowed_updates=['message','callback_query','pre_checkout_query'])
-
-    def stars_invoice(self,message,lang):
-        uid=message.from_user.id;value=cents((message.text or '').replace('$','').replace(',','.'),minimum=10,maximum=100000)
-        stars=max(1,(value*quantity(self.STARS_RATE,100000)+99)//100)
-        ident=uuid.uuid4().hex
-        self.db.star_invoices.insert_one({'_id':ident,'user_id':uid,'amount_cents':value,'stars':stars,'status':'created','created_at':dt.datetime.utcnow()})
-        self.bot.send_invoice(uid,'شحن رصيد المتجر','شحن رصيد المتجر باستخدام النجوم',payload='invoice:'+ident,
-            provider_token='',currency='XTR',prices=[self.LabeledPrice(label='رصيد المتجر',amount=stars)])
-    def stars_checkout(self,query):
-        inv=self.db.star_invoices.find_one({'_id':str(query.invoice_payload).removeprefix('invoice:'),'user_id':query.from_user.id})
-        ok=bool(inv and inv['stars']==query.total_amount and query.currency=='XTR' and inv['status'] in ('created','paid'))
-        self.bot.answer_pre_checkout_query(query.id,ok=ok,error_message=None if ok else 'الفاتورة غير صالحة؛ أنشئ فاتورة جديدة.')
-    def stars_paid(self,message):
-        payment=message.successful_payment;uid=message.from_user.id
-        inv=self.db.star_invoices.find_one({'_id':str(payment.invoice_payload).removeprefix('invoice:'),'user_id':uid})
-        if not inv or inv['stars']!=payment.total_amount or payment.currency!='XTR':
-            self.notice_once('stars-review:'+payment.telegram_payment_charge_id,86400,'⚠️ دفعة نجوم قديمة أو غير مطابقة تحتاج تسوية. المستخدم: '+str(uid));return
-        result=self.credit_user(uid,inv['amount_cents']/100,payment.telegram_payment_charge_id,self.get_lang(uid),'Telegram Stars')
-        if result.get('ok'):self.db.star_invoices.update_one({'_id':inv['_id']},{'$set':{'status':'paid','charge_id':payment.telegram_payment_charge_id}})
-
-    def run_worker(self,fn):
-        while not self._stop.is_set():
-            try:
-                fn()
-                return
-            except Exception:
-                self.logger.exception('Worker interrupted; will resume')
-                self._stop.wait(5)
-
-    def all_accounts(self):
-        accounts=list(self.db.cgpt_accounts.find())
-        main=self.db.cgpt_cookies.find_one({'_id':'main'})
-        if main and (main.get('data') or main.get('sealed_data')) and not any(str(a['_id'])=='main' for a in accounts):
-            accounts.append({**main,'name':main.get('name','الحساب الرئيسي')})
-        return accounts
-
-
-
-
-# تهيئة Runtime بعd تعريف كل الوحdات المدموجة
-_safe = Runtime(globals())
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -2218,7 +195,7 @@ def get_binance_client():
 
 
 # جلب البروكسيات أول مرة عند بدء البوت (في الخلفية)
-# Worker starts after runtime initialization.
+threading.Thread(target=refresh_proxies, args=(True,), daemon=True).start()
 
 
 def execute_binance_call(call_fn, max_retries=10, fast_mode=False, total_timeout=20):
@@ -2323,24 +300,21 @@ def _generate_api_key():
     return f"sk_{secrets.token_hex(24)}"
 
 def _get_api_user(api_key):
-    return _safe.get_api_user(api_key)
+    try:
+        doc = db.api_keys.find_one({'api_key': api_key, 'is_active': True})
+        if not doc: return None, None
+        return doc, get_user_data_full(doc['user_id'])
+    except: return None, None
 
 def _json_resp(h, code, data):
     try:
-# [merged]         from http_api import encode_response
-        body, encoding = encode_response(data, h.headers.get('Accept-Encoding', ''), h.path)
-        if getattr(h, 'command', '') == 'POST' and 200 <= code < 300:
-            globals()['_PRODUCTS_CACHE'] = None
         h.send_response(code)
-        h.send_header('Content-Length', str(len(body)))
-        h.send_header('Vary', 'Accept-Encoding')
-        if encoding: h.send_header('Content-Encoding', encoding)
         h.send_header('Content-Type', 'application/json; charset=utf-8')
         h.send_header('Access-Control-Allow-Origin', '*')
-        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key, Accept-Encoding')
+        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
         h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         h.end_headers()
-        h.wfile.write(body)
+        h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
     except (BrokenPipeError, ConnectionResetError):
         # العميل قطع الاتصال قبل اكتمال الإرسال — غير ضار، نتجاهله بهدوء
         pass
@@ -2348,8 +322,26 @@ def _json_resp(h, code, data):
         logger.debug(f"_json_resp err: {e}")
 
 def _read_body(h):
-# [merged]     from http_api import read_body
-    return read_body(h)
+    """قراءة body آمنة تدعم Content-Length و chunked encoding"""
+    try:
+        cl = h.headers.get('Content-Length')
+        if cl:
+            return h.rfile.read(int(cl)).decode('utf-8')
+        # chunked أو بدون Content-Length
+        te = h.headers.get('Transfer-Encoding', '').lower()
+        if 'chunked' in te:
+            chunks = []
+            while True:
+                line = h.rfile.readline().decode('utf-8').strip()
+                size = int(line, 16)
+                if size == 0:
+                    break
+                chunks.append(h.rfile.read(size).decode('utf-8'))
+                h.rfile.readline()
+            return ''.join(chunks)
+        return ''
+    except Exception:
+        return ''
 
 # Rate limiter بسيط: max 30 طلب/دقيقة لكل API key
 _api_rate = {}
@@ -2421,7 +413,7 @@ def _build_api_owner_profile(uid):
 
         name = u.get('name', '') or api_doc.get('username', str(uid))
         username = u.get('username', '') or api_doc.get('username', '')
-        balance = round(finite_float(u.get('balance', 0)), 2) if u else 0.0
+        balance = round(float(u.get('balance', 0)), 2) if u else 0.0
 
         # 🆙 محاولة جلب الاسم الحالي من تيليجرام (أحدث من DB)
         try:
@@ -2496,8 +488,526 @@ def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, i
 # ChatGPT Business Seat Manager — مدمج مع البوت
 # ================================================================
 
-# [merged] from chatgpt_service import SeatManager as ChatGPTSeatManager
-ChatGPTSeatManager = SeatManager  # الاسم المستعD (بعd دمج chatgpt_service)
+class ChatGPTSeatManager:
+    """
+    مدير مقاعد ChatGPT Business.
+    يعمل كـ singleton — استخدم get_cgpt_manager().
+    """
+    _instance = None
+
+    def __init__(self):
+        _raw_path = get_setting('cgpt_token_path')
+        self.token_file = _raw_path if _raw_path and _raw_path != 'Not Set' else 'pasted_content.txt'
+        self.data_file  = get_setting('cgpt_data_file') or 'cookie_seat_invites.json'
+        self.access_token  = None
+        self.session_token = None
+        self.org_id        = None
+        self.account_id    = None
+        self.owner_email   = None
+        self._loaded       = False
+        self._load_tokens()
+        self.invites_data  = self._load_data()
+        self.allowed_emails = set(self.invites_data.get('allowed_emails', []))
+
+    # ---------- token / data ----------
+    def _load_tokens(self):
+        # 1) نحاول من قاعدة البيانات أولاً (دائم على Render)
+        try:
+            db_doc = db.cgpt_cookies.find_one({'_id': 'main'})
+            if db_doc and db_doc.get('data'):
+                c = db_doc['data']
+                self.access_token  = c.get('accessToken')
+                self.session_token = c.get('sessionToken')
+                acct = c.get('account', {})
+                self.org_id     = acct.get('organizationId')
+                self.account_id = acct.get('id')
+                user = c.get('user', {})
+                self.owner_email = user.get('email')
+                self._loaded = bool(self.access_token and self.session_token)
+                if self._loaded:
+                    logger.info("[CGPT] Loaded tokens from DB")
+                    return
+        except Exception as db_err:
+            logger.debug(f"[CGPT] DB load failed: {db_err}")
+
+        # لا توجد كوكيز في DB
+        logger.info("[CGPT] No cookies in DB yet — admin must add them")
+        self._loaded = False
+
+    def _headers(self):
+        return {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type':  'application/json',
+            'Cookie':        f'__Secure-next-auth.session-token={self.session_token}',
+            'User-Agent':    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept':        'application/json',
+            'Origin':        'https://chatgpt.com',
+            'Referer':       'https://chatgpt.com/'
+        }
+
+    def _load_data(self):
+        """تحميل بيانات الدعوات من MongoDB"""
+        try:
+            doc = db.cgpt_invites_data.find_one({'_id': 'main'})
+            if doc and doc.get('data'):
+                return doc['data']
+        except Exception as e:
+            logger.debug(f"[CGPT] load_data DB err: {e}")
+        return {'invites': {}, 'allowed_emails': [self.owner_email] if self.owner_email else []}
+
+    def _save_data(self):
+        """حفظ بيانات الدعوات في MongoDB (لكل حساب على حدة)"""
+        self.invites_data['allowed_emails'] = list(self.allowed_emails)
+        _key = getattr(self, '_account_key', 'main')
+        try:
+            db.cgpt_invites_data.update_one(
+                {'_id': _key},
+                {'$set': {'data': self.invites_data}},
+                upsert=True
+            )
+        except Exception as e:
+            logger.error(f"[CGPT] save_data DB err: {e}")
+
+    def reload_token(self):
+        """إعادة تحميل الـ token من MongoDB"""
+        self._load_tokens()
+        return self._loaded
+
+    # ---------- core API ----------
+    def check_subscription_status(self):
+        """يفحص حالة اشتراك البيزنس. يرجّع:
+        'active' | 'deactivated' | 'no_seats' | 'error' | 'unauthorized'"""
+        if not CFFI_AVAILABLE or not self._loaded:
+            return 'unauthorized'
+        try:
+            # endpoint الرسمي لفحص حالة الحساب
+            url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            if r.status_code == 402:
+                # workspace معطّل (اشتراك ملغى/فاتورة غير مدفوعة)
+                return 'deactivated'
+            if r.status_code == 401:
+                return 'unauthorized'
+            if r.status_code == 200:
+                data = r.json()
+                # نبحث عن حالة الاشتراك في بنية الرد
+                accounts = data.get('accounts', {})
+                for acc_key, acc_val in accounts.items():
+                    if not isinstance(acc_val, dict):
+                        continue
+                    acc = acc_val.get('account', acc_val)
+                    # لو الحساب هو حسابنا
+                    if acc.get('account_id') == self.account_id or acc_key == self.account_id or acc_key == 'default':
+                        plan = acc.get('plan_type', acc.get('structure', ''))
+                        is_deactivated = acc.get('is_deactivated', False)
+                        if is_deactivated:
+                            return 'deactivated'
+                        # لو فيه اشتراك بيزنس/تيم فعّال
+                        return 'active'
+                return 'active'  # الحساب موجود ويعمل
+            return 'error'
+        except Exception as e:
+            logger.debug(f"[CGPT] check_subscription err: {e}")
+            return 'error'
+
+    def _get_org_users(self):
+        if not CFFI_AVAILABLE or not self._loaded:
+            self._last_fetch_failed = True
+            return []
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+            r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
+            if r.status_code == 200:
+                self._last_fetch_failed = False
+                return r.json().get('items', [])
+            # فشل (401 مثلاً = كوكيز منتهية)
+            self._last_fetch_failed = True
+            self._last_fetch_status = r.status_code
+            logger.warning(f"[CGPT] get_org_users {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            self._last_fetch_failed = True
+            logger.error(f"[CGPT] get_org_users error: {e}")
+        return []
+
+    def invite_user(self, email: str, minutes_valid: int) -> dict:
+        """
+        يدعو مستخدم ويرجع dict:
+        {'ok': True/False, 'expires_at': '...', 'error': '...'}
+        """
+        if not CFFI_AVAILABLE:
+            return {'ok': False, 'error': 'curl_cffi غير مثبتة'}
+        if not self._loaded:
+            return {'ok': False, 'error': 'لم يتم تحميل الـ token'}
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+            payload = {'email_addresses': [email], 'role': 'standard-user'}
+            r = cffi_requests.post(url, headers=self._headers(), json=payload,
+                                   impersonate='chrome110', timeout=15)
+            if r.status_code in [200, 201]:
+                expires_at = (_dt_mod.datetime.now() +
+                              _dt_mod.timedelta(minutes=minutes_valid)).isoformat()
+                self.invites_data['invites'][email] = {
+                    'invited_at': _dt_mod.datetime.now().isoformat(),
+                    'expires_at': expires_at,
+                    'status': 'active',
+                    'minutes': minutes_valid,
+                    'telegram_uid': getattr(self, '_last_buyer_uid', None)
+                }
+                self.allowed_emails.add(email)
+                self._save_data()
+                return {'ok': True, 'expires_at': expires_at}
+            else:
+                err = r.text[:300]
+                logger.error(f"[CGPT] invite failed {r.status_code}: {err}")
+                return {'ok': False, 'error': f'{r.status_code}: {err}'}
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+
+    def remove_user_by_email(self, email: str) -> bool:
+        """يحذف مستخدم بالإيميل"""
+        users = self._get_org_users()
+        for u in users:
+            if u.get('email') == email:
+                return self._remove_user(u.get('id'), email)
+        return False
+
+    def remove_by_email(self, email):
+        """يطرد بالإيميل — يفحص العضو (member) وقائمة الانتظار (pending invite).
+        يرجّع: 'member' | 'pending' | 'not_found' | 'error'"""
+        if not CFFI_AVAILABLE or not self._loaded:
+            return 'error'
+        email_l = str(email).strip().lower()
+        # 1) نفحص الأعضاء الفعليين
+        try:
+            users = self._get_org_users()
+            for u in users:
+                if str(u.get('email', '')).lower() == email_l:
+                    uid_org = u.get('id') or u.get('user_id')
+                    if uid_org and self._remove_user(uid_org, email):
+                        return 'member'
+        except Exception as e:
+            logger.debug(f"[CGPT] remove member err: {e}")
+        # 2) نفحص قائمة الانتظار (invites المعلّقة)
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                invites = data.get('items', data.get('invites', []))
+                for inv in invites:
+                    inv_email = str(inv.get('email_address', inv.get('email', ''))).lower()
+                    if inv_email == email_l:
+                        inv_id = inv.get('id') or inv.get('invite_id')
+                        # نحذف الدعوة المعلّقة
+                        del_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+                        # بعض الحسابات تحذف بـ DELETE مع body، بعضها بـ id في المسD
+                        try:
+                            dr = cffi_requests.delete(
+                                f'{del_url}/{inv_id}',
+                                headers=self._headers(), impersonate='chrome110', timeout=15)
+                            if dr.status_code in (200, 204):
+                                return 'pending'
+                        except Exception:
+                            pass
+                        # محاولة بديلة: DELETE مع body {email}
+                        try:
+                            dr2 = cffi_requests.delete(
+                                del_url, headers=self._headers(),
+                                json={'email_address': email}, impersonate='chrome110', timeout=15)
+                            if dr2.status_code in (200, 204):
+                                return 'pending'
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.debug(f"[CGPT] remove pending err: {e}")
+        return 'not_found'
+
+    def _remove_user(self, user_id, email) -> bool:
+        if email == self.owner_email: return False
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users/{user_id}'
+            r = cffi_requests.delete(url, headers=self._headers(), impersonate='chrome110', timeout=15)
+            ok = r.status_code in [200, 204]
+            if ok:
+                # إشعار الأدمن بتفاصيل الطرد
+                try:
+                    info = self.invites_data.get('invites', {}).get(email, {})
+                    tg_uid = info.get('telegram_uid', '?')
+                    reason = info.get('_remove_reason', 'انتهاء المدة')
+                    kmsg = (
+                        f"🗑 <b>تم طرد مستخدم من ChatGPT</b>\n\n"
+                        f"📧 <b>الإيميل:</b> <code>{email}</code>\n"
+                        f"👤 <b>اليوزر (Telegram):</b> <code>{tg_uid}</code>\n"
+                        f"🏢 <b>الحساب:</b> <code>{self.owner_email}</code>\n"
+                        f"📋 <b>السبب:</b> {reason}"
+                    )
+                    for admin in db.users.find({'is_admin': 1}):
+                        try: bot.send_message(admin['user_id'], kmsg, parse_mode="HTML")
+                        except Exception: pass
+                except Exception:
+                    pass
+            return ok
+        except Exception as e:
+            logger.error(f"[CGPT] remove error: {e}")
+            return False
+
+    def check_and_cleanup(self):
+        """فحص المنتهين والمخالفين وحذفهم"""
+        now = _dt_mod.datetime.now()
+        emails_to_remove = []
+
+        # منتهو الصلاحية
+        for email, info in self.invites_data['invites'].items():
+            if info.get('status') != 'active': continue
+            try:
+                exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+                if now > exp:
+                    emails_to_remove.append(email)
+                    self.allowed_emails.discard(email)
+            except: pass
+
+        current_users = self._get_org_users()
+
+        # 🛡 لو فشل جلب المستخدمين (كوكيز منتهية/خطأ اتصال) → لا ننفّذ أي طرد
+        #    (لتفادي طرد عملاء بالخطأ ونحن لا نعرف الحالة الحقيقية)
+        if getattr(self, '_last_fetch_failed', False):
+            logger.warning(f"[CGPT] fetch failed for {self.owner_email} — skipping cleanup")
+            return
+
+        # مخالفون (دُعوا خارج البوت)
+        unauthorized = [u.get('email') for u in current_users
+                        if u.get('email') != self.owner_email
+                        and u.get('email') not in self.allowed_emails
+                        and u.get('email') not in emails_to_remove]
+
+        if unauthorized:
+            logger.warning(f"[CGPT] {len(unauthorized)} unauthorized users — punishing all active")
+
+            # بناء تقرير كامل: إيميل المخالف + إيميل العميل المسبب
+            violation_lines = []
+            for unauth_email in unauthorized:
+                violation_lines.append(f"  🔴 مضاف خارج البوت: <code>{unauth_email}</code>")
+
+            # نعاقب كل النشطين، نرسل لهم رسالة، ونسجلهم
+            punished_lines = []
+            for email, info in self.invites_data['invites'].items():
+                if info.get('status') == 'active':
+                    emails_to_remove.append(email)
+                    self.allowed_emails.discard(email)
+                    punished_lines.append(f"  👤 عميل مُعاقب: <code>{email}</code>")
+                    # إرسال رسالة مباشرة للعميل المخالف في تيليغرام
+                    tg_uid = info.get('telegram_uid')
+                    if tg_uid:
+                        try:
+                            violation_msg = (
+                                "🚫 <b>تم إلغاء وصولك إلى ChatGPT Business</b>\n\n"
+                                "❌ <b>السبب: مخالفة شروط الاستخدام</b>\n\n"
+                                f"تم رصد إضافة مستخدم غير مصرح به من حسابك:\n"
+                                + "\n".join([f"📧 <code>{ue}</code>" for ue in unauthorized]) +
+                                "\n\n"
+                                "⛔️ <b>قرار نهائي:</b>\n"
+                                "• تم حذف وصولك فوراً\n"
+                                "• <b>لن يتم تعويضك أو استرجاع أموالك</b>\n"
+                                "• لا يحق لك المطالبة بأي تعويض\n\n"
+                                "📜 لأنك خالفت القوانين المنصوص عليها عند الشراء، "
+                                "فقدت حق الحماية والضمان."
+                            )
+                            bot.send_message(tg_uid, violation_msg, parse_mode="HTML")
+                        except Exception as _nm:
+                            logger.debug(f"[CGPT] notify violated user {tg_uid} failed: {_nm}")
+
+            report = (
+                f"⚠️ <b>ChatGPT — مخالفة اكتُشفت!</b>\n\n"
+                f"<b>المستخدمون المضافون خارج البوت ({len(unauthorized)}):</b>\n"
+                + "\n".join(violation_lines) +
+                f"\n\n<b>العملاء الذين تم إلغاء صلاحيتهم ({len(punished_lines)}):</b>\n"
+                + ("\n".join(punished_lines) if punished_lines else "  لا يوجد") +
+                f"\n\n<i>تم حذف جميع المضافين وإلغاء كل الصلاحيات النشطة.</i>"
+            )
+            notify_admins(report)
+
+        # تنفيذ الحذف
+        for u in current_users:
+            uid_org, email = u.get('id'), u.get('email')
+            if email == self.owner_email: continue
+            if email in emails_to_remove or email in unauthorized:
+                ok = self._remove_user(uid_org, email)
+                if ok and email in self.invites_data['invites']:
+                    self.invites_data['invites'][email]['status'] = 'expired'
+                    self.invites_data['invites'][email]['removed_at'] = now.isoformat()
+
+        self._save_data()
+
+    def list_active(self):
+        """يرجع قائمة المدعوين النشطين"""
+        now = _dt_mod.datetime.now()
+        result = []
+        for email, info in self.invites_data['invites'].items():
+            if info.get('status') != 'active': continue
+            try:
+                exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+                remaining = exp - now
+                result.append({
+                    'email': email,
+                    'expires_at': info['expires_at'],
+                    'remaining_hours': max(0, int(remaining.total_seconds() // 3600)),
+                    'remaining_days':  max(0, remaining.days)
+                })
+            except: pass
+        return result
+
+    def purge_old_records(self, days_old=7):
+        """يحذف سجلات العملاء المنتهية/المخالفة القديمة (أقdم من X يوم)."""
+        now = _dt_mod.datetime.now()
+        invites = self.invites_data.get('invites', {})
+        to_delete = []
+        for email, info in invites.items():
+            status = info.get('status', '')
+            if status in ('expired', 'violated', 'migrated', 'removed'):
+                # نفحص متى أُزيل/انتهى
+                ref_time = info.get('removed_at') or info.get('expires_at')
+                if ref_time:
+                    try:
+                        rt = _dt_mod.datetime.fromisoformat(ref_time)
+                        if (now - rt).days >= days_old:
+                            to_delete.append(email)
+                    except Exception:
+                        to_delete.append(email)  # تاريخ تالف → نحذف
+                else:
+                    to_delete.append(email)  # بلا تاريخ → قديم
+        for email in to_delete:
+            invites.pop(email, None)
+        self._save_data()
+        return len(to_delete)
+
+    def diagnose(self):
+        """يفحص الاتصالل الفعلي ويرجّع: الاتصالل، الإيميل، المقاعد المستخدمة/المتاحة."""
+        report = {}
+        report['loaded'] = self._loaded
+        report['owner_email'] = self.owner_email or 'غير معروف'
+        report['org_id'] = self.org_id or 'غير معروف'
+        report['account_id'] = self.account_id or 'غير معروف'
+        if not self._loaded:
+            report['connected'] = False
+            report['error'] = 'لا توجد cookies محمّلة'
+            return report
+        # نستعلم عن المستخدمين الفعليين (يؤكد الاتصالل)
+        try:
+            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+            r = cffi_requests.get(url, headers=self._headers(),
+                                  impersonate='chrome110', timeout=15)
+            report['http_status'] = r.status_code
+            if r.status_code == 200:
+                data = r.json()
+                users = data.get('items', [])
+                report['connected'] = True
+                # المالك لا يُحسب كمقعd مُستهلَك (مقعده ليس للبيع)
+                non_owner = [u for u in users
+                             if str(u.get('email', '')).lower() != str(self.owner_email or '').lower()]
+                used_count = len(non_owner)
+                # 🪑 مهم: الدعوات المعلّقة (pending) تحجز مقاعd أيضاً — نحسبها
+                try:
+                    inv_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+                    ir = cffi_requests.get(inv_url, headers=self._headers(),
+                                           impersonate='chrome110', timeout=12)
+                    if ir.status_code == 200:
+                        idata = ir.json()
+                        pend = idata.get('items', idata.get('invites', []))
+                        # نستبعd دعوات المالك (نادر) ونعd الباقي
+                        pend_count = len([iv for iv in pend
+                                          if str(iv.get('email_address', iv.get('email', ''))).lower()
+                                          != str(self.owner_email or '').lower()])
+                        used_count += pend_count
+                        report['pending_invites'] = pend_count
+                except Exception:
+                    pass
+                report['used_seats'] = used_count
+                # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
+                try:
+                    acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
+                    ar = cffi_requests.get(acc_url, headers=self._headers(),
+                                           impersonate='chrome110', timeout=15)
+                    if ar.status_code == 200:
+                        acc = ar.json()
+                        report['_raw_account'] = str(acc)[:500]  # للتشخيص
+
+                        # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
+                        def _find_seats(obj, depth=0):
+                            if depth > 5 or not isinstance(obj, dict):
+                                return None
+                            # المفاتيح المحتملة لعدد المقاعد
+                            for k in ('max_member_count', 'max_seats', 'seats',
+                                      'seat_count', 'total_seats', 'member_limit',
+                                      'max_members', 'paid_seats', 'licenses',
+                                      'subscription_seats', 'num_seats'):
+                                v = obj.get(k)
+                                if isinstance(v, int) and v > 0:
+                                    return v
+                            # نغوص في المستويات
+                            for nested in ('account', 'plan', 'subscription',
+                                           'billing', 'workspace', 'limits'):
+                                if isinstance(obj.get(nested), dict):
+                                    found = _find_seats(obj[nested], depth + 1)
+                                    if found:
+                                        return found
+                            return None
+
+                        total_seats = _find_seats(acc)
+                        # نجرّب أيضاً من endpoint الفواتير/الاشتراك
+                        if not total_seats:
+                            try:
+                                sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
+                                sr = cffi_requests.get(sub_url, headers=self._headers(),
+                                                       impersonate='chrome110', timeout=12)
+                                if sr.status_code == 200:
+                                    total_seats = _find_seats(sr.json())
+                            except Exception:
+                                pass
+                        # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
+                        if not total_seats:
+                            try:
+                                chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+                                cr = cffi_requests.get(chk_url, headers=self._headers(),
+                                                       impersonate='chrome110', timeout=12)
+                                if cr.status_code == 200:
+                                    chk = cr.json()
+                                    report['_raw_check'] = str(chk)[:800]
+                                    total_seats = _find_seats(chk)
+                                    # نبحث في accounts داخل check
+                                    if not total_seats and isinstance(chk.get('accounts'), dict):
+                                        for _av in chk['accounts'].values():
+                                            found = _find_seats(_av) if isinstance(_av, dict) else None
+                                            if found:
+                                                total_seats = found
+                                                break
+                            except Exception:
+                                pass
+                        report['total_seats'] = total_seats
+                        if total_seats:
+                            report['available_seats'] = max(0, int(total_seats) - len(users))
+                except Exception as _se:
+                    report['_seat_err'] = str(_se)[:100]
+                # قائمة الإيميلات
+                report['user_emails'] = [u.get('email', '') for u in users][:20]
+            elif r.status_code == 401:
+                report['connected'] = False
+                report['error'] = 'الكوكيز منتهية (401) — أعد إضافتها'
+            else:
+                report['connected'] = False
+                report['error'] = f'HTTP {r.status_code}: {r.text[:150]}'
+        except Exception as e:
+            report['connected'] = False
+            report['error'] = str(e)[:200]
+        return report
+
+    def get_stats(self):
+        invites = self.invites_data.get('invites', {})
+        total   = len(invites)
+        active  = sum(1 for i in invites.values() if i.get('status') == 'active')
+        expired = total - active
+        return {'total': total, 'active': active, 'expired': expired}
 
 
 # Singleton accessor
@@ -2505,15 +1015,79 @@ _cgpt_manager_instance = None
 _cgpt_lock = __import__('threading').Lock()
 
 def _cgpt_build_manager_from_doc(doc):
-    return ChatGPTSeatManager.from_doc(doc)
+    """يبني مدير ChatGPT مؤقت من مستند حساب (لحساب معيّن)."""
+    mgr = ChatGPTSeatManager.__new__(ChatGPTSeatManager)
+    mgr.token_file = ''
+    mgr.data_file = ''
+    c = doc.get('data', {})
+    mgr.access_token = c.get('accessToken')
+    mgr.session_token = c.get('sessionToken')
+    acct = c.get('account', {})
+    mgr.org_id = acct.get('organizationId')
+    mgr.account_id = acct.get('id')
+    user = c.get('user', {})
+    mgr.owner_email = user.get('email')
+    mgr._loaded = bool(mgr.access_token and mgr.session_token)
+    # بيانات الدعوات مشتركة (نفس invites_data) لكن نربطها بالحساب
+    mgr._account_key = str(doc.get('_id'))
+    try:
+        idata = db.cgpt_invites_data.find_one({'_id': mgr._account_key})
+        mgr.invites_data = idata.get('data', {'invites': {}, 'allowed_emails': []}) if idata else {'invites': {}, 'allowed_emails': []}
+    except Exception:
+        mgr.invites_data = {'invites': {}, 'allowed_emails': []}
+    if mgr.owner_email and mgr.owner_email not in mgr.invites_data.get('allowed_emails', []):
+        mgr.invites_data.setdefault('allowed_emails', []).append(mgr.owner_email)
+    mgr.allowed_emails = set(mgr.invites_data.get('allowed_emails', []))
+    return mgr
 
 
 def _cgpt_all_accounts():
-    return _safe.all_accounts()
+    """يرجّع كل حسابات ChatGPT المخزّنة (متعددة).
+    يشمل الحساب القديم (main) للتوافق."""
+    accounts = []
+    try:
+        for doc in db.cgpt_accounts.find():
+            accounts.append(doc)
+    except Exception:
+        pass
+    # نضيف الحساب القديم (main) لو موجود ولم يُنقل بعد
+    try:
+        main = db.cgpt_cookies.find_one({'_id': 'main'})
+        if main and main.get('data'):
+            # نتفادى التكرار لو نُقل
+            if not any(str(a.get('_id')) == 'main' for a in accounts):
+                accounts.append({'_id': 'main', 'data': main['data'],
+                                 'name': 'الحساب الرئيسي',
+                                 'manual_seats': main.get('manual_seats')})
+    except Exception:
+        pass
+    return accounts
 
 
 def _cgpt_account_seat_info(doc):
-    return _safe.account_info(doc)
+    """يفحص حساباً ويرجّع معلومات مقاعده."""
+    mgr = _cgpt_build_manager_from_doc(doc)
+    rep = mgr.diagnose()
+    total = rep.get('total_seats')
+    used = rep.get('used_seats', 0)
+    avail = rep.get('available_seats')
+    # لو الكشف التلقائي فشل، نستخدم القيمة اليدوية المحفوظة (لو موجودة)
+    manual_seats = doc.get('manual_seats')
+    if not total and manual_seats:
+        total = int(manual_seats)
+        avail = max(0, total - used) if rep.get('connected') else None
+    return {
+        'id': str(doc.get('_id')),
+        'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
+        'email': rep.get('owner_email', '?'),
+        'connected': rep.get('connected', False),
+        'used_seats': used,
+        'total_seats': total,
+        'available_seats': avail,
+        'manual': bool(manual_seats and not rep.get('total_seats')),
+        'error': rep.get('error'),
+        'mgr': mgr,
+    }
 
 
 def _cgpt_process_pending_migrations():
@@ -2662,7 +1236,14 @@ _CGPT_SEATS_CACHE = {'val': None, 'exp': 0}
 
 
 def _cgpt_get_seats_cached():
-    return _ops.display_seats()
+    """يرجّع المقاعd المتاحة مع cache 30 ثانية (تفادي بطء الاستعلام المتكرر)."""
+    now = time.time()
+    if _CGPT_SEATS_CACHE['exp'] > now:
+        return _CGPT_SEATS_CACHE['val']
+    val = _cgpt_total_available_seats()
+    _CGPT_SEATS_CACHE['val'] = val
+    _CGPT_SEATS_CACHE['exp'] = now + 30
+    return val
 
 
 def _cgpt_total_available_seats():
@@ -2685,11 +1266,27 @@ def _cgpt_total_available_seats():
 
 
 def _cgpt_find_available_account():
-    return _safe.find_account()
+    """يجد أول حساب فيه مقعد فارغ (للتوزيع التلقائي)."""
+    for doc in _cgpt_all_accounts():
+        info = _cgpt_account_seat_info(doc)
+        if not info['connected']:
+            continue
+        avail = info.get('available_seats')
+        # لو عرفنا السعة والمتاح > 0
+        if avail is not None and avail > 0:
+            return info
+        # لو لم نعرف السعة لكن الحساب متصل، نعتبره متاحاً (احتياط)
+        if avail is None and info['connected']:
+            return info
+    return None
 
 
-def get_cgpt_manager():
-    return ChatGPTSeatManager()
+def get_cgpt_manager() -> ChatGPTSeatManager:
+    global _cgpt_manager_instance
+    with _cgpt_lock:
+        if _cgpt_manager_instance is None:
+            _cgpt_manager_instance = ChatGPTSeatManager()
+        return _cgpt_manager_instance
 
 
 _CGPT_EXPIRY_NOTIFIED = {}  # {account_id: last_notify_time}
@@ -2786,7 +1383,60 @@ def _cgpt_notify_cookie_expired(account_id, email, status):
 
 
 def _cgpt_daemon_loop():
-    return _safe.cgpt_daemon()
+    """Daemon thread يعمل كل 5 دقائق"""
+    import time as _t
+    logger.info("[CGPT] Daemon started")
+    while True:
+        try:
+            # نجلب الـ interval بأمان — لو 'Not Set' أو أي قيمة غير رقمية نستخدم 300
+            raw_interval = get_setting('cgpt_check_interval')
+            try:
+                interval = int(raw_interval) if str(raw_interval).isdigit() else 300
+            except (ValueError, TypeError):
+                interval = 300
+            _t.sleep(interval)
+            # ننظّف كل الحسابات (متعددة)
+            _accs = _cgpt_all_accounts()
+            if _accs:
+                for _doc in _accs:
+                    try:
+                        _m = _cgpt_build_manager_from_doc(_doc)
+                        _acc_email = _m.owner_email or _doc.get('name', 'حساب')
+                        _acc_id = str(_doc.get('_id'))
+                        if _m._loaded:
+                            # 1) نفحص حالة اشتراك البيزنس
+                            _sub = _m.check_subscription_status()
+                            if _sub == 'deactivated':
+                                # الاشتراك مات → ننقل عملاءه لحساب حيّ
+                                logger.warning(f"[CGPT] subscription DEAD for {_acc_email} — migrating")
+                                _cgpt_migrate_dead_account(_doc)
+                                _cgpt_notify_subscription_dead(_acc_id, _acc_email)
+                                continue
+                            elif _sub == 'unauthorized':
+                                _cgpt_notify_cookie_expired(_acc_id, _acc_email, '401 كوكيز')
+                                continue
+                            # 2) التنظيف العادي (منتهين + مخالفين)
+                            _m.check_and_cleanup()
+                            if getattr(_m, '_last_fetch_failed', False):
+                                _cgpt_notify_cookie_expired(_acc_id, _acc_email,
+                                    getattr(_m, '_last_fetch_status', '?'))
+                            # 3) تذكير قرب الانتهاء (قبل يوم)
+                            _cgpt_send_expiry_reminders(_m)
+                        else:
+                            _cgpt_notify_cookie_expired(_acc_id, _acc_email, 'لا كوكيز')
+                    except Exception as _ce:
+                        logger.debug(f"[CGPT] account cleanup err: {_ce}")
+                # بعd التنظيف: ننقل المعلّقين لو توفّرت مقاعd
+                try:
+                    _cgpt_process_pending_migrations()
+                except Exception as _pm_e:
+                    logger.debug(f"[CGPT] pending migration err: {_pm_e}")
+            else:
+                mgr = get_cgpt_manager()
+                mgr.check_and_cleanup()
+        except Exception as e:
+            logger.error(f"[CGPT] daemon error: {e}")
+            _t.sleep(300)  # لو صار خطأ ننام 5 دقائق بدل ما نعيد فوراً
 
 
 # ============================================================
@@ -2819,8 +1469,12 @@ _EVENT_TTL_SECONDS = 24 * 60 * 60
 
 # يُنشَأ index على api_events.created_at مرة واحدة (TTL)
 def _ensure_event_indexes():
-    # Managed by Runtime.initialize after DB initialization.
-    return None
+    try:
+        db.api_events.create_index('created_at', expireAfterSeconds=_EVENT_TTL_SECONDS)
+        db.api_events.create_index([('created_at', -1)])
+        db.api_webhooks.create_index('api_user_id', unique=True)
+    except Exception as _ie:
+        logger.debug(f"event index create skipped: {_ie}")
 
 try: _ensure_event_indexes()
 except Exception: pass
@@ -2835,7 +1489,7 @@ def _build_product_snapshot(pr):
         'product_id': pid,
         'name_ar': pr.get('name_ar', ''),
         'name_en': pr.get('name_en', ''),
-        'price': finite_float(pr.get('price', 0)),
+        'price': float(pr.get('price', 0)),
         'is_manual': manual,
         'is_hidden': pr.get('is_hidden', False),
         'stock': 'unlimited' if manual else get_product_stock_count(pid)
@@ -2843,7 +1497,47 @@ def _build_product_snapshot(pr):
 
 
 def _emit_event(event_type, data, product_id=None):
-    return _safe.emit_event(event_type,data,product_id)
+    """
+    🔔 يبث حدث لكل المطورين (يُحفظ في DB + يُرسل لـ webhooks).
+
+    event_type: نوع الحدث (stock.sold / stock.added / product.updated / ...)
+    data: dict يحتوي تفاصيل الحدث
+    product_id: للفلترة (اختياري)
+    """
+    try:
+        import time as _t
+        now = _t.time()
+        evt = {
+            'event_id': f"evt_{int(now*1000)}_{secrets.token_hex(4)}",
+            'event_type': event_type,
+            'timestamp': int(now),
+            'created_at': datetime.datetime.utcnow(),
+            'data': data or {},
+        }
+        if product_id is not None:
+            evt['product_id'] = str(product_id)
+
+        # 1) خزّن في DB للـ polling
+        try:
+            db.api_events.insert_one(dict(evt))
+        except Exception as _de:
+            logger.debug(f"event insert err: {_de}")
+
+        # 2) ادفع في queue الـ webhooks
+        try:
+            # نظّف ObjectId و datetime قبل ما نضعها في queue (للـ JSON)
+            evt_for_q = {
+                'event_id': evt['event_id'],
+                'event_type': evt['event_type'],
+                'timestamp': evt['timestamp'],
+                'data': evt['data'],
+                'product_id': evt.get('product_id')
+            }
+            _event_queue.put_nowait(evt_for_q)
+        except Exception:
+            pass  # queue ممتلئة — الـ polling لسه شغال
+    except Exception as _ee:
+        logger.debug(f"_emit_event error: {_ee}")
 
 
 def _sign_webhook_body(secret, body_bytes, timestamp):
@@ -2853,20 +1547,99 @@ def _sign_webhook_body(secret, body_bytes, timestamp):
 
 
 def _deliver_webhook(webhook_doc, evt):
-    return _safe.deliver_webhook(webhook_doc,evt)
+    """
+    يرسل event لـ webhook URL واحد — مع retry بسيط.
+    webhook_doc: {api_user_id, url, secret, event_filter (optional), failures}
+    """
+    url = webhook_doc.get('url')
+    secret = webhook_doc.get('secret', '')
+    if not url:
+        return False
+
+    # فلترة: لو المطور حدد أنواع معينة فقط
+    ev_filter = webhook_doc.get('event_filter') or []
+    if ev_filter and evt['event_type'] not in ev_filter:
+        return True  # ما هو خطأ — مفلتر
+
+    import time as _t
+    timestamp = str(int(_t.time()))
+    body = json.dumps(evt, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    sig = _sign_webhook_body(secret, body, timestamp) if secret else ''
+
+    headers = {
+        'Content-Type': 'application/json; charset=utf-8',
+        'User-Agent': 'ShopBot-Webhook/1.0',
+        'X-Event-Id': evt['event_id'],
+        'X-Event-Type': evt['event_type'],
+        'X-Webhook-Timestamp': timestamp,
+    }
+    if sig:
+        headers['X-Webhook-Signature'] = f"sha256={sig}"
+
+    for attempt in range(3):
+        try:
+            r = requests.post(url, data=body, headers=headers, timeout=8)
+            if 200 <= r.status_code < 300:
+                # نجاح — صفّر العداد
+                if webhook_doc.get('failures', 0) > 0:
+                    db.api_webhooks.update_one(
+                        {'_id': webhook_doc['_id']},
+                        {'$set': {'failures': 0, 'last_success': datetime.datetime.utcnow()}}
+                    )
+                return True
+        except Exception as _we:
+            logger.debug(f"webhook attempt {attempt+1} fail: {_we}")
+        _t.sleep(1 + attempt)  # 1s, 2s, 3s
+
+    # فشل كل المحاولات — زِد عداد الفشل
+    try:
+        db.api_webhooks.update_one(
+            {'_id': webhook_doc['_id']},
+            {'$inc': {'failures': 1},
+             '$set': {'last_failure': datetime.datetime.utcnow()}}
+        )
+        # لو فشل 50 مرة متتالية — نعطّل الـ webhook تلقائياً
+        fresh = db.api_webhooks.find_one({'_id': webhook_doc['_id']})
+        if fresh and fresh.get('failures', 0) >= 50:
+            db.api_webhooks.update_one(
+                {'_id': webhook_doc['_id']},
+                {'$set': {'is_active': False, 'disabled_reason': 'Too many failures'}}
+            )
+            logger.warning(f"Webhook auto-disabled (50 failures): {url}")
+    except Exception:
+        pass
+    return False
 
 
 def _webhook_worker():
-    return _safe.webhook_worker()
+    """Thread خلفي يسحب من queue ويوزع لكل المطورين المسجلين"""
+    logger.info("[Webhook] worker started")
+    while True:
+        try:
+            evt = _event_queue.get(timeout=10)
+        except _QEmpty:
+            continue
+        try:
+            # كل webhooks النشطة
+            hooks = list(db.api_webhooks.find({'is_active': True}))
+            for h in hooks:
+                # نشغل كل تسليم في thread صغير عشان webhook بطيء ما يعطّل البقية
+                threading.Thread(
+                    target=_deliver_webhook,
+                    args=(h, evt),
+                    daemon=True
+                ).start()
+        except Exception as _wre:
+            logger.debug(f"webhook worker iter err: {_wre}")
 
 
-# Worker starts after runtime initialization.
+threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").start()
 
 
 _PRODUCTS_CACHE = None  # cache لرد /products (يقلّل استعلامات DB المتكررة)
 
 
-class LegacyAPIHandler(BaseHTTPRequestHandler):
+class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def do_OPTIONS(self):
@@ -2911,7 +1684,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
             _now = time.time()
             global _PRODUCTS_CACHE
             try:
-                _pc = (_PRODUCTS_CACHE or {}).get(uid)
+                _pc = _PRODUCTS_CACHE
             except NameError:
                 _pc = None
             if _pc and _pc.get('exp', 0) > _now and _pc.get('uid') == uid:
@@ -2928,12 +1701,11 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 custom_prices[cp['product_id']] = cp
             result = []
             for pr in prods:
-                if pr.get('cgpt_product_id') and pr.get('product_type') in ('cgpt_main','chatgpt_seat'): continue
                 pid = str(pr.get('id', str(pr.get('_id', ''))))
                 if pid in hidden_pids:
                     continue
                 manual = pr.get('is_manual', False)
-                base_price = finite_float(pr.get('price', 0))
+                base_price = float(pr.get('price', 0))
                 cp = custom_prices.get(pid, {})
                 # 🌟 دعم Premium Emoji
                 custom_emoji_id = pr.get('custom_emoji_id')
@@ -2962,13 +1734,13 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                                 if your_price < base_price else
                                 'Store price changed since you locked your price. Review your price.'
                             ),
-                            'old_store_price': finite_float(cp.get('base_price_snapshot')),
+                            'old_store_price': float(cp.get('base_price_snapshot')),
                             'new_store_price': base_price,
                             'your_price': your_price,
                         }
                         if (your_price is not None
                             and cp.get('base_price_snapshot') is not None
-                            and finite_float(cp.get('base_price_snapshot')) != base_price)
+                            and float(cp.get('base_price_snapshot')) != base_price)
                         else None
                     ),
                     'stock': 'unlimited' if manual else get_product_stock_count(pid),
@@ -3004,7 +1776,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                     ep_name = str(ep.get('name', ''))
                     ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
                     ep_emoji_id = ep.get('emoji_id')
-                    ep_price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+                    ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
                     cp = custom_prices.get(epid, {})
                     your_price = cp.get('sell_price')
                     ext_item = {
@@ -3052,7 +1824,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                         cg_seats = None
                     for dur in cg.get('durations', []):
                         dur_id = dur.get('dur_id', '')
-                        dur_price = finite_float(dur.get('price', 0))
+                        dur_price = float(dur.get('price', 0))
                         dur_label = dur.get('label', '')
                         dur_mins = int(dur.get('minutes', 0))
                         dur_days = round(dur_mins / 1440, 1) if dur_mins else 0
@@ -3066,8 +1838,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                             'your_price': None,
                             'price_locked': False,
                             'price_alert': None,
-                            'stock': cg_seats if cg_seats is not None else 0,
-                            'stock_known': cg_seats is not None,
+                            'stock': cg_seats if cg_seats is not None else 9999,
                             'is_manual': False,
                             'duration_label': dur_label,
                             'duration_minutes': dur_mins,
@@ -3085,9 +1856,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 logger.debug(f"cgpt products in API err: {_cg_e}")
 
             try:
-                if not isinstance(_PRODUCTS_CACHE, dict): _PRODUCTS_CACHE = {}
-                if len(_PRODUCTS_CACHE) >= 128: _PRODUCTS_CACHE.clear()
-                _PRODUCTS_CACHE[uid] = {'data': result, 'exp': time.time() + 30, 'uid': uid}
+                _PRODUCTS_CACHE = {'data': result, 'exp': time.time() + 30, 'uid': uid}
             except Exception:
                 pass
             return _json_resp(self, 200, {'success': True, 'products': result})
@@ -3116,9 +1885,8 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 return _json_resp(self, 200, {'success': True, 'product': {
                     'id': pid, 'name_ar': full_name, 'name_en': full_name,
                     'desc_ar': cg.get('desc', ''), 'desc_en': cg.get('desc', ''),
-                    'store_price': finite_float(dur.get('price', 0)),
-                    'stock': cg_seats if cg_seats is not None else 0,
-                            'stock_known': cg_seats is not None,
+                    'store_price': float(dur.get('price', 0)),
+                    'stock': cg_seats if cg_seats is not None else 9999,
                     'duration_minutes': int(dur.get('minutes', 0)),
                     'duration_days': round(int(dur.get('minutes', 0)) / 1440, 1),
                     'custom_emoji_id': cg_emoji,
@@ -3136,7 +1904,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 ep_name = str(ep.get('name', ''))
                 ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
                 ep_emoji_id = ep.get('emoji_id')
-                ep_price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+                ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
                 return _json_resp(self, 200, {'success': True, 'product': {
                     'id': pid, 'name_ar': ep_name, 'name_en': ep_name,
                     'desc_ar': ep_desc, 'desc_en': ep_desc,
@@ -3154,7 +1922,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 return _json_resp(self, 404, {'error': 'Product not found'})
             pid = str(pr.get('id', str(pr.get('_id', ''))))
             manual = pr.get('is_manual', False)
-            base_price = finite_float(pr.get('price', 0))
+            base_price = float(pr.get('price', 0))
             cp = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
             # 🌟 دعم Premium Emoji
             custom_emoji_id = pr.get('custom_emoji_id')
@@ -3228,7 +1996,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
             for cp in customs:
                 pr = find_product(cp['product_id'])
                 if not pr: continue
-                base = finite_float(pr.get('price', 0))
+                base = float(pr.get('price', 0))
                 sell = cp.get('sell_price', base)
                 snap = cp.get('base_price_snapshot', base)
                 item = {
@@ -3414,7 +2182,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                         'message': 'This is a ChatGPT Business seat. Send the buyer email in the "email" field so we can invite them.',
                         'example': {'product_id': product_id, 'email': 'buyer@example.com'}
                     })
-                cg_price = finite_float(dur.get('price', 0))
+                cg_price = float(dur.get('price', 0))
                 cg_minutes = int(dur.get('minutes', 0))
                 # نفحص المقاعd المتاحة
                 try:
@@ -3425,7 +2193,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                     return _json_resp(self, 409, {'error': 'No seats available'})
                 # نخصم من رصيد المطوّر
                 api_user = db.users.find_one({'user_id': uid})
-                api_bal = finite_float(api_user.get('balance', 0)) if api_user else 0
+                api_bal = float(api_user.get('balance', 0)) if api_user else 0
                 if api_bal < cg_price:
                     return _json_resp(self, 402, {'error': 'Insufficient balance',
                                                   'required': cg_price, 'balance': api_bal})
@@ -3465,7 +2233,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                         'duration_minutes': cg_minutes,
                         'message': f'Invitation sent to {buyer_email}. The buyer must accept it from their email to activate the seat.',
                         'total': cg_price,
-                        'balance_after': finite_float(updated.get('balance', 0)) - 0,
+                        'balance_after': float(updated.get('balance', 0)) - 0,
                     })
                 else:
                     db.users.update_one({'user_id': uid}, {'$inc': {'balance': cg_price}})
@@ -3490,16 +2258,16 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
 
             # سعر الشراء الفعلي من المتجر (base) — يُستخدم للخصم من رصيد المطور
             cp_doc = db.api_pricing.find_one({'api_user_id': uid, 'product_id': pid}) or {}
-            store_price = finite_float(pr.get('price', 0))
+            store_price = float(pr.get('price', 0))
             # الكمية → تطبيق خصومات المتجر على store_price
             purchase_unit = store_price
             for t in sorted(pr.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0), reverse=True):
                 if qty >= t.get('min_qty', 0):
-                    purchase_unit = finite_float(t.get('price', store_price))
+                    purchase_unit = float(t.get('price', store_price))
                     break
             total = round(purchase_unit * qty, 2)
             # sell_price المقفول للـ response فقط (ما يؤثر على الخصم من رصيده)
-            unit = finite_float(cp_doc.get('sell_price', store_price))
+            unit = float(cp_doc.get('sell_price', store_price))
 
             order_id = f"API_{int(time.time())}_{uid}"
 
@@ -3569,7 +2337,7 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
             pid_str = str(pid)
             qs = [{'product_id': pid_str}]
             if pid_str.isdigit(): qs.append({'product_id': int(pid_str)})
-            try: qs.append({'product_id': finite_float(pid_str)})
+            try: qs.append({'product_id': float(pid_str)})
             except: pass
 
             res_id = f"api_{uid}_{int(time.time()*1000)}"
@@ -3697,10 +2465,10 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
                 return _json_resp(self, 404, {'error': 'Product not found'})
 
             pid = str(pr.get('id', str(pr.get('_id', ''))))
-            base_price = finite_float(pr.get('price', 0))
+            base_price = float(pr.get('price', 0))
 
             try:
-                sell_price = round(finite_float(sell_price), 2)
+                sell_price = round(float(sell_price), 2)
                 if sell_price < base_price:
                     return _json_resp(self, 400, {'error': f'Price cannot be less than base price (${base_price:.2f})'})
                 if sell_price > 9999:
@@ -3837,8 +2605,8 @@ class LegacyAPIHandler(BaseHTTPRequestHandler):
             if 'desc_en' in body: update['desc_en'] = str(body['desc_en'])[:500]
             if 'price' in body:
                 try:
-                    sp = round(finite_float(body['price']), 2)
-                    base_price = finite_float(pr.get('price', 0))
+                    sp = round(float(body['price']), 2)
+                    base_price = float(pr.get('price', 0))
                     if sp < base_price:
                         return _json_resp(self, 400, {'error': f'Price cannot be less than ${base_price:.2f}'})
                     update['sell_price'] = sp
@@ -3871,7 +2639,7 @@ def keep_alive():
         server = _ThreadedHTTP(('0.0.0.0', port), APIHandler)
     server.serve_forever()
 
-# Worker starts after runtime initialization.
+threading.Thread(target=keep_alive, daemon=True).start()
 
 try:
     bot = telebot.TeleBot(TOKEN, use_class_middlewares=False,
@@ -3909,7 +2677,6 @@ bot.answer_callback_query = _safe_answer_cbq
 # الـ callbacks المسموح بها أثناء القفل
 _ALLOWED_LOCKED_CB_PREFIXES = (
     'cancel_deposit',       # زر إلغاء الدفع
-    'bybit_check_',
     'binance_check_',       # زر فحص الدفع
     'copy_fb',              # fallback نسخ
 )
@@ -4132,7 +2899,7 @@ def get_referral_reward():
     try:
         val = get_setting('referral_reward')
         if val and val != "Not Set":
-            return max(0.01, finite_float(val))
+            return max(0.01, float(val))
     except: pass
     return REFERRAL_REWARD
 
@@ -4142,7 +2909,7 @@ def get_referral_purchase_reward():
     try:
         val = get_setting('referral_purchase_reward')
         if val and val != "Not Set":
-            return max(0.01, finite_float(val))
+            return max(0.01, float(val))
     except: pass
     return REFERRAL_REWARD
 
@@ -4152,7 +2919,7 @@ def get_referral_min_purchase():
     try:
         val = get_setting('referral_min_purchase')
         if val and val != "Not Set":
-            return max(0.10, finite_float(val))
+            return max(0.10, float(val))
     except: pass
     return REFERRAL_MIN_PURCHASE
 temp_product = {}
@@ -4263,24 +3030,294 @@ def get_setting(key, default="Not Set"):
 REF_V2_INIT_KEY = 'referrals_v2_initialized_v6'
 
 def initialize_referrals_v2():
-    # Non-destructive initialization; existing referrals/custom texts are preserved.
-    db.referrals_v2.create_index('invited_id', unique=True)
-    db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
+    """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
+    try:
+        already_init = db.settings.find_one({'key': REF_V2_INIT_KEY})
+        if already_init and already_init.get('value') == 'done':
+            logger.info("✅ نظام الإحالات V2 مُهيأ مسبقاً.")
+            return
+
+        logger.info("🔄 جاري تهيئة نظام الإحالات V2 (لأول مرة)...")
+
+        # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
+        try:
+            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4', 'referrals_v2_initialized_v5']}})
+        except Exception:
+            pass
+
+        # 1. مسح كامل لجدول الإحالات الجديد (لو موجود من تجارب سابقة)
+        try:
+            db.referrals_v2.delete_many({})
+        except Exception:
+            pass
+
+        # 2. مسح الحقول القديمة من جدول المستخدمين (referred_by القديم)
+        try:
+            db.users.update_many(
+                {},
+                {'$unset': {
+                    'referred_by': "",
+                    'ref_status': "",
+                    'ref_earned': "",
+                    'ref_v2_earned': ""
+                }}
+            )
+        except Exception as e:
+            logger.error(f"Error clearing old referral fields: {e}")
+        
+        # 2.5. مسح نص invite_txt المخصص القديم من custom_texts
+        # عشان يستخدم النص الجديد من الكود (اللي يحتوي على 6 متغيرات بدل 2)
+        try:
+            db.custom_texts.delete_many({'key': 'invite_txt'})
+            logger.info("✅ تم مسح النص القديم لرسالة الإحالات من custom_texts")
+        except Exception as e:
+            logger.error(f"Error clearing old invite_txt: {e}")
+
+        # 3. إنشاء فهارس (Indexes) لتسريع الاستعلامات
+        try:
+            db.referrals_v2.create_index('referrer_id')
+            db.referrals_v2.create_index('invited_id', unique=True)
+            db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
+            db.referrals_archived.create_index('referrer_id')
+            db.referrals_archived.create_index('invited_id')
+        except Exception as e:
+            logger.error(f"Error creating indexes: {e}")
+
+        # 🛡 4. حماية atomic ضد سرقة الحوالات (race conditions)
+        # هذولي الـ indexes حرجين - يمنعون أي مستخدمين من استخدام نفس الـ hash بنفس اللحظة
+        try:
+            db.used_transactions.create_index('transaction_id', unique=True)
+            logger.info("✅ تم إنشاء unique index على used_transactions")
+        except Exception as e:
+            # الـ index قد يكون موجود مسبقاً - هذا ok
+            logger.debug(f"used_transactions index info: {e}")
+        
+        try:
+            db.claimed_hashes.create_index('transaction_id', unique=True)
+            logger.info("✅ تم إنشاء unique index على claimed_hashes")
+        except Exception as e:
+            logger.debug(f"claimed_hashes index info: {e}")
+
+        # 4. وضع علامة أن النظام تم تهيئته
+        db.settings.update_one(
+            {'key': REF_V2_INIT_KEY},
+            {'$set': {'value': 'done', 'init_time': int(time.time())}},
+            upsert=True
+        )
+
+        logger.info("✅ تم تهيئة نظام الإحالات V2 بنجاح. (كل شي يبدأ من الصفر)")
+    except Exception as e:
+        logger.error(f"❌ فشل تهيئة نظام الإحالات V2: {e}")
 
 
 def normalize_tx_id(tx_id):
-    return _safe.normalize_tx_id(tx_id)
+    """
+    🛡 توحيد رقم العملية (TxID) لمنع الالتفاف على الحماية.
+    
+    يتعامل مع الحالات:
+    - 0x1db4... و 1db4... → نفس الشي
+    - ABCdef... و abcdef... → نفس الشي
+    - " abc " (مع مسافات) → "abc"
+    - "abc\n" (سطر جديد) → "abc"
+    - أحرف غير مرئية → تُحذف
+    """
+    if not tx_id:
+        return ""
+    
+    # 1. تحويل لـ string وتنظيف
+    s = str(tx_id).strip()
+    
+    # 2. إزالة المسافات والأسطر الجديدة من داخل النص (احتياط)
+    s = re.sub(r'\s+', '', s)
+    
+    # 3. إزالة أحرف غير مرئية (zero-width chars)
+    s = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]', '', s)
+    
+    # 4. تحويل لـ lowercase
+    s = s.lower()
+    
+    # 5. إزالة بادئات شائعة:
+    # - 0x (Ethereum/USDT-BEP20/USDT-ERC20)
+    # - 0X (نسخة كبيرة)
+    if s.startswith('0x'):
+        s = s[2:]
+    
+    # 6. إزالة أحرف غريبة (نحتفظ بأحرف وأرقام فقط)
+    # ملاحظة: TON hashes ممكن تحتوي على = و / و +
+    # فما نحذفها لو الـ tx_id فيها هذي الحروف
+    if not any(c in s for c in '=/+'):
+        # ما فيها رموز TON - نحذف أي رمز غير alphanumeric
+        s = re.sub(r'[^a-z0-9]', '', s)
+    
+    return s
 
 
 # 🛡 دالة منفصلة لإنشاء الـ unique indexes - تتنفذ في كل تشغيل
 def ensure_critical_indexes():
-    # Managed by Runtime.initialize after the full module is ready.
-    return None
+    """
+    🛡 تضمن وجود الـ unique indexes الحرجة في كل تشغيل للبوت.
+    هذي الـ indexes تمنع race conditions في race conditions.
+    لازم تتنفذ مهما كانت حالة DB.
+    """
+    # 🛡 الخطوة 0: نرملز كل الـ used_transactions القديمة (للتوافق مع normalize_tx_id الجديد)
+    try:
+        # نجلب كل الـ records اللي transaction_id فيها مو متطابق مع normalize
+        all_txs = list(db.used_transactions.find({}, {'transaction_id': 1}))
+        normalized_count = 0
+        for tx_doc in all_txs:
+            old_tx_id = tx_doc.get('transaction_id', '')
+            if not old_tx_id:
+                continue
+            new_tx_id = normalize_tx_id(old_tx_id)
+            if new_tx_id != old_tx_id:
+                # نشيك لو فيه duplicate بعد التطبيع
+                existing = db.used_transactions.find_one({'transaction_id': new_tx_id})
+                if existing and existing.get('_id') != tx_doc.get('_id'):
+                    # في duplicate - نحذف القديم (الأقل) ونحتفظ بالأول
+                    logger.warning(f"🚨 وجد duplicate بعد التطبيع: {old_tx_id[:30]} = {new_tx_id[:30]}")
+                    db.used_transactions.delete_one({'_id': tx_doc['_id']})
+                else:
+                    # نحدث الـ transaction_id لقيمته المطبّعة
+                    try:
+                        db.used_transactions.update_one(
+                            {'_id': tx_doc['_id']},
+                            {'$set': {'transaction_id': new_tx_id}}
+                        )
+                        normalized_count += 1
+                    except Exception:
+                        pass
+        if normalized_count > 0:
+            logger.info(f"✅ تم تطبيع {normalized_count} transaction_id قديم")
+    except Exception as e:
+        logger.error(f"Failed to normalize old transactions: {e}")
+    
+    try:
+        # 1. used_transactions - الحماية الأهم!
+        # لو فيه duplicates من قبل، نحاول ننظفها أولاً
+        try:
+            db.used_transactions.create_index('transaction_id', unique=True)
+            logger.info("✅ unique index على used_transactions.transaction_id جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                # في duplicates موجودة - نحذف المكررات أولاً (نحتفظ بالأقدم)
+                logger.warning("⚠️ وُجدت duplicates في used_transactions - جاري التنظيف...")
+                
+                # نجد كل الـ duplicates
+                pipeline = [
+                    {'$group': {
+                        '_id': '$transaction_id',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'},
+                        'amounts': {'$push': '$amount'},
+                        'users': {'$push': '$user_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                
+                duplicates = list(db.used_transactions.aggregate(pipeline))
+                
+                for dup in duplicates:
+                    # نحتفظ بأول واحد فقط، نحذف الباقي
+                    ids_to_keep = dup['ids'][0]
+                    ids_to_delete = dup['ids'][1:]
+                    
+                    # تسجيل للأدمن (الناس اللي خسروا فلوس بسبب التلاعب)
+                    logger.warning(
+                        f"🚨 وجدت {len(ids_to_delete)} تكرار للـ tx {dup['_id'][:30]}\n"
+                        f"   المستخدمين: {dup['users']}\n"
+                        f"   المبالغ: {dup['amounts']}"
+                    )
+                    
+                    # حذف المكررات
+                    db.used_transactions.delete_many({'_id': {'$in': ids_to_delete}})
+                
+                # نحاول ننشئ الـ index مرة ثانية
+                try:
+                    db.used_transactions.create_index('transaction_id', unique=True)
+                    logger.info("✅ تم إنشاء unique index بعد تنظيف المكررات")
+                except Exception as e2:
+                    logger.error(f"❌ فشل إنشاء unique index حتى بعد التنظيف: {e2}")
+            else:
+                logger.debug(f"used_transactions index info: {idx_err}")
+        
+        # 🆕 1.5. index على الـ fingerprint (للحماية ضد نفس الحوالة بـ tx_id مختلف)
+        try:
+            db.used_transactions.create_index('fingerprint', unique=True, sparse=True)
+            logger.info("✅ unique index على used_transactions.fingerprint جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                logger.warning("⚠️ duplicates في fingerprint - جاري التنظيف...")
+                # نحذف الـ records اللي ما عندهم fingerprint (records قديمة)
+                # نحتفظ بالأقدم لكل fingerprint
+                pipeline = [
+                    {'$match': {'fingerprint': {'$exists': True, '$ne': None}}},
+                    {'$group': {
+                        '_id': '$fingerprint',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                try:
+                    duplicates = list(db.used_transactions.aggregate(pipeline))
+                    for dup in duplicates:
+                        ids_to_delete = dup['ids'][1:]  # نحتفظ بالأول
+                        db.used_transactions.delete_many({'_id': {'$in': ids_to_delete}})
+                    
+                    db.used_transactions.create_index('fingerprint', unique=True, sparse=True)
+                    logger.info("✅ تم إنشاء unique index على fingerprint بعد التنظيف")
+                except Exception as e: 
+                    logger.error(f"فشل: {e}")
+            else:
+                logger.debug(f"fingerprint index info: {idx_err}")
+        
+        # 🆕 1.6. index على method+amount+created_at للفحص السريع
+        try:
+            db.used_transactions.create_index([
+                ('method', 1),
+                ('amount', 1),
+                ('created_at', 1)
+            ])
+            logger.info("✅ compound index على used_transactions جاهز")
+        except Exception as e:
+            logger.debug(f"compound index info: {e}")
+        
+        # 2. claimed_hashes
+        try:
+            db.claimed_hashes.create_index('transaction_id', unique=True)
+            logger.info("✅ unique index على claimed_hashes جاهز")
+        except Exception as idx_err:
+            err_str = str(idx_err).lower()
+            if 'duplicate' in err_str or 'e11000' in err_str:
+                # نظف الـ claimed_hashes المكررة (احتفظ بالأقدم)
+                pipeline = [
+                    {'$group': {
+                        '_id': '$transaction_id',
+                        'count': {'$sum': 1},
+                        'ids': {'$push': '$_id'}
+                    }},
+                    {'$match': {'count': {'$gt': 1}}}
+                ]
+                duplicates = list(db.claimed_hashes.aggregate(pipeline))
+                for dup in duplicates:
+                    ids_to_delete = dup['ids'][1:]
+                    db.claimed_hashes.delete_many({'_id': {'$in': ids_to_delete}})
+                
+                try:
+                    db.claimed_hashes.create_index('transaction_id', unique=True)
+                    logger.info("✅ unique index على claimed_hashes جاهز (بعد التنظيف)")
+                except: pass
+            else:
+                logger.debug(f"claimed_hashes index info: {idx_err}")
+    except Exception as e:
+        logger.error(f"❌ فشل critical: {e}")
 
 
 # نُفّذها فوراً عند بدء البوت
-# Initialization deferred.
-# Initialization deferred.
+initialize_referrals_v2()
+ensure_critical_indexes()
 
 # 🛡 ضمان أن الأونر مسجّل كأدمن (عشان يستقبل تنبيهات الستوك وكل إشعارات الأدمن بثبات)
 try:
@@ -4510,11 +3547,107 @@ def refspam_ok_handler(call):
 
 
 def register_new_referral(invited_id, referrer_id):
-    return _ops.register_referral(invited_id, referrer_id)
+    """
+    تسجيل إحالة جديدة في الجدول الجديد - محمي من race conditions.
+    شروط القبول:
+    - المستخدم المدعو (invited) ما يكون مسجلاً من قبل
+    - الـ referrer_id ما يكون نفسه invited_id
+    - ما يكون مسجلاً في جدول الإحالات من قبل
+    
+    🛡 الحماية:
+    - يستخدم unique index على invited_id لمنع التكرار
+    - DuplicateKeyError = الإحالة مسجلة بالفعل (آمن)
+    """
+    try:
+        invited_id = int(invited_id)
+        referrer_id = int(referrer_id)
+
+        if invited_id == referrer_id:
+            return False
+
+        if not db.users.find_one({'user_id': referrer_id}):
+            return False
+
+        # 🛡 محاولة الإدراج مباشرة — الـ unique index بيمنع التكرار
+        # هذا أسرع وأأمن من find_one ثم insert (ما فيه race condition)
+        try:
+            db.referrals_v2.insert_one({
+                'invited_id': invited_id,
+                'referrer_id': referrer_id,
+                'status': 'pending',
+                'created_at': int(time.time()),
+                'updated_at': int(time.time())
+            })
+            # 🆕 فحص spam بعد كل إحالة ناجحة
+            try:
+                threading.Thread(
+                    target=_check_referral_spam,
+                    args=(referrer_id,),
+                    daemon=True
+                ).start()
+            except Exception: pass
+            return True
+        except Exception as dup_err:
+            # DuplicateKeyError - الإحالة مسجلة من قبل (طبيعي، نتجاهل)
+            error_msg = str(dup_err).lower()
+            if 'duplicate' in error_msg or 'e11000' in error_msg:
+                return False
+            # خطأ آخر — نسجله
+            logger.error(f"Insert referral error: {dup_err}")
+            return False
+    except Exception as e:
+        logger.error(f"Error registering referral: {e}")
+        return False
 
 
 def mark_referral_status(invited_id, new_status):
-    return _ops.mark_referral(invited_id, new_status)
+    """
+    يحدّث حالة المُدعَى وبعدها يحدّث رصيد المُحيل تلقائياً.
+    🛡 محمي من race conditions:
+    - يستخدم find_one_and_update atomic
+    - يحدّث فقط لو الحالة الحالية فعلاً تختلف عن الجديدة
+    """
+    try:
+        invited_id = int(invited_id)
+        
+        # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
+        result = db.referrals_v2.find_one_and_update(
+            {
+                'invited_id': invited_id,
+                'status': {'$ne': new_status}
+            },
+            {
+                '$set': {
+                    'status': new_status,
+                    'updated_at': int(time.time())
+                }
+            },
+            return_document=False
+        )
+        
+        if result is None:
+            return
+        
+        old_status = result.get('status', 'pending')
+        referrer_id = result['referrer_id']
+        
+        # تحديث رصيد المُحيل
+        update_referrer_balance(referrer_id)
+        
+        # 🆕 لما إحالة تصير active (جديدة)، نرسل إشعار "باقي X"
+        if new_status == 'active' and old_status != 'active':
+            try:
+                send_progress_log_notification(referrer_id)
+            except Exception as prog_err:
+                logger.debug(f"Progress notification failed: {prog_err}")
+
+            # 🔔 إشعار الأدمن كل ما بلغ المُحيل مضاعفات العتبة (10, 20, ...)
+            try:
+                _notify_admin_referral_milestone(referrer_id)
+            except Exception as ms_err:
+                logger.debug(f"Referral milestone notify failed: {ms_err}")
+    except Exception as e:
+        logger.error(f"Error marking referral status: {e}")
 
 
 def _notify_admin_referral_milestone(referrer_id):
@@ -4632,7 +3765,32 @@ def send_progress_log_notification(referrer_id):
         except Exception as dm_err:
             logger.debug(f"Progress DM failed for {referrer_id}: {dm_err}")
 
-        # Progress is delivered privately, at most once per five minutes.
+        # 2) قناة اللوق (بالإنجليزي دائماً)
+        if remaining == threshold:
+            return  # milestone - الـ update_referrer_balance سيرسل
+
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                # نجلب النص من CMS أو الافتراضي
+                default_log = (
+                    f"📈 <b>New Active Referral!</b>\n\n"
+                    f"👤 Referrer: <b>**</b>\n"
+                    f"✅ Active Referrals: <b>{active_count}</b>\n"
+                    f"⏳ <b>{remaining}</b> more to earn <b>${reward:.2f}</b>"
+                )
+                cms = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_progress'})
+                if cms and cms.get('value'):
+                    try:
+                        log_text = cms['value'].format(active_count, remaining, f"{reward:.2f}")
+                    except:
+                        log_text = default_log
+                else:
+                    log_text = default_log
+                bot.send_message(log_ch, log_text, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Progress log failed: {log_err}")
+
     except Exception as e:
         logger.error(f"send_progress_log_notification error: {e}")
 
@@ -4752,7 +3910,7 @@ def update_referrer_balance(referrer_id):
             # 🛡 الإصلاح: نتعامل مع الحقل المفقود أو القيمة الخاطئة
             raw_earned = referrer.get('ref_v2_earned', 0.0)
             try:
-                current_earned = round(finite_float(raw_earned), 2)
+                current_earned = round(float(raw_earned), 2)
             except (ValueError, TypeError):
                 current_earned = 0.0
 
@@ -4790,7 +3948,7 @@ def update_referrer_balance(referrer_id):
             if update_result is None:
                 # فشل الـ optimistic lock - نعيد المحاولة مرة واحدة
                 update_result = db.users.find_one_and_update(
-                    match_condition,
+                    {'user_id': rid},
                     {
                         '$inc': {'balance': diff},
                         '$set': {'ref_v2_earned': expected}
@@ -4799,7 +3957,7 @@ def update_referrer_balance(referrer_id):
                 )
 
             if update_result is not None and diff > 0:
-                new_balance = round(finite_float(update_result.get('balance', 0)), 2)
+                new_balance = round(float(update_result.get('balance', 0)), 2)
                 ref_lang = referrer.get('lang', 'ar')
 
                 # 1) رسالة للمُحيل في الخاص (من CMS)
@@ -4875,7 +4033,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
     """
     try:
         buyer_uid = int(buyer_uid)
-        purchase_amount = round(finite_float(purchase_amount), 2)
+        purchase_amount = round(float(purchase_amount), 2)
         
         # 🆕 نجلب الإعدادات الحالية
         min_purchase = get_referral_min_purchase()
@@ -4929,7 +4087,7 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         
         # 🎉 إشعار خاص للمُحيل في الشات (بالإنجليزي + قابل للتعديل من CMS)
         try:
-            new_balance = finite_float(result.get('balance', 0))
+            new_balance = float(result.get('balance', 0))
             buyer_data = db.users.find_one({'user_id': buyer_uid})
             buyer_display = obscure_text(buyer_data.get('username') or str(buyer_uid)) if buyer_data else "***"
             
@@ -4994,10 +4152,15 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
 
 
 # 🛡 قفل لكل referrer_id (للحماية الإضافية)
-_referrer_locks = [threading.Lock() for _ in range(64)]
+_referrer_locks = {}
+_referrer_locks_master = threading.Lock()
 
 def _get_referrer_lock(referrer_id):
-    return _referrer_locks[int(referrer_id) % len(_referrer_locks)]
+    """يرجع lock مخصص لكل referrer لتفادي race conditions"""
+    with _referrer_locks_master:
+        if referrer_id not in _referrer_locks:
+            _referrer_locks[referrer_id] = threading.Lock()
+        return _referrer_locks[referrer_id]
 
 
 def get_ref_counts(referrer_id):
@@ -5015,12 +4178,122 @@ def get_ref_counts(referrer_id):
 
 
 def background_referral_checker_v2():
-    return _ops.referral_worker()
+    """
+    فاحص خلفي ذكي - يتجنب Telegram Rate Limit
+    
+    🛡 الاستراتيجية:
+    - يفحص pending و active فقط
+    - لو شخص مو مشترك → يزيد عداد left_checks
+    - لازم 3 فحوصات متتالية تأكد المغادرة
+    - بعد التأكيد → ينقل للأرشيف (referrals_archived)
+    - خطأ اتصال = يتجاهل ويصفّر العداد
+    """
+    
+    # ═══ إصلاح لمرة واحدة: رجّع الإحالات اللي صارت 'left' بالغلط ═══
+    try:
+        fix_key = db.settings.find_one({'key': 'ref_left_fix_v1'})
+        if not fix_key:
+            wrong_left = db.referrals_v2.count_documents({'status': 'left'})
+            if wrong_left > 0:
+                db.referrals_v2.update_many(
+                    {'status': 'left'},
+                    {'$set': {'status': 'active', 'left_checks': 0}}
+                )
+                logger.info(f"🔧 Fixed {wrong_left} wrongly-marked 'left' referrals → reset to 'active' for re-verification")
+            db.settings.insert_one({'key': 'ref_left_fix_v1', 'value': True})
+    except Exception as e:
+        logger.error(f"Error in referral fix: {e}")
+    BATCH_SIZE = 10
+    DELAY_BETWEEN_CHECKS = 0.15
+    DELAY_BETWEEN_CYCLES = 60
+    LEFT_CONFIRM_NEEDED = 3  # لازم 3 فحوصات متتالية تأكد إنه غادر
+    
+    # ⏳ انتظار 90 ثانية بعد تشغيل البوت عشان الاتصال يستقر
+    time.sleep(90)
+    logger.info("🔄 Background referral checker started.")
+    
+    while True:
+        try:
+            # نفحص pending و active فقط (left محفوظة في referrals_archived)
+            cursor = db.referrals_v2.find({
+                'status': {'$in': ['pending', 'active']}
+            })
+            
+            batch_count = 0
+            for r in cursor:
+                inv_uid = r.get('invited_id')
+                if not inv_uid:
+                    continue
+                
+                current_status = r.get('status', 'pending')
+                
+                try:
+                    is_subbed = check_forced_sub(int(inv_uid))
+                except Exception:
+                    time.sleep(DELAY_BETWEEN_CHECKS)
+                    continue
+                
+                # None = خطأ اتصال — نحافظ على الحالة + نصفّر العداد
+                if is_subbed is None:
+                    db.referrals_v2.update_one(
+                        {'invited_id': inv_uid},
+                        {'$set': {'left_checks': 0}}
+                    )
+                    time.sleep(DELAY_BETWEEN_CHECKS)
+                    continue
+                
+                if is_subbed:
+                    # مشترك ✅
+                    if current_status != 'active':
+                        mark_referral_status(inv_uid, 'active')
+                    # نصفّر عداد المغادرة
+                    db.referrals_v2.update_one(
+                        {'invited_id': inv_uid},
+                        {'$set': {'left_checks': 0}}
+                    )
+                else:
+                    # مو مشترك — نزيد العداد
+                    if current_status == 'active':
+                        left_checks = r.get('left_checks', 0) + 1
+                        if left_checks >= LEFT_CONFIRM_NEEDED:
+                            # ✅ مؤكد غادر — ننقله للأرشيف
+                            referrer_id = r.get('referrer_id')
+                            db.referrals_archived.insert_one({
+                                'invited_id': inv_uid,
+                                'referrer_id': referrer_id,
+                                'status': 'left',
+                                'original_status': current_status,
+                                'archived_at': int(time.time())
+                            })
+                            # نحذفه من الأساسي
+                            db.referrals_v2.delete_one({'invited_id': inv_uid})
+                            # نحدّث رصيد المُحيل
+                            try: update_referrer_balance(referrer_id)
+                            except: pass
+                            logger.info(f"📤 Referral {inv_uid} archived as LEFT (confirmed {LEFT_CONFIRM_NEEDED}x)")
+                        else:
+                            db.referrals_v2.update_one(
+                                {'invited_id': inv_uid},
+                                {'$set': {'left_checks': left_checks}}
+                            )
+                    # pending ما يصير left — يبقى pending
+                
+                time.sleep(DELAY_BETWEEN_CHECKS)
+                
+                batch_count += 1
+                if batch_count >= BATCH_SIZE:
+                    batch_count = 0
+                    time.sleep(2)
+        except Exception as e:
+            logger.error(f"Background ref checker error: {e}")
+        
+        # دورة كاملة كل 30 ثانية (آمن وكافي)
+        time.sleep(DELAY_BETWEEN_CYCLES)
 
 
 # 🆕 فاحص فوري للإحالات الجديدة عند الـ /start
 # هذا الـ thread الرئيسي يدور بهدوء، والتحديث الفوري يحصل في start_handler
-# Worker starts after runtime initialization.
+threading.Thread(target=background_referral_checker_v2, daemon=True).start()
 
 # ============================================================
 # 🤖 5. تهيئة اليوزربوت (Telethon) - للتفعيلات التلقائية
@@ -5031,7 +4304,98 @@ ACTIVE_GEMINI_SESSION = None
 GEMINI_QUEUE = []
 
 def start_dynamic_userbot():
-    return _safe.userbot_start()
+    global client, USERBOT_LOOP
+    session_string = get_setting("userbot_session", "")
+    provider_bot = get_setting("provider_bot", "").replace("@", "")
+
+    if not session_string or session_string == "Not Set" or not provider_bot or provider_bot == "Not Set":
+        return
+
+    if client:
+        try: asyncio.run_coroutine_threadsafe(client.disconnect(), USERBOT_LOOP)
+        except: pass
+
+    USERBOT_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(USERBOT_LOOP)
+    client = TelegramClient(StringSession(session_string), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
+
+    @client.on(events.NewMessage(chats=provider_bot))
+    @client.on(events.MessageEdited(chats=provider_bot))
+    async def provider_msg_handler(event):
+        global ACTIVE_GEMINI_SESSION
+        if not ACTIVE_GEMINI_SESSION or not ACTIVE_GEMINI_SESSION.get('ready'): return
+        
+        text = event.raw_text or ""
+        uid = ACTIVE_GEMINI_SESSION['uid']
+        price = ACTIVE_GEMINI_SESSION['price']
+        
+        l = get_lang(uid)
+        display_text = text
+        if l == 'ar':
+            try: display_text = GoogleTranslator(source='auto', target='ar').translate(text)
+            except: pass
+
+        formatted_text = f"📩 <b>{html.escape(display_text)}</b>"
+        provider_msg_id = event.message.id
+
+        if isinstance(event, events.MessageEdited.Event):
+            if provider_msg_id in ACTIVE_GEMINI_SESSION.get('msg_map', {}):
+                user_msg_id = ACTIVE_GEMINI_SESSION['msg_map'][provider_msg_id]
+                try: bot.edit_message_text(formatted_text, chat_id=uid, message_id=user_msg_id, parse_mode="HTML")
+                except: pass 
+        else:
+            try: 
+                sent_msg = bot.send_message(uid, formatted_text, parse_mode="HTML")
+                if 'msg_map' not in ACTIVE_GEMINI_SESSION: ACTIVE_GEMINI_SESSION['msg_map'] = {}
+                ACTIVE_GEMINI_SESSION['msg_map'][provider_msg_id] = sent_msg.message_id
+            except: pass
+
+        if "✅ Status: SUCCEEDED" in text:
+            db.orders.insert_one({'user_id': uid, 'product_id': 'Gemini_Activation', 'code_delivered': f"تم التفعيل بنجاح (Gemini)"})
+            bot.send_message(uid, "🎉 <b>اكتمل التفعيل بنجاح!</b>\nتم خصم الرصيد وتوثيق الطلب. يمكنك رؤية الإيصال في المشتريات.", parse_mode="HTML")
+            
+            log_ch = get_setting('log_channel')
+            u_data = db.users.find_one({'user_id': uid})
+            obs_user = obscure_text(u_data.get('username') or str(uid))
+            if log_ch and log_ch != "Not Set":
+                try: 
+                    # 🆕 النص من CMS (قابل للتعديل)
+                    gemini_msg = LANG['en']['log_gemini'].format(obs_user)
+                    custom_g = db.custom_texts.find_one({'lang': 'en', 'key': 'log_gemini'})
+                    if custom_g and custom_g.get('value'):
+                        try:
+                            gemini_msg = custom_g['value'].format(obs_user)
+                        except: pass
+                    bot.send_message(log_ch, gemini_msg, parse_mode="HTML")
+                except: pass
+            
+            # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
+            try:
+                award_purchase_referral_reward(uid, "Gemini Advanced", price)
+            except Exception as ref_err:
+                logger.error(f"Error awarding referral on Gemini purchase: {ref_err}")
+
+            ACTIVE_GEMINI_SESSION = None
+            process_next_gemini()
+            
+        elif "❌ Status: FAILED" in text or "❌ Error" in text:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+            bot.send_message(uid, "❌ <b>فشلت العملية وتم إرجاع رصيدك!</b>\nتأكد من تفعيل (التحقق بخطوتين) والبيانات الصحيحة.", parse_mode="HTML")
+            ACTIVE_GEMINI_SESSION = None
+            process_next_gemini()
+
+    async def run_client():
+        try:
+            await client.connect()
+            await client.run_until_disconnected()
+        except Exception as e:
+            logger.error(f"❌ خطأ حرج في تشغيل اليوزربوت: {e}")
+
+    def run_it():
+        asyncio.set_event_loop(USERBOT_LOOP)
+        USERBOT_LOOP.run_until_complete(run_client())
+
+    threading.Thread(target=run_it, daemon=True).start()
 
 def start_gemini_session(uid, price):
     global ACTIVE_GEMINI_SESSION
@@ -5072,7 +4436,9 @@ def start_gemini_session(uid, price):
         process_next_gemini()
 
 def process_next_gemini():
-    return _safe.gemini_next()
+    if GEMINI_QUEUE:
+        next_user = GEMINI_QUEUE.pop(0)
+        start_gemini_session(next_user['uid'], next_user['price'])
 
 def add_to_gemini_queue(uid, price):
     global ACTIVE_GEMINI_SESSION
@@ -6350,10 +5716,22 @@ def _invalidate_products_cache():
     _PRODUCTS_LIST_CACHE['exp'] = 0
     _PRODUCTS_BY_ID_CACHE['map'] = {}
     _PRODUCTS_BY_ID_CACHE['exp'] = 0
-    globals()['_PRODUCTS_CACHE'] = None
 
 
 def find_product(pid):
+    pid_str = str(pid)
+    # ⚡ نجرّب الـ cache أولاً (يقطع استعلامات MongoDB بشدة)
+    now = time.time()
+    if _PRODUCTS_BY_ID_CACHE['exp'] > now:
+        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+        if cached:
+            return cached
+    else:
+        # نبني الـ cache لو منتهي
+        _get_all_products_cached()
+        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+        if cached:
+            return cached
     return _find_product_db(pid)
 
 
@@ -6367,7 +5745,7 @@ def _find_product_db(pid):
             p = db.products.find_one({'id': int(pid_str)})
             if p: return p
         try:
-            p = db.products.find_one({'id': finite_float(pid_str)})
+            p = db.products.find_one({'id': float(pid_str)})
             if p: return p
         except: pass
 
@@ -6387,7 +5765,7 @@ def _find_product_db(pid):
         # ── 4. بحث إضافي: ربما pid_str هو الجزء الرقمي من id مخزن كـ float ──
         if '.' not in pid_str:
             try:
-                p = db.products.find_one({'id': finite_float(pid_str + '.0')})
+                p = db.products.find_one({'id': float(pid_str + '.0')})
                 if p: return p
             except: pass
 
@@ -6431,7 +5809,7 @@ def get_product_stock_count(pid):
 
         queries = [{'product_id': pid_str}]
         if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-        try: queries.append({'product_id': finite_float(pid_str)})
+        try: queries.append({'product_id': float(pid_str)})
         except: pass
         return db.product_stock.count_documents({'$or': queries, 'is_sold': False})
     except: return 0
@@ -6441,7 +5819,19 @@ _USER_CACHE_TTL = 3       # ثوانٍ قليلة — تغطّي عرض قائم
 
 
 def get_user_data_full(uid, use_cache=True):
-    return db.users.find_one({'user_id': uid})
+    """يجلب بيانات المستخدم. cache قصير جداً (3ث) لتفادي عشرات الاستعلامات
+    المكررة أثناء عرض قائمة واحدة (كل get_text كان يستعلم من جديد)."""
+    if use_cache:
+        c = _USER_CACHE.get(uid)
+        if c and c[1] > time.time():
+            return c[0]
+    data = db.users.find_one({'user_id': uid})
+    # لا نخزّن None في الـ cache (يسبب بيانات قديمة بعد إنشاء المستخدم)
+    if data is not None:
+        _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
+    else:
+        _USER_CACHE.pop(uid, None)
+    return data
 
 
 def _invalidate_user_cache(uid):
@@ -6508,7 +5898,44 @@ _FORCED_SUB_CACHE_TTL = 300     # 5 دقائق — نتذكّر أن الشخص 
 
 
 def check_forced_sub(uid, use_cache=True):
-    return _ops.forced_sub(uid, use_cache)
+    """
+    يفحص اشتراك المستخدم في كل القنوات الإجبارية.
+    لازم يكون مشترك في كل القنوات — لو طلع من واحدة = غير مشترك.
+    يرجع True (مشترك بالكل) / False (طلع من واحدة على الأقل) / None (خطأ اتصال).
+
+    ⚡ للسرعة: نخزّن نتيجة "مشترك" مؤقتاً (5 دقائق) فلا نستعلم من تيليجرام
+    في كل ضغطة — التنقّل يصير فورياً. النتيجة False لا تُخزَّن (نعيد الفحص
+    فوراً حتى يشترك). التخزين يُمسح تلقائياً بعد المدة.
+    """
+    if uid == OWNER_ID: return True
+    user_db = get_user_data_full(uid)
+    if user_db and user_db.get('is_admin') == 1: return True
+    chans = list(db.required_channels.find())
+    if not chans: return True
+
+    # ⚡ cache: لو عندنا نتيجة "مشترك" حديثة، نرجّعها فوراً بلا استعلام
+    if use_cache:
+        cached = _FORCED_SUB_CACHE.get(uid)
+        if cached and cached[1] > time.time() and cached[0] is True:
+            return True
+
+    had_error = False
+    for c in chans:
+        try:
+            member = bot.get_chat_member(c['channel_id'], uid)
+            if member.status in ['left', 'kicked']:
+                # غير مشترك: نمسح أي cache قديم ونرجّع False فوراً
+                _FORCED_SUB_CACHE.pop(uid, None)
+                return False  # طلع من قناة واحدة = مو مشترك أكيد
+        except Exception:
+            had_error = True
+            continue  # نكمّل فحص باقي القنوات
+
+    if had_error:
+        return None  # ما نخزّن الغموض
+    # مشترك بالكل → نخزّن للسرعة
+    _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
+    return True
 
 def notify_admins(message_text):
     if OWNER_ID:
@@ -6527,7 +5954,7 @@ def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='m
     - amount موجب = إضافة | سالب = خصم
     """
     try:
-        amount = round(finite_float(amount), 2)
+        amount = round(float(amount), 2)
     except (ValueError, TypeError):
         return
     if amount == 0:
@@ -6536,7 +5963,7 @@ def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='m
     # 1) إشعار المستخدم في الخاص (بلغته)
     try:
         u = get_user_data_full(target_uid)
-        new_balance = round(finite_float(u.get('balance', 0)), 2) if u else 0.0
+        new_balance = round(float(u.get('balance', 0)), 2) if u else 0.0
         l = u.get('lang', 'ar') if u else 'ar'
 
         if amount > 0:
@@ -6737,8 +6164,8 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
             # نحسب المقاعd المتاحة (المخزون الحقيقي)
             _seats = _cgpt_get_seats_cached()
             if _seats is None:
-                stock_ar = "جارٍ التحقق"
-                stock_en = "Checking availability"
+                stock_ar = "غير محدود"
+                stock_en = "Unlimited"
             else:
                 stock_ar = f"{_seats} مقعد"
                 stock_en = f"{_seats} seats"
@@ -6781,7 +6208,7 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                             )
                         except:
                             pass
-                dur_price = finite_float(dur.get('price', 0))
+                dur_price = float(dur.get('price', 0))
                 # نعرض المدة بوضوح — لو الـ label ناقص نحسبها من الدقائق
                 _mins = int(dur.get('minutes', 0))
                 if not dur_label or not dur_label.strip():
@@ -6837,12 +6264,12 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
             if lang == 'ar':
                 discount_text = "\n\n🏷 <b>خصومات الكمية:</b>\n"
                 for t in sorted_tiers:
-                    t_price = finite_float(t.get('price', 0))
+                    t_price = float(t.get('price', 0))
                     discount_text += f"  • {t.get('min_qty')}+ قطعة = <b>${t_price:.2f}</b>/قطعة\n"
             else:
                 discount_text = "\n\n🏷 <b>Quantity Discounts:</b>\n"
                 for t in sorted_tiers:
-                    t_price = finite_float(t.get('price', 0))
+                    t_price = float(t.get('price', 0))
                     discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
 
         if lang == 'en':
@@ -6894,7 +6321,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         name = cat.get('name_en', cat.get('name_ar', '')) if lang == 'en' else cat.get('name_ar', cat.get('name_en', ''))
         
         markup = InlineKeyboardMarkup(row_width=1)
-        prod_ids = list(dict.fromkeys(str(pid) for pid in (cat.get('product_ids') or [])))
+        prod_ids = cat.get('product_ids') or []
 
         # ⚡ نجمع المنتجات أولاً، ثم نجلب المخزون دفعة واحدة (batch) للسرعة
         cat_prods = []
@@ -7060,7 +6487,7 @@ def start_handler(message):
     
     # 🆕 مكافآت رجعية: نتأكد إن المستخدم استلم كل مكافآته (لو فاته شي)
     try:
-        pass  # Referral changes are already queued by mark_referral_status.
+        update_referrer_balance(uid)
     except Exception as ref_err:
         logger.debug(f"Retroactive reward check error: {ref_err}")
 
@@ -7086,11 +6513,7 @@ def start_handler(message):
     # ============================================================
     ref_record = db.referrals_v2.find_one({'invited_id': uid})
     
-    sub_status = check_forced_sub(uid)
-    if sub_status is None:
-        bot.send_message(chat_id, '⚠️ تعذر التحقق من الاشتراك الآن. حاول مجددًا بعد قليل.')
-        return
-    if sub_status is False:
+    if not check_forced_sub(uid):
         if ref_record:
             current = ref_record.get('status', 'pending')
             if current == 'active':
@@ -7283,7 +6706,7 @@ def gemini_info_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     l = get_lang(uid)
-    gemini_price = finite_float(get_setting("gemini_price", 5.0))
+    gemini_price = float(get_setting("gemini_price", 5.0))
     
     text = get_text(uid, 'gemini_desc', gemini_price)
     
@@ -7299,7 +6722,37 @@ def gemini_info_ui(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "gemini_buy_prompt")
 def gemini_buy_prompt(call):
-    return _safe.gemini_buy(call)
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    l = get_lang(uid)
+    
+    # 🛡 Rate Limiting
+    if not _acquire_purchase_lock(uid):
+        bot.send_message(uid, bil(uid, "⏳ <b>يوجد عملية شراء قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", "⏳ <b>You have a purchase in progress!</b>\nWait until it finishes."), parse_mode="HTML")
+        return
+    
+    try:
+        gemini_price = round(float(get_setting("gemini_price", 5.0)), 2)
+        
+        # 🛡 خصم atomic مع فحص الرصيد - يمنع double-spending
+        updated_user = db.users.find_one_and_update(
+            {
+                'user_id': uid,
+                'balance': {'$gte': gemini_price}
+            },
+            {'$inc': {'balance': -gemini_price}},
+            return_document=True
+        )
+        
+        if updated_user is None:
+            send_no_balance(uid)
+            return
+        
+        # ✅ نجح الخصم - أضفه للقائمة
+        add_to_gemini_queue(uid, gemini_price)
+    finally:
+        # نحرر القفل بعد ما يدخل القائمة (لأنه ممكن يستنى طويل)
+        _release_purchase_lock(uid)
 
 @bot.message_handler(func=lambda m: ACTIVE_GEMINI_SESSION and m.from_user.id == ACTIVE_GEMINI_SESSION['uid'])
 def relay_to_provider(message):
@@ -7322,7 +6775,7 @@ def github_info_ui(call):
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     l = get_lang(uid)
-    gh_price = finite_float(get_setting("github_price", 15.0))
+    gh_price = float(get_setting("github_price", 15.0))
     
     text = get_text(uid, 'gh_desc', gh_price)
     
@@ -7344,10 +6797,10 @@ def github_buy_prompt(call):
         bot.send_message(uid, bil(uid, "⏳ <b>يوجد عملية شراء أو تفعيل قيد المعالجة!</b>\nانتظر انتهاءها أولاً.", "⏳ <b>You have a purchase/activation in progress!</b>\nWait until it finishes."), parse_mode="HTML")
         return
     
-    gh_price = finite_float(get_setting("github_price", 15.0))
+    gh_price = float(get_setting("github_price", 15.0))
     u = get_user_data_full(uid)
     
-    if finite_float(u.get('balance', 0)) < gh_price:
+    if float(u.get('balance', 0)) < gh_price:
         _release_purchase_lock(uid)  # حرّر القفل
         send_no_balance(uid)
         return
@@ -7391,7 +6844,162 @@ def process_gh_step_pass(message):
 
 @safe_next_step
 def process_gh_step_2fa(message):
-    return _safe.github_begin(message)
+    uid = message.from_user.id
+    if uid not in temp_github_data: return
+    
+    # 🛡 تشفير كود 2FA
+    two_factor_encrypted = encrypt_sensitive(message.text.strip())
+    
+    # حذف رسالة 2FA فوراً من المحادثة
+    try: bot.delete_message(uid, message.message_id)
+    except: pass
+    
+    data = temp_github_data.pop(uid)
+    
+    price = data['price']
+    lang = data['lang']
+    
+    # 🛡 فك التشفير فقط عند الإرسال للـ API (وقت قصير جداً في الذاكرة)
+    g_user = decrypt_sensitive(data['user'])
+    g_pass = decrypt_sensitive(data['pass'])
+    g_totp = decrypt_sensitive(two_factor_encrypted)
+    
+    # مسح المرجع المشفّر بعد فك التشفير
+    secure_wipe(data)
+    del two_factor_encrypted
+    
+    # 🛡 خصم atomic مع إعادة فحص الرصيد — يمنع الرصيد السالب / الشراء المزدوج.
+    # (كان $inc بسيط بدون فحص؛ والرصيد فُحص فقط في البداية قبل دقائق —
+    #  ثغرة TOCTOU لأن إدخال 2FA قد يتجاوز قفل الـ60 ثانية.)
+    _gh_updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}},
+        return_document=True
+    )
+    if _gh_updated is None:
+        _release_purchase_lock(uid)
+        try: bot.clear_step_handler_by_chat_id(chat_id=uid)
+        except: pass
+        send_no_balance(uid)
+        return
+    status_msg = bot.send_message(uid, get_text(uid, 'gh_deducted'), parse_mode="HTML")
+    
+    def api_worker():
+        try:
+            if not GITHUB_API_KEY:
+                raise Exception("API Key not found in .env")
+                
+            headers = {
+                "X-API-Key": GITHUB_API_KEY,
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            
+            payload = {
+                "github_username": g_user,
+                "github_password": g_pass,
+                "totp_secret": g_totp
+            }
+                
+            api_url = f"{GITHUB_BASE_URL}/api/run"
+            
+            res = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            
+            if res.status_code in [200, 201, 202]:
+                res_data = res.json()
+                job_id = res_data.get("job_id")
+                
+                if not job_id:
+                    bot.edit_message_text(get_text(uid, 'gh_submitted'), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                    return
+
+                bot.edit_message_text(get_text(uid, 'gh_received', job_id), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                
+                for i in range(1, 35):
+                    time.sleep(5) 
+                    status_url = f"{GITHUB_BASE_URL}/api/job/{job_id}"
+                    
+                    try:
+                        status_res = requests.get(status_url, headers=headers, timeout=15)
+                        
+                        if status_res.status_code == 200:
+                            s_data = status_res.json()
+                            status = s_data.get("status", "").lower()
+                            
+                            if status == "submitted":
+                                app_id = s_data.get("app_id", "N/A")
+                                
+                                db.orders.insert_one({'user_id': uid, 'product_id': 'GitHub_Student', 'code_delivered': f"Account: {g_user} | AppID: {app_id}"})
+                                bot.edit_message_text(get_text(uid, 'gh_success', g_user), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                notify_admins(f"🔐 <b>إشعار إدارة (تفعيل GitHub) ⚡</b>\n\n👤 العميل: <code>{uid}</code>\n📦 الحساب: {g_user}\n🔖 رقم الطلب: <code>{job_id}</code>\n✅ الحالة: تم التفعيل بنجاح!")
+                                
+                                log_ch = get_setting('log_channel')
+                                u_data = db.users.find_one({'user_id': uid})
+                                obs_user = obscure_text(u_data.get('username') or str(uid))
+                                
+                                if log_ch and log_ch != "Not Set":
+                                    try: 
+                                        # 🆕 النص من CMS (قابل للتعديل)
+                                        github_msg = LANG['en']['log_github'].format(obs_user)
+                                        custom_gh = db.custom_texts.find_one({'lang': 'en', 'key': 'log_github'})
+                                        if custom_gh and custom_gh.get('value'):
+                                            try:
+                                                github_msg = custom_gh['value'].format(obs_user)
+                                            except: pass
+                                        bot.send_message(log_ch, github_msg, parse_mode="HTML")
+                                    except: pass
+                                
+                                # 🎁 منح مكافأة الإحالة لو هذا المستخدم جاي من إحالة
+                                try:
+                                    award_purchase_referral_reward(uid, "GitHub Student Pack", price)
+                                except Exception as ref_err:
+                                    logger.error(f"Error awarding referral on GitHub: {ref_err}")
+
+                                return 
+                                
+                            elif status in ["failed", "error"]:
+                                err_reason = s_data.get("error", s_data.get("refund_reason", "بيانات تسجيل الدخول أو الـ 2FA غير صحيحة"))
+                                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+                                bot.edit_message_text(get_text(uid, 'gh_fail', err_reason, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                return
+                                
+                            else:
+                                step = s_data.get("step", "processing")
+                                dots = "." * (i % 3 + 1)
+                                step_ar = step if lang == 'en' else step.replace("login", "تسجيل الدخول").replace("2fa", "التحقق الثنائي").replace("identity", "الهوية").replace("submit", "تقديم الطلب")
+                                progress_text = get_text(uid, 'gh_processing', job_id, step_ar, dots, i)
+                                try: bot.edit_message_text(progress_text, chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                except: pass
+                                
+                    except requests.exceptions.Timeout:
+                        continue
+                        
+                bot.edit_message_text(get_text(uid, 'gh_timeout'), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+
+            else:
+                try: error_msg = res.json().get("error", "Unknown Error")
+                except: error_msg = f"HTTP {res.status_code}"
+                
+                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+                bot.edit_message_text(get_text(uid, 'gh_fail', error_msg, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                logger.error(f"GitHub API Fast Error: {res.status_code} - {res.text}")
+                
+        except Exception as e:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+            try: bot.edit_message_text(get_text(uid, 'gh_conn_err', e), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+            except: pass
+            logger.error(f"GitHub Connection Error: {e}")
+        finally:
+            # 🛡 تحرير قفل الشراء (سواء نجح أو فشل)
+            _release_purchase_lock(uid)
+            # 🛡 مسح بيانات GitHub الحساسة من الذاكرة بعد الانتهاء
+            try:
+                nonlocal_vars = {'g_user': g_user, 'g_pass': g_pass, 'g_totp': g_totp}
+                secure_wipe(nonlocal_vars)
+            except Exception:
+                pass
+
+    threading.Thread(target=api_worker, daemon=True).start()
 
 # ============================================================
 # 👤 11. الملف الشخصي وتاريخ العمليات 
@@ -7407,7 +7015,7 @@ def profile_ui(call):
     u = get_user_data_full(uid); l = u.get('lang', 'ar') if u else 'ar'
     buy_count = db.orders.count_documents({'user_id': uid})
     d_res = list(db.used_transactions.find({'user_id': uid}))
-    dep_total = sum([finite_float(d.get('amount', 0)) for d in d_res])
+    dep_total = sum([float(d.get('amount', 0)) for d in d_res])
 
     prof_emoji_id = get_setting('emoji_profile', '')
     profile_text = get_text(uid, 'profile_txt', uid, clean_name(u.get('name','User')), u.get('balance', 0.0), buy_count, dep_total)
@@ -7698,7 +7306,7 @@ def invite_ui(call):
     
     # 🆕 تحديث رجعي - لو فيه إحالات نشطة لم يستلم مكافأتها، يضيف الآن
     try:
-        pass  # Referral changes are already queued by mark_referral_status.
+        update_referrer_balance(uid)
         u = get_user_data_full(uid)
     except Exception as e:
         logger.error(f"Error updating referrer balance in invite_ui: {e}")
@@ -7707,10 +7315,10 @@ def invite_ui(call):
     pending_count, active_count, left_count, total_clicks = get_ref_counts(uid)
     
     # 🆕 الأرباح من الإحالات (milestones - كل 10 إحالات)
-    earnings_from_referrals = round(finite_float(u.get('ref_v2_earned', 0.0)), 2)
+    earnings_from_referrals = round(float(u.get('ref_v2_earned', 0.0)), 2)
     
     # 🆕 الأرباح من مشتريات المُحالين
-    earnings_from_purchases = round(finite_float(u.get('ref_v2_purchase_earned', 0.0)), 2)
+    earnings_from_purchases = round(float(u.get('ref_v2_purchase_earned', 0.0)), 2)
     
     # 🆕 الإجمالي
     total_earnings = round(earnings_from_referrals + earnings_from_purchases, 2)
@@ -7976,14 +7584,14 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
         st = stock_map.get(pid, 0)
         in_stock = is_manual or is_cgpt or st > 0
         items.append(('reg', pid, nm, p.get('custom_emoji_id'),
-                      finite_float(p.get('price', 0)), st, in_stock, is_manual, is_cgpt))
+                      float(p.get('price', 0)), st, in_stock, is_manual, is_cgpt))
     for ep in db.ext_products.find():
         if ep.get('hidden') and not is_admin:
             continue
         st = ep.get('stock', 0)
         items.append(('ext', str(ep['_id']), str(ep.get('name', '')),
                       ep.get('emoji_id'),
-                      finite_float(ep.get('sell_price', ep.get('base_price', 0))),
+                      float(ep.get('sell_price', ep.get('base_price', 0))),
                       st, st > 0, False, False))
 
     # ترتيب: منتج ChatGPT أولاً، ثم المتوفر (أبجدياً)، ثم غير المتوفر
@@ -8109,6 +7717,23 @@ def shop_list_ui(call):
         # ═══ عرض الكتالوجات أولاً (مرتبة أبجدياً) ثم المنتجات العادية ═══
         markup = InlineKeyboardMarkup(row_width=2)
 
+        # 🤖 منتج ChatGPT Business في البداية المطلقة (قبل المجلدات)
+        try:
+            _cgpt_top = None
+            for _cp in db.cgpt_products.find():
+                _cgid = str(_cp['_id'])
+                _seats = _cgpt_get_seats_cached()
+                _seats = _seats if _seats is not None else 0
+                _cgnm = clean_name(_cp.get('name', 'ChatGPT Business'))
+                _bt = f"{_cgnm} | 📦 {_seats}"
+                _bstyle = "success" if _seats > 0 else "danger"
+                _bkw = {'text': _bt, 'callback_data': f"vi_p_cgpt_main_{_cgid}", 'style': _bstyle}
+                if _cp.get('custom_emoji_id'):
+                    _bkw['icon_custom_emoji_id'] = _cp['custom_emoji_id']
+                markup.add(CustomInlineButton(**_bkw))
+        except Exception as _cge:
+            logger.debug(f"cgpt top btn err: {_cge}")
+
         # ترتيب الكتالوجات أبجدياً
         name_key = 'name_en' if l == 'en' else 'name_ar'
         catalogs.sort(key=lambda c: (c.get(name_key) or c.get('name_ar', '')).lower())
@@ -8169,9 +7794,12 @@ def shop_list_ui(call):
             except Exception:
                 pass
             # لو أي معرّف للمنتج موجود في أي مجلد → نتخطّاه (لا نعرضه خارج المجلد)
-            if pid_candidates & all_catalog_pids or str(p.get('catalog_id') or '') in {str(c['_id']) for c in catalogs}:
+            if pid_candidates & all_catalog_pids:
                 continue
             if p.get('is_hidden', False) and not is_admin:
+                continue
+            # منتج ChatGPT معروض في الأعلى بالفعل — نتخطّاه هنا لتفadي التكرار
+            if p.get('product_type') == 'cgpt_main':
                 continue
             prods_no_cat.append(p)
         
@@ -8243,7 +7871,7 @@ def shop_list_ui(call):
                 if ep.get('hidden') and not is_admin:
                     continue
                 epid = str(ep['_id'])
-                price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
                 enm = str(ep.get('name', ''))
                 short_n = enm[:30] + ".." if len(enm) > 30 else enm
                 hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
@@ -8352,7 +7980,7 @@ def shop_list_ui(call):
                 if ep.get('hidden') and not is_admin:
                     continue
                 epid = str(ep['_id'])
-                price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
                 enm = str(ep.get('name', ''))
                 short_n = enm[:30] + ".." if len(enm) > 30 else enm
                 hidden_icon = " 👻(مخفي)" if ep.get('hidden') else ""
@@ -8473,7 +8101,7 @@ def shop_detail_ui(call):
                         )
                     except:
                         pass
-            dur_price = finite_float(dur.get('price', 0))
+            dur_price = float(dur.get('price', 0))
             _mins = int(dur.get('minutes', 0))
             if not dur_label or not dur_label.strip():
                 if _mins >= 43200:
@@ -8523,12 +8151,12 @@ def shop_detail_ui(call):
         if l == 'ar':
             discount_text = "\n\n🏷 <b>خصومات الكمية:</b>\n"
             for t in sorted_tiers:
-                t_price = finite_float(t.get('price', 0))
+                t_price = float(t.get('price', 0))
                 discount_text += f"  • {t.get('min_qty')}+ قطعة = <b>${t_price:.2f}</b>/قطعة\n"
         else:
             discount_text = "\n\n🏷 <b>Quantity Discounts:</b>\n"
             for t in sorted_tiers:
-                t_price = finite_float(t.get('price', 0))
+                t_price = float(t.get('price', 0))
                 discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
 
     if l == 'en':
@@ -8572,7 +8200,7 @@ def prompt_quantity(call):
         bot.send_message(uid, get_text(uid, 'out_stock'), parse_mode="HTML")
         return
     
-    unit_price = finite_float(p.get('price', 0))
+    unit_price = float(p.get('price', 0))
     is_cgpt_flag = pid.startswith('cgpt_')
     p_name = clean_name(get_translated_product_name(p, l, is_cgpt=is_cgpt_flag))
     custom_emoji_id = p.get('custom_emoji_id')
@@ -8590,7 +8218,7 @@ def prompt_quantity(call):
         if discount_tiers:
             qty_msg += "\n🏷 <b>خصومات الكمية:</b>\n"
             for t in discount_tiers:
-                t_price = finite_float(t.get('price', unit_price))
+                t_price = float(t.get('price', unit_price))
                 qty_msg += f"  • {t['min_qty']}+ قطعة → <b>${t_price:.2f}</b>/قطعة\n"
         qty_msg += (
             f"\n━━━━━━━━━━━━━━\n"
@@ -8605,7 +8233,7 @@ def prompt_quantity(call):
         if discount_tiers:
             qty_msg += "\n🏷 <b>Quantity Discounts:</b>\n"
             for t in discount_tiers:
-                t_price = finite_float(t.get('price', unit_price))
+                t_price = float(t.get('price', unit_price))
                 qty_msg += f"  • {t['min_qty']}+ units → <b>${t_price:.2f}</b>/unit\n"
         qty_msg += (
             f"\n━━━━━━━━━━━━━━\n"
@@ -8632,7 +8260,7 @@ def execute_bulk_buy(message, pid, lang):
         bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
         return
     
-    unit_price = finite_float(p.get('price', 0))
+    unit_price = float(p.get('price', 0))
     p_name = clean_name(p.get('name_ar') if lang == 'ar' else p.get('name_en', p.get('name_ar', '')))
     discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('discount', 0), reverse=True)
     
@@ -8640,7 +8268,7 @@ def execute_bulk_buy(message, pid, lang):
     discounted_unit = unit_price
     for tier in sorted(discount_tiers, key=lambda x: x.get('min_qty', 0), reverse=True):
         if qty >= tier.get('min_qty', 0):
-            discounted_unit = finite_float(tier.get('price', unit_price))
+            discounted_unit = float(tier.get('price', unit_price))
             break
     total_price = round(discounted_unit * qty, 2)
     has_discount = (discounted_unit < unit_price)
@@ -8708,7 +8336,48 @@ def execute_bulk_buy(message, pid, lang):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_buy_"))
 def confirm_buy_handler(call):
-    return _safe.confirm_buy_handler(call)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    lang = get_lang(uid)
+    
+    # 🛡 أول شيء: نحذف أزرار الرسالة فوراً عشان ما يضغط مرتين
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+    except: pass
+    
+    bot.answer_callback_query(call.id)
+    
+    parts = call.data.split('_')
+    try:
+        qty = int(parts[-1])
+        pid = '_'.join(parts[2:-1])
+    except:
+        return
+
+    if is_deposit_locked(uid):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(
+            "❌ إلغاء عملية الإيداع" if lang == 'ar' else "❌ Cancel Deposit",
+            callback_data="cancel_deposit"
+        ))
+        bot.send_message(uid, bil(uid,
+            "⚠️ <b>لديك عملية إيداع جارية!</b>\n\nيجب إكمال الإيداع أو إلغاؤه أولاً.",
+            "⚠️ <b>You have a pending deposit!</b>\n\nPlease complete or cancel it first."
+        ), parse_mode="HTML", reply_markup=markup)
+        return
+
+    # رسالة "جاري المعالجة" من CMS
+    try:
+        cms_proc = db.custom_texts.find_one({'lang': 'en', 'key': 'processing_msg'})
+        proc_text = cms_proc['value'] if cms_proc and cms_proc.get('value') else bil(uid, "⏳ <b>جاري معالجة طلبك...</b>", "⏳ <b>Processing your order...</b>")
+        bot.edit_message_text(proc_text, call.message.chat.id, call.message.message_id, parse_mode="HTML")
+    except: pass
+
+    _do_purchase(uid, pid, qty, lang)
 
 
 # قاموس مؤقت لبيانات شراء ChatGPT
@@ -8724,37 +8393,687 @@ def _close_msg_handler(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_renew_"))
 def cgpt_renew(call):
-    return _safe.renew_ui(call)
+    """تجديد اشتراك ChatGPT — يعرض المنتجات بالسعر الحالي."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    old_email = call.data.replace("cgpt_renew_", "")
+    l = get_lang(uid)
+    # نعرض منتجات ChatGPT المتاحة (بالسعر الحالي) للتجديد
+    products = list(db.cgpt_products.find())
+    if not products:
+        bot.send_message(uid, "⚠️ لا توجد باقات تجديد متاحة حالياً." if l != 'en'
+                         else "⚠️ No renewal packages available.")
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    for p in products:
+        pid = str(p.get('_id'))
+        name = p.get('name', 'باقة')
+        price = p.get('price', 0)
+        # نمرّر الإيميل القديم ليُستخدم في التجديد
+        markup.add(InlineKeyboardButton(
+            f"{name} — ${price}",
+            callback_data=f"cgpt_buy_{pid}_renew"))
+    markup.add(InlineKeyboardButton("🔙 إلغاء", callback_data="close_msg"))
+    # نحفظ الإيميل القديم مؤقتاً للتجديد
+    try:
+        db.cgpt_renew_pending.update_one({'_id': uid},
+            {'$set': {'old_email': old_email, 'ts': int(time.time())}}, upsert=True)
+    except Exception:
+        pass
+    bot.send_message(uid,
+        (f"🔄 <b>تجديد اشتراك ChatGPT</b>\n\n"
+         f"📧 الإيميل الحالي: <code>{html.escape(old_email)}</code>\n\n"
+         f"اختر باقة التجديد (بالسعر الحالي):\n"
+         f"<i>يمكنك استخدام نفس الإيميل أو تغييره عند الشراء.</i>") if l != 'en' else
+        (f"🔄 <b>Renew ChatGPT subscription</b>\n\n"
+         f"📧 Current email: <code>{html.escape(old_email)}</code>\n\n"
+         f"Choose a renewal package (current price):"),
+        parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_buy_"))
 def cgpt_buy_duration(call):
-    return _safe.cgpt_begin(call)
+    """الزبون يضغط على مدة محددة → نطلب الإيميل"""
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    l = get_lang(uid)
+
+    raw = call.data.replace("cgpt_buy_", "")
+    parts = raw.split("_", 1)
+    if len(parts) != 2:
+        return
+    cgpt_pid, dur_id = parts[0], parts[1]
+
+    try:
+        from bson import ObjectId as _ObjId2
+        parent = db.cgpt_products.find_one({'_id': _ObjId2(cgpt_pid)})
+    except:
+        parent = None
+
+    if not parent:
+        bot.send_message(uid, "❌ المنتج غير موجود." if l == 'ar' else "❌ Product not found.")
+        return
+
+    dur = next((d for d in parent.get('durations', []) if d.get('dur_id') == dur_id), None)
+    if not dur:
+        bot.send_message(uid, "❌ المدة غير موجودة." if l == 'ar' else "❌ Duration not found.")
+        return
+
+    price = float(dur.get('price', 0))
+    label = dur.get('label_en') if l == 'en' and dur.get('label_en') else dur.get('label', '')
+    if l == 'en' and not dur.get('label_en'):
+        translated_label = translate_duration_label(dur.get('label', ''), 'en')
+        if translated_label and translated_label != dur.get('label', ''):
+            label = translated_label
+            try:
+                db.cgpt_products.update_one(
+                    {'_id': _ObjId2(cgpt_pid), 'durations.dur_id': dur_id},
+                    {'$set': {'durations.$.label_en': translated_label}}
+                )
+            except:
+                pass
+    minutes = int(dur.get('minutes', 10080))
+    u = get_user_data_full(uid)
+    balance = round(float(u.get('balance', 0)), 2) if u else 0.0
+
+    if balance < price:
+        send_no_balance(uid)
+        return
+
+    # نحفظ بيانات الشراء
+    order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
+    _cgpt_pending[uid] = {
+        'cgpt_pid': cgpt_pid,
+        'dur_id': dur_id,
+        'label': label,
+        'price': price,
+        'minutes': minutes,
+        'order_id': order_id,
+        'p_name': parent.get('name', ''),
+    }
+
+    if l == 'ar':
+        msg_txt = (
+            f"✅ <b>المدة المختارة: {label} — ${price:.2f}</b>\n\n"
+            f"📧 <b>أرسل إيميل حساب ChatGPT الخاص بك:</b>"
+        )
+    else:
+        msg_txt = (
+            f"✅ <b>Selected: {label} — ${price:.2f}</b>\n\n"
+            f"📧 <b>Send your ChatGPT account email:</b>"
+        )
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ إلغاء" if l == 'ar' else "❌ Cancel", callback_data=f"cgpt_cancel_buy_{uid}"))
+    msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l)
 
 def _cancel_cgpt_purchase(uid, lang):
-    return _safe.cgpt_cancel(uid,lang)
+    try: bot.clear_step_handler_by_chat_id(uid)
+    except: pass
+    pending = _cgpt_pending.pop(uid, None)
+    if pending:
+        if 'total_price' in pending:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': pending['total_price']}})
+            txt = (
+                f"❌ <b>تم إلغاء عملية الشراء وإرجاع رصيدك:</b> <code>${pending['total_price']:.2f}</code>"
+                if lang == 'ar' else
+                f"❌ <b>Purchase cancelled. Refunded:</b> <code>${pending['total_price']:.2f}</code>"
+            )
+        else:
+            txt = "❌ تم إلغاء عملية الشراء." if lang == 'ar' else "❌ Purchase cancelled."
+        try: bot.send_message(uid, txt, parse_mode="HTML")
+        except: pass
+    else:
+        try: bot.send_message(uid, "❌ لا توجد عملية شراء جارية." if lang == 'ar' else "❌ No active purchase in progress.")
+        except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_cancel_buy_"))
 def cgpt_cancel_buy_callback(call):
-    return _safe.cgpt_cancel_callback(call)
+    try: bot.answer_callback_query(call.id)
+    except: pass
+    uid = int(call.data.replace("cgpt_cancel_buy_", ""))
+    lang = get_lang(uid)
+    _cancel_cgpt_purchase(uid, lang)
 
 def cgpt_confirm_email_step(message, buyer_uid, lang):
-    return _safe.cgpt_email_step(message,buyer_uid,lang)
+    """الخطوة 1: يرسل الإيميل → نطلب تأكيده"""
+    text_cmd = (message.text or "").strip().lower()
+    if text_cmd in ['الغاء', 'cancel', '/cancel']:
+        _cancel_cgpt_purchase(buyer_uid, lang)
+        return
+    import re as _re3
+    email = (message.text or "").strip().lower()
+    if not _re3.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        bot.send_message(buyer_uid,
+            "❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>" if lang == 'ar' else
+            "❌ <b>Invalid email, please send again.</b>",
+            parse_mode="HTML")
+        pending = _cgpt_pending.get(buyer_uid)
+        if pending:
+            msg = bot.send_message(buyer_uid,
+                "📧 <b>أرسل إيميل حساب ChatGPT:</b>" if lang == 'ar' else
+                "📧 <b>Send your ChatGPT email:</b>",
+                parse_mode="HTML")
+            bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
+        return
+
+    # نطلب التأكيد
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("✅ نعم، صحيح" if lang == 'ar' else "✅ Yes, correct",
+            callback_data=f"cgpt_email_ok_{buyer_uid}"),
+        InlineKeyboardButton("✏️ تغييره" if lang == 'ar' else "✏️ Change it",
+            callback_data=f"cgpt_email_change_{buyer_uid}")
+    )
+    _cgpt_pending[buyer_uid]['email'] = email
+    bot.send_message(buyer_uid,
+        f"📧 <b>الإيميل:</b> <code>{email}</code>\n\n"
+        f"{'هل هذا الإيميل صحيح؟' if lang == 'ar' else 'Is this email correct?'}",
+        parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_change_"))
 def cgpt_email_change(call):
-    return _safe.cgpt_change(call)
+    bot.answer_callback_query(call.id)
+    buyer_uid = int(call.data.replace("cgpt_email_change_", ""))
+    lang = get_lang(buyer_uid)
+    msg = bot.send_message(call.message.chat.id,
+        "📧 <b>أرسل الإيميل الصحيح:</b>" if lang == 'ar' else "📧 <b>Send the correct email:</b>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_ok_"))
 def cgpt_email_confirmed(call):
-    return _safe.cgpt_confirm(call)
+    """تأكيد الإيميل → تنفيذ الشراء"""
+    bot.answer_callback_query(call.id)
+    buyer_uid = int(call.data.replace("cgpt_email_ok_", ""))
+    lang = get_lang(buyer_uid)
+    pending = _cgpt_pending.pop(buyer_uid, None)
+    if not pending or 'email' not in pending:
+        bot.send_message(call.message.chat.id,
+            "❌ انتهت الجلسة." if lang == 'ar' else "❌ Session expired.")
+        return
+
+    email   = pending['email']
+    price   = pending['price']
+    minutes = pending['minutes']
+    label   = pending['label']
+    order_id = pending['order_id']
+    p_name  = pending['p_name']
+
+    # 🪑 فحص المقاعd قبل الخصم — لو نفدت، نمنع الشراء
+    _seats = _cgpt_get_seats_cached()
+    if _seats is not None and _seats <= 0:
+        bot.send_message(call.message.chat.id,
+            ("❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً." if lang == 'ar'
+             else "❌ Sorry, no seats available right now. Try later."),
+            parse_mode="HTML")
+        return
+
+    # خصم الرصيد أتوميك
+    updated = db.users.find_one_and_update(
+        {'user_id': buyer_uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}},
+        return_document=True
+    )
+    if not updated:
+        send_no_balance(buyer_uid)
+        return
+
+    bot.send_message(buyer_uid,
+        "⏳ <b>جاري إرسال الدعوة...</b>" if lang == 'ar' else "⏳ <b>Sending invite...</b>",
+        parse_mode="HTML")
+
+    # 🔀 توزيع تلقائي: نجد حساباً فيه مقعد فارغ (من كل الحسابات)
+    _avail_acc = _cgpt_find_available_account()
+    if _avail_acc:
+        mgr = _avail_acc['mgr']
+    else:
+        # لا حساب متاح → نرد المال
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(buyer_uid)
+        # نمسح الـ cache ليعيد الحساب
+        _CGPT_SEATS_CACHE['exp'] = 0
+        bot.send_message(buyer_uid,
+            ("❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك." if lang == 'ar'
+             else "❌ No seats available. Your balance was refunded."))
+        return
+    mgr._last_buyer_uid = buyer_uid
+    result = mgr.invite_user(email, minutes)
+    days = round(minutes / 1440, 1)
+
+    if result['ok']:
+        _CGPT_SEATS_CACHE['exp'] = 0  # نمسح cache المقاعd (نقص مقعd)
+        expires_iso = result['expires_at']
+        db.orders.insert_one({
+            'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
+            'code_delivered': f"chatgpt_seat:{email}",
+            'qty': 1, 'total_price': price, 'order_id': order_id,
+            'cgpt_email': email, 'cgpt_expires_at': expires_iso, 'cgpt_minutes': minutes
+        })
+        u_data = get_user_data_full(buyer_uid)
+        buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
+        if lang == 'ar':
+            success = (
+                f"✅ <b>تم إرسال الدعوة بنجاح!</b>\n\n"
+                f"📧 <b>الإيميل:</b> <code>{email}</code>\n"
+                f"⏱ <b>المدة:</b> {label}\n"
+                f"📅 <b>ينتهي في:</b> {expires_iso[:10]}\n\n"
+                f"<i>تفقد بريدك الإلكتروني وقبل الدعوة 🎉</i>\n\n"
+                f"🔎 لعرض اشتراكاتك والتجديد اكتب: /my_chatgpt"
+            )
+        else:
+            success = (
+                f"✅ <b>Invite sent!</b>\n\n"
+                f"📧 <b>Email:</b> <code>{email}</code>\n"
+                f"⏱ <b>Duration:</b> {label}\n"
+                f"📅 <b>Expires:</b> {expires_iso[:10]}\n\n"
+                f"<i>Check your inbox and accept the invite 🎉</i>\n\n"
+                f"🔎 To view your subscriptions & renew, type: /my_chatgpt"
+            )
+        bot.send_message(buyer_uid, success, parse_mode="HTML")
+        notify_admins(
+            f"🤖 <b>ChatGPT — شراء</b>\n"
+            f"👤 {buyer_m} (<code>{buyer_uid}</code>)\n"
+            f"📧 <code>{email}</code>\n"
+            f"⏱ {label}\n💰 ${price:.2f}\n🆔 <code>{order_id}</code>"
+        )
+        # 📢 لوق القناة لشراء ChatGPT Duration/Package
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                obs_user = obscure_text(u_data.get('username') or str(buyer_uid))
+                p_name_clean = clean_name(p_name)
+                product_display = f"ChatGPT Plus ({label})" if p_name_clean == "Plus" else f"{p_name_clean} ({label})"
+                product_name_log = f"🤖 <b>{product_display}</b>"
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, 1)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, 1)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Log channel error for cgpt package: {log_err}")
+    else:
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
+        bot.send_message(buyer_uid,
+            f"❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{result.get('error','')}</code>"
+            if lang == 'ar' else
+            f"❌ <b>Invite failed. Balance refunded.</b>\n<code>{result.get('error','')}</code>",
+            parse_mode="HTML")
 
 def _cgpt_handle_email(message, buyer_uid, lang):
-    return _safe.cgpt_email_step(message,buyer_uid,lang)
+    text_cmd = (message.text or "").strip().lower()
+    if text_cmd in ['الغاء', 'cancel', '/cancel']:
+        _cancel_cgpt_purchase(buyer_uid, lang)
+        return
+    pending = _cgpt_pending.pop(buyer_uid, None)
+    if not pending:
+        bot.send_message(buyer_uid, "\u274c \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u0629 \u0627\u0644\u0637\u0644\u0628. \u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645.", parse_mode="HTML")
+        return
+    import re as _re_email
+    email = (message.text or "").strip().lower()
+    if not _re_email.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
+        bot.send_message(buyer_uid,
+            f"\u274c <b>\u0625\u064a\u0645\u064a\u0644 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d. \u062a\u0645 \u0625\u0631\u062c\u0627\u0639 \u0631\u0635\u064a\u062f\u0643.</b>\n"
+            f"\u0627\u0644\u0631\u0635\u064a\u062f \u0627\u0644\u0645\u064f\u0631\u062c\u0639: <b>${pending['total_price']:.2f}</b>",
+            parse_mode="HTML")
+        return
+    bot.send_message(buyer_uid, "\u23f3 <b>\u062c\u0627\u0631\u064a \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629...</b>", parse_mode="HTML")
+    mgr = get_cgpt_manager()
+    mgr._last_buyer_uid = buyer_uid
+    result = mgr.invite_user(email, pending['minutes'])
+    days = round(pending['minutes'] / 1440, 1)
+    if result['ok']:
+        expires_iso = result['expires_at']
+        db.orders.insert_one({
+            'user_id': buyer_uid, 'product_id': pending['pid'],
+            'code_delivered': f"chatgpt_seat:{email}",
+            'qty': 1, 'total_price': pending['total_price'],
+            'order_id': pending['order_id'],
+            'cgpt_email': email, 'cgpt_expires_at': expires_iso,
+            'cgpt_minutes': pending['minutes']
+        })
+        u_data = get_user_data_full(buyer_uid)
+        buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
+        if lang == 'ar':
+            success = (f"\u2705 <b>\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629 \u0628\u0646\u062c\u0627\u062d!</b>\n\n"
+                f"\U0001f4e7 <b>\u0627\u0644\u0625\u064a\u0645\u064a\u0644:</b> <code>{email}</code>\n"
+                f"\u23f1 <b>\u0645\u062f\u0629 \u0627\u0644\u0648\u0635\u0648\u0644:</b> {days} \u064a\u0648\u0645\n"
+                f"\U0001f4c5 <b>\u064a\u0646\u062a\u0647\u064a \u0641\u064a:</b> {expires_iso[:10]}\n\n"
+                f"<i>\u062a\u0641\u0642\u062f \u0628\u0631\u064a\u062f\u0643 \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0648\u0642\u0628\u0644 \u0627\u0644\u062f\u0639\u0648\u0629 \U0001f389</i>")
+        else:
+            success = (f"\u2705 <b>Invite sent successfully!</b>\n\n"
+                f"\U0001f4e7 <b>Email:</b> <code>{email}</code>\n"
+                f"\u23f1 <b>Duration:</b> {days} days\n"
+                f"\U0001f4c5 <b>Expires:</b> {expires_iso[:10]}\n\n"
+                f"<i>Check your inbox and accept the invite \U0001f389</i>")
+        bot.send_message(buyer_uid, success, parse_mode="HTML")
+        notify_admins(
+            f"\U0001f916 <b>ChatGPT Seat \u2014 \u0634\u0631\u0627\u0621</b>\n"
+            f"\U0001f464 {buyer_m} (<code>{buyer_uid}</code>)\n"
+            f"\U0001f4e7 <code>{email}</code>\n"
+            f"\u23f1 {days} \u064a\u0648\u0645\n"
+            f"\U0001f4b0 ${pending['total_price']:.2f}\n"
+            f"\U0001f194 <code>{pending['order_id']}</code>"
+        )
+        # 📢 لوق القناة لشراء ChatGPT Seat
+        try:
+            log_ch = get_setting('log_channel')
+            if log_ch and log_ch != "Not Set":
+                obs_user = obscure_text(u_data.get('username') or str(buyer_uid))
+                p_name_clean = clean_name(pending.get('p_name_en', pending.get('p_name_ar', 'ChatGPT Seat')))
+                product_display = f"{p_name_clean} ({days} Days)"
+                product_name_log = f"🤖 <b>{product_display}</b>"
+                qty = pending.get('qty', 1)
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except Exception as log_err:
+            logger.debug(f"Log channel error for cgpt seat: {log_err}")
+    else:
+        db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
+        bot.send_message(buyer_uid,
+            f"\u274c <b>\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629. \u062a\u0645 \u0625\u0631\u062c\u0627\u0639 \u0631\u0635\u064a\u062f\u0643.</b>\n"
+            f"\u0627\u0644\u0633\u0628\u0628: <code>{result.get('error', 'unknown')}</code>",
+            parse_mode="HTML")
+        notify_admins(f"\U0001f6a8 ChatGPT Seat \u2014 \u0641\u0634\u0644 \u062f\u0639\u0648\u0629\n<code>{buyer_uid}</code> / <code>{email}</code>\n{result.get('error', '')}")
 
 
 def _do_purchase(uid, pid, qty, lang):
-    return _safe._do_purchase(uid,pid,qty,lang)
+    """المنطق الفعلي للشراء"""
+    # Resolve pid to actual product id field if it exists
+    try:
+        p_res = find_product(pid)
+        if p_res and p_res.get('id'):
+            pid = str(p_res.get('id'))
+    except: pass
+
+    # 🛡 Rate Limiting
+    if not _acquire_purchase_lock(uid):
+        bot.send_message(uid, bil(uid,
+            "⏳ <b>يوجد طلب شراء قيد المعالجة!</b>\nانتظر انتهاءه.",
+            "⏳ <b>Purchase in progress!</b>\nWait until it finishes."
+        ), parse_mode="HTML")
+        return
+
+    # 🔒 منع الشراء أثناء عملية إيداع جارية
+    if is_deposit_locked(uid):
+        _release_purchase_lock(uid)
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(
+            "❌ إلغاء عملية الإيداع" if lang == 'ar' else "❌ Cancel Deposit",
+            callback_data="cancel_deposit"
+        ))
+        bot.send_message(uid, bil(uid,
+            "⚠️ <b>لديك عملية إيداع جارية!</b>\n\nيجب إكمال الإيداع أو إلغاؤه أولاً.",
+            "⚠️ <b>You have a pending deposit!</b>\n\nPlease complete or cancel it first."
+        ), parse_mode="HTML", reply_markup=markup)
+        return
+
+    try:
+        u = get_user_data_full(uid)
+        p = find_product(pid)
+        if not p:
+            bot.send_message(uid, bil(uid, "❌ المنتج غير موجود.", "❌ Product not found."), parse_mode="HTML")
+            return
+
+        product_type = p.get('product_type', 'standard')
+        is_manual = p.get('is_manual', False)
+        unit_price = float(p.get('price', 0))
+
+        # 🏷 نظام الخصومات - سعر ثابت بالدولار
+        discounted_unit = unit_price
+        discount_tiers = sorted(p.get('discount_tiers', []), key=lambda x: x.get('min_qty', 0), reverse=True)
+        for tier in discount_tiers:
+            if qty >= tier.get('min_qty', 0):
+                discounted_unit = float(tier.get('price', unit_price))
+                break
+        total_price = round(discounted_unit * qty, 2)
+
+        # 🛡 حجز الأكواد atomically
+        reserved_items = []
+        reservation_id = f"{uid}_{int(time.time() * 1000)}"
+
+        if not is_manual:
+            pid_str = str(pid)
+            queries = [{'product_id': pid_str}]
+            if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
+            try: queries.append({'product_id': float(pid_str)})
+            except: pass
+
+            for _ in range(qty):
+                reserved = db.product_stock.find_one_and_update(
+                    {'$or': queries, 'is_sold': False},
+                    {'$set': {
+                        'is_sold': True,
+                        'reservation_id': reservation_id,
+                        'reserved_at': int(time.time())
+                    }},
+                    return_document=True
+                )
+                if reserved is None:
+                    _release_reservation(reservation_id)
+                    bot.send_message(uid, get_text(uid, 'qty_not_enough', len(reserved_items)), parse_mode="HTML")
+                    return
+                reserved_items.append(reserved)
+
+        # 🛡 خصم الرصيد atomically
+        updated_user = db.users.find_one_and_update(
+            {'user_id': uid, 'balance': {'$gte': total_price}},
+            {'$inc': {'balance': -total_price}},
+            return_document=True
+        )
+
+        if updated_user is None:
+            _release_reservation(reservation_id)
+            send_no_balance(uid)
+            return
+
+        u = updated_user
+        support_user = f"@{OWNER_USER}" if OWNER_USER else "الإدارة"
+        buyer_m = f"@{u['username']}" if u and u.get('username') else f"عضو جديد"
+        log_ch = get_setting('log_channel')
+
+        if product_type == 'chatgpt_seat':
+            # ── ChatGPT Business Seat ──
+            # نطلب الإيميل أولاً ثم ندعوه
+            cgpt_minutes = int(p.get('cgpt_minutes', 10080))
+            _release_purchase_lock(uid)  # نفك الـ lock ريثما يكتب الإيميل
+            order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
+            # نحفظ بيانات الشراء مؤقتاً
+            _cgpt_pending[uid] = {
+                'pid': str(pid), 'qty': qty, 'total_price': total_price,
+                'order_id': order_id, 'minutes': cgpt_minutes,
+                'p_name_ar': clean_name(p.get('name_ar', '')),
+                'p_name_en': clean_name(p.get('name_en', p.get('name_ar', '')))
+            }
+            if lang == 'ar':
+                msg_txt = (
+                    f"✅ <b>تم خصم ${total_price:.2f} من رصيدك!</b>\n\n"
+                    f"📧 <b>أرسل إيميل حساب ChatGPT الخاص بك:</b>\n"
+                    f"<i>(يجب أن يكون مسجلاً على chatgpt.com)</i>"
+                )
+            else:
+                msg_txt = (
+                    f"✅ <b>${total_price:.2f} deducted!</b>\n\n"
+                    f"📧 <b>Send your ChatGPT account email:</b>\n"
+                    f"<i>(Must be registered on chatgpt.com)</i>"
+                )
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("❌ إلغاء" if lang == 'ar' else "❌ Cancel", callback_data=f"cgpt_cancel_buy_{uid}"))
+            msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
+            bot.register_next_step_handler(msg, _cgpt_handle_email, uid, lang)
+            return  # نرجع — الباقي سيتم في _cgpt_handle_email
+
+        elif is_manual:
+            order_id = "M" + str(int(time.time()))[-6:] + str(uid)[-2:]
+            try:
+                db.orders.insert_one({
+                    'user_id': uid,
+                    'product_id': str(pid),
+                    'code_delivered': f"طلب يدوي: {order_id}",
+                    'qty': qty,
+                    'total_price': total_price
+                })
+            except Exception as e:
+                logger.error(f"Failed to insert manual order: {e}")
+                db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                bot.send_message(uid, bil(uid, "❌ حدث خطأ في معالجة الطلب. تم إرجاع رصيدك.", "❌ Error processing request. Balance refunded."), parse_mode="HTML")
+                return
+
+            if lang == 'ar':
+                msg_txt = f"✅ <b>تم الطلب بنجاح! (${total_price:.2f})</b>\n\nهذا المنتج يتطلب تسليم يدوي.\nرقم طلبك: <code>{order_id}</code>\n\nتواصل مع {support_user}"
+            else:
+                msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nManual delivery product.\nOrder ID: <code>{order_id}</code>\n\nContact {support_user}"
+            bot.send_message(uid, msg_txt, parse_mode="HTML")
+            notify_admins(f"🔐 <b>إشعار إدارة (يدوي)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🔖 <code>{order_id}</code>")
+        else:
+            delivered_codes = []
+            try:
+                for item in reserved_items:
+                    db.product_stock.update_one(
+                        {'_id': item['_id']},
+                        {'$unset': {'reservation_id': "", 'reserved_at': ""}}
+                    )
+                    db.orders.insert_one({
+                        'user_id': uid,
+                        'product_id': str(pid),
+                        'code_delivered': item['code_line'],
+                        'qty': 1,
+                        'price': float(p.get('price', 0))
+                    })
+                    delivered_codes.append(item['code_line'])
+            except Exception as e:
+                logger.error(f"Critical: Failed during code delivery: {e}")
+                notify_admins(f"⚠️ <b>تنبيه!</b>\nفشل تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}")
+
+            # إرسال الأكواد كملف
+            _delivery_ok = False
+            try:
+                p_name = p.get(f'name_{lang}', p.get('name_en', p.get('name_ar', 'product')))
+                file_content = f"=== {clean_name(p_name)} ===\nQty: {qty} | Total: ${total_price:.2f}\nDate: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*40}\n\n"
+                for i, code in enumerate(delivered_codes, 1):
+                    file_content += f"{i}. {code}\n"
+
+                f = io.BytesIO(file_content.encode('utf-8'))
+                # اسم ملف فريد لكل عملية شراء (اسم المنتج + يوزر + تاريخ + رقم عشوائي)
+                # عشان تيليجرام ما يكاش نفس الملف ويعرضه للمشتري التاني
+                safe_pname = re.sub(r'[^\w\-]', '_', clean_name(p_name))[:25].strip('_') or 'product'
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                rand_sfx = _uuid_mod.uuid4().hex[:6]
+                f.name = f"{safe_pname}_{uid}_{ts}_{rand_sfx}.txt"
+
+                if lang == 'ar':
+                    success_msg = f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 {clean_name(p.get('name_ar'))}\n🔢 الكمية: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 الأكواد في الملف أدناه 👇"
+                else:
+                    success_msg = f"✅ <b>Purchase Successful!</b>\n\n📦 {clean_name(p.get('name_en', p.get('name_ar')))}\n🔢 Qty: <b>{qty}</b>\n💰 <b>${total_price:.2f}</b>\n\n📄 Codes in the file below 👇"
+
+                bot.send_document(uid, f, caption=success_msg, parse_mode="HTML")
+                _delivery_ok = True
+            except Exception as file_err:
+                logger.error(f"Failed to send file: {file_err}")
+                # محاولة احتياطية: إرسال الأكواد كنص
+                try:
+                    bot.send_message(uid, "✅ Done!\n\n" + "\n".join(delivered_codes))
+                    _delivery_ok = True
+                except Exception:
+                    _delivery_ok = False
+
+            # 🛡 لو فشل إيصال الأكواد نهائياً → نسترجع الرصيد ونعيد المخزون (وإلا العميل يخسر فلوسه بلا مقابل)
+            if not _delivery_ok and delivered_codes:
+                try:
+                    # 1) إرجاع الرصيد
+                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+                    # 2) إعادة الأكواد للمخزون (نلغي is_sold)
+                    for item in reserved_items:
+                        db.product_stock.update_one(
+                            {'_id': item['_id']},
+                            {'$set': {'is_sold': False}, '$unset': {'reservation_id': "", 'reserved_at': ""}}
+                        )
+                    # 3) حذف سجلات الطلب التي أُنشئت لهذه العملية
+                    try:
+                        db.orders.delete_many({'user_id': uid, 'product_id': str(pid),
+                                               'code_delivered': {'$in': delivered_codes}})
+                    except Exception: pass
+                    # 4) إبلاغ المستخدم والإدارة
+                    try:
+                        bot.send_message(uid, bil(uid,
+                            "⚠️ <b>تعذّر تسليم الأكواد وتم إرجاع رصيدك بالكامل.</b>\nحاول مرة ثانية.",
+                            "⚠️ <b>Could not deliver the codes — your balance was fully refunded.</b>\nPlease try again."),
+                            parse_mode="HTML")
+                    except Exception: pass
+                    notify_admins(f"🚨 <b>فشل تسليم أكواد + تم الاسترجاع تلقائياً</b>\n👤 <code>{uid}</code>\n📦 {clean_name(p.get('name_ar'))}\n💰 ${total_price:.2f} (رجّعناه)")
+                except Exception as refund_err:
+                    logger.error(f"Refund-on-delivery-fail error: {refund_err}")
+                    notify_admins(f"🚨🚨 <b>فشل تسليم وفشل الاسترجاع!</b> راجع يدوياً فوراً!\n👤 <code>{uid}</code>\n💰 ${total_price:.2f}\nالأكواد: {delivered_codes}")
+
+            notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}")
+
+        # لوق القناة
+        if log_ch and log_ch != "Not Set":
+            try:
+                obs_user = obscure_text(u.get('username') or str(uid))
+                product_name_clean = clean_name(p.get('name_en', p.get('name_ar', 'Product')))
+                custom_emoji_id = p.get('custom_emoji_id')
+                product_name_log = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> <b>{product_name_clean}</b>' if custom_emoji_id else f'📦 <b>{product_name_clean}</b>'
+                pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, qty)
+                custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+                if custom_pub and custom_pub.get('value'):
+                    try: pub_msg = custom_pub['value'].format(obs_user, product_name_log, qty)
+                    except: pass
+                bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+            except Exception as log_err:
+                logger.debug(f"Log channel error: {log_err}")
+
+        # مكافأة الإحالة
+        try:
+            award_purchase_referral_reward(uid, clean_name(p.get('name_ar') or p.get('name_en') or ''), total_price)
+        except Exception as ref_err:
+            logger.error(f"Error awarding referral: {ref_err}")
+
+        # 🔔 تنبيه الستوك (يصل لكل الأدمن، مو OWNER_ID فقط)
+        if not is_manual:
+            try:
+                remaining = get_product_stock_count(pid)
+                pname = clean_name(p.get('name_ar', ''))
+                if remaining == 0:
+                    notify_admins(
+                        f"🚨 <b>تنبيه: ستوك انتهى!</b>\n\n"
+                        f"📦 المنتج: <b>{pname}</b>\n"
+                        f"📊 المتبقي: <b>0</b>\n\n"
+                        f"⚠️ أضف ستوك جديد الآن!"
+                    )
+                elif remaining <= 2:
+                    notify_admins(
+                        f"⚠️ <b>تنبيه: ستوك قارب على الانتهاء!</b>\n\n"
+                        f"📦 المنتج: <b>{pname}</b>\n"
+                        f"📊 المتبقي: <b>{remaining}</b>\n\n"
+                        f"⚠️ أضف ستوك جديد!"
+                    )
+            except Exception as _stk_e:
+                logger.debug(f"Stock alert error: {_stk_e}")
+
+        # 🔄 بث حدث للمزامنة (بيع عبر البوت — يدوي أو تلقائي)
+        try:
+            _emit_event('stock.sold', {
+                'product_id': str(pid),
+                'qty_sold': qty,
+                'remaining_stock': 'unlimited' if is_manual else get_product_stock_count(pid),
+                'is_manual': bool(is_manual),
+                'via_api': False,
+                'buyer_user_id': uid
+            }, product_id=pid)
+        except: pass
+
+    finally:
+        _release_purchase_lock(uid)
 
 
 def _release_reservation(reservation_id):
@@ -8816,7 +9135,7 @@ def _cleanup_stale_purchase_locks():
         except Exception as e:
             logger.error(f"Error in cleanup_stale_purchase_locks: {e}")
 
-# Worker starts after runtime initialization.
+threading.Thread(target=_cleanup_stale_purchase_locks, daemon=True).start()
 
 # ============================================================
 # 🏦 13. بوابات الدفع (تحديث لقبول الهاش القصير)
@@ -8933,14 +9252,14 @@ def dep_init_ui(call):
     if check_forced_sub(uid) is False: start_handler(call.message); return
     
     u = get_user_data_full(uid)
-    balance = finite_float(u.get('balance', 0)) if u else 0
+    balance = float(u.get('balance', 0)) if u else 0
     name = clean_name(u.get('name', '')) if u else ''
     uname = f"@{u['username']}" if u and u.get('username') else ''
     l = get_lang(uid)
     
     # إجمالي الإيداعات
     deps = list(db.used_transactions.find({'user_id': uid}))
-    total_dep = sum(finite_float(d.get('amount', 0)) for d in deps)
+    total_dep = sum(float(d.get('amount', 0)) for d in deps)
     
     if l == 'ar':
         wallet_text = (
@@ -9010,15 +9329,98 @@ def dep_stars_ui(call):
 
 @safe_next_step
 def process_stars_amount(message, lang):
-    return _safe.stars_invoice(message,lang)
+    uid = message.from_user.id
+    if not message.text:
+        return
+    
+    text = message.text.strip()
+    
+    # 🛡 رفض الأوامر
+    if text.startswith('/'):
+        return
+    
+    # رفض الإلغاء
+    if text.lower() in ['الغاء', 'cancel', 'إلغاء']:
+        bot.send_message(uid, bil(uid, "❌ تم الإلغاء.", "❌ Cancelled."))
+        return
+    
+    try:
+        usd_amount = float(text.replace(',', '.').replace('$', ''))
+    except ValueError:
+        err = "❌ الرجاء إرسال أرقام فقط (مثال: 5 أو 10.5)." if lang == 'ar' else "❌ Please send numbers only (e.g., 5 or 10.5)."
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    # 🛡 validation
+    if usd_amount < 0.1:
+        err = "❌ الحد الأدنى للشحن هو $0.10" if lang == 'ar' else "❌ Minimum deposit is $0.10"
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    if usd_amount > 1000:
+        err = "❌ الحد الأقصى للشحن هو $1000" if lang == 'ar' else "❌ Maximum deposit is $1000"
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+        
+    stars_amount = int(usd_amount * STARS_RATE)
+    
+    # 🛡 stars_amount يجب يكون >= 1 (Telegram يرفض 0)
+    if stars_amount < 1:
+        err = "❌ المبلغ صغير جداً. زده قليلاً." if lang == 'ar' else "❌ Amount too small. Please increase."
+        bot.send_message(uid, err, parse_mode="HTML")
+        return
+    
+    title = "شحن رصيد المتجر" if lang == 'ar' else "Shop Balance Deposit"
+    desc = f"شحن حساب بمبلغ ${usd_amount:.2f}" if lang == 'ar' else f"Deposit ${usd_amount:.2f} to your account"
+    prices = [LabeledPrice(label=f"Deposit ${usd_amount:.2f}", amount=stars_amount)]
+    
+    try:
+        bot.send_invoice(
+            chat_id=uid,
+            title=title,
+            description=desc,
+            invoice_payload=f"dep_{uid}_{usd_amount}",
+            provider_token="",
+            currency="XTR",
+            prices=prices
+        )
+    except Exception as e:
+        err_str = str(e).lower()
+        if 'currency_total_amount_invalid' in err_str:
+            msg = (
+                "❌ <b>المبلغ غير صحيح!</b>\n\n"
+                "💡 جرّب مبلغ أكبر أو تحقق من معدل التحويل."
+            ) if lang == 'ar' else (
+                "❌ <b>Invalid amount!</b>\n\n"
+                "💡 Try a larger amount or check the conversion rate."
+            )
+        else:
+            msg = (
+                "❌ <b>حدث خطأ في إنشاء فاتورة الدفع.</b>\n\n"
+                "💡 حاول مرة ثانية بعد قليل."
+            ) if lang == 'ar' else (
+                "❌ <b>Error creating invoice.</b>\n\n"
+                "💡 Please try again later."
+            )
+        bot.send_message(uid, msg, parse_mode="HTML")
+        logger.error(f"send_invoice error for user {uid}: {e}")
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def checkout(pre_checkout_query):
-    return _safe.stars_checkout(pre_checkout_query)
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @bot.message_handler(content_types=['successful_payment'])
 def got_payment(message):
-    return _safe.stars_paid(message)
+    uid = message.from_user.id
+    pay_info = message.successful_payment
+    payload = pay_info.invoice_payload
+
+    if payload.startswith("dep_"):
+        parts = payload.split('_')
+        usd_amount = float(parts[2])
+        tx_id = pay_info.telegram_payment_charge_id
+        l = get_lang(uid)
+        credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
 
 # ============================================================
 # ⚠️ تنبيه المبلغ الدقيق — لكل طرق الدفع عدا نجوم تيليجرام
@@ -9153,7 +9555,7 @@ def ask_binance_deposit_amount(message):
     base_amount = 0.0
     if message.text and not message.text.startswith('/'):
         try:
-            base_amount = finite_float(message.text.strip().replace(',', '.').replace('$', ''))
+            base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
             valid_number = True
         except ValueError:
             pass
@@ -9278,7 +9680,7 @@ def binance_check_payment(call):
                         continue
                     
                     # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
-                    _raw_amount = finite_float(tx.get('amount') or tx.get('totalFee') or 0)
+                    _raw_amount = float(tx.get('amount') or tx.get('totalFee') or 0)
                     _tx_cur = _binance_tx_currency(tx) or 'USDT'
                     amount, _price_used = binance_amount_to_usd(_raw_amount, _tx_cur)
                     if amount is None or amount <= 0:
@@ -9353,11 +9755,115 @@ def binance_check_payment(call):
 # ============================================================
 
 def generate_unique_amount_for_user(base_amount_usd, uid, coin):
-    return _safe.generate_unique_amount_for_user(base_amount_usd,uid,coin)
+    """
+    🛡 يولّد مبلغ فريد عشوائي لكل عملية إيداع.
+
+    ⚠️ مهم: Bybit أحياناً لا تقرأ كل الخانات العشرية عند الإدخال.
+    لذا لعملات Bybit نولّد خانتين فقط (مثل 5.37) — قصيرة، سهلة النسخ،
+    وتُقرأ بموثوقية على كل واجهات Bybit. المسافة بينها 0.01 تكفي للتمييز.
+
+    أمثلة:
+    - Bybit:  $5 → $5.37 / $5.42 / $5.08 (خانتان)
+    - غيرها:  $5 → $5.001847 (6 خانات، دقة أعلى للشبكات الأخرى)
+    """
+    base = float(base_amount_usd)
+    is_bybit = str(coin).startswith('BYBIT')
+
+    # عدد الخانات ومسافة الأمان حسب العملة
+    if is_bybit:
+        decimals = 2
+        MIN_SPACING = 0.02     # أكبر من خطوة الخانتين (0.01)
+        # الكسور بوحدات 0.01: من 0.05 إلى 0.99 (نبدأ من 5 لتجنّب الأصفار المربكة)
+        lo, hi, div = 5, 99, 100.0
+        lo2, hi2 = 5, 99            # نفس المدى (خانتان محدودتان أصلاً)
+    else:
+        decimals = 6
+        MIN_SPACING = 0.0002
+        lo, hi, div = 100, 9999, 1000000.0
+        lo2, hi2 = 100, 29999
+
+    def _is_free(amount):
+        """يتأكد ما فيه إيداع معلّق قريب من هذا المبلغ (داخل مسافة الأمان).
+
+        🛡 مهم: نفحص عبر كل العملات التي قد تصل لنفس المحفظة (Bybit).
+        وإلا: شخص على USDT_BEP20 وآخر على BYBIT_BEP20 قد يأخذان نفس
+        المبلغ الفريد، فيصل التحويل ويُطابق مع الشخص الخطأ."""
+        try:
+            # كل العملات التي تصل فعلياً لنفس محفظة الوجهة
+            if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
+                check_coins = list(set(
+                    ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
+                ))
+            else:
+                check_coins = [coin]
+            clash = db.pending_deposits.find_one({
+                'coin': {'$in': check_coins},
+                'status': 'pending',
+                'expires_at': {'$gt': int(time.time())},
+                'unique_amount_usd': {
+                    '$gte': amount - MIN_SPACING,
+                    '$lte': amount + MIN_SPACING
+                }
+            })
+            return clash is None
+        except Exception:
+            return True
+
+    # المحاولة 1: المدى الأساسي
+    for _ in range(400):
+        unique_amount = round(base + random.randint(lo, hi) / div, decimals)
+        if _is_free(unique_amount):
+            return unique_amount
+
+    # المحاولة 2: مدى أوسع لو ازدحمت الإيداعات بنفس المبلغ
+    for _ in range(400):
+        unique_amount = round(base + random.randint(lo2, hi2) / div, decimals)
+        if _is_free(unique_amount):
+            return unique_amount
+
+    # احتياط أخير (نادر جداً)
+    return round(base + random.randint(lo, hi2) / div, decimals)
 
 
 def register_pending_deposit(uid, base_amount_usd, unique_amount_usd, coin, sender_uid=None):
-    return _safe.register_pending_deposit(uid,base_amount_usd,unique_amount_usd,coin,sender_uid)
+    """
+    يسجّل عملية إيداع متوقعة ويقفل المستخدم حتى يكتمل أو يُلغى.
+    sender_uid: (اختياري) رقم UID المرسِل في Bybit — للمطابقة المزدوجة (UID + المبلغ).
+    """
+    try:
+        db.pending_deposits.delete_many({'user_id': uid, 'coin': coin, 'status': 'pending'})
+        
+        pending_id = f"PD{uid}{int(time.time())}{random.randint(100, 999)}"
+        # صلاحية أطول (ساعتان) حتى لو تأخّر المستخدم أو تأخّرت التأكيدات،
+        # يبقى الإيداع قابلاً للمطابقة التلقائية. العدّاد المعروض للمستخدم يبقى 30 دقيقة.
+        expires = int(time.time()) + (60 * 120)
+        record = {
+            'pending_id': pending_id,
+            'user_id': uid,
+            'base_amount_usd': float(base_amount_usd),
+            'unique_amount_usd': float(unique_amount_usd),
+            'coin': coin,
+            'status': 'pending',
+            'created_at': int(time.time()),
+            'expires_at': expires
+        }
+        if sender_uid:
+            record['sender_uid'] = str(sender_uid).strip()
+        db.pending_deposits.insert_one(record)
+        
+        # 🔒 قفل المستخدم أثناء الإيداع
+        db.users.update_one(
+            {'user_id': uid},
+            {'$set': {
+                'deposit_locked': True,
+                'deposit_lock_pending_id': pending_id,
+                'deposit_lock_expires': expires
+            }}
+        )
+        return record
+    except Exception as e:
+        logger.error(f"Error registering pending deposit: {e}")
+        return None
 
 
 def unlock_deposit(uid):
@@ -9416,18 +9922,18 @@ _ambiguous_alert_cache = {}
 def _alert_ambiguous_deposit(coin, amount_usd, records):
     """🚨 يبلّغ الأدمن عن إيداع غامض (مرة كل ساعة لنفس المبلغ لتفادي التكرار)."""
     try:
-        key = f"{coin}:{round(finite_float(amount_usd), 5)}"
+        key = f"{coin}:{round(float(amount_usd), 5)}"
         now = int(time.time())
         if now - _ambiguous_alert_cache.get(key, 0) < 3600:
             return
         _ambiguous_alert_cache[key] = now
         ids = ", ".join(
-            f"{r.get('user_id')}=${finite_float(r.get('unique_amount_usd', 0)):.6f}" for r in records[:5]
+            f"{r.get('user_id')}=${float(r.get('unique_amount_usd', 0)):.6f}" for r in records[:5]
         )
         notify_admins(
             f"⚠️ <b>إيداع غامض — مراجعة يدوية مطلوبة!</b>\n\n"
             f"💳 العملة: <b>{coin}</b>\n"
-            f"💰 المبلغ المُستلَم: <b>${finite_float(amount_usd):.6f}</b>\n"
+            f"💰 المبلغ المُستلَم: <b>${float(amount_usd):.6f}</b>\n"
             f"🔀 يطابق أكثر من إيداع معلّق بنفس القرب:\n<code>{ids}</code>\n\n"
             f"🛡 <b>لم يُضَف الرصيد لأحد تلقائياً</b> حمايةً من إعطاء الشخص الخطأ.\n"
             f"راجع وأضف الرصيد يدوياً للشخص الصحيح من «👥 إدارة العملاء ← تعديل رصيده»."
@@ -9447,7 +9953,7 @@ def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.03, down_max=None
     - عند أي التباس: لا نعطي أحداً (أأمن من الخطأ).
     """
     try:
-        amount_usd = finite_float(amount_usd)
+        amount_usd = float(amount_usd)
         # 🛡 نفحص عبر كل العملات التي تصل لنفس المحفظة (Bybit)
         if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
             match_coins = ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
@@ -9463,7 +9969,7 @@ def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.03, down_max=None
 
         in_band = []
         for r in records:
-            req = finite_float(r.get('unique_amount_usd', 0))
+            req = float(r.get('unique_amount_usd', 0))
             if req <= 0:
                 continue
             # 🛡 نقص ضئيل جداً فقط (رسوم شبكة): 0.03$ كحد أقصى
@@ -9484,7 +9990,7 @@ def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.03, down_max=None
         for r in records:
             if r.get('pending_id') == winner.get('pending_id'):
                 continue
-            other = finite_float(r.get('unique_amount_usd', 0))
+            other = float(r.get('unique_amount_usd', 0))
             if abs(other - amount_usd) <= 0.15:
                 logger.warning(f"[SHORTFALL] إيداع آخر قريب (${other}) من ${amount_usd} — رُفض للأمان")
                 return None
@@ -9504,7 +10010,7 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
       (أأمن من إعطاء الشخص الخطأ).
     """
     try:
-        amount_usd = finite_float(amount_usd)
+        amount_usd = float(amount_usd)
         # 🛡 نفحص الغموض عبر كل العملات التي تصل لنفس المحفظة (Bybit)
         if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
             match_coins = ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
@@ -9527,12 +10033,12 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
 
         # 🛡 أكثر من إيداع داخل النطاق — نرتّب بالأقرب للمبلغ بالضبط (مو الأقدم)
         records.sort(key=lambda r: (
-            abs(finite_float(r.get('unique_amount_usd', 0)) - amount_usd),
+            abs(float(r.get('unique_amount_usd', 0)) - amount_usd),
             r.get('created_at', 0)
         ))
         closest, second = records[0], records[1]
-        d1 = abs(finite_float(closest.get('unique_amount_usd', 0)) - amount_usd)
-        d2 = abs(finite_float(second.get('unique_amount_usd', 0)) - amount_usd)
+        d1 = abs(float(closest.get('unique_amount_usd', 0)) - amount_usd)
+        d2 = abs(float(second.get('unique_amount_usd', 0)) - amount_usd)
 
         # لو الأقرب أوضح من الثاني بفارق كافٍ → هو الصحيح (آمن نعطيه)
         if (d2 - d1) >= 0.00005:
@@ -9551,15 +10057,235 @@ def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
 # ============================================================
 
 def auto_credit_from_pending(pending, tx_id_for_record, method_label, actual_usd=None):
-    return _safe.auto_credit_from_pending(pending, tx_id_for_record, method_label, actual_usd)
+    """
+    يضيف رصيد للمستخدم تلقائياً من pending deposit (بدون ما يرسل tx_id).
+
+    actual_usd: (اختياري) المبلغ الفعلي الذي وصل بالدولار.
+      لو المستخدم حوّل أقل من المطلوب، نضيف له الواصل فعلاً — لا المطلوب.
+      لو حوّل أكثر، نضيف الواصل أيضاً (يستفيد المستخدم).
+    """
+    try:
+        uid = pending['user_id']
+        requested_amount = float(pending.get('base_amount_usd', 0))
+        unique_amount = float(pending.get('unique_amount_usd', 0))
+        pending_id = pending.get('pending_id', '')
+
+        # 💵 المبلغ الذي سيُضاف = الواصل فعلاً إن توفّر، وإلا المطلوب
+        if actual_usd is not None and float(actual_usd) > 0:
+            base_amount = round(float(actual_usd), 2)
+        else:
+            base_amount = requested_amount
+        # هل الواصل يختلف عن المطلوب؟ (لإخبار المستخدم)
+        shortfall = (actual_usd is not None and round(float(actual_usd), 2) < requested_amount - 0.01)
+
+        # نعلم الـ pending كـ completed
+        result = db.pending_deposits.update_one(
+            {'pending_id': pending_id, 'status': 'pending'},
+            {'$set': {'status': 'completed', 'completed_at': int(time.time()),
+                      'tx_id_detected': tx_id_for_record,
+                      'credited_usd': base_amount}}
+        )
+        
+        if result.modified_count == 0:
+            return False
+        
+        # 🔓 فك قفل الإيداع
+        unlock_deposit(uid)
+        
+        # 🎉 رسالة تأكيد للمستخدم قبل ما نضيف الرصيد
+        try:
+            lang = get_lang(uid)
+            # نعرض الـ tx_id مختصراً
+            tx_short = tx_id_for_record[:20] + "..." if len(tx_id_for_record) > 20 else tx_id_for_record
+            # سطر تنبيه لو وصل أقل من المطلوب
+            note_ar = (f"\n⚠️ <i>وصل مبلغ أقل من المطلوب (${requested_amount:.2f})، "
+                       f"أُضيف لك الواصل فعلاً.</i>\n") if shortfall else ""
+            note_en = (f"\n⚠️ <i>Less than requested (${requested_amount:.2f}) arrived; "
+                       f"we credited the actual amount received.</i>\n") if shortfall else ""
+            if lang == 'ar':
+                msg = (
+                    f"✅ <b>تم استلام إيداعك تلقائياً!</b> 🎉\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 <b>المبلغ المُضاف:</b> <b>${base_amount:.2f}</b>\n"
+                    f"{note_ar}"
+                    f"💳 <b>الطريقة:</b> {method_label}\n"
+                    f"🆔 <b>رقم العملية:</b>\n<code>{tx_id_for_record}</code>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"💼 <i>تم إضافة الرصيد لحسابك.</i>"
+                )
+            else:
+                msg = (
+                    f"✅ <b>Deposit auto-detected!</b> 🎉\n\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"💰 <b>Amount credited:</b> <b>${base_amount:.2f}</b>\n"
+                    f"{note_en}"
+                    f"💳 <b>Method:</b> {method_label}\n"
+                    f"🆔 <b>Transaction ID:</b>\n<code>{tx_id_for_record}</code>\n"
+                    f"━━━━━━━━━━━━━━\n\n"
+                    f"💼 <i>Balance added to your account.</i>"
+                )
+            bot.send_message(uid, msg, parse_mode="HTML")
+        except Exception: pass
+        
+        # نضيف الرصيد
+        # trusted_txid=True: هذا المسار يأتي من فحص تلقائي بـ tx_id فريد
+        # (Bybit txID / hash بلوكشين) — نتخطّى فحص المبلغ+الوقت التقريبي
+        # الذي كان يرفض إيداعات صحيحة بنفس المبلغ في نفس الدقيقة ويحظر أصحابها.
+        credit_user(uid, base_amount, tx_id_for_record, get_lang(uid), method_label, trusted_txid=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error in auto_credit: {e}")
+        return False
 
 
 def check_ltc_blockchain_auto():
-    return _safe.check_ltc_blockchain_auto()
+    """
+    🔍 يفحص LTC blockchain ويلقى الحوالات اللي وصلت
+    ويربطها بـ pending_deposits تلقائياً.
+    """
+    try:
+        wallet_address = get_setting('ltc_address')
+        if not wallet_address or wallet_address == "Not Set":
+            return
+        
+        # نجيب الـ pending deposits لـ LTC
+        pending_count = db.pending_deposits.count_documents({
+            'coin': 'LTC',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return  # ما فيه pending - نوفر الـ API calls
+        
+        # نجيب آخر transactions من litecoinspace
+        url = f"https://litecoinspace.org/api/address/{wallet_address}/txs"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return
+            txs = res.json()
+        except Exception:
+            return
+        
+        # نجيب سعر LTC
+        ltc_price = get_ltc_price_usd()
+        if not ltc_price or ltc_price < 10:
+            return
+        
+        current_time_ms = int(time.time() * 1000)
+        cutoff_time_ms = current_time_ms - (45 * 60 * 1000)  # آخر 45 دقيقة
+        
+        for tx in txs[:30]:  # آخر 30 معاملة فقط
+            try:
+                tx_id = tx.get('txid', '')
+                if not tx_id:
+                    continue
+                
+                # شيك التاريخ - نتجاهل المعاملات القديمة
+                tx_time = (tx.get('status', {}).get('block_time', 0) or 0) * 1000
+                if tx_time and tx_time < cutoff_time_ms:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_id)
+                
+                # شيك إن المعاملة ما تم معالجتها
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                # نحسب الـ amount المُستلم
+                received_ltc = 0.0
+                for vout in tx.get('vout', []):
+                    if vout.get('scriptpubkey_address') == wallet_address:
+                        received_ltc += vout.get('value', 0) / 100000000  # satoshi → LTC
+                
+                if received_ltc <= 0:
+                    continue
+                
+                usd_amount = round(received_ltc * ltc_price, 6)
+                
+                # نشوف لو في pending مطابق
+                pending = find_pending_deposit_for_amount(usd_amount, 'LTC', tolerance=0.001)
+                if pending:
+                    success = auto_credit_from_pending(pending, tx_id_normalized, "Litecoin (LTC) Auto")
+                    if success:
+                        logger.info(f"✅ AUTO-CREDITED LTC: user {pending['user_id']} → ${pending['base_amount_usd']:.2f} (tx: {tx_id[:16]})")
+            except Exception as tx_err:
+                logger.debug(f"Skip tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_ltc_blockchain_auto error: {e}")
 
 
 def check_ton_blockchain_auto():
-    return _safe.check_ton_blockchain_auto()
+    """🔍 يفحص TON blockchain تلقائياً"""
+    try:
+        wallet_address = get_setting('ton_address')
+        if not wallet_address or wallet_address == "Not Set":
+            return
+        
+        pending_count = db.pending_deposits.count_documents({
+            'coin': 'TON',
+            'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if pending_count == 0:
+            return
+        
+        # TONCenter API
+        url = f"https://toncenter.com/api/v2/getTransactions?address={wallet_address}&limit=30"
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return
+            data = res.json()
+            if not data.get('ok'):
+                return
+            txs = data.get('result', [])
+        except Exception:
+            return
+        
+        ton_price = get_ton_price_usd()
+        if not ton_price or ton_price < 0.5:
+            return
+        
+        current_time = int(time.time())
+        cutoff_time = current_time - (45 * 60)  # 45 دقيقة
+        
+        for tx in txs:
+            try:
+                tx_hash = tx.get('transaction_id', {}).get('hash', '')
+                if not tx_hash:
+                    continue
+                
+                tx_time = tx.get('utime', 0)
+                if tx_time and tx_time < cutoff_time:
+                    continue
+                
+                tx_id_normalized = normalize_tx_id(tx_hash)
+                
+                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                    continue
+                
+                # نحسب الـ TON المُستلم
+                in_msg = tx.get('in_msg', {})
+                value_nanoton = int(in_msg.get('value', 0))
+                if value_nanoton <= 0:
+                    continue
+                
+                received_ton = value_nanoton / 1_000_000_000
+                usd_amount = round(received_ton * ton_price, 6)
+                
+                # نشوف pending مطابق
+                pending = find_pending_deposit_for_amount(usd_amount, 'TON', tolerance=0.001)
+                if pending:
+                    success = auto_credit_from_pending(pending, tx_id_normalized, "Toncoin (TON) Auto")
+                    if success:
+                        logger.info(f"✅ AUTO-CREDITED TON: user {pending['user_id']} → ${pending['base_amount_usd']:.2f} (tx: {tx_hash[:16]})")
+            except Exception as tx_err:
+                logger.debug(f"Skip TON tx: {tx_err}")
+                continue
+    except Exception as e:
+        logger.error(f"check_ton_blockchain_auto error: {e}")
 
 
 # ============================================================
@@ -9904,7 +10630,7 @@ def _check_usdt_binance_legacy():
                 if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
                     continue
                 
-                amt = finite_float(d.get('amount', 0))
+                amt = float(d.get('amount', 0))
                 if amt <= 0:
                     continue
                 
@@ -9981,7 +10707,7 @@ def get_coin_price_usd(symbol):
     try:
         r = requests.get(f"https://api.coinbase.com/v2/prices/{sym}-USD/spot", timeout=8)
         if r.status_code == 200:
-            p = finite_float(r.json().get('data', {}).get('amount', 0) or 0)
+            p = float(r.json().get('data', {}).get('amount', 0) or 0)
             if p > 0:
                 price = p
     except Exception as e:
@@ -9995,7 +10721,7 @@ def get_coin_price_usd(symbol):
                 params={"fsym": sym, "tsyms": "USD"}, timeout=8
             )
             if r.status_code == 200:
-                p = finite_float(r.json().get('USD', 0) or 0)
+                p = float(r.json().get('USD', 0) or 0)
                 if p > 0:
                     price = p
         except Exception as e:
@@ -10011,7 +10737,7 @@ def get_coin_price_usd(symbol):
                     params={"ids": cg_id, "vs_currencies": "usd"}, timeout=8
                 )
                 if r.status_code == 200:
-                    p = finite_float(r.json().get(cg_id, {}).get('usd', 0) or 0)
+                    p = float(r.json().get(cg_id, {}).get('usd', 0) or 0)
                     if p > 0:
                         price = p
             except Exception as e:
@@ -10025,7 +10751,7 @@ def get_coin_price_usd(symbol):
                 params={"symbol": f"{sym}USDT"}, timeout=6
             )
             if r.status_code == 200:
-                p = finite_float(r.json().get('price', 0) or 0)
+                p = float(r.json().get('price', 0) or 0)
                 if p > 0:
                     price = p
         except Exception as e:
@@ -10039,7 +10765,7 @@ def get_coin_price_usd(symbol):
                 fast_mode=True, total_timeout=8
             )
             if ticker:
-                p = finite_float(ticker.get('price', 0) or 0)
+                p = float(ticker.get('price', 0) or 0)
                 if p > 0:
                     price = p
         except Exception as e:
@@ -10071,7 +10797,7 @@ def binance_amount_to_usd(amount, currency):
     يرجّع (usd_value, price_used) أو (None, None) لو تعذّر تحديد السعر.
     ملاحظة: المبالغ السالبة (حوالات صادرة) ترجّع None فتُتجاهَل تلقائياً."""
     try:
-        amt = finite_float(amount or 0)
+        amt = float(amount or 0)
     except (TypeError, ValueError):
         return None, None
     if amt <= 0:   # <=0 يعني صادرة أو صفر → نتجاهلها
@@ -10209,7 +10935,7 @@ def check_binance_pay_auto():
                     continue
 
                 # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
-                _raw_amount = finite_float(tx.get('amount') or tx.get('totalFee') or 0)
+                _raw_amount = float(tx.get('amount') or tx.get('totalFee') or 0)
                 _tx_cur = _binance_tx_currency(tx) or 'USDT'
                 amount, _price_used = binance_amount_to_usd(_raw_amount, _tx_cur)
                 if amount is None or amount <= 0:
@@ -10292,7 +11018,7 @@ def check_binance_pay_auto():
                 pending = find_pending_deposit_for_amount(amount, 'BINANCE', tolerance=0.0001)
                 if pending:
                     uid = pending['user_id']
-                    base_amount = finite_float(pending.get('base_amount_usd', amount))
+                    base_amount = float(pending.get('base_amount_usd', amount))
 
                     user = db.users.find_one({'user_id': uid})
                     if not user or user.get('is_banned') == 1:
@@ -10570,7 +11296,7 @@ def _bybit_row_time_ms(row):
         if not v:
             continue
         try:
-            t = int(finite_float(v))
+            t = int(float(v))
         except Exception:
             continue
         if t <= 0:
@@ -10600,7 +11326,7 @@ def _bybit_row_usd(row):
     """يحوّل مبلغ السجل للدولار. يرجّع (usd|None, coin)."""
     coin = str(row.get('coin') or row.get('currency') or 'USDT').upper()
     try:
-        amt = finite_float(row.get('amount') or 0)
+        amt = float(row.get('amount') or 0)
     except Exception:
         return None, coin
     if amt <= 0:
@@ -10648,7 +11374,7 @@ def _bybit_match_by_sender(sender_uid, usd, tolerance=0.01):
     if not sender_uid:
         return None
     try:
-        usd = finite_float(usd)
+        usd = float(usd)
         recs = list(db.pending_deposits.find({
             'coin': 'BYBIT_UID',
             'status': 'pending',
@@ -10661,9 +11387,9 @@ def _bybit_match_by_sender(sender_uid, usd, tolerance=0.01):
         if len(recs) == 1:
             return recs[0]
         # غموض: نأخذ الأقرب للمبلغ بالضبط، ولو تساوى اثنان نرفض
-        recs.sort(key=lambda r: abs(finite_float(r.get('unique_amount_usd', 0)) - usd))
-        d0 = abs(finite_float(recs[0].get('unique_amount_usd', 0)) - usd)
-        d1 = abs(finite_float(recs[1].get('unique_amount_usd', 0)) - usd)
+        recs.sort(key=lambda r: abs(float(r.get('unique_amount_usd', 0)) - usd))
+        d0 = abs(float(recs[0].get('unique_amount_usd', 0)) - usd)
+        d1 = abs(float(recs[1].get('unique_amount_usd', 0)) - usd)
         if abs(d0 - d1) < 1e-9:
             logger.warning(f"[BYBIT] غموض في مطابقة UID {sender_uid} بمبلغ ${usd} — رُفض للأمان")
             return None
@@ -10680,7 +11406,7 @@ def _bybit_match_internal_by_amount(usd, tolerance=0.004):
     المبلغ الفريد (بكسور ٤ خانات) مميّز بما يكفي. نطبّق نفس حارس الغموض:
     لو تعدّدت المطابقات بنفس القرب نرفض."""
     try:
-        usd = finite_float(usd)
+        usd = float(usd)
         recs = list(db.pending_deposits.find({
             'coin': 'BYBIT_UID',
             'status': 'pending',
@@ -10691,9 +11417,9 @@ def _bybit_match_internal_by_amount(usd, tolerance=0.004):
             return None
         if len(recs) == 1:
             return recs[0]
-        recs.sort(key=lambda r: abs(finite_float(r.get('unique_amount_usd', 0)) - usd))
-        d0 = abs(finite_float(recs[0].get('unique_amount_usd', 0)) - usd)
-        d1 = abs(finite_float(recs[1].get('unique_amount_usd', 0)) - usd)
+        recs.sort(key=lambda r: abs(float(r.get('unique_amount_usd', 0)) - usd))
+        d0 = abs(float(recs[0].get('unique_amount_usd', 0)) - usd)
+        d1 = abs(float(recs[1].get('unique_amount_usd', 0)) - usd)
         if abs(d0 - d1) < 1e-9:
             logger.warning(f"[BYBIT] غموض في مطابقة المبلغ ${usd} (داخلي) — رُفض للأمان")
             return None
@@ -10906,7 +11632,7 @@ def check_bybit_auto():
                         _near = list(db.pending_deposits.find({
                             'coin': {'$in': coin_keys}, 'status': 'pending'
                         }).limit(5))
-                        _near_amts = [round(finite_float(p.get('unique_amount_usd', 0)), 6) for p in _near]
+                        _near_amts = [round(float(p.get('unique_amount_usd', 0)), 6) for p in _near]
                         logger.warning(
                             f"[BYBIT] وصل ${usd} ({kind}) بلا مطابقة. "
                             f"المعلّقة {coin_keys}: {_near_amts or 'لا يوجد'} "
@@ -11131,7 +11857,7 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
     if not message.text or message.text.startswith('/'):
         _retry(); return
     try:
-        base_amount = finite_float(message.text.strip().replace(',', '.').replace('$', ''))
+        base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
     except ValueError:
         _retry(); return
 
@@ -11223,7 +11949,7 @@ def bybit_check_payment(call):
 
     # نلتقط الرصيد قبل الفحص لنعرف هل أُضيف شيء
     try:
-        before = finite_float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
+        before = float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
     except Exception:
         before = 0.0
 
@@ -11233,7 +11959,7 @@ def bybit_check_payment(call):
         logger.error(f"bybit manual check err: {e}")
 
     try:
-        after = finite_float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
+        after = float((db.users.find_one({'user_id': uid}) or {}).get('balance', 0) or 0)
     except Exception:
         after = before
 
@@ -11293,7 +12019,7 @@ def admin_search_bybit_tx(query):
             usd, coin_name = _bybit_row_usd(row)
             return {
                 'hash': main_tx, 'label': f"🟠 {label}", 'coin': coin_name,
-                'amount_usd': usd, 'crypto_amount': finite_float(row.get('amount') or 0),
+                'amount_usd': usd, 'crypto_amount': float(row.get('amount') or 0),
                 'when': _bybit_row_time_ms(row), 'note': _bybit_row_note(row), 'kind': kind,
             }
     return None
@@ -11452,7 +12178,110 @@ def cgpt_sub_back(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgsub_act_"))
 def cgpt_sub_upgrade(call):
-    return _safe.renew_ui(call)
+    """ينفّذ التجديد/الترقية — يضيف المدة للمتبقّي بنفس الإيميل."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    uid = call.from_user.id
+    if is_user_banned(uid): return
+    raw = call.data.replace("cgsub_act_", "")
+    # الصيغة: {idx}_{prod_id}_{dur_id}
+    parts = raw.split('_')
+    if len(parts) < 3:
+        bot.send_message(uid, "❌ بيان, غير مكتملة.")
+        return
+    idx_s = parts[0]
+    prod_id = parts[1]
+    dur_id = '_'.join(parts[2:])  # dur_id قد يحوي _
+    idx = int(idx_s) if idx_s.isdigit() else -1
+    try:
+        cache = db.cgpt_sub_cache.find_one({'_id': uid})
+        subs = cache.get('subs', []) if cache else []
+    except Exception:
+        subs = []
+    if idx < 0 or idx >= len(subs):
+        bot.send_message(uid, "انتهت الجلسة، أعد /my_chatgpt")
+        return
+    s = subs[idx]
+    l = get_lang(uid)
+    # نجد المنتج والمدة المحددة
+    try:
+        prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
+    except Exception:
+        prod = None
+    if not prod:
+        bot.send_message(uid, "❌ الباقة غير متاحة.")
+        return
+    # نجد المدة بالـ dur_id
+    dur = next((d for d in prod.get('durations', []) if d.get('dur_id') == dur_id), None)
+    if not dur:
+        bot.send_message(uid, "❌ المدة غير متاحة.")
+        return
+    price = float(dur.get('price', 0))
+    add_minutes = int(dur.get('minutes', 0))
+    if add_minutes <= 0:
+        bot.send_message(uid, "❌ مدة غير صالحة.")
+        return
+    # نفحص الرصيد
+    user = get_user_data_full(uid, use_cache=False)
+    balance = float(user.get('balance', 0)) if user else 0
+    if balance < price:
+        markup = InlineKeyboardMarkup()
+        markup.add(create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
+        bot.send_message(uid,
+            (f"❌ <b>رصيدك غير كافٍ</b>\n\n"
+             f"💰 السعر: ${price:.2f}\n"
+             f"💼 رصيدك: ${balance:.2f}\n\n"
+             f"أضف رصيداً ثم أعد المحاولة.") if l != 'en' else
+            (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
+            parse_mode="HTML", reply_markup=markup)
+        return
+    # نخصم الرصيد ذرّياً
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ.")
+        return
+    _invalidate_user_cache(uid)
+    # نضيف المدة للمتبقّي (نحdّث expires_at في حساب الاشتراك)
+    acc_id = s['account_id']
+    email = s['email']
+    try:
+        idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+        data = idata.get('data', {}) if idata else {}
+        inv = data.get('invites', {}).get(email)
+        if inv:
+            old_exp = _dt_mod.datetime.fromisoformat(inv['expires_at'])
+            now = _dt_mod.datetime.now()
+            base = old_exp if old_exp > now else now
+            new_exp = base + _dt_mod.timedelta(minutes=add_minutes)
+            data['invites'][email]['expires_at'] = new_exp.isoformat()
+            db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}}, upsert=True)
+            add_days = round(add_minutes / 1440, 1)
+            new_rem = (new_exp - now).days
+            bot.send_message(uid,
+                (f"✅ <b>تم التجديد/الترقية بنجاح!</b>\n\n"
+                 f"📧 <code>{html.escape(email)}</code>\n"
+                 f"➕ أُضيف: {add_days} يوم\n"
+                 f"⏳ المدة الجديدة: <b>{new_rem} يوم</b>\n"
+                 f"💰 خُصم: ${price:.2f}") if l != 'en' else
+                (f"✅ <b>Renewed successfully!</b>\n➕ Added: {add_days} days\n"
+                 f"⏳ New total: {new_rem} days\n💰 Charged: ${price:.2f}"),
+                parse_mode="HTML")
+            # إشعار الأدمن
+            try:
+                notify_admins(f"🔄 تجديد/ترقية ChatGPT\n📧 {email}\n👤 {uid}\n➕ {add_days}ي\n💰 ${price:.2f}")
+            except Exception:
+                pass
+        else:
+            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+            _invalidate_user_cache(uid)
+            bot.send_message(uid, "❌ لم أجد الاشتراك. أُعيد رصيدك.")
+    except Exception as e:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, f"❌ خطأ، أُعيد رصيدك: {str(e)[:50]}")
 
 
 @bot.message_handler(commands=['ping'])
@@ -11540,7 +12369,7 @@ def cmd_usdt_why(message):
             l2 = [f"🔗 <b>آخر تحويلات BEP20 المرئية ({len(rows)}):</b>"]
             for tx_id, amt, t_ms in rows[:10]:
                 # هل يطابق أي معلّق؟
-                matched = any(abs(amt - finite_float(p['unique_amount_usd'])) <= 0.001
+                matched = any(abs(amt - float(p['unique_amount_usd'])) <= 0.001
                               for p in pend if p['coin'] == 'USDT_BEP20')
                 mark = "✅ يطابق معلّقاً" if matched else "⚠️ لا يطابق"
                 l2.append(f"• {amt} USDT — {mark}")
@@ -11551,7 +12380,7 @@ def cmd_usdt_why(message):
             for p in pend:
                 if p['coin'] != 'USDT_BEP20':
                     continue
-                want = finite_float(p['unique_amount_usd'])
+                want = float(p['unique_amount_usd'])
                 closest = min(rows, key=lambda r: abs(r[1] - want), default=None)
                 if closest:
                     diff = closest[1] - want
@@ -11793,19 +12622,237 @@ def cmd_bybit_match(message):
 
 
 def _ext_broadcast_new_product(ep):
-    return  # Automatic external-product announcements are disabled.
+    """يبثّ رسالة 'منتج جديد' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    if not ep:
+        return
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        price = float(ep.get('sell_price', ep.get('base_price', 0)))
+        stk = ep.get('stock', 0)
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                delivery = "تلقائي ⚡" if u_lang == 'ar' else "Auto ⚡"
+                p_desc = str(ep.get('desc', ''))[:200]
+                alert_msg = get_text(uid_u, 'new_product', p_name, f"{price:.2f}", delivery, p_desc)
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_new_product err: {_e}")
 
 
 def _ext_broadcast_stock(ep):
-    return _ops.queue_restock(ep, 0)
+    """يبثّ رسالة 'توفّر ستوك' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    try:
+        epid = str(ep['_id'])
+        stk = ep.get('stock', 0)
+        emoji_id = ep.get('emoji_id')
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                price = float(ep.get('sell_price', ep.get('base_price', 0)))
+                alert_msg = get_text(uid_u, 'new_stock', p_name, stk)
+                alert_msg += f"\n\n💰 <b>{'السعر' if u_lang == 'ar' else 'Price'}:</b> ${price:.2f}"
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_stock err: {_e}")
 
 
 def _ext_broadcast_price_drop(ep, old_price, new_price):
-    return  # Price changes are silent.
+    """يبثّ رسالة 'تخفيض السعر' لكل مستخدمي البوت لمنتج API."""
+    try:
+        epid = str(ep['_id'])
+        emoji_id = ep.get('emoji_id')
+        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        for u in users:
+            try:
+                uid_u = u['user_id']
+                u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
+                if u_lang not in ['ar', 'en']: u_lang = 'en'
+                p_name = clean_name(str(ep.get('name', '')))
+                if u_lang == 'ar':
+                    msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>سارع بالشراء الآن!</i>")
+                else:
+                    msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{p_name}</b>\n"
+                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
+                           f"<i>Buy now!</i>")
+                markup = InlineKeyboardMarkup()
+                markup.add(CustomInlineButton(
+                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+                    style="success",
+                    icon_custom_emoji_id=emoji_id if emoji_id else None))
+                bot.send_message(uid_u, msg, parse_mode="HTML", reply_markup=markup)
+                time.sleep(0.05)
+            except Exception:
+                pass
+    except Exception as _e:
+        logger.debug(f"_ext_broadcast_price_drop err: {_e}")
 
 
 def _auto_sync_ext_stores():
-    return _ops.sync_external()
+    """مزامنة تلقائية دورية لكل متاجر API:
+    - منتج جديد في المتجر الخارجي → إشعار الأدمن (هل تريd إضافته؟)
+    - كمية/ستوك تغيّر لمنتج مضاف → تحديث تلقائي + برودكاست توفّر ستوك
+    """
+    try:
+        stores = list(db.ext_stores.find())
+    except Exception:
+        return
+    for store in stores:
+        sid = str(store['_id'])
+        data = _ext_api_get(store, '/products')
+        prods = _ext_parse_products(data)
+        # لو الرد فشل (None) نتخطّى المتجر — لا نصفّر بالخطأ
+        if data is None:
+            continue
+        seen_ext_ids = set()
+        for p in prods:
+            _f = _ext_extract_fields(p)
+            ext_id = _f['ext_id']
+            if not ext_id:
+                continue
+            seen_ext_ids.add(ext_id)
+            existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+            new_stock = _f['stock']
+            if _f['available'] is False:
+                new_stock = 0
+            p_name = _f['name']
+
+            if not existing:
+                already = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
+                if already:
+                    continue
+                try:
+                    db.ext_pending_new.insert_one({
+                        'store_id': sid, 'ext_id': ext_id, 'name': p_name,
+                        'raw': p, 'created_at': int(time.time())
+                    })
+                    _notify_admins_new_ext_product(store, sid, ext_id, p_name, new_stock)
+                except Exception as _ne:
+                    logger.debug(f"notify new ext product err: {_ne}")
+            else:
+                # منتج مضاف: نتحقق من تغيّر التكلفة (سعر المتجر) أولاً — عالمي
+                new_cost = _f['cost_price']
+                old_cost = existing.get('cost_price', existing.get('base_price', 0)) or 0
+                if new_cost and abs(float(new_cost) - float(old_cost)) > 0.001:
+                    # المتجر غيّر سعر التكلفة → نعيd حساب سعر البيع بنفس النسبة تلقائياً
+                    mt = existing.get('markup_type', 'percent')
+                    mv = existing.get('markup_value', 0)
+                    new_sell = _ext_compute_sell_price(float(new_cost), mt, mv)
+                    db.ext_products.update_one({'_id': existing['_id']},
+                        {'$set': {'cost_price': float(new_cost),
+                                  'base_price': float(new_cost),
+                                  'sell_price': new_sell}})
+                    # إشعار الأدمن (رفع/خفض سعر من المتجر)
+                    try:
+                        direction = "📈 رفع" if float(new_cost) > float(old_cost) else "📉 خفض"
+                        notify_admins(
+                            f"{direction} <b>سعر من المتجر (API)</b>\n"
+                            f"🏪 {html.escape(store.get('name',''))}\n"
+                            f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
+                            f"💵 التكلفة: ${float(old_cost):.2f} → <b>${float(new_cost):.2f}</b>\n"
+                            f"💰 سعرك الجديد (بالنسبة {mv}{'%' if mt=='percent' else '$'}): "
+                            f"<b>${new_sell:.2f}</b>\n\n"
+                            f"<i>أُعيد حساب سعرك تلقائياً.</i>"
+                        )
+                    except Exception:
+                        pass
+                    # لو ارتفع سعر البيع كثيراً، أو انخفض → نبثّ للعملاء
+                    try:
+                        _emit_event('product.updated', {
+                            'source': 'external_api',
+                            'product_id': f"ext_{existing['_id']}",
+                            'name_ar': existing.get('name', p_name),
+                            'name_en': existing.get('name', p_name),
+                            'price': new_sell,
+                            'is_manual': False, 'is_hidden': False,
+                            'stock': new_stock,
+                        }, product_id=f"ext_{existing['_id']}")
+                    except Exception:
+                        pass
+
+                # منتج مضاف: نتحقق من تغيّر الستوك
+                old_stock = existing.get('stock', 0) or 0
+                if new_stock != old_stock:
+                    db.ext_products.update_one({'_id': existing['_id']},
+                                               {'$set': {'stock': new_stock}})
+                    # لو توفّر ستوك جديد (كان 0 وصار متوفر) → برودكاست + إشعار
+                    # نرسل الإشعار عند أي زيادة في الستوك (مثل المنتج العادي)
+                    if new_stock > old_stock and not existing.get('hidden'):
+                        # حماية: لا نكرّر البرودكاست لنفس المنتج خلال 10 دقائق
+                        _last_bc = existing.get('last_stock_broadcast', 0)
+                        _skip_bc = (time.time() - _last_bc) < 600
+                        try:
+                            _emit_event('stock.added', {
+                                'source': 'external_api',
+                                'product_id': f"ext_{existing['_id']}",
+                                'name_ar': existing.get('name', p_name),
+                                'name_en': existing.get('name', p_name),
+                                'price': existing.get('sell_price', existing.get('base_price')),
+                                'stock': new_stock, 'added': new_stock,
+                            }, product_id=f"ext_{existing['_id']}")
+                        except Exception:
+                            pass
+                        # إشعار الأدمن بتوفّر الستوك
+                        try:
+                            notify_admins(
+                                f"📦 <b>توفّر ستوك (API)</b>\n"
+                                f"🏪 {html.escape(store.get('name',''))}\n"
+                                f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
+                                f"🔢 المتوفر الآن: <b>{new_stock}</b>"
+                            )
+                        except Exception:
+                            pass
+                        # 📢 برودكاست للمستخدمين (مثل المنتج العادي) — مع حماية التكرار
+                        if not _skip_bc:
+                            try:
+                                db.ext_products.update_one({'_id': existing['_id']},
+                                    {'$set': {'last_stock_broadcast': time.time()}})
+                                _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
+                                threading.Thread(
+                                    target=_ext_broadcast_stock,
+                                    args=(_updated_ep,),
+                                    daemon=True
+                                ).start()
+                            except Exception:
+                                pass
+
+        # 🔴 المنتجات المضافة عندك لكن غير موجودة في رد المتجر = نفدت (out of stock)
+        #    حسب الدوكس: المنتجات النافدة تُحذف من /products. فنصفّر ستوكها.
+        try:
+            for ep in db.ext_products.find({'store_id': sid}):
+                if str(ep.get('ext_id', '')) not in seen_ext_ids:
+                    if (ep.get('stock', 0) or 0) != 0:
+                        db.ext_products.update_one({'_id': ep['_id']},
+                                                   {'$set': {'stock': 0}})
+        except Exception as _ze:
+            logger.debug(f"zero out-of-stock err: {_ze}")
 
 
 def _notify_admins_new_ext_product(store, sid, ext_id, name, stock):
@@ -11859,7 +12906,7 @@ def auto_deposit_monitor_thread():
         (check_usdt_blockchain_auto, 12, 34, "USDT"),
         (check_binance_pay_auto,     12, 36, "BinancePay"),
         (check_bybit_auto,           12, 38, "Bybit"),
-        (_auto_sync_ext_stores,      60, 60, "ExtAPISync"),
+        (_auto_sync_ext_stores,      120, 60, "ExtAPISync"),
     ]
     for func, interval, delay, name in checks:
         threading.Thread(
@@ -11870,7 +12917,7 @@ def auto_deposit_monitor_thread():
 
 
 # نشغل الـ monitor في الخلفية
-# Worker starts after runtime initialization.
+threading.Thread(target=auto_deposit_monitor_thread, daemon=True).start()
 
 
 @bot.message_handler(commands=['binance_debug'])
@@ -11930,7 +12977,21 @@ def cmd_binance_debug(message):
 
 
 def mark_pending_deposit_used(pending_id):
-    return True  # Only Finance.credit may complete a pending deposit.
+    """يعلّم إيداع معلق كـ مستخدم + 🔓 يفكّ قفل الإيداع عن صاحبه.
+
+    ⚠️ كان يُغلق السجل فقط بدون فك القفل، فيظل المستخدم عالقاً في
+    "لديك عملية دفع معلقة" رغم إضافة رصيده."""
+    try:
+        doc = db.pending_deposits.find_one({'pending_id': pending_id})
+        db.pending_deposits.update_one(
+            {'pending_id': pending_id},
+            {'$set': {'status': 'completed', 'completed_at': int(time.time())}}
+        )
+        # 🔓 فك القفل عن صاحب الإيداع
+        if doc and doc.get('user_id'):
+            unlock_deposit(doc['user_id'])
+    except Exception as e:
+        logger.debug(f"mark_pending_deposit_used err: {e}")
 
 
 def cleanup_expired_pending_deposits():
@@ -12068,7 +13129,80 @@ def reject_wrong_amount_deposit(uid, coin, usd_amount_precise, tx_id, coin_label
 
 
 def punish_steal_attempt_thief_only(thief_uid, tx_id_clean, pending_owner_uid, attempted_amount):
-    return _safe.collision_review()
+    """
+    🚨 يعاقب فقط بوت النصاب (المستخدم الأصلي ما يتلمس).
+    
+    لما بوت النصاب يحاول يستخدم حوالة مسجّلة لمستخدم آخر:
+    1. حظر بوت النصاب
+    2. سجل في theft_attempts
+    3. إشعار قوي للأدمن
+    """
+    try:
+        # حظر النصاب فقط
+        db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
+        
+        # تسجيل
+        thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+        owner_data = db.users.find_one({'user_id': pending_owner_uid}) or {}
+        
+        try:
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'pending_owner_id': pending_owner_uid,
+                'pending_owner_username': owner_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'attempted_amount': float(attempted_amount),
+                'attack_type': 'monitoring_bot_steal',
+                'timestamp': int(time.time()),
+                'status': 'auto_handled'
+            })
+        except Exception: pass
+        
+        # إشعار قوي للأدمن
+        try:
+            thief_username = thief_data.get('username', 'unknown')
+            owner_username = owner_data.get('username', 'unknown')
+            
+            notify_admins(
+                f"🚨 <b>هجوم بوت نصاب تم إيقافه!</b>\n\n"
+                f"⚡ <b>بوت نصاب حاول سرقة حوالة من blockchain</b>\n"
+                f"🛡 <b>تم حظر النصاب وحماية المستخدم الأصلي!</b>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🤖 <b>بوت النصاب (محظور):</b>\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"😇 <b>المستخدم الأصلي (آمن):</b>\n"
+                f"   • ID: <code>{pending_owner_uid}</code>\n"
+                f"   • Username: @{owner_username}\n"
+                f"   • <i>المستخدم الأصلي يقدر يكمل إيداعه بشكل طبيعي</i>\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 المبلغ: <b>${attempted_amount:.4f}</b>\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
+            )
+        except Exception: pass
+        
+        # رسالة للنصاب (بدون كشف وجود نظام حماية)
+        try:
+            bot.send_message(
+                thief_uid,
+                "❌ <b>تم حظر حسابك!</b>\n\n"
+                "🚫 السبب: محاولة استخدام حوالة غير صحيحة.\n\n"
+                "⚠️ <i>للاستفسار، تواصل مع الإدارة.</i>",
+                parse_mode="HTML"
+            )
+        except Exception: pass
+        
+        logger.warning(
+            f"🚨 MONITORING BOT BLOCKED: "
+            f"thief {thief_uid} tried to steal tx {tx_id_clean[:30]} "
+            f"that belongs to {pending_owner_uid}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_steal_attempt: {e}")
+        return False
 
 
 def is_amount_protection_enabled():
@@ -12129,7 +13263,7 @@ def ask_deposit_amount(message, coin):
     base_amount = 0.0
     if message.text and not message.text.startswith('/'):
         try:
-            base_amount = finite_float(message.text.strip().replace(',', '.').replace('$', ''))
+            base_amount = float(message.text.strip().replace(',', '.').replace('$', ''))
             valid_number = True
         except ValueError:
             pass
@@ -12212,14 +13346,14 @@ def ask_deposit_amount(message, coin):
     coin_short = ""
     try:
         if coin == 'LTC':
-            ltc_price = pending['quoted_price']
-            crypto_amount = pending['crypto_units'] / 100000000
+            ltc_price = get_ltc_price_usd()
+            crypto_amount = unique_amount / ltc_price
             crypto_amount_value = f"{crypto_amount:.8f}"
             coin_short = "LTC"
         elif coin == 'TON':
-            ton_price = pending['quoted_price']
-            crypto_amount = pending['crypto_units'] / 1000000000
-            crypto_amount_value = f"{crypto_amount:.9f}"
+            ton_price = get_ton_price_usd()
+            crypto_amount = unique_amount / ton_price
+            crypto_amount_value = f"{crypto_amount:.6f}"
             coin_short = "TON"
         elif coin in ['USDT', 'USDT_BEP20']:
             crypto_amount_value = f"{unique_amount:.4f}"
@@ -12268,8 +13402,49 @@ def dep_crypto_ui(call):
 
 
 def _dep_crypto_real(call):
+    bot.answer_callback_query(call.id)
+    uid = call.from_user.id
+    if is_user_banned(uid): return
     coin = call.data.replace('dep_crypto_', '')
-    return start_amount_protected_deposit(call, coin)
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+    
+    # 🛡 لو الحماية مفعّلة، نستخدم النظام الجديد (مبلغ فريد)
+    if is_amount_protection_enabled():
+        start_amount_protected_deposit(call, coin)
+        return
+    
+    # النظام القديم (لو الحماية معطّلة)
+    l = get_lang(uid)
+    if coin == "USDT": db_key = "usdt_address"
+    elif coin == "USDT_BEP20": db_key = "usdt_bep20_address"
+    elif coin == "TON": db_key = "ton_address"
+    else: db_key = "ltc_address"
+    
+    wallet = get_setting(db_key)
+    
+    if coin == "USDT": 
+        msg_txt = f"🟢 <b>USDT (TRC-20)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
+    elif coin == "USDT_BEP20":
+        msg_txt = f"🟡 <b>USDT (BEP-20)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>\n\n⚠️ <b>Network: BEP-20 ONLY</b>"
+    elif coin == "TON":
+        msg_txt = f"💎 <b>Toncoin (TON)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
+    else:
+        msg_txt = f"🔵 <b>Litecoin (LTC)</b>\n\n💰 <b>Amount:</b>\n<code>${base_amount:.2f}</code>\n\n📬 <b>Address:</b>\n<code>{wallet}</code>"
+    
+    msg_txt += "\n\n⚠️ <i>Send TxID after transfer</i>"
+    
+    dep_markup = InlineKeyboardMarkup(row_width=1)
+    dep_markup.add(InlineKeyboardButton(
+        "❌ Cancel" if l == 'en' else "❌ إلغاء",
+        callback_data="cancel_deposit"
+    ))
+    
+    msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=dep_markup)
+    
+    if coin == "LTC": bot.register_next_step_handler(msg, verify_ltc_public_blockchain, l, wallet)
+    elif coin == "TON": bot.register_next_step_handler(msg, verify_crypto_tx, l, "TON")
+    elif coin == "USDT_BEP20": bot.register_next_step_handler(msg, verify_crypto_tx, l, "USDT")
+    else: bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
 @safe_next_step
 def verify_binance_pay(message, lang):
@@ -12382,7 +13557,7 @@ def verify_binance_pay(message, lang):
                         parse_mode="HTML")
                     return
                 found = True
-                amt_raw = finite_float(d.get('amount', 0.0))
+                amt_raw = float(d.get('amount', 0.0))
                 amt_currency = _binance_tx_currency(d) or 'USDT'
                 break
                 
@@ -12536,7 +13711,7 @@ def verify_crypto_tx(message, lang, coin):
                     return
                 found = True
                 status = int(d.get('status', -1))
-                amt = finite_float(d.get('amount', 0.0))
+                amt = float(d.get('amount', 0.0))
                 break
                 
         if found:
@@ -12544,7 +13719,7 @@ def verify_crypto_tx(message, lang, coin):
                 # 🛡 فحص المبلغ الفريد (حماية من بوتات النصب)
                 if is_amount_protection_enabled():
                     # USDT = 1$ تقريباً، فالمبلغ بالعملة = المبلغ بالدولار
-                    usd_amount_precise = round(finite_float(amt), 4)
+                    usd_amount_precise = round(float(amt), 4)
                     
                     pending = find_pending_deposit_for_amount(usd_amount_precise, coin, tolerance=0.0001)
                     if pending is None:
@@ -12589,7 +13764,7 @@ def get_ltc_price_usd():
             total_timeout=5
         )
         if ticker:
-            price = finite_float(ticker.get('price', 0))
+            price = float(ticker.get('price', 0))
             if 10 <= price <= 1000:
                 logger.info(f"💱 سعر LTC من Binance: ${price:.4f}")
                 return price
@@ -12603,7 +13778,7 @@ def get_ltc_price_usd():
             timeout=10
         )
         if cg_res.status_code == 200:
-            price = finite_float(cg_res.json().get('litecoin', {}).get('usd', 0))
+            price = float(cg_res.json().get('litecoin', {}).get('usd', 0))
             if 10 <= price <= 1000:
                 logger.info(f"💱 سعر LTC من CoinGecko: ${price:.4f}")
                 return price
@@ -12617,7 +13792,7 @@ def get_ltc_price_usd():
             timeout=10
         )
         if cb_res.status_code == 200:
-            price = finite_float(cb_res.json().get('data', {}).get('amount', 0))
+            price = float(cb_res.json().get('data', {}).get('amount', 0))
             if 10 <= price <= 1000:
                 logger.info(f"💱 سعر LTC من Coinbase: ${price:.4f}")
                 return price
@@ -12636,7 +13811,7 @@ def get_ton_price_usd():
             timeout=10
         )
         if cg_res.status_code == 200:
-            price = finite_float(cg_res.json().get('the-open-network', {}).get('usd', 0))
+            price = float(cg_res.json().get('the-open-network', {}).get('usd', 0))
             if 0.5 <= price <= 50:  # نطاق منطقي لـ TON
                 logger.info(f"💱 سعر TON من CoinGecko: ${price:.4f}")
                 return price
@@ -12650,7 +13825,7 @@ def get_ton_price_usd():
             timeout=10
         )
         if cb_res.status_code == 200:
-            price = finite_float(cb_res.json().get('data', {}).get('amount', 0))
+            price = float(cb_res.json().get('data', {}).get('amount', 0))
             if 0.5 <= price <= 50:
                 logger.info(f"💱 سعر TON من Coinbase: ${price:.4f}")
                 return price
@@ -12665,7 +13840,7 @@ def get_ton_price_usd():
             total_timeout=5
         )
         if ticker:
-            price = finite_float(ticker.get('price', 0))
+            price = float(ticker.get('price', 0))
             if 0.5 <= price <= 50:
                 logger.info(f"💱 سعر TON من Binance: ${price:.4f}")
                 return price
@@ -13091,7 +14266,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                         vout_key = f"litecoinspace_{idx}_{vout.get('value', 0)}"
                         if vout_key not in seen_vouts:
                             seen_vouts.add(vout_key)
-                            temp_received += finite_float(vout.get("value", 0)) / 100000000.0
+                            temp_received += float(vout.get("value", 0)) / 100000000.0
                 
                 if temp_received > 0:
                     received_ltc = temp_received  # 🛡 = بدل +=
@@ -13131,7 +14306,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                             output_key = f"blockcypher_{idx}_{output.get('value', 0)}"
                             if output_key not in seen_outputs:
                                 seen_outputs.add(output_key)
-                                temp_received2 += finite_float(output.get("value", 0)) / 100000000.0
+                                temp_received2 += float(output.get("value", 0)) / 100000000.0
                     
                     if temp_received2 > 0:
                         received_ltc = temp_received2  # 🛡 = بدل +=
@@ -13216,7 +14391,7 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             
     except Exception as e:
-        bot.send_message(uid, bil(uid, "❌ حدث خطأ أثناء فحص الشبكة.", "❌ Network check error."), parse_mode="HTML")
+        bot.send_message(uid, fbil(uid, "❌ حدث خطأ أثناء فحص الشبكة.", "❌ Network check error."), parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id_normalized)
 
@@ -13241,7 +14416,7 @@ def generate_tx_fingerprint(amount, method, sender_addr=None, receiver_addr=None
     receiver = (receiver_addr or '').strip().lower()
     
     # نقرّب المبلغ لـ 8 خانات عشرية
-    amt_str = f"{finite_float(amount):.8f}"
+    amt_str = f"{float(amount):.8f}"
     
     # نولّد البصمة
     fingerprint_str = f"{amt_str}|{method}|{sender}|{receiver}|{minute_ts}"
@@ -13251,19 +14426,471 @@ def generate_tx_fingerprint(amount, method, sender_addr=None, receiver_addr=None
 
 
 def check_duplicate_transaction(uid, amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None, tx_id_clean=None, trusted_txid=False):
-    return _safe.check_duplicate_transaction(uid, amount, method, sender_addr, receiver_addr, tx_timestamp, tx_id_clean, trusted_txid)
+    """
+    🛡 يفحص لو الحوالة مستخدمة بالفعل (حتى لو الـ tx_id مختلف).
+    
+    يستخدم 3 طبقات فحص:
+    1. tx_id المطبّع (لو موجود)
+    2. بصمة الحوالة (fingerprint)
+    3. فحص ذكي للحوالات المشابهة (نفس المبلغ + نفس الدقيقة)
+
+    trusted_txid=True: الـ tx_id فريد عالمياً وموثوق (مثل Bybit txID / hash بلوكشين).
+      عندها نتخطّى الطبقتين 2 و3 (المبلغ+الوقت) لأنهما heuristic للعملات بلا
+      معرّف مميّز — ومع مبالغ متقاربة في نفس الدقيقة تعطي إيجابيات كاذبة
+      (ترفض إيداعات صحيحة وتحظر أصحابها ظلماً).
+    
+    يرجع:
+    - None لو الحوالة جديدة
+    - dict فيه معلومات المُستخدم القديم لو فيه duplicate
+    """
+    try:
+        # الطبقة 1: tx_id المطبّع
+        if tx_id_clean:
+            existing = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+            if existing:
+                return {
+                    'match_type': 'tx_id',
+                    'original_uid': existing.get('user_id'),
+                    'original_amount': existing.get('amount', 0),
+                    'original_record': existing
+                }
+
+        # 🛡 tx_id موثوق وفريد → طبقة 1 تكفي؛ نتخطّى الـ heuristics
+        if trusted_txid:
+            return None
+
+        # الطبقة 2: بصمة الحوالة
+        fingerprint = generate_tx_fingerprint(amount, method, sender_addr, receiver_addr, tx_timestamp)
+        existing_fp = db.used_transactions.find_one({'fingerprint': fingerprint})
+        if existing_fp:
+            return {
+                'match_type': 'fingerprint',
+                'original_uid': existing_fp.get('user_id'),
+                'original_amount': existing_fp.get('amount', 0),
+                'original_record': existing_fp
+            }
+        
+        # الطبقة 3: فحص ذكي - نفس المبلغ + نفس الطريقة + نفس الدقيقة
+        # (للحوالات اللي ما عندها sender/receiver معروف)
+        if tx_timestamp:
+            minute_start = int(tx_timestamp / 60) * 60
+            minute_end = minute_start + 60
+            
+            # نبحث عن أي حوالة بنفس المبلغ والطريقة في نفس الدقيقة
+            similar = db.used_transactions.find_one({
+                'amount': float(amount),
+                'method': method,
+                'created_at': {
+                    '$gte': minute_start,
+                    '$lt': minute_end
+                },
+                'user_id': {'$ne': uid}  # مستخدم آخر
+            })
+            
+            if similar:
+                return {
+                    'match_type': 'similar_time_amount',
+                    'original_uid': similar.get('user_id'),
+                    'original_amount': similar.get('amount', 0),
+                    'original_record': similar
+                }
+        
+        return None  # حوالة جديدة، آمنة
+    except Exception as e:
+        logger.error(f"Error in check_duplicate_transaction: {e}")
+        return None
 
 
 def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, original_amount=0, match_type='tx_id'):
-    return _safe.collision_review()
+    """
+    🚨 نسخة موسعة - تحظر الاثنين فقط (بدون سحب رصيد).
+    """
+    try:
+        # نجلب رصيد الأصلي (للعرض فقط - بدون سحب)
+        original_user = db.users.find_one({'user_id': original_uid})
+        original_balance = float(original_user.get('balance', 0)) if original_user else 0
+        
+        # حظر الاثنين فقط (بدون أي تعديل على الرصيد)
+        db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
+        db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
+        
+        # تسجيل
+        original_data = db.users.find_one({'user_id': original_uid}) or {}
+        thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+        
+        try:
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'original_user_id': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'current_balance': original_balance,
+                'match_type': match_type,
+                'timestamp': int(time.time()),
+                'status': 'pending_admin_review'
+            })
+        except: pass
+        
+        # شرح نوع الكشف
+        match_descriptions = {
+            'tx_id': 'نفس رقم العملية (TxID)',
+            'fingerprint': 'نفس بصمة الحوالة (مبلغ + وقت + عناوين)',
+            'similar_time_amount': 'نفس المبلغ في نفس الدقيقة بنفس طريقة الدفع',
+            'unknown': 'تطابق غير محدد'
+        }
+        match_desc = match_descriptions.get(match_type, match_type)
+        
+        # إشعار للأدمن
+        try:
+            original_username = original_data.get('username', 'unknown')
+            thief_username = thief_data.get('username', 'unknown')
+            
+            admin_msg = (
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
+                f"🔍 <b>نوع الكشف:</b> {match_desc}\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش/الرقم: <code>{tx_id_clean[:40]}...</code>"
+            )
+            notify_admins(admin_msg)
+        except Exception as notify_err:
+            logger.error(f"Failed to notify: {notify_err}")
+        
+        # رسائل للمستخدمين
+        if True:  # نبني حسب اللغة
+            ar_msg = (
+                "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+            )
+            en_msg = (
+                "❌ <b>Manipulation detected!</b>\n\n"
+                "🚫 Your account has been banned for attempting to use the same transaction with another account.\n\n"
+                "⚠️ <i>Contact admin if you believe this is a mistake.</i>"
+            )
+        
+        try: bot.send_message(original_uid, bil(original_uid, ar_msg, en_msg), parse_mode="HTML")
+        except: pass
+        try: bot.send_message(thief_uid, bil(thief_uid, ar_msg, en_msg), parse_mode="HTML")
+        except: pass
+        
+        logger.warning(
+            f"🚨 EXTENDED COLLISION PUNISHMENT ({match_type}):\n"
+            f"   tx: {tx_id_clean[:30]}\n"
+            f"   original: {original_uid} (banned, ${original_balance:.2f} seized)\n"
+            f"   thief: {thief_uid} (banned)"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_hash_collision_extended: {e}")
+        return False
 
 
 def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=0):
-    return _safe.collision_review()
+    """
+    🚨 يحظر الاثنين (بدون سحب الرصيد):
+    1. حظر الاثنين (الأصلي والمدّعي)
+    2. تسجيل في theft_attempts للمراجعة
+    3. إشعار قوي للأدمن لمراجعتهم يدوياً
+    """
+    try:
+        # نجلب رصيد الأصلي (للعرض في الإشعار فقط - بدون سحب)
+        original_user = db.users.find_one({'user_id': original_uid})
+        original_balance = float(original_user.get('balance', 0)) if original_user else 0
+        
+        # 1. حظر الأصلي (بدون سحب الرصيد)
+        db.users.update_one(
+            {'user_id': original_uid},
+            {'$set': {'is_banned': 1}}
+        )
+        
+        # 2. حظر الـ thief
+        db.users.update_one(
+            {'user_id': thief_uid},
+            {'$set': {'is_banned': 1}}
+        )
+        
+        # 3. تسجيل في theft_attempts
+        try:
+            original_data = db.users.find_one({'user_id': original_uid}) or {}
+            thief_data = db.users.find_one({'user_id': thief_uid}) or {}
+            
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'original_user_id': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_user_id': thief_uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'seized_balance': original_balance,
+                'collision_type': 'post_success',  # شخصين بعد نجاح الإيداع الأول
+                'timestamp': int(time.time()),
+                'status': 'pending_admin_review'
+            })
+        except Exception as log_err:
+            logger.error(f"Failed to log theft attempt: {log_err}")
+        
+        # 4. إشعار قوي للأدمن للمراجعة اليدوية
+        try:
+            original_username = original_data.get('username', 'unknown') if original_data else 'unknown'
+            thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
+            
+            admin_msg = (
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
+                f"   • ID: <code>{thief_uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
+            )
+            notify_admins(admin_msg)
+        except Exception as notify_err:
+            logger.error(f"Failed to notify admin about hash collision: {notify_err}")
+        
+        # رسائل بسيطة للمستخدمين
+        manipulation_msg = (
+            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+        )
+        
+        try:
+            bot.send_message(original_uid, manipulation_msg, parse_mode="HTML")
+        except Exception:
+            pass
+        
+        try:
+            bot.send_message(thief_uid, manipulation_msg, parse_mode="HTML")
+        except Exception:
+            pass
+        
+        logger.warning(
+            f"🚨 HASH COLLISION PUNISHMENT APPLIED:\n"
+            f"   tx: {tx_id_clean[:30]}\n"
+            f"   original: {original_uid} (banned, balance ${original_balance:.2f} seized)\n"
+            f"   thief: {thief_uid} (banned)"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error in punish_hash_collision: {e}")
+        return False
 
 
 def claim_tx_hash(tx_id, uid):
-    return 'already_used' if db.used_transactions.find_one({'transaction_id': normalize_tx_id(tx_id)}) else 'new'
+    """
+    🛡 يحجز الـ hash للمستخدم الأول اللي يقدّمه - atomic 100%.
+    
+    🔥 الاستراتيجية الجديدة (atomic-first):
+    - نحاول insert في claimed_hashes أولاً (atomic + unique index)
+    - لو نجح: أنت الأول → استمر
+    - لو فشل (duplicate): شخص آخر سبقك → نحظره فوراً
+    
+    يرجع:
+    - 'claimed' لو نجح الحجز (هذا أول استخدام - استمر)
+    - 'already_used' لو الـ hash استُخدم سابقاً (إيداع مكتمل) - يُطبّق عقوبات
+    - 'stolen_attempt' لو شخص آخر يحاول استخدام نفس الـ hash المعلق
+    - 'own_pending' لو نفس المستخدم يعيد المحاولة (مسموح)
+    - 'already_used_own' لو نفس المستخدم استخدمه قبل (مرفوض)
+    """
+    try:
+        # 🛡 validation صارمة: ما نقبل أوامر أو نصوص قصيرة
+        tx_id_str = str(tx_id).strip()
+        if not tx_id_str or tx_id_str.startswith('/') or len(tx_id_str) < 5:
+            logger.warning(f"⚠️ claim_tx_hash رفض tx_id غير صحيح: {tx_id_str[:30]} للمستخدم {uid}")
+            return 'invalid'
+        
+        tx_id_clean = normalize_tx_id(tx_id)
+        
+        # 🛡 بعد التطبيع لازم يبقى أطول من 5 أحرف
+        if not tx_id_clean or len(tx_id_clean) < 5:
+            logger.warning(f"⚠️ claim_tx_hash رفض tx_id قصير بعد التطبيع: {tx_id_clean}")
+            return 'invalid'
+        
+        uid = int(uid)
+        
+        # 🛡 الخطوة 1: نحاول insert atomic في claimed_hashes (الـ unique index يحمي)
+        # هذا اللي يحل race condition - فقط مستخدم واحد ينجح
+        try:
+            db.claimed_hashes.insert_one({
+                'transaction_id': tx_id_clean,
+                'user_id': uid,
+                'claimed_at': int(time.time()),
+                'status': 'pending'
+            })
+            # ✅ نجح الـ insert - أنت الأول
+            # نشيك إن الـ hash مو مستخدم في used_transactions أصلاً
+            used_record = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+            if used_record:
+                # حالة نادرة: الـ hash استخدم بالفعل لكن ما كان في claimed_hashes
+                # نلغي الـ claim وننفذ العقوبات
+                db.claimed_hashes.delete_one({'transaction_id': tx_id_clean, 'user_id': uid})
+                
+                original_uid = used_record.get('user_id')
+                if original_uid == uid:
+                    return 'already_used_own'
+                
+                # نطبق العقوبات
+                original_amount = float(used_record.get('amount', 0))
+                original_user = db.users.find_one({'user_id': original_uid})
+                if original_user and original_user.get('is_banned') != 1:
+                    punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                return 'already_used'
+            
+            return 'claimed'
+        except Exception as insert_err:
+            # ❌ فشل الـ insert - شخص آخر سبقك (race condition محل)
+            err_str = str(insert_err).lower()
+            if 'duplicate' not in err_str and 'e11000' not in err_str:
+                # خطأ ثاني مو duplicate
+                logger.error(f"Unexpected claim error: {insert_err}")
+                return 'claimed'  # نسمح بالمحاولة عشان ما نقفله بسبب خطأ DB
+        
+        # 🛡 الخطوة 2: لقينا duplicate - نشوف من اللي سبقنا
+        # شيك على الـ used_transactions أولاً (أخطر حالة)
+        used_record = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+        if used_record:
+            original_uid = used_record.get('user_id')
+            if original_uid == uid:
+                return 'already_used_own'
+            
+            # 🚨 شخص ثاني بعد نجاح الأول - عقوبات كاملة
+            original_amount = float(used_record.get('amount', 0))
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+            else:
+                # الأصلي محظور أصلاً
+                try:
+                    db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+                    thief_data = db.users.find_one({'user_id': uid}) or {}
+                    thief_username = thief_data.get('username', 'unknown')
+                    notify_admins(
+                        f"🚨 <b>محاولة سرقة جديدة!</b>\n\n"
+                        f"👤 المهاجم: <code>{uid}</code> @{thief_username}\n"
+                        f"🆔 Hash: <code>{tx_id_clean[:30]}...</code>\n"
+                        f"💡 الحساب الأصلي محظور بالفعل.\n"
+                        f"🚫 تم حظر هذا المستخدم تلقائياً."
+                    )
+                except: pass
+            return 'already_used'
+        
+        # 🛡 الخطوة 3: الـ hash موجود في claimed_hashes (شخص آخر حجزه)
+        existing_claim = db.claimed_hashes.find_one({'transaction_id': tx_id_clean})
+        
+        if not existing_claim:
+            # غريب - الـ insert فشل بـ duplicate لكن لا في claimed_hashes ولا used_transactions
+            # نحاول مرة ثانية
+            return claim_tx_hash(tx_id, uid)
+        
+        if existing_claim.get('user_id') == uid:
+            return 'own_pending'  # نفس المستخدم
+        
+        # 🚨 شخصين مختلفين، نفس الـ hash، نفس الوقت → race condition!
+        # نطبق عقوبات قوية فوراً لأن هذا سيناريو نصب واضح
+        original_uid = existing_claim.get('user_id')
+        
+        # تسجيل المحاولة
+        try:
+            thief_data = db.users.find_one({'user_id': uid}) or {}
+            original_data = db.users.find_one({'user_id': original_uid}) or {}
+            
+            db.theft_attempts.insert_one({
+                'transaction_id': tx_id_clean,
+                'original_claimer': original_uid,
+                'original_username': original_data.get('username', 'unknown'),
+                'thief_attempt': uid,
+                'thief_username': thief_data.get('username', 'unknown'),
+                'timestamp': int(time.time()),
+                'collision_type': 'simultaneous_race',
+                'status': 'pending_admin_review'
+            })
+        except Exception:
+            pass
+        
+        # 🚨 حظر الاثنين فوراً (race condition = نصب واضح)
+        try:
+            # حظر الاثنين فقط (بدون سحب رصيد)
+            db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
+            db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+            
+            # نجلب رصيد الأول (للعرض في الإشعار فقط)
+            original_user = db.users.find_one({'user_id': original_uid})
+            original_balance = float(original_user.get('balance', 0)) if original_user else 0
+        except Exception as ban_err:
+            logger.error(f"Failed to ban race users: {ban_err}")
+        
+        # إشعار قوي للأدمن
+        try:
+            original_username = original_data.get('username', 'unknown') if original_data else 'unknown'
+            thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
+            
+            admin_msg = (
+                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
+                f"⚠️ شخصان أرسلا نفس الهاش/الأوردر في نفس اللحظة.\n"
+                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"👤 الحساب 1:\n"
+                f"   • ID: <code>{original_uid}</code>\n"
+                f"   • Username: @{original_username}\n"
+                f"   • 💰 الرصيد الحالي: <b>${original_balance:.2f}</b>\n\n"
+                f"👤 الحساب 2:\n"
+                f"   • ID: <code>{uid}</code>\n"
+                f"   • Username: @{thief_username}\n\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🆔 الهاش: <code>{tx_id_clean[:40]}...</code>"
+            )
+            notify_admins(admin_msg)
+        except Exception:
+            pass
+        
+        # رسائل بسيطة للمستخدمين
+        cancel_msg_ar = (
+            "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+            "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+            "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>"
+        )
+        cancel_msg_en = (
+            "❌ <b>Manipulation detected!</b>\n\n"
+            "🚫 Your account has been banned for trying to use the same transaction with another account.\n\n"
+            "⚠️ <i>You attempted manipulation - contact admin if you believe this is a mistake.</i>"
+        )
+        
+        try:
+            bot.send_message(uid, cancel_msg_ar, parse_mode="HTML")
+        except: pass
+        try:
+            bot.send_message(original_uid, cancel_msg_ar, parse_mode="HTML")
+        except: pass
+        
+        logger.warning(
+            f"🚨 SIMULTANEOUS RACE DETECTED: "
+            f"users {original_uid} and {uid} both tried hash {tx_id_clean[:20]}... "
+            f"at the same time. Both banned."
+        )
+        
+        return 'stolen_attempt'
+    except Exception as e:
+        logger.error(f"Error in claim_tx_hash: {e}")
+        return 'claimed'
 
 
 def cleanup_old_claimed_hashes():
@@ -13292,11 +14919,278 @@ def _cleanup_thread():
             time.sleep(600)
 
 
-# Worker starts after runtime initialization.
+threading.Thread(target=_cleanup_thread, daemon=True).start()
 
 
 def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
-    return _safe.credit_user(uid, amt, tx_id, lang, method, trusted_txid)
+    """
+    🛡 إضافة رصيد للمستخدم بشكل atomic.
+    trusted_txid: الـ tx_id فريد عالمياً (Bybit txID / hash بلوكشين) →
+      نعتمد عليه وحده ونتخطّى فحص (المبلغ+الوقت) الذي يعطي إيجابيات كاذبة.
+    """
+    # نحفظ النسخة الأصلية للعرض في الإشعارات
+    tx_id_original = str(tx_id).strip() if tx_id else ''
+    # 🛡 الخطوة 0: Validation حرجة!
+    try:
+        amt = float(amt)
+    except (ValueError, TypeError):
+        logger.error(f"❌ مبلغ غير صحيح في credit_user: {amt!r} للمستخدم {uid}")
+        return
+    
+    # 🛡 رفض المبالغ الصفر والسالبة (الحد الأدنى 0.10$)
+    if amt <= 0:
+        logger.error(f"🚨 محاولة إيداع بمبلغ صفر/سالب: amt={amt} للمستخدم {uid}")
+        try:
+            bot.send_message(uid, bil(uid, "❌ <b>المبلغ غير صالح.</b>", "❌ <b>Invalid amount.</b>"), parse_mode="HTML")
+        except: pass
+        return
+    
+    if amt < 0.10:
+        logger.warning(f"⚠️ مبلغ إيداع تحت الحد الأدنى: amt={amt} للمستخدم {uid}")
+        try:
+            bot.send_message(uid, f"❌ <b>المبلغ ${amt:.2f} أقل من الحد الأدنى ($0.10).</b>", parse_mode="HTML")
+        except: pass
+        return
+    
+    # 🛡 رفض المبالغ الضخمة المشبوهة (أكثر من $50,000 = خطأ بالتأكيد)
+    if amt > 50000:
+        logger.error(f"🚨 مبلغ ضخم مشبوه: amt={amt} للمستخدم {uid} - تم رفضه!")
+        try:
+            notify_admins(
+                f"🚨 <b>مبلغ ضخم مشبوه!</b>\n\n"
+                f"👤 المستخدم: <code>{uid}</code>\n"
+                f"💰 المبلغ: <b>${amt:.2f}</b>\n"
+                f"💳 الطريقة: {method}\n\n"
+                f"⚠️ تم رفض الإيداع تلقائياً. راجع يدوياً."
+            )
+        except: pass
+        try:
+            bot.send_message(uid, "❌ <b>المبلغ كبير جداً.</b>\n\nتواصل مع الإدارة.", parse_mode="HTML")
+        except: pass
+        return
+    
+    # 🛡 validation للـ tx_id
+    if not tx_id or len(str(tx_id).strip()) < 5:
+        logger.error(f"🚨 tx_id غير صحيح: {tx_id!r} للمستخدم {uid}")
+        return
+    
+    # 🛡 الخطوة 1: توحيد tx_id - يشيل 0x والأحرف الكبيرة والمسافات
+    tx_id_clean = normalize_tx_id(tx_id)
+    
+    # 🛡 رفض tx_id قصير جداً بعد التطبيع
+    if len(tx_id_clean) < 5:
+        logger.error(f"🚨 tx_id قصير بعد التطبيع: {tx_id_clean!r}")
+        return
+    
+    # 🛡 الخطوة 2: فحص duplicate شامل (3 طبقات)
+    # هذا يكتشف نفس الحوالة حتى لو الـ tx_id مختلف
+    current_time = int(time.time())
+    dup_check = check_duplicate_transaction(
+        uid=uid,
+        amount=amt,
+        method=method,
+        tx_timestamp=current_time,
+        tx_id_clean=tx_id_clean,
+        trusted_txid=trusted_txid
+    )
+    
+    if dup_check:
+        original_uid = dup_check.get('original_uid')
+        match_type = dup_check.get('match_type', 'unknown')
+        original_amount = float(dup_check.get('original_amount', 0))
+        
+        if original_uid != uid:
+            # 🚨 شخص آخر استخدم نفس الحوالة (بأي طريقة)
+            logger.warning(
+                f"🚨 DUPLICATE DETECTED ({match_type}): "
+                f"user {uid} حاول حوالة مستخدمة من user {original_uid}"
+            )
+            
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                try:
+                    punish_hash_collision_extended(
+                        original_uid, uid, tx_id_clean, original_amount, match_type
+                    )
+                except Exception as punish_err:
+                    logger.error(f"Failed extended punishment: {punish_err}")
+            else:
+                # الأصلي محظور بالفعل، نحظر الجديد
+                try:
+                    db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+                    notify_admins(
+                        f"🚨 <b>محاولة استخدام حوالة مستخدمة!</b>\n\n"
+                        f"👤 المهاجم: <code>{uid}</code>\n"
+                        f"🔍 نوع الكشف: <b>{match_type}</b>\n"
+                        f"💰 المبلغ: <b>${amt:.2f}</b>\n"
+                        f"🚫 تم حظره تلقائياً (الأصلي محظور بالفعل)"
+                    )
+                except: pass
+            
+            # رسالة للمستخدم
+            try:
+                bot.send_message(
+                    uid,
+                    "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                    "🚫 تم حظر حسابك بسبب محاولة استخدام حوالة مستخدمة بالفعل.\n\n"
+                    "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                    parse_mode="HTML"
+                )
+            except: pass
+            return
+        else:
+            # نفس المستخدم - يا إما أعاد المحاولة، يا إما الإيداع موجود
+            if dup_check.get('match_type') == 'tx_id':
+                try:
+                    bot.send_message(uid, "✅ <b>هذا الإيداع تم تأكيده بالفعل.</b>", parse_mode="HTML")
+                except: pass
+            return
+    
+    # 🛡 الخطوة 3: نحسب البصمة الفريدة للحوالة
+    tx_fingerprint = generate_tx_fingerprint(
+        amount=amt,
+        method=method,
+        tx_timestamp=current_time
+    )
+    
+    # 🛡 الخطوة 4: فحص duplicate صريح ثاني (احتياط)
+    existing_check = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+    if existing_check:
+        original_uid = existing_check.get('user_id')
+        if original_uid != uid:
+            original_amount = float(existing_check.get('amount', 0))
+            original_user = db.users.find_one({'user_id': original_uid})
+            if original_user and original_user.get('is_banned') != 1:
+                try:
+                    punish_hash_collision(original_uid, uid, tx_id_clean, original_amount)
+                except Exception as punish_err:
+                    logger.error(f"Failed punishment in pre-check: {punish_err}")
+        
+        try:
+            if lang == 'ar':
+                bot.send_message(
+                    uid,
+                    "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                    "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                    "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                    parse_mode="HTML"
+                )
+            else:
+                bot.send_message(
+                    uid,
+                    "❌ <b>Manipulation detected!</b>\n\n"
+                    "🚫 Your account has been banned.\n\n"
+                    "⚠️ <i>Contact admin if you believe this is a mistake.</i>",
+                    parse_mode="HTML"
+                )
+        except Exception: pass
+        return
+    
+    # 🛡 الخطوة 5: محاولة atomic insert (الـ unique index يحمي من race condition)
+    try:
+        db.used_transactions.insert_one({
+            'transaction_id': tx_id_clean,
+            'fingerprint': tx_fingerprint,
+            'amount': amt,
+            'user_id': uid,
+            'method': method,
+            'created_at': int(time.time())
+        })
+    except Exception as insert_err:
+        err_str = str(insert_err).lower()
+        if 'duplicate' in err_str or 'e11000' in err_str:
+            # ❌ duplicate - race condition محل بالـ index
+            logger.warning(
+                f"🚨 RACE CONDITION CAUGHT: "
+                f"user {uid} حاول tx {tx_id_clean[:30]} لكن سبقه آخر"
+            )
+            
+            # نشوف من الأول
+            existing = db.used_transactions.find_one({
+                '$or': [
+                    {'transaction_id': tx_id_clean},
+                    {'fingerprint': tx_fingerprint}
+                ]
+            })
+            if existing:
+                original_uid = existing.get('user_id')
+                if original_uid != uid:
+                    original_amount = float(existing.get('amount', 0))
+                    original_user = db.users.find_one({'user_id': original_uid})
+                    if original_user and original_user.get('is_banned') != 1:
+                        try:
+                            punish_hash_collision_extended(
+                                original_uid, uid, tx_id_clean, original_amount, 'race_condition'
+                            )
+                        except Exception as punish_err:
+                            logger.error(f"Failed punishment: {punish_err}")
+            
+            # رسالة الإلغاء
+            try:
+                if lang == 'ar':
+                    bot.send_message(
+                        uid,
+                        "❌ <b>تم اكتشاف تلاعب!</b>\n\n"
+                        "🚫 تم حظر حسابك بسبب محاولة استخدام نفس الحوالة مع حساب آخر.\n\n"
+                        "⚠️ <i>أنت قمت بتلاعب - تواصل مع الإدارة لو تعتقد أن هذا خطأ.</i>",
+                        parse_mode="HTML"
+                    )
+                else:
+                    bot.send_message(
+                        uid,
+                        "❌ <b>Manipulation detected!</b>\n\n"
+                        "🚫 Your account has been banned.\n\n"
+                        "⚠️ <i>Contact admin if you believe this is a mistake.</i>",
+                        parse_mode="HTML"
+                    )
+            except Exception: pass
+            return  # ⛔ ما نضيف رصيد
+        else:
+            logger.error(f"Failed to insert tx: {insert_err}")
+            try:
+                bot.send_message(
+                    uid,
+                    bil(uid, "❌ <b>حدث خطأ في معالجة الإيداع.</b>\n\nيرجى التواصل مع الإدارة.", "❌ <b>Error processing deposit.</b>\n\nPlease contact admin."),
+                    parse_mode="HTML"
+                )
+            except: pass
+            return
+    
+    # ✅ الخطوة 4: نجح الـ insert - نضيف الرصيد
+    db.users.update_one({'user_id': uid}, {'$inc': {'balance': amt}})
+    
+    # 🛡 نظف الـ claimed_hashes بعد نجاح الإيداع
+    try:
+        db.claimed_hashes.delete_one({'transaction_id': tx_id_clean})
+    except Exception:
+        pass
+    
+    bot.send_message(uid, get_text(uid, 'dep_success', amt), parse_mode="HTML")
+    
+    u = get_user_data_full(uid)
+    buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
+    
+    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id_original}</code>"
+    notify_admins(admin_msg)
+    
+    log_ch = get_setting('log_channel')
+    if log_ch and log_ch != "Not Set":
+        obs_user = obscure_text(u.get('username') or str(uid))
+        try: 
+            # 🔔 النص الافتراضي للإيداع
+            pub_msg = LANG['en']['log_deposit'].format(obs_user, f"{amt:.2f}", method)
+            
+            # شيك على النص المخصص من CMS
+            custom_dep = db.custom_texts.find_one({'lang': 'en', 'key': 'log_deposit'})
+            if custom_dep and custom_dep.get('value'):
+                try:
+                    pub_msg = custom_dep['value'].format(obs_user, f"{amt:.2f}", method)
+                except:
+                    pass
+            
+            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+        except Exception as log_err: 
+            logger.debug(f"Log channel deposit error: {log_err}")
 
 # ============================================================
 # 👑 14. لوحة الإدارة ونظام التقارير 
@@ -13478,7 +15372,7 @@ def ad_ref_save_reward(message):
         return
     
     try:
-        value = finite_float(message.text.strip().replace('$', '').replace(',', '.'))
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
         if value < 0.01:
             bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.01.")
             return
@@ -13537,7 +15431,7 @@ def ad_ref_save_purchase_reward(message):
         return
     
     try:
-        value = finite_float(message.text.strip().replace('$', '').replace(',', '.'))
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
         if value < 0.01:
             bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.01.")
             return
@@ -13587,7 +15481,7 @@ def ad_ref_save_min_purchase(message):
         return
     
     try:
-        value = finite_float(message.text.strip().replace('$', '').replace(',', '.'))
+        value = float(message.text.strip().replace('$', '').replace(',', '.'))
         if value < 0.10:
             bot.send_message(message.chat.id, "❌ الحد الأدنى هو $0.10.")
             return
@@ -13658,7 +15552,7 @@ def fix_referrals_cmd(message):
 
             raw = user.get('ref_v2_earned', 0.0)
             try:
-                current = round(finite_float(raw), 2)
+                current = round(float(raw), 2)
             except:
                 current = 0.0
 
@@ -13734,7 +15628,7 @@ def fix_innocent_bans_cmd(message):
         # نجمع IDs
         original_id = attempt.get('original_user_id') or attempt.get('original_claimer')
         thief_id = attempt.get('thief_user_id') or attempt.get('thief_attempt')
-        seized = finite_float(attempt.get('seized_balance', 0))
+        seized = float(attempt.get('seized_balance', 0))
         
         for victim_id in [original_id, thief_id]:
             if not victim_id:
@@ -13875,7 +15769,7 @@ def _ext_extract_fields(p):
     stock = _ext_deep_get(p, ['stock', 'stock_count', 'quantity', 'qty', 'available_qty',
                               'inventory', 'stockCount', 'in_stock_count', 'count'], 0)
     try:
-        stock = int(finite_float(stock))
+        stock = int(float(stock))
     except Exception:
         stock = 0
     # التوفّr
@@ -13904,11 +15798,11 @@ def _ext_extract_fields(p):
     # الرمز العادي
     emoji_char = _ext_deep_get(p, ['emoji', 'icon', 'emoji_char'], '') or ''
     try:
-        sell_f = finite_float(sell_price or 0)
+        sell_f = float(sell_price or 0)
     except Exception:
         sell_f = 0.0
     try:
-        cost_f = finite_float(cost_price or 0)
+        cost_f = float(cost_price or 0)
     except Exception:
         cost_f = sell_f
     return {
@@ -13991,7 +15885,7 @@ def _ext_api_get(store, path):
     # المسارات المحتملة للـ prefix
     if '/api/v1' in base or '/shop-api/v1' in base:
         prefixes = ['']  # المستخدم كتبه كاملاً
-    elif 'api_prefix' in store:
+    elif store.get('api_prefix'):
         prefixes = [store['api_prefix']]  # مكتشف مسبقاً
     else:
         # نجرّب كل المسارات الشائعة للـ prefix
@@ -14003,7 +15897,7 @@ def _ext_api_get(store, path):
             r = requests.get(url, headers=_ext_api_headers(store), timeout=15)
             if r.status_code == 200:
                 # نحفظ الـ prefix الناجح للمرات القادمة
-                if 'api_prefix' not in store:
+                if prefix and not store.get('api_prefix'):
                     try:
                         db.ext_stores.update_one({'_id': store['_id']},
                                                  {'$set': {'api_prefix': prefix}})
@@ -14013,22 +15907,49 @@ def _ext_api_get(store, path):
                 return r.json()
             if r.status_code != 404:
                 logger.warning(f"[EXT_API] GET {path} → {r.status_code}")
-                return None
         except Exception as e:
-            logger.debug(f"[EXT_API] GET failed: {type(e).__name__}")
-            return None
+            logger.debug(f"[EXT_API] GET err: {e}")
     return None
 
 
 def _ext_api_post(store, path, body, idem_key=None):
-    return _safe.ext_post(store,path,body,idem_key)
+    """POST لمتجر API خارجي (طلب) — يستخdم الـ prefix المكتشف. يرجّع (ok, json|error_str)."""
+    base = str(store.get('base_url', '')).rstrip('/')
+    if '/api/v1' in base or '/shop-api/v1' in base:
+        prefixes = ['']
+    elif store.get('api_prefix'):
+        prefixes = [store['api_prefix']]
+    else:
+        prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api',
+                    '/store-api/v1', '/reseller/v1', '']
+    headers = _ext_api_headers(store)
+    if idem_key:
+        headers['Idempotency-Key'] = idem_key
+    last_err = "unknown"
+    for prefix in prefixes:
+        url = f"{base}{prefix}{path}"
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=25)
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            if r.status_code in (200, 201):
+                return True, data
+            if r.status_code == 404:
+                last_err = "404"
+                continue  # نجرّب prefix آخر
+            return False, str(data or r.status_code)
+        except Exception as e:
+            last_err = str(e)
+    return False, last_err
 
 
 def _ext_compute_sell_price(base_price, markup_type, markup_value):
     """يحسب سعر البيع حسب نوع التسعير."""
     try:
-        bp = finite_float(base_price or 0)
-        mv = finite_float(markup_value or 0)
+        bp = float(base_price or 0)
+        mv = float(markup_value or 0)
         if markup_type == 'percent':
             return round(bp * (1 + mv / 100.0), 2)
         if markup_type == 'fixed':
@@ -14037,7 +15958,7 @@ def _ext_compute_sell_price(base_price, markup_type, markup_value):
             return round(mv, 2)  # السعر اليدوي هو القيمة نفسها
     except Exception:
         pass
-    return round(finite_float(base_price or 0), 2)
+    return round(float(base_price or 0), 2)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ext_api_main")
@@ -14184,12 +16105,12 @@ def ext_add_new_product(call):
     # 🆕 يرث نسبة المتجر الافتراضية
     _def_mt = store.get('default_markup_type', 'percent') if isinstance(store, dict) else 'percent'
     _def_mv = store.get('default_markup_value', 0) if isinstance(store, dict) else 0
-    _cost0 = finite_float(cost_price or base_price or 0)
+    _cost0 = float(cost_price or base_price or 0)
     _sell0 = _ext_compute_sell_price(_cost0, _def_mt, _def_mv)
     doc = {
         'store_id': sid, 'ext_id': ext_id, 'name': name,
         'desc': desc, 'desc_text': p.get('description_text', ''),
-        'base_price': finite_float(base_price or 0), 'cost_price': finite_float(cost_price or 0),
+        'base_price': float(base_price or 0), 'cost_price': float(cost_price or 0),
         'emoji_id': emoji_id, 'emoji_char': emoji_char, 'stock': stock,
         'markup_type': _def_mt, 'markup_value': _def_mv,
         'sell_price': _sell0, 'hidden': False, 'raw': p,
@@ -14201,11 +16122,18 @@ def ext_add_new_product(call):
         _emit_event('product.created', {
             'product_id': f"ext_{res.inserted_id}",
             'name_ar': name, 'name_en': name,
-            'price': finite_float(base_price or 0),
+            'price': float(base_price or 0),
             'is_manual': False, 'is_hidden': False, 'stock': stock,
             'description': desc, 'emoji': emoji_char, 'emoji_custom_id': emoji_id,
             'source': 'external_api',
         }, product_id=f"ext_{res.inserted_id}")
+    except Exception:
+        pass
+    # 📢 برودكاست للمستخدمين (رسالة "منتج جديد" مثل المنتج العادي)
+    try:
+        _new_ep = db.ext_products.find_one({'_id': res.inserted_id})
+        threading.Thread(target=_ext_broadcast_new_product,
+                         args=(_new_ep,), daemon=True).start()
     except Exception:
         pass
     try:
@@ -14275,16 +16203,112 @@ def ext_raw_preview(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_sync_"))
 @admin_required
 def ext_sync_products(call):
-# [merged]     from operations import product_list
-    bot.answer_callback_query(call.id, '🔄 جاري التحديث...')
-    sid = call.data.removeprefix('ext_sync_')
-    store = db.ext_stores.find_one({'_id': ObjectId(sid)})
-    if not store: raise ShopError('المتجر غير موجود.')
-    products = product_list(_ext_api_get(store, '/products'))
-    if products is None: raise ShopError('تعذر قراءة المنتجات؛ احتُفظ بالمخزون السابق.')
-    with _ops.sync_lock:
-        _ops.sync_products(sid, products)
-    bot.send_message(call.from_user.id, '✅ تم تحديث الأسعار والمخزون بصمت. تنبيهات عودة التوفر تدخل الملخص المجمع.')
+    """يجلب المنتجات من API الخارجي ويسجّلها/يحدّثها."""
+    try: bot.answer_callback_query(call.id, "🔄 جاري الجلب...")
+    except Exception: pass
+    sid = call.data.replace("ext_sync_", "")
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+    except Exception:
+        store = None
+    if not store:
+        bot.send_message(call.message.chat.id, "❌ المتجر غير موجود.")
+        return
+    data = _ext_api_get(store, '/products')
+    # الرد قد يكون {'products': [...]} أو قائمة مباشرة
+    prods = _ext_parse_products(data)
+    if not prods:
+        bot.send_message(call.message.chat.id,
+            "⚠️ لم أجلب منتجات (تأكد من الـ URL والمفتاح، أو أن endpoint /api/v1/products يعمل).")
+        return
+    added, updated = 0, 0
+    _seen_manual = set()
+    for p in prods:
+        ext_id = str(p.get('id', p.get('product_id', '')))
+        if not ext_id:
+            continue
+        _seen_manual.add(ext_id)
+        # استخراج موحّd يدعم كل تنسيقات المتاجر
+        _f = _ext_extract_fields(p)
+        base_price = _f['sell_price']   # سعري الحالي في المتجر
+        cost_price = _f['cost_price']   # ما يُخصم مني فعلياً
+        name = _f['name']
+        desc = _f['desc']
+        desc_text = _f['desc_text']
+        emoji_id = _f['emoji_id']
+        emoji_char = _f['emoji_char']
+        stock = _f['stock']
+        existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+        doc = {
+            'store_id': sid, 'ext_id': ext_id,
+            'name': name,
+            'desc': desc,
+            'desc_text': desc_text,
+            'desc_en_html': desc, 'desc_ar_html': desc,
+            'base_price': float(base_price or 0),
+            'cost_price': float(cost_price or 0),
+            'emoji_id': emoji_id,
+            'emoji_char': emoji_char,
+            'stock': stock,
+            'raw': p,
+        }
+        if existing:
+            # نحافظ على الرمز المعيّن يدوياً لو الـ API لا يعطي رمزاً
+            if not doc.get('emoji_id') and existing.get('emoji_id'):
+                doc['emoji_id'] = existing['emoji_id']
+            # نحدّث السعر الأساسي والبيانات، نُبقي التسعير والإخفاء
+            db.ext_products.update_one({'_id': existing['_id']}, {'$set': doc})
+            # نعيد حساب سعر البيع لو التسعير نسبة/ثابت
+            mt = existing.get('markup_type', 'percent')
+            if mt in ('percent', 'fixed'):
+                sp = _ext_compute_sell_price(doc['base_price'], mt, existing.get('markup_value', 0))
+                db.ext_products.update_one({'_id': existing['_id']}, {'$set': {'sell_price': sp}})
+            updated += 1
+            # 🔔 بثّ حدث تحديث للمطوّرين (كأنه منتج عادي) — للمنتجات الظاهرة فقط
+            if not existing.get('hidden'):
+                old_stock = existing.get('stock', 0) or 0
+                new_stock = stock or 0
+                try:
+                    _emit_event('product.updated', {
+                        'source': 'external_api', 'store_id': sid,
+                        'product_id': f"ext_{existing['_id']}",
+                        'name_ar': name, 'name_en': name,
+                        'price': doc.get('base_price'),
+                        'description': desc, 'stock': new_stock,
+                        'is_manual': False, 'is_hidden': False,
+                    }, product_id=f"ext_{existing['_id']}")
+                    # لو توفّر ستوك جديد (كان 0 وصار أكثر) → بثّ stock.added
+                    if old_stock <= 0 and new_stock > 0:
+                        _emit_event('stock.added', {
+                            'source': 'external_api',
+                            'product_id': f"ext_{existing['_id']}",
+                            'name_ar': name, 'name_en': name,
+                            'price': doc.get('base_price'),
+                            'stock': new_stock, 'added': new_stock,
+                        }, product_id=f"ext_{existing['_id']}")
+                except Exception:
+                    pass
+        else:
+            # ♻️ هذا زر "تحديث فقط" — لا نضيف منتجات جديدة تلقائياً.
+            #    المنتجات الجديدة تُضاف عبر "جلب واختيار المنتجات" فقط.
+            continue
+
+    # 🔴 المنتجات المضافة لكن غير موجودة في الرد = نفدت → نصفّر ستوكها
+    zeroed = 0
+    try:
+        for ep in db.ext_products.find({'store_id': sid}):
+            if str(ep.get('ext_id', '')) not in _seen_manual:
+                if (ep.get('stock', 0) or 0) != 0:
+                    db.ext_products.update_one({'_id': ep['_id']}, {'$set': {'stock': 0}})
+                    zeroed += 1
+    except Exception:
+        pass
+
+    bot.send_message(call.message.chat.id,
+        f"♻️ <b>تم تحديث الأسعار والمخزون</b>\n"
+        f"🔄 محدّث: {updated}\n🔴 نفد: {zeroed}\n\n"
+        f"<i>لإضافة منتجات جديدة، استخدم «🔄 جلب واختيار المنتجات».</i>",
+        parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_pick_"))
@@ -14564,9 +16588,9 @@ def ext_product_detail(call):
         f"{icon_prefix}<b>{name_disp}</b>\n\n"
         f"{emoji_line}"
         f"📝 {desc_disp}\n\n"
-        f"💵 سعر API الأصلي: <b>${finite_float(p.get('base_price',0)):.2f}</b>\n"
+        f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
         f"🏷 التسعير: {mt_label}\n"
-        f"💰 سعر البيع: <b>${finite_float(p.get('sell_price',0)):.2f}</b>\n"
+        f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
         f"📊 المخزون: <b>{p.get('stock', 0)}</b>\n"
         f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}\n\n"
         f"🔗 <b>رابط المنتج:</b>\n<code>{link}</code>"
@@ -14664,7 +16688,7 @@ def _ext_save_price(message, pid, ptype):
     if not message.text:
         return
     try:
-        val = finite_float(message.text.strip().replace('%', '').replace('$', ''))
+        val = float(message.text.strip().replace('%', '').replace('$', ''))
     except Exception:
         bot.send_message(message.chat.id, "❌ قيمة غير صالحة. أرسل رقماً.")
         return
@@ -14676,12 +16700,29 @@ def _ext_save_price(message, pid, ptype):
         bot.send_message(message.chat.id, "❌ المنتج غير موجود.")
         return
     _cost = p.get('cost_price', p.get('base_price', 0))
-    old_sell = finite_float(p.get('sell_price', 0))
+    old_sell = float(p.get('sell_price', 0))
     sell = _ext_compute_sell_price(_cost, ptype, val)
     db.ext_products.update_one({'_id': p['_id']},
         {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
+    # 📢 لو انخفض السعر → برودكاست تخفيض للمستخدمين + إشعار المطوّرين
+    if old_sell > 0 and sell < old_sell and not p.get('hidden'):
+        try:
+            threading.Thread(target=_ext_broadcast_price_drop,
+                             args=(p, old_sell, sell), daemon=True).start()
+        except Exception:
+            pass
+        try:
+            _emit_event('product.updated', {
+                'source': 'external_api', 'product_id': f"ext_{pid}",
+                'name_ar': p.get('name', ''), 'name_en': p.get('name', ''),
+                'price': sell, 'old_price': old_sell,
+                'is_manual': False, 'is_hidden': False,
+                'stock': p.get('stock', 0),
+            }, product_id=f"ext_{pid}")
+        except Exception:
+            pass
     bot.send_message(message.chat.id,
-        f"✅ تم التسعير!\n💵 سعر API: ${finite_float(p.get('base_price',0)):.2f}\n"
+        f"✅ تم التسعير!\n💵 سعر API: ${float(p.get('base_price',0)):.2f}\n"
         f"💰 سعر البيع: <b>${sell:.2f}</b>", parse_mode="HTML")
 
 
@@ -14821,7 +16862,7 @@ def ext_view_orders(call):
 
 def _ext_send_product_view(chat_id, uid, ep, l):
     """يعرض منتج API كرسالة جديدة (للـ deeplink)."""
-    price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
     name = str(ep.get('name', ''))
     desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
     def _is_html(s):
@@ -14874,7 +16915,7 @@ def ext_customer_view(call):
         except Exception: pass
         return
     l = get_lang(uid)
-    price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
     name = str(ep.get('name', ''))
     # الوصف: desc (HTML آمن من الدوكس) — يُعرض كما هو
     desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
@@ -14936,7 +16977,7 @@ def ext_customer_qty(call):
         bot.send_message(uid, "❌ غير متاح.")
         return
     l = get_lang(uid)
-    price = finite_float(ep.get('sell_price', ep.get('base_price', 0)))
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
     stock = ep.get('stock', 0)
     # لو نفد المنتج، نمنع الشراء (السلوك مثل المنتج العادي)
     if not stock or stock <= 0:
@@ -14965,12 +17006,262 @@ def ext_customer_qty(call):
 
 
 def _ext_execute_buy(message, epid, lang):
-    return _safe.ext_buy_message(message,epid,lang)
+    """ينفّذ شراء منتج API بالكمية، يخصم الرصيد، يطلب من API، يسلّم ملفاً."""
+    uid = message.from_user.id
+    if is_user_banned(uid):
+        return
+    l = lang
+    try:
+        qty = int(str(message.text).strip())
+        if qty <= 0:
+            raise ValueError()
+    except Exception:
+        bot.send_message(uid, "❌ كمية غير صالحة. أرسل رقماً صحيحاً." if l != 'en'
+                         else "❌ Invalid quantity. Send a whole number.")
+        return
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        bot.send_message(uid, "❌ المنتج لم يعد متاحاً.")
+        return
+
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    stock = ep.get('stock', 0)
+    if stock and qty > stock:
+        bot.send_message(uid, (f"❌ المتوفر فقط {stock} قطعة!" if l != 'en'
+                               else f"❌ Only {stock} in stock!"))
+        return
+    total = round(price * qty, 2)
+
+    # خصم الرصيد ذرّياً
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': total}},
+        {'$inc': {'balance': -total}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ. اشحن رصيدك أولاً." if l != 'en'
+                         else "❌ Insufficient balance. Please top up.")
+        return
+    _invalidate_user_cache(uid)
+
+    store = None
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
+    except Exception:
+        pass
+    if not store:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': total}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ المتجر غير متاح. أُعيد رصيدك.")
+        return
+
+    bot.send_message(uid, "⏳ جاري تنفيذ طلبك..." if l != 'en' else "⏳ Processing your order...")
+
+    idem = f"tg{uid}_{epid}_{int(time.time())}_{random.randint(1000,9999)}"
+    body = {'product_id': _ext_int_or_str(ep.get('ext_id')), 'quantity': qty}
+    ok, resp = _ext_api_post(store, '/orders', body, idem_key=idem)
+
+    order_rec = {
+        'store_id': ep.get('store_id', ''), 'ext_product_id': epid,
+        'user_id': uid, 'product_name': ep.get('name', ''),
+        'price': total, 'quantity': qty, 'created_at': int(time.time()),
+        'idempotency_key': idem,
+    }
+
+    if not ok:
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': total}})
+        _invalidate_user_cache(uid)
+        order_rec['status'] = 'failed'
+        order_rec['error'] = str(resp)[:300]
+        try: db.ext_orders.insert_one(order_rec)
+        except Exception: pass
+        bot.send_message(uid,
+            ("❌ تعذّر تنفيذ الطلب من المتجر. أُعيد رصيدك بالكامل." if l != 'en' else
+             "❌ Order failed at the store. Your balance was fully refunded."))
+        try:
+            for admin in db.users.find({'is_admin': 1}):
+                bot.send_message(admin['user_id'],
+                    f"⚠️ فشل طلب API:\nuser {uid} — {ep.get('name','')} ×{qty}\nالسبب: {str(resp)[:200]}")
+        except Exception:
+            pass
+        return
+
+    codes = _ext_extract_codes(resp)
+    _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
+    order_rec['status'] = 'success'
+    order_rec['ext_order_id'] = str(_order_obj.get('id', ''))
+    order_rec['codes'] = codes
+    try: db.ext_orders.insert_one(order_rec)
+    except Exception: pass
+
+    pname = str(ep.get('name', ''))
+
+    # 🔔 إشعار البيع للأدمن + لوق القناة (مثل المنتج العادي تماماً)
+    try:
+        u_data = get_user_data_full(uid) or {}
+        buyer_m = u_data.get('name') or u_data.get('username') or str(uid)
+        notify_admins(
+            f"🛒 <b>بيع منتج (API)</b>\n"
+            f"👤 {html.escape(str(buyer_m))} (<code>{uid}</code>)\n"
+            f"📦 {html.escape(pname)}\n"
+            f"🔢 الكمية: {qty}\n💰 ${total:.2f}\n"
+            f"🆔 <code>{order_rec.get('ext_order_id','')}</code>"
+        )
+    except Exception as _ne:
+        logger.debug(f"ext sale admin notify err: {_ne}")
+    # لوق القناة العامة
+    try:
+        log_ch = get_setting('log_channel')
+        if log_ch and log_ch != "Not Set":
+            obs_user = obscure_text((get_user_data_full(uid) or {}).get('username') or str(uid))
+            p_name_log = f"📦 <b>{html.escape(clean_name(pname))}</b>"
+            pub_msg = LANG['en']['log_purchase'].format(obs_user, p_name_log, qty)
+            custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
+            if custom_pub and custom_pub.get('value'):
+                try: pub_msg = custom_pub['value'].format(obs_user, p_name_log, qty)
+                except Exception: pass
+            bot.send_message(log_ch, pub_msg, parse_mode="HTML")
+    except Exception as _le:
+        logger.debug(f"ext sale channel log err: {_le}")
+
+    # 🎁 مكافأة الإحالة على الشراء (مثل المنتج العادي)
+    try:
+        award_purchase_referral_reward(uid, pname, total)
+    except Exception:
+        pass
+
+    if codes:
+        import io
+        content = "\n".join(str(c) for c in codes)
+        f = io.BytesIO(content.encode('utf-8'))
+        f.name = f"order_{qty}x.txt"
+        caption = (
+            (f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 <b>{html.escape(pname)}</b>\n"
+             f"🔢 الكمية: <b>{qty}</b>\n💰 المدفوع: <b>${total:.2f}</b>\n\n"
+             f"🔑 الأكواد في الملف المرفق ⬆️") if l != 'en' else
+            (f"✅ <b>Purchase successful!</b>\n\n📦 <b>{html.escape(pname)}</b>\n"
+             f"🔢 Quantity: <b>{qty}</b>\n💰 Paid: <b>${total:.2f}</b>\n\n"
+             f"🔑 Codes in the attached file ⬆️"))
+        try:
+            bot.send_document(uid, f, caption=caption, parse_mode="HTML")
+        except Exception:
+            codes_txt = "\n".join(f"<code>{html.escape(str(c))}</code>" for c in codes)
+            bot.send_message(uid, f"{caption}\n\n{codes_txt}", parse_mode="HTML")
+    else:
+        bot.send_message(uid,
+            (f"✅ <b>تم تنفيذ الطلب!</b>\n\nرقم الطلب: <code>{order_rec.get('ext_order_id','')}</code>") if l != 'en' else
+            (f"✅ <b>Order placed!</b>\n\nOrder ID: <code>{order_rec.get('ext_order_id','')}</code>"),
+            parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buyext_"))
 def ext_customer_buy(call):
-    return _safe.ext_buy_callback(call)
+    """يشتري الزبون منتج API: يخصم الرصيد، يطلب من API الخارجي، يسلّم الكود."""
+    uid = call.from_user.id
+    if is_user_banned(uid):
+        return
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    epid = call.data.replace("buyext_", "")
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(epid)})
+    except Exception:
+        ep = None
+    if not ep or ep.get('hidden'):
+        bot.send_message(uid, "❌ المنتج غير متاح.")
+        return
+    l = get_lang(uid)
+    price = float(ep.get('sell_price', ep.get('base_price', 0)))
+    if price <= 0:
+        bot.send_message(uid, "❌ سعر غير صالح.")
+        return
+
+    # 1) خصم الرصيد ذرياً (يمنع الشراء لو الرصيد غير كافٍ)
+    updated = db.users.find_one_and_update(
+        {'user_id': uid, 'balance': {'$gte': price}},
+        {'$inc': {'balance': -price}}, return_document=True)
+    if not updated:
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ رصيدك غير كافٍ. اشحن رصيدك أولاً." if l != 'en'
+                         else "❌ Insufficient balance. Please top up.")
+        return
+    _invalidate_user_cache(uid)
+
+    store = None
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
+    except Exception:
+        pass
+    if not store:
+        # نرجّع الرصيد
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        bot.send_message(uid, "❌ المتجر غير متاح. أُعيد رصيدك.")
+        return
+
+    bot.send_message(uid, "⏳ جاري تنفيذ طلبك..." if l != 'en' else "⏳ Processing your order...")
+
+    # 2) الطلب التلقائي من API الخارجي (مع Idempotency-Key لمنع الشحن المزدوج)
+    idem = f"tg{uid}_{epid}_{int(time.time())}_{random.randint(1000,9999)}"
+    body = {'product_id': _ext_int_or_str(ep.get('ext_id')), 'quantity': 1}
+    ok, resp = _ext_api_post(store, '/orders', body, idem_key=idem)
+
+    order_rec = {
+        'store_id': ep.get('store_id', ''), 'ext_product_id': epid,
+        'user_id': uid, 'product_name': ep.get('name', ''),
+        'price': price, 'created_at': int(time.time()),
+        'idempotency_key': idem,
+    }
+
+    if not ok:
+        # فشل الطلب → نرجّع الرصيد
+        db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+        _invalidate_user_cache(uid)
+        order_rec['status'] = 'failed'
+        order_rec['error'] = str(resp)[:300]
+        try: db.ext_orders.insert_one(order_rec)
+        except Exception: pass
+        bot.send_message(uid,
+            ("❌ تعذّر تنفيذ الطلب من المتجر. أُعيد رصيدك بالكامل.\n"
+             "حاول لاحقاً أو تواصل مع الدعم.") if l != 'en' else
+            ("❌ Order failed at the store. Your balance was fully refunded.\n"
+             "Please try again later or contact support."))
+        # ننبّه الأدمن
+        try:
+            for admin in db.users.find({'is_admin': 1}):
+                bot.send_message(admin['user_id'],
+                    f"⚠️ فشل طلب API:\nuser {uid} — {ep.get('name','')}\nالسبب: {str(resp)[:200]}")
+        except Exception:
+            pass
+        return
+
+    # 3) استخراج الأكواد من الرد وتسليمها
+    codes = _ext_extract_codes(resp)
+    order_rec['status'] = 'success'
+    _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
+    order_rec['ext_order_id'] = str(_order_obj.get('id', resp.get('order_id', resp.get('id', '')))) if isinstance(resp, dict) else ''
+    order_rec['codes'] = codes
+    try: db.ext_orders.insert_one(order_rec)
+    except Exception: pass
+
+    if codes:
+        codes_txt = "\n".join(f"<code>{html.escape(str(c))}</code>" for c in codes)
+        bot.send_message(uid,
+            (f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 <b>{html.escape(str(ep.get('name','')))}</b>\n\n"
+             f"🔑 <b>الكود:</b>\n{codes_txt}\n\n💰 خُصم: ${price:.2f}") if l != 'en' else
+            (f"✅ <b>Purchase successful!</b>\n\n📦 <b>{html.escape(str(ep.get('name','')))}</b>\n\n"
+             f"🔑 <b>Code:</b>\n{codes_txt}\n\n💰 Charged: ${price:.2f}"),
+            parse_mode="HTML")
+    else:
+        # نجح الطلب لكن ما استخرجنا كوداً واضحاً — نعرض الرد ونُبقي الخصم
+        bot.send_message(uid,
+            (f"✅ <b>تم تنفيذ الطلب!</b>\n\nرقم الطلب: <code>{order_rec.get('ext_order_id','')}</code>\n"
+             f"إذا لم تصلك التفاصيل، تواصل مع الدعم برقم الطلب.") if l != 'en' else
+            (f"✅ <b>Order placed!</b>\n\nOrder ID: <code>{order_rec.get('ext_order_id','')}</code>\n"
+             f"If you didn't receive details, contact support with this ID."),
+            parse_mode="HTML")
 
 
 def _ext_int_or_str(v):
@@ -15066,7 +17357,7 @@ def _ext_bulk_apply(message, sid, ptype):
     if not message.text:
         return
     try:
-        val = finite_float(message.text.strip().replace('%', '').replace('$', ''))
+        val = float(message.text.strip().replace('%', '').replace('$', ''))
     except Exception:
         bot.send_message(message.chat.id, "❌ قيمة غير صالحة. أرسل رقماً.")
         return
@@ -15074,7 +17365,7 @@ def _ext_bulk_apply(message, sid, ptype):
     count = 0
     for ep in prods:
         # نسعّر على أساس التكلفة (cost_price) لضمان الربح فوق ما يُخصم فعلاً
-        cost = finite_float(ep.get('cost_price', ep.get('base_price', 0)))
+        cost = float(ep.get('cost_price', ep.get('base_price', 0)))
         sell = _ext_compute_sell_price(cost, ptype, val)
         db.ext_products.update_one({'_id': ep['_id']},
             {'$set': {'markup_type': ptype, 'markup_value': val, 'sell_price': sell}})
@@ -15118,7 +17409,7 @@ def ext_check_balance(call):
         bal = data.get('balance', data.get('wallet', data.get('amount')))
     lines = [f"💰 <b>رصيدك في {html.escape(store.get('name',''))}:</b>\n"]
     if bal is not None:
-        lines.append(f"<b>${finite_float(bal):.2f} USDT</b>\n")
+        lines.append(f"<b>${float(bal):.2f} USDT</b>\n")
     # السجل الأخير لو موجود
     ledger = data.get('ledger') or data.get('recent') or [] if isinstance(data, dict) else []
     if ledger:
@@ -15645,7 +17936,7 @@ def _admin_search_ltc_tx(query):
             received = 0.0
             for vout in data.get("vout", []):
                 if vout.get("scriptpubkey_address") == wallet_address:
-                    received += finite_float(vout.get("value", 0)) / 100000000.0
+                    received += float(vout.get("value", 0)) / 100000000.0
             if received > 0:
                 return {
                     'received_ltc': received,
@@ -15667,7 +17958,7 @@ def _admin_search_ltc_tx(query):
             received = 0.0
             for output in data2.get("outputs", []):
                 if wallet_address in output.get("addresses", []):
-                    received += finite_float(output.get("value", 0)) / 100000000.0
+                    received += float(output.get("value", 0)) / 100000000.0
             if received > 0:
                 return {
                     'received_ltc': received,
@@ -15944,7 +18235,7 @@ def ad_check_tx_handle(message):
             pending_credit_id = f"pc_{int(time.time())}_{order_id[-10:]}"
             # نحفظ المبلغ بالكريبتو والعملة عشان لو فشل السعر نعيد الحساب وقت الإضافة
             try:
-                _crypto_amount = finite_float(binance_match.get('amount') or 0)
+                _crypto_amount = float(binance_match.get('amount') or 0)
             except Exception:
                 _crypto_amount = 0.0
             _crypto_amount = abs(_crypto_amount)
@@ -16206,7 +18497,7 @@ def ad_check_tx_handle(message):
                 first_name = user_doc.get('first_name', '') or ''
 
             # نجيب رصيده الحالي
-            user_balance = finite_float(user_doc.get('balance', 0)) if user_doc else 0
+            user_balance = float(user_doc.get('balance', 0)) if user_doc else 0
 
             # 🆕 رابط قابل للضغط حتى لو ما عنده يوزر (tg://user?id=...)
             display_name = first_name or username or str(user_id)
@@ -16222,7 +18513,7 @@ def ad_check_tx_handle(message):
             if username:
                 detail += f"\n📱 <b>Username:</b> <a href=\"https://t.me/{html.escape(username)}\">@{html.escape(username)}</a>"
             detail += (
-                f"\n💰 <b>المبلغ:</b> <b>${finite_float(amount):.4f}</b>\n"
+                f"\n💰 <b>المبلغ:</b> <b>${float(amount):.4f}</b>\n"
                 f"💼 <b>الرصيد الحالي:</b> <b>${user_balance:.2f}</b>\n"
                 f"🔄 <b>الطريقة:</b> {html.escape(str(method))}\n"
                 f"📅 <b>الوقت:</b> {str(used_at)[:19]}"
@@ -16253,7 +18544,7 @@ def credit_pending_handler(call):
 
     msg = bot.send_message(
         call.message.chat.id,
-        f"💰 <b>إضافة ${finite_float(pending['amount']):.4f}</b>\n\n"
+        f"💰 <b>إضافة ${float(pending['amount']):.4f}</b>\n\n"
         f"أرسل <b>User ID</b> (رقم) أو <b>@username</b> للمستخدم اللي يستلم المبلغ:\n\n"
         f"❌ للإلغاء: <b>الغاء</b>",
         parse_mode="HTML"
@@ -16312,14 +18603,14 @@ def credit_pending_exec(message, pending_id):
         bot.send_message(uid, f"❌ المستخدم <code>{target_uid}</code> محظور!", parse_mode="HTML")
         return
 
-    amount = finite_float(pending['amount'])
+    amount = float(pending['amount'])
     tx_id = pending['tx_id']
     note = pending.get('note', '')
     user_lang = target_user.get('language', 'ar')
 
     # 💱 لو المبلغ صفر (فشل جلب السعر وقت البحث) → نعيد التحويل الآن من الكريبتو
     if amount <= 0:
-        _c_amt = finite_float(pending.get('crypto_amount') or 0)
+        _c_amt = float(pending.get('crypto_amount') or 0)
         _c_cur = str(pending.get('crypto_currency') or '').upper()
         if _c_amt > 0 and _c_cur:
             _usd, _ = binance_amount_to_usd(_c_amt, _c_cur)
@@ -16333,7 +18624,7 @@ def credit_pending_exec(message, pending_id):
 
     # لو ما زال صفراً → نوقف بدل ما نضيف $0.00 للمستخدم
     if amount <= 0:
-        _c_amt = finite_float(pending.get('crypto_amount') or 0)
+        _c_amt = float(pending.get('crypto_amount') or 0)
         _c_cur = str(pending.get('crypto_currency') or 'CRYPTO').upper()
         bot.send_message(
             uid,
@@ -16451,7 +18742,35 @@ def ad_reports_ui(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_csv_orders")
 @admin_required
 def ad_csv_orders(call):
-    return _safe.csv_orders(call)
+    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+    chat_id = call.message.chat.id
+    orders = list(db.orders.find().sort('_id', -1))
+    if not orders:
+        bot.send_message(chat_id, "📭 لا توجد طلبات."); return
+
+    lines = ["التاريخ,المستخدم_ID,اليوزر,المنتج,الكمية,السعر/قطعة,الإجمالي,حالة التسليم"]
+    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
+
+    for r in orders:
+        try:
+            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+            uid_r = r.get('user_id', '')
+            u = db.users.find_one({'user_id': uid_r})
+            uname = f"@{u['username']}" if u and u.get('username') else str(uid_r)
+            pid = str(r.get('product_id', ''))
+            qty = int(r.get('quantity', 1))
+            p = all_prods.get(pid)
+            p_name = p.get('name_ar', p.get('name_en', pid)) if p else pid
+            price = float(p.get('price', 0)) if p else 0
+            total = round(price * qty, 2)
+            delivered = "✅" if r.get('code_delivered') else "⏳"
+            lines.append(f"{date_str},{uid_r},{uname},{p_name},{qty},{price:.2f},{total:.2f},{delivered}")
+        except: pass
+
+    content = "\n".join(lines)
+    f = io.BytesIO(("\ufeff" + content).encode('utf-8-sig'))
+    f.name = f"orders_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+    bot.send_document(chat_id, f, caption=f"📦 <b>تقرير الطلبات</b>\nإجمالي: <b>{len(orders)}</b> طلب", parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_csv_deposits")
@@ -16470,7 +18789,7 @@ def ad_csv_deposits(call):
             uid_r = r.get('user_id', '')
             u = db.users.find_one({'user_id': uid_r})
             uname = f"@{u['username']}" if u and u.get('username') else str(uid_r)
-            amount = finite_float(r.get('amount', 0))
+            amount = float(r.get('amount', 0))
             method = r.get('method', '-')
             tx = r.get('transaction_id', '-')
             lines.append(f"{date_str},{uid_r},{uname},{amount:.2f},{method},{tx}")
@@ -16479,7 +18798,7 @@ def ad_csv_deposits(call):
     content = "\n".join(lines)
     f = io.BytesIO(("\ufeff" + content).encode('utf-8-sig'))
     f.name = f"deposits_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
-    total = sum(finite_float(d.get('amount', 0)) for d in deps)
+    total = sum(float(d.get('amount', 0)) for d in deps)
     bot.send_document(chat_id, f, caption=f"💳 <b>تقرير الإيداعات</b>\nإجمالي: <b>${total:.2f}</b> من <b>{len(deps)}</b> عملية", parse_mode="HTML")
 
 
@@ -16497,7 +18816,7 @@ def ad_csv_products(call):
         try:
             pid = str(p.get('id', p.get('_id', '')))
             p_name = p.get('name_ar', p.get('name_en', pid))
-            price = finite_float(p.get('price', 0))
+            price = float(p.get('price', 0))
             sold_count = db.orders.count_documents({'product_id': pid})
             revenue = round(sold_count * price, 2)
             stock = db.stock.count_documents({'product_id': pid, 'is_sold': {'$ne': True}}) if 'stock' in db.list_collection_names() else 0
@@ -16525,7 +18844,6 @@ def ad_texts_main_ui(call):
 def ad_cms_msgs_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton("🤖 نصوص وأزرار ChatGPT", callback_data="cgx_cms"))
     markup.add(InlineKeyboardButton("📋 رسالة الترحيب (Start)", callback_data="edit_txt_welcome"))
     markup.add(InlineKeyboardButton("💳 رسالة قسم الشحن", callback_data="edit_txt_dep_choose"))
     # 🆕 رسائل وأزرار الدفع الجديدة
@@ -17570,8 +19888,8 @@ def ad_prod_emoji_save(message, pid):
 @admin_required
 def admin_api_main(call):
     bot.answer_callback_query(call.id)
-    gh_price = finite_float(get_setting("github_price", 15.0))
-    gem_price = finite_float(get_setting("gemini_price", 5.0))
+    gh_price = float(get_setting("github_price", 15.0))
+    gem_price = float(get_setting("gemini_price", 5.0))
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("💳 فحص رصيد API (AhsanLabs)", callback_data="ad_gh_credits"))
     markup.add(InlineKeyboardButton(f"💰 تعديل سعر GitHub (الحالي: ${gh_price:.2f})", callback_data="ad_gh_price"))
@@ -17643,7 +19961,7 @@ def admin_set_price(call):
         if not hasattr(message, 'text') or hasattr(message, 'data'):
             return
         try:
-            new_price = finite_float(message.text.strip())
+            new_price = float(message.text.strip())
             db.settings.update_one({'key': key}, {'$set': {'value': new_price}}, upsert=True)
             bot.send_message(message.chat.id, f"✅ تم تحديث السعر بنجاح إلى <b>${new_price:.2f}</b>.", parse_mode="HTML")
             
@@ -17691,9 +20009,6 @@ def ad_cgpt_panel(call):
     products_count = db.cgpt_products.count_documents({})
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("✏️ نصوص وأزرار ChatGPT", callback_data="cgx_cms"),
-        InlineKeyboardButton("📦 تعديل الأسماء والوصف والإيموجي", callback_data="cgx_products"),
-        InlineKeyboardButton("📋 الطلبات والتسوية", callback_data="cgx_jobs"),
         InlineKeyboardButton("\U0001f465 \u0627\u0644\u0639\u0645\u0644\u0627\u0621", callback_data="cgpt_customers"),
         InlineKeyboardButton(f"\U0001f4e6 \u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a ({products_count})", callback_data="cgpt_products_list"),
         InlineKeyboardButton("\u2795 \u0625\u0636\u0627\u0641\u0629 \u0645\u0646\u062a\u062c \u062c\u062f\u064a\u062f", callback_data="cgpt_add_product"),
@@ -17720,17 +20035,88 @@ def ad_cgpt_panel(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_accounts")
 @admin_required
 def cgpt_accounts(call):
-    return _safe.accounts_ui(call)
+    """يعرض كل حسابات ChatGPT ومقاعدها."""
+    try: bot.answer_callback_query(call.id, "🗂 جاري الفحص...")
+    except Exception: pass
+    accounts = _cgpt_all_accounts()
+    markup = InlineKeyboardMarkup(row_width=1)
+    lines = ["🗂 <b>حسابات ChatGPT Business</b>\n"]
+    if not accounts:
+        lines.append("لا حسابات بعد. أضف حساباً بكوكيزه.")
+    else:
+        total_avail = 0
+        for doc in accounts:
+            info = _cgpt_account_seat_info(doc)
+            icon = "✅" if info['connected'] else "❌"
+            seat_txt = ""
+            if info['connected']:
+                used = info.get('used_seats', 0)
+                total = info.get('total_seats')
+                avail = info.get('available_seats')
+                if total:
+                    seat_txt = f" | 🪑 {used}/{total} (متاح {avail})"
+                    if avail:
+                        total_avail += avail
+                else:
+                    seat_txt = f" | 👥 {used} مستخdم"
+            else:
+                seat_txt = f" | {info.get('error','')[:30]}"
+            lines.append(f"{icon} <code>{html.escape(str(info['email']))}</code>{seat_txt}")
+            markup.add(InlineKeyboardButton(
+                f"🗑 حذف: {str(info['email'])[:25]}",
+                callback_data=f"cgpt_delacc_{info['id']}"))
+            markup.add(InlineKeyboardButton(
+                f"🪑 ضبط مقاعد: {str(info['email'])[:20]}",
+                callback_data=f"cgpt_setseats_{info['id']}"))
+        lines.append(f"\n🟢 <b>إجمالي المقاعد المتاحة: {total_avail}</b>")
+    markup.add(InlineKeyboardButton("➕ إضافة حساب جديد", callback_data="cgpt_addacc"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    bot.send_message(call.message.chat.id, "\n".join(lines),
+                     parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_addacc")
 @admin_required
 def cgpt_add_account(call):
-    return _safe.cookies_begin(call,'new')
+    """يطلب كوكيز حساب جديد."""
+    try: bot.answer_callback_query(call.id)
+    except Exception: pass
+    msg = bot.send_message(call.message.chat.id,
+        "➕ <b>إضافة حساب ChatGPT جديد</b>\n\n"
+        "أرسل كوكيز الحساب (JSON) — نفس صيغة الحساب الرئيسي:\n"
+        "<code>{\"accessToken\":\"...\",\"sessionToken\":\"...\",\"account\":{...},\"user\":{...}}</code>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_new_account)
 
 
 def _cgpt_save_new_account(message):
-    return _safe.cookies_input(message)
+    if not message.text:
+        return
+    import json as _json
+    try:
+        data = _json.loads(message.text.strip())
+    except Exception:
+        bot.send_message(message.chat.id, "❌ JSON غير صالح. حاول مجدداً.")
+        return
+    if not data.get('accessToken') or not data.get('sessionToken'):
+        bot.send_message(message.chat.id, "❌ ينقص accessToken أو sessionToken.")
+        return
+    email = data.get('user', {}).get('email', 'حساب جديد')
+    res = db.cgpt_accounts.insert_one({
+        'data': data, 'name': email, 'created_at': int(time.time())
+    })
+    # نفحص الاتصال والمستخدمين الحاليين
+    info = _cgpt_account_seat_info({'_id': res.inserted_id, 'data': data, 'name': email})
+    status = "✅ متصل" if info['connected'] else f"⚠️ {info.get('error','')[:50]}"
+    used = info.get('used_seats', 0)
+    # نطلب عدد المقاعد مباشرة
+    msg = bot.send_message(message.chat.id,
+        f"✅ <b>أُضيف الحساب:</b> <code>{html.escape(str(email))}</code>\n{status}\n"
+        f"👥 المستخدمون الحاليون: {used}\n\n"
+        f"🪑 <b>الآن أرسل عدد المقاعد الإجمالي لهذا الحساب</b> (رقم):\n"
+        f"<i>مثال: 5 — لو اشتراكك فيه 5 مقاعد. سيحسب البوت المتاح تلقائياً.</i>",
+        parse_mode="HTML")
+    bot.register_next_step_handler(msg, _cgpt_save_seats, str(res.inserted_id))
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_bcast_"))
@@ -17870,7 +20256,7 @@ def cgpt_refunds(call):
                 {'user_id': tg_uid, 'product_id': {'$regex': '^cgpt'}},
                 sort=[('_id', -1)])
             if order:
-                paid = finite_float(order.get('total_price', order.get('price', 0)))
+                paid = float(order.get('total_price', order.get('price', 0)))
                 orig_min = int(order.get('cgpt_minutes', order.get('duration_minutes', 0)))
                 if orig_min > 0 and paid > 0:
                     # المبلغ المستحق = (المتبقّي / الأصلي) × المدفوع
@@ -17978,7 +20364,46 @@ def _cgpt_save_seats(message, acc_id):
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_diagnose")
 @admin_required
 def cgpt_diagnose(call):
-    return _safe.accounts_ui(call)
+    """يعرض حالة الاتصال والإيميل والمقاعد المتاحة."""
+    try: bot.answer_callback_query(call.id, "🩺 جاري الفحص...")
+    except Exception: pass
+    mgr = get_cgpt_manager()
+    rep = mgr.diagnose()
+    lines = ["🩺 <b>فحص حساب ChatGPT Business</b>\n"]
+    if rep.get('connected'):
+        lines.append("✅ <b>متصل ويعمل</b>\n")
+        lines.append(f"📧 <b>الإيميل:</b> <code>{html.escape(str(rep.get('owner_email','')))}</code>")
+        used = rep.get('used_seats', '?')
+        total = rep.get('total_seats')
+        avail = rep.get('available_seats')
+        lines.append(f"👥 <b>المقاعد المستخدمة:</b> {used}")
+        if total:
+            lines.append(f"🪑 <b>إجمالي المقاعد:</b> {total}")
+            lines.append(f"🟢 <b>المتاح:</b> {avail}")
+        else:
+            lines.append("🪑 <i>لم أتمكّن من قراءة إجمالي المقاعد تلقائياً.</i>")
+            _raw = rep.get('_raw_check') or rep.get('_raw_account', '')
+            if _raw:
+                lines.append(f"\n🔬 <b>بنية الرد (للتشخيص):</b>\n<code>{html.escape(str(_raw)[:700])}</code>")
+                lines.append("\n<i>أرسل هذا لضبط القراءة، أو استخدم «🪑 ضبط مقاعد» يدوياً.</i>")
+            else:
+                lines.append("\n<i>استخدم «🪑 ضبط مقاعد» في «الحسابات المتعددة» لضبطها يدوياً.</i>")
+        emails = rep.get('user_emails', [])
+        if emails:
+            lines.append(f"\n📋 <b>المستخدمون ({len(emails)}):</b>")
+            for e in emails[:15]:
+                lines.append(f"  • <code>{html.escape(str(e))}</code>")
+    else:
+        lines.append("❌ <b>غير متصل</b>\n")
+        lines.append(f"السبب: {html.escape(str(rep.get('error','غير معروف')))}")
+        if rep.get('owner_email') and rep['owner_email'] != 'غير معروف':
+            lines.append(f"\n📧 الإيميل المحفوظ: <code>{html.escape(str(rep['owner_email']))}</code>")
+        lines.append("\n<i>الحل: أعد إضافة الكوكيز عبر «إضافة/تحديث الكوكيز».</i>")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔄 إعادة الفحص", callback_data="cgpt_diagnose"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    bot.send_message(call.message.chat.id, "\n".join(lines),
+                     parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_customers")
@@ -18025,22 +20450,6 @@ def cgpt_cust_view(call):
         for email, info in invites.items():
             if info.get('status') == mode:
                 all_items.append((email, info, acc_id, acc_email))
-    # 🔧 مصdر إضافي: نجمع المشترين من db.orders (لو لم يُحفظوا في invites_data)
-    if mode == 'active':
-        try:
-            now_iso = _dt_mod.datetime.now().isoformat()
-            seen_emails = {it[0] for it in all_items}
-            for order in db.orders.find({'cgpt_email': {'$exists': True},
-                                         'cgpt_expires_at': {'$gt': now_iso}}):
-                em = order.get('cgpt_email')
-                if em and em not in seen_emails:
-                    seen_emails.add(em)
-                    info = {'status': 'active',
-                            'expires_at': order.get('cgpt_expires_at', ''),
-                            'telegram_uid': order.get('user_id')}
-                    all_items.append((em, info, 'main', 'من الطلبات'))
-        except Exception as _oe:
-            logger.debug(f"orders active merge err: {_oe}")
     markup = InlineKeyboardMarkup(row_width=1)
     if not all_items:
         txt = title + "\n\nلا يوجد."
@@ -18149,20 +20558,6 @@ def cgpt_delete_customer(call):
             pass
     bot.send_message(call.message.chat.id,
         f"🗑 <b>{email}</b>\n{status_txt}", parse_mode="HTML")
-    # 🔔 إشعm كل الأدمن الآخرين بالطرd (بالتفاصيل)
-    if removal_result in ('member', 'pending'):
-        try:
-            _kind = "عضو" if removal_result == 'member' else "دعوة معلّقة"
-            _notif = (f"🗑 <b>تم طرd مستخdم من ChatGPT</b>\n"
-                      f"📧 <code>{email}</code>\n"
-                      f"📋 النوع: {_kind}\n"
-                      f"👮 بواسطة: <code>{call.from_user.id}</code>")
-            for _adm in db.users.find({'is_admin': 1}):
-                if _adm['user_id'] != call.from_user.id:
-                    try: bot.send_message(_adm['user_id'], _notif, parse_mode="HTML")
-                    except Exception: pass
-        except Exception:
-            pass
     # نعيد عرض القائمة
     call.data = f"cgpt_cust_{mode}"
     cgpt_cust_view(call)
@@ -18295,7 +20690,7 @@ def cgpt_save_duration(message, pid):
             raise ValueError("no underscore")
         parts = text.rsplit("_", 1)
         label = parts[0].strip()
-        price = finite_float(parts[1].strip())
+        price = float(parts[1].strip())
         if price <= 0:
             raise ValueError("price must be positive")
         days_map = {'7': 10080, '15': 21600, '25': 36000, '30': 43200, '60': 86400, '90': 129600}
@@ -18338,7 +20733,6 @@ def cgpt_save_duration(message, pid):
             upsert=True
         )
 
-        _invalidate_products_cache()
         # نعرض المجلدات مباشرة للاختيار
         cats = list(db.catalogs.find().sort('order', 1))
         markup = InlineKeyboardMarkup(row_width=1)
@@ -18466,13 +20860,50 @@ def cgpt_dur_cat_selected(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_setcat_"))
 @admin_required
 def cgpt_setcat(call):
+    """يضيف المنتج الرئيسي للمجلد المختار في الأول"""
     bot.answer_callback_query(call.id)
-    raw = call.data.removeprefix('cgpt_setcat_')
-    pid, cat_id = raw.rsplit('_', 1)
-    product = find_product('cgpt_main_' + pid)
-    if not product: raise ShopError('المنتج غير موجود.')
-    _ops.move_product(product, cat_id)
-    bot.send_message(call.from_user.id, '✅ تم نقل المنتج وتحديث عرضه في المتجر.')
+    raw = call.data.replace("cgpt_setcat_", "")
+    parts = raw.rsplit("_", 1)
+    pid = parts[0]
+    cat_id = parts[1] if len(parts) > 1 else "none"
+    main_pid = f"cgpt_main_{pid}"
+
+    # نزيله من أي مجلد قديم
+    for c in db.catalogs.find():
+        if main_pid in (c.get('product_ids') or []):
+            db.catalogs.update_one(
+                {'_id': c['_id']},
+                {'$pull': {'product_ids': main_pid}}
+            )
+
+    if cat_id == "none":
+        # بدون مجلد
+        db.products.update_one({'_id': main_pid}, {'$set': {'catalog_id': None}})
+        bot.send_message(call.from_user.id,
+            "✅ <b>تم تعيين المنتج بدون مجلد.</b>",
+            parse_mode="HTML")
+        return
+
+    from bson import ObjectId as _ObjId3
+    # نضيفه في أول القائمة في المجلد
+    try:
+        db.products.update_one({'_id': main_pid}, {'$set': {'catalog_id': str(cat_id)}})
+        db.catalogs.update_one(
+            {'_id': _ObjId3(cat_id)},
+            {'$push': {'product_ids': {'$each': [main_pid], '$position': 0}}}
+        )
+        cat = db.catalogs.find_one({'_id': _ObjId3(cat_id)})
+        cat_name = cat.get('name_ar', cat.get('name', '')) if cat else cat_id
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("⚙️ إدارة المنتج", callback_data=f"edit_p_{main_pid}"),
+            InlineKeyboardButton("🔙 رجوع للوحة", callback_data="ad_cgpt_panel")
+        )
+        bot.send_message(call.from_user.id,
+            f"✅ <b>تم وضع المنتج في المجلد:</b>\n📁 <b>{cat_name}</b> (أول القائمة)",
+            parse_mode="HTML", reply_markup=markup)
+    except Exception as e:
+        bot.send_message(call.from_user.id, f"\u274c \u062e\u0637\u0623: {e}")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_del_prod_"))
@@ -18509,15 +20940,44 @@ def cgpt_del_confirm(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_set_cookies")
 @admin_required
 def cgpt_set_cookies(call):
-    return _safe.accounts_ui(call)
+    bot.answer_callback_query(call.id)
+    mgr = get_cgpt_manager()
+    loaded_icon = "\u2705" if mgr._loaded else "\u274c"
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\U0001f4cb \u0644\u0635\u0642 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON)", callback_data="cgpt_paste_json"),
+        InlineKeyboardButton("\U0001f504 \u0625\u0639\u0627\u062f\u0629 \u062a\u062d\u0645\u064a\u0644 \u0645\u0646 DB", callback_data="ad_cgpt_reload_token"),
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
+    )
+    txt = f"\U0001f36a <b>\u0625\u0639\u062f\u0627\u062f \u0627\u0644\u0643\u0648\u0643\u064a\u0632</b>\n\n\u0627\u0644\u062d\u0627\u0644\u0629: {loaded_icon}\n\u0627\u062e\u062a\u0631 \u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0625\u0636\u0627\u0641\u0629:"
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_paste_json")
 @admin_required
 def cgpt_paste_json(call):
-    return _safe.cookies_begin(call,'main')
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.from_user.id, "\U0001f4cb <b>\u0627\u0644\u0635\u0642 \u0645\u062d\u062a\u0648\u0649 \u0645\u0644\u0641 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON \u0643\u0627\u0645\u0644):</b>", parse_mode="HTML")
+    bot.register_next_step_handler(msg, cgpt_save_json_cookies)
 
 def cgpt_save_json_cookies(message):
-    return _safe.cookies_input(message)
+    try:
+        data = json.loads(message.text.strip())
+        # نحفظ في قاعدة البيانات (دائم)
+        db.cgpt_cookies.update_one({'_id': 'main'}, {'$set': {'data': data}}, upsert=True)
+        # نعيد تحميل المدير
+        global _cgpt_manager_instance
+        with _cgpt_lock:
+            _cgpt_manager_instance = None
+        ok = get_cgpt_manager()._loaded
+        icon = "\u2705" if ok else "\u274c"
+        bot.send_message(message.chat.id,
+            f"{icon} <b>{'\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0641\u064a \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a!' if ok else '\u062a\u0645 \u0627\u0644\u062d\u0641\u0638 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>",
+            parse_mode="HTML")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"\u274c <b>JSON \u063a\u064a\u0631 \u0635\u062d\u064a\u062d!</b>\n<code>{e}</code>", parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_cleanup")
@@ -18627,7 +21087,7 @@ def ad_p_step3(message):
 def ad_p_price(message):
     uid = message.from_user.id
     try:
-        price = finite_float(message.text.strip())
+        price = float(message.text.strip())
         temp_product[uid]['price'] = price
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("⚡ تسليم تلقائي (أكواد وبطاقات)", callback_data="ad_ptype_auto"))
@@ -18699,7 +21159,7 @@ def ad_p_cgpt_cat_selected(call):
         'name_en':      p.get('n_en', ''),
         'desc_ar':      p.get('d_ar', ''),
         'desc_en':      p.get('d_en', ''),
-        'price':        finite_float(p.get('price', 0)),
+        'price':        float(p.get('price', 0)),
         'is_manual':    False,
         'product_type': 'chatgpt_seat',
         'cgpt_minutes': int(p.get('cgpt_minutes', 10080)),
@@ -18752,7 +21212,7 @@ def ad_p_final(call):
             'product_id': pid,
             'name_ar': p['n_ar'],
             'name_en': p['n_en'],
-            'price': finite_float(p['price']),
+            'price': float(p['price']),
             'is_manual': is_manual,
             'is_hidden': False,
             'stock': 'unlimited' if is_manual else 0
@@ -18953,7 +21413,7 @@ def ep_disc_ui(call):
     tiers = p.get('discount_tiers', [])
     tiers_sorted = sorted(tiers, key=lambda x: x.get('min_qty', 0))
 
-    unit_price = finite_float(p.get('price', 0))
+    unit_price = float(p.get('price', 0))
     text = (
         f"🏷 <b>خصومات الكمية</b>\n"
         f"📦 {clean_name(p.get('name_ar', ''))}\n"
@@ -18962,7 +21422,7 @@ def ep_disc_ui(call):
     if tiers_sorted:
         text += "<b>الخصومات الحالية:</b>\n"
         for t in tiers_sorted:
-            t_price = finite_float(t.get('price', 0))
+            t_price = float(t.get('price', 0))
             text += f"  • {t.get('min_qty')}+ قطعة = <b>${t_price:.2f}</b>/قطعة\n"
     else:
         text += "<i>لا توجد خصومات بعد.</i>\n"
@@ -19042,7 +21502,7 @@ def _save_discount_tier(message, pid):
     try:
         parts = text.split()
         min_qty = int(parts[0])
-        price = finite_float(parts[1])
+        price = float(parts[1])
         if min_qty < 1 or price <= 0:
             raise ValueError()
     except:
@@ -19054,7 +21514,7 @@ def _save_discount_tier(message, pid):
         bot.send_message(uid, "❌ المنتج غير موجود.")
         return
 
-    unit_price = finite_float(p.get('price', 0))
+    unit_price = float(p.get('price', 0))
     tiers = p.get('discount_tiers', [])
     tiers = [t for t in tiers if t.get('min_qty') != min_qty]
     tiers.append({'min_qty': min_qty, 'price': price})
@@ -19133,7 +21593,7 @@ def admin_edit_prompt(call):
     
     # تحديد القيمة القديمة + التسمية حسب النوع
     if field == "price":
-        current_price = finite_float(p.get('price', 0))
+        current_price = float(p.get('price', 0))
         prompt_msg = (
             f"━━━━━━━━━━━━━━━\n"
             f"💵 <b>تعديل سعر المنتج</b>\n"
@@ -19259,7 +21719,7 @@ def _emit_product_updated_after_edit(func):
                             'name_en': _p2.get('name_en', ''),
                             'desc_ar': _p2.get('desc_ar', ''),
                             'desc_en': _p2.get('desc_en', ''),
-                            'store_price': finite_float(_p2.get('price', 0) or 0),
+                            'store_price': float(_p2.get('price', 0) or 0),
                             'is_hidden': bool(_p2.get('is_hidden', False)),
                             'custom_emoji_id': _p2.get('custom_emoji_id'),
                             'discount_tiers': _p2.get('discount_tiers', []),
@@ -19323,11 +21783,11 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
 
     if field == "price":
         try:
-            new_price = finite_float(val)
+            new_price = float(val)
             if new_price < 0:
                 bot.send_message(message.chat.id, "❌ السعر لا يمكن أن يكون سالباً.")
                 return
-            old_price = finite_float(p.get('price', 0))
+            old_price = float(p.get('price', 0))
             db.products.update_one({'_id': p['_id']}, {'$set': {'price': new_price}})
             
             # رسالة توضح التغيير
@@ -19523,7 +21983,7 @@ def admin_del_exec(call):
         pid_str = str(pid)
         queries = [{'product_id': pid_str}]
         if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-        try: queries.append({'product_id': finite_float(pid_str)})
+        try: queries.append({'product_id': float(pid_str)})
         except: pass
         db.product_stock.delete_many({'$or': queries})
         db.orders.delete_many({'$or': queries})
@@ -19702,7 +22162,7 @@ def admin_stock_save(message, pid):
                     icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> ' if custom_emoji_id else '📦 '
                     p_name = icon_html + clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
                     p_name_plain = clean_name(p.get(f'name_{u_lang}', p.get('name_en', '')))
-                    unit_price = finite_float(p.get('price', 0))
+                    unit_price = float(p.get('price', 0))
                     
                     alert_msg = get_text(uid_u, 'new_stock', p_name, stk_total)
                     
@@ -19714,7 +22174,7 @@ def admin_stock_save(message, pid):
                         else:
                             alert_msg += f"\n\n💰 <b>Price:</b> ${unit_price:.2f}/unit\n🏷 <b>Qty Discounts:</b>\n"
                         for t in sorted(discount_tiers, key=lambda x: x.get('min_qty', 0)):
-                            t_price = finite_float(t.get('price', unit_price))
+                            t_price = float(t.get('price', unit_price))
                             if u_lang == 'ar':
                                 alert_msg += f"  • {t['min_qty']}+ قطعة → <b>${t_price:.2f}</b>/قطعة\n"
                             else:
@@ -19765,7 +22225,7 @@ def admin_stock_view(call):
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-    try: queries.append({'product_id': finite_float(pid_str)})
+    try: queries.append({'product_id': float(pid_str)})
     except: pass
     items = list(db.product_stock.find({'$or': queries, 'is_sold': False}))
     if not items:
@@ -19789,7 +22249,7 @@ def admin_stock_delcode_exec(message, pid):
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-    try: queries.append({'product_id': finite_float(pid_str)})
+    try: queries.append({'product_id': float(pid_str)})
     except: pass
     res = db.product_stock.delete_one({'$or': queries, 'code_line': code_to_del, 'is_sold': False})
     if res.deleted_count > 0:
@@ -19812,7 +22272,7 @@ def admin_stock_clear_exec(call):
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-    try: queries.append({'product_id': finite_float(pid_str)})
+    try: queries.append({'product_id': float(pid_str)})
     except: pass
     res = db.product_stock.delete_many({'$or': queries, 'is_sold': False})
     # 🔄 بث حدث للمزامنة
@@ -19840,7 +22300,7 @@ def admin_stock_edit_step2(message, pid):
     pid_str = str(pid)
     queries = [{'product_id': pid_str}]
     if pid_str.isdigit(): queries.append({'product_id': int(pid_str)})
-    try: queries.append({'product_id': finite_float(pid_str)})
+    try: queries.append({'product_id': float(pid_str)})
     except: pass
     item = db.product_stock.find_one({'$or': queries, 'code_line': old_code, 'is_sold': False})
     if not item:
@@ -19946,7 +22406,7 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     if not u: return
     buy_count = db.orders.count_documents({'user_id': target_uid})
     d_res = list(db.used_transactions.find({'user_id': target_uid}))
-    dep_total = sum([finite_float(d.get('amount', 0)) for d in d_res])
+    dep_total = sum([float(d.get('amount', 0)) for d in d_res])
     uname_str = f"@{u['username']}" if u.get('username') else "لا يوجد"
     ban_str = "محظور 🚫" if u.get('is_banned') == 1 else "نشط ✅"
     
@@ -20005,8 +22465,8 @@ def admin_user_referrals_page(call):
     # معلومات صاحب الإحالات + أرباحه
     target_user = get_user_data_full(target_uid)
     t_uname = f"@{target_user.get('username')}" if target_user and target_user.get('username') else ''
-    earn_ref = round(finite_float(target_user.get('ref_v2_earned', 0.0)), 2) if target_user else 0.0
-    earn_buy = round(finite_float(target_user.get('ref_v2_purchase_earned', 0.0)), 2) if target_user else 0.0
+    earn_ref = round(float(target_user.get('ref_v2_earned', 0.0)), 2) if target_user else 0.0
+    earn_buy = round(float(target_user.get('ref_v2_purchase_earned', 0.0)), 2) if target_user else 0.0
 
     txt = (
         f"👥 <b>إحالات المستخدم</b>\n"
@@ -20066,7 +22526,7 @@ def ad_uh_dep_handler(call):
         return
     
     # إجمالي
-    total_amount = sum([finite_float(r.get('amount', 0)) for r in recs])
+    total_amount = sum([float(r.get('amount', 0)) for r in recs])
     
     # نجيب معلومات المستخدم
     u = get_user_data_full(target_uid)
@@ -20162,7 +22622,7 @@ def ad_uh_buy_handler(call):
     for r in recs:
         try:
             p = find_product(str(r.get('product_id', '')))
-            price = finite_float(p.get('price', 0)) if p else 0
+            price = float(p.get('price', 0)) if p else 0
             qty = int(r.get('quantity', 1))
             total_spent += price * qty
         except: pass
@@ -20188,7 +22648,7 @@ def ad_uh_buy_handler(call):
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0
+                price = float(p.get('price', 0)) if p else 0
             
             text += (
                 f"\n#{i} 📦 <b>{p_name}</b>\n"
@@ -20221,7 +22681,7 @@ def ad_dlbuy_handler(call):
     recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
     u = get_user_data_full(target_uid)
     uname = f"@{u['username']}" if u and u.get('username') else "بدون"
-    balance = finite_float(u.get('balance', 0)) if u else 0
+    balance = float(u.get('balance', 0)) if u else 0
     
     total_spent = 0.0
     lines = []
@@ -20238,7 +22698,7 @@ def ad_dlbuy_handler(call):
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0
+                price = float(p.get('price', 0)) if p else 0
             
             subtotal = price * qty
             total_spent += subtotal
@@ -20296,7 +22756,7 @@ def ad_dldep_handler(call):
     
     u = get_user_data_full(target_uid)
     uname = f"@{u['username']}" if u and u.get('username') else "بدون"
-    total_amount = sum([finite_float(r.get('amount', 0)) for r in recs])
+    total_amount = sum([float(r.get('amount', 0)) for r in recs])
     
     content = f"=== سجل إيداعات المستخدم ===\n"
     content += f"ID: {target_uid}\n"
@@ -20359,7 +22819,7 @@ def ad_full_history_handler(call):
     target_uid = int(call.data.replace("ad_full_hist_", ""))
     u = get_user_data_full(target_uid)
     uname = f"@{u['username']}" if u and u.get('username') else "بدون"
-    balance = finite_float(u.get('balance', 0)) if u else 0
+    balance = float(u.get('balance', 0)) if u else 0
 
     # المشتريات
     orders = list(db.orders.find({'user_id': target_uid}).sort('_id', 1))
@@ -20375,7 +22835,7 @@ def ad_full_history_handler(call):
             else:
                 p = find_product(pid)
                 p_name = clean_name(p.get('name_ar', p.get('name_en', 'محذوف'))) if p else 'محذوف'
-                price = finite_float(p.get('price', 0)) if p else 0.0
+                price = float(p.get('price', 0)) if p else 0.0
             subtotal = price * qty; total_spent += subtotal
             
             # نجمع كل الأكواد من هذا الطلب
@@ -20419,7 +22879,7 @@ def ad_full_history_handler(call):
     for i, r in enumerate(deposits, 1):
         try:
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
-            amount = finite_float(r.get('amount', 0))
+            amount = float(r.get('amount', 0))
             method = r.get('method', 'غير محدد')
             tx_id = r.get('transaction_id', '-')
             total_deposited += amount
@@ -20581,10 +23041,10 @@ def ad_gift_comp_exec(message, target_uid):
         except: pass
         return
     try:
-        val = finite_float(message.text.strip())
+        val = float(message.text.strip())
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
         u = get_user_data_full(target_uid)
-        new_bal = round(finite_float(u.get('balance', 0)), 2) if u else 0.0
+        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
         import datetime as _dt
         db.balance_logs.insert_one({
             'user_id': target_uid,
@@ -20623,7 +23083,7 @@ def ad_gift_note_step2(message, target_uid):
         except: pass
         return
     try:
-        val = finite_float(message.text.strip())
+        val = float(message.text.strip())
         msg = bot.send_message(message.chat.id,
             "📝 <b>أرسل الملاحظة (نوت):</b>\n"
             "<i>مثال: hash العملية، Order ID، رقم تحويل، أو أي سبب</i>\n\n"
@@ -20646,7 +23106,7 @@ def ad_gift_note_exec(message, target_uid, val):
         note = message.text.strip()
         db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
         u = get_user_data_full(target_uid)
-        new_bal = round(finite_float(u.get('balance', 0)), 2) if u else 0.0
+        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
         import datetime as _dt
         db.balance_logs.insert_one({
             'user_id': target_uid,
@@ -20858,7 +23318,7 @@ def ad_gift_val(message):
 
 def ad_gift_finish(message, tid):
     try:
-        val = finite_float(message.text)
+        val = float(message.text)
         db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
         bot.send_message(message.from_user.id, "✅ Done.")
         try: notify_balance_gift(tid, val)
@@ -21655,12 +24115,27 @@ def ad_cat_add_ext_product(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_doadd_"))
 @admin_required
 def ad_cat_doadd(call):
-    cat_id, pid = call.data.removeprefix('ad_cat_doadd_').split('_', 1)
+    parts = call.data.replace("ad_cat_doadd_", "").rsplit("_", 1)
+    cat_id = parts[0]
+    pid = parts[1] if len(parts) > 1 else ""
+    from bson import ObjectId
+    
     p = find_product(pid)
-    if not p: raise ShopError('المنتج غير موجود.')
-    _ops.move_product(p, cat_id)
-    bot.answer_callback_query(call.id, '✅ تم نقل المنتج.', show_alert=True)
-    call.data = 'ad_cat_addp_' + cat_id
+    if p:
+        actual_pid = p['_id']
+        db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': str(cat_id)}})
+        
+        # نضيف في البداية: نحذف لو موجود ثم نضيف في أول القائمة
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$pull': {'product_ids': actual_pid}}
+        )
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$push': {'product_ids': {'$each': [actual_pid], '$position': 0}}}
+        )
+    bot.answer_callback_query(call.id, "✅ Added as first!", show_alert=True)
+    call.data = f"ad_cat_addp_{cat_id}"
     ad_cat_addp(call)
 
 
@@ -21716,12 +24191,22 @@ def ad_cat_remp(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_cat_dorem_"))
 @admin_required
 def ad_cat_dorem(call):
-    cat_id, pid = call.data.removeprefix('ad_cat_dorem_').split('_', 1)
+    parts = call.data.replace("ad_cat_dorem_", "").rsplit("_", 1)
+    cat_id = parts[0]
+    pid = parts[1] if len(parts) > 1 else ""
+    from bson import ObjectId
+    
     p = find_product(pid)
-    if not p: raise ShopError('المنتج غير موجود.')
-    _ops.move_product(p, None)
-    bot.answer_callback_query(call.id, '✅ تم نقله إلى المنتجات خارج المجلدات.', show_alert=True)
-    call.data = 'ad_cat_remp_' + cat_id
+    if p:
+        actual_pid = p['_id']
+        db.products.update_one({'_id': p['_id']}, {'$set': {'catalog_id': None}})
+        
+        db.catalogs.update_one(
+            {'_id': ObjectId(cat_id)},
+            {'$pull': {'product_ids': actual_pid}}
+        )
+    bot.answer_callback_query(call.id, "✅ Moved to regular!", show_alert=True)
+    call.data = f"ad_cat_remp_{cat_id}"
     ad_cat_remp(call)
 
 
@@ -21893,7 +24378,6 @@ def open_api(call):
 # ═══ إنشاء مفتاح ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_gen")
 def api_gen(call):
-    if is_user_banned(call.from_user.id): return
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
@@ -21926,7 +24410,6 @@ def api_gen(call):
 # ═══ توثيق API ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_docs")
 def api_docs(call):
-    _safe.send(call.from_user.id, '📌 تحديث API: أرسل هيدر Idempotency-Key فريدًا لكل طلب شراء، وأعد نفس المفتاح عند تكرار المحاولة. /changes يعيد مؤشرًا نصيًا مثل s:123؛ أرسله كما هو في since. طلبات الخدمات قد تعيد 202 وحالة قيد المتابعة؛ استعلم عن /order/ORDER_ID قبل تكرار الشراء.')
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
@@ -22321,7 +24804,6 @@ def verify(secret, timestamp, body_bytes, received_sig):
 # ═══ رسالة جاهزة للذكاء الاصطناعي ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_ai_prompt")
 def api_ai_prompt(call):
-    _safe.send(call.from_user.id, '📌 تحديث API: أرسل هيدر Idempotency-Key فريدًا لكل طلب شراء، وأعد نفس المفتاح عند تكرار المحاولة. /changes يعيد مؤشرًا نصيًا مثل s:123؛ أرسله كما هو في since. طلبات الخدمات قد تعيد 202 وحالة قيد المتابعة؛ استعلم عن /order/ORDER_ID قبل تكرار الشراء.')
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
@@ -22693,7 +25175,6 @@ def api_products_manage(call):
 # ═══ تبديل إخفاء/إظهار منتج ═══
 @bot.callback_query_handler(func=lambda call: call.data.startswith("api_toggle_"))
 def api_toggle_product(call):
-    if is_user_banned(call.from_user.id): return
     uid = call.from_user.id
     pid = call.data.replace("api_toggle_", "")
     
@@ -22713,7 +25194,6 @@ def api_toggle_product(call):
 # ═══ إعادة توليد ═══
 @bot.callback_query_handler(func=lambda call: call.data == "api_regen")
 def api_regen(call):
-    if is_user_banned(call.from_user.id): return
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
@@ -22747,14 +25227,35 @@ def api_disable(call):
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
-    return _safe.start()
+    # تشغيل الـ daemon في thread خلفية عند بدء البوت
+    try:
+        _cgpt_daemon_thread = __import__('threading').Thread(
+            target=_cgpt_daemon_loop, daemon=True, name="cgpt_seat_daemon"
+        )
+        _cgpt_daemon_thread.start()
+        logger.info("✅ تم بدء خيط مراقبة مقاعد ChatGPT بنجاح.")
+    except Exception as e:
+        logger.error(f"❌ فشل بدء خيط مراقبة مقاعد ChatGPT: {e}")
 
-# [merged] from http_api import make_handler
-APIHandler = make_handler(LegacyAPIHandler, _safe)
-_SAFE_ADMIN_NAMES = ['_ad_ext_emoji_save', '_admin_search_ltc_tx', '_admin_search_ton_tx', '_admin_search_usdt_onchain', '_bc_show_folders', '_cancel_markup', '_cgpt_manual_invite_exec', '_cgpt_save_new_account', '_cgpt_save_seats', '_cgpt_show_products_list', '_emit_product_updated_after_edit', '_is_cancel_msg', '_lookup_bep20_tx_by_hash', '_lookup_trc20_tx_by_hash', '_save_discount_tier', '_text_fallback_for_lang', '_tx_hash_matches', '_tx_hash_to_bytes', '_validate_setting_value', 'ad_ban_exec', 'ad_ban_start', 'ad_cat_add_ext_product', 'ad_cat_addp', 'ad_cat_create', 'ad_cat_create_step2', 'ad_cat_create_step3', 'ad_cat_del', 'ad_cat_doadd', 'ad_cat_dorem', 'ad_cat_edit', 'ad_cat_remp', 'ad_cat_rename', 'ad_cat_rename_step2', 'ad_cat_rename_step3', 'ad_cat_reorder', 'ad_catalog_list', 'ad_cgpt_cleanup_now', 'ad_cgpt_manual_invite', 'ad_cgpt_panel', 'ad_cgpt_reload_token', 'ad_check_tx_handle', 'ad_check_tx_prompt', 'ad_cms_btns_cats_ui', 'ad_cms_btns_list', 'ad_cms_msgs_ui', 'ad_csv_deposits', 'ad_csv_orders', 'ad_csv_products', 'ad_dlbuy_handler', 'ad_dldep_handler', 'ad_edit_btn_prompt', 'ad_edit_txt_prompt', 'ad_emoji_ext_store', 'ad_emoji_regular', 'ad_ext_emoji_ask', 'ad_full_history_handler', 'ad_gift_cancel', 'ad_gift_comp_amount', 'ad_gift_comp_exec', 'ad_gift_finish', 'ad_gift_note_amount', 'ad_gift_note_exec', 'ad_gift_note_step2', 'ad_gift_start', 'ad_gift_val', 'ad_p_cgpt_cat_selected', 'ad_p_final', 'ad_p_price', 'ad_p_step1', 'ad_p_step2', 'ad_p_step3', 'ad_prod_emoji_ask', 'ad_prod_emoji_back', 'ad_prod_emoji_save', 'ad_prod_emoji_start', 'ad_prod_manage', 'ad_ptype_cgpt_handler', 'ad_ptype_cgpt_save_minutes', 'ad_ref_save_min_purchase', 'ad_ref_save_purchase_reward', 'ad_ref_save_reward', 'ad_ref_save_threshold', 'ad_ref_set_min_purchase', 'ad_ref_set_purchase_reward', 'ad_ref_set_reward', 'ad_ref_set_threshold', 'ad_ref_settings_ui', 'ad_reports_ui', 'ad_reset_text_to_default', 'ad_save_custom_btn', 'ad_save_custom_text', 'ad_set_btn_style', 'ad_texts_main_ui', 'ad_u_det_router', 'ad_u_search_exec', 'ad_u_search_prompt', 'ad_u_top_ui', 'ad_ugift_prompt', 'ad_uh_buy_handler', 'ad_uh_dep_handler', 'ad_users_main_ui', 'ad_view_balance_logs', 'admin_add_admin_save', 'admin_add_admin_start', 'admin_all_logs', 'admin_api_main', 'admin_bc_confirm', 'admin_bc_exe', 'admin_bc_init', 'admin_bc_pick_product', 'admin_del_confirm', 'admin_del_exec', 'admin_del_list', 'admin_download_buy_hist', 'admin_edit_list', 'admin_edit_opts', 'admin_edit_prompt', 'admin_fsub_add', 'admin_fsub_list', 'admin_fsub_save', 'admin_github_credits', 'admin_main_ui', 'admin_panel_main_entry', 'admin_required', 'admin_save_edit', 'admin_save_setting', 'admin_search_bybit_tx', 'admin_set_inputs', 'admin_set_price', 'admin_set_userbot_vars', 'admin_shop_settings', 'admin_stock_cancel', 'admin_stock_clear_exec', 'admin_stock_delcode_exec', 'admin_stock_delcode_prompt', 'admin_stock_edit_step1', 'admin_stock_edit_step2', 'admin_stock_edit_step3', 'admin_stock_input', 'admin_stock_list_ui', 'admin_stock_opts_ui', 'admin_stock_save', 'admin_stock_view', 'admin_toggle_hide', 'admin_user_referrals_page', 'bc_back_handler', 'bc_cat_handler', 'bc_nocat_handler', 'bc_sendcat_handler', 'bc_sendnocat_handler', 'cgpt_accounts', 'cgpt_add_account', 'cgpt_add_duration', 'cgpt_add_product', 'cgpt_add_product_desc', 'cgpt_add_product_name', 'cgpt_broadcast_choose', 'cgpt_broadcast_send', 'cgpt_cust_view', 'cgpt_customers', 'cgpt_del_confirm', 'cgpt_del_product', 'cgpt_delete_account', 'cgpt_delete_customer', 'cgpt_diagnose', 'cgpt_dur_cat_selected', 'cgpt_paste_json', 'cgpt_products_list', 'cgpt_purge_old', 'cgpt_refunds', 'cgpt_save_duration', 'cgpt_save_json_cookies', 'cgpt_set_cookies', 'cgpt_set_seats', 'cgpt_setcat', 'cmd_binance_debug', 'cmd_bybit_debug', 'cmd_bybit_match', 'cmd_bybit_off', 'cmd_bybit_on', 'cmd_usdt_debug', 'cmd_usdt_why', 'credit_pending_exec', 'credit_pending_handler', 'del_fsub_btn', 'diag_alerts_cmd', 'ep_disc_clear', 'ep_disc_ui', 'ep_dosetcat_handler', 'ep_setcat_handler', 'ext_add_new_product', 'ext_add_store', 'ext_api_main', 'ext_bulk_fix_ask', 'ext_bulk_pct_ask', 'ext_bulk_price', 'ext_check_balance', 'ext_delete_store', 'ext_delete_store_exec', 'ext_do_set_catalog', 'ext_edit_desc', 'ext_edit_name', 'ext_edit_price', 'ext_edit_text', 'ext_health_check', 'ext_ignore_new_product', 'ext_list_products', 'ext_pick_all', 'ext_pick_confirm', 'ext_pick_none', 'ext_pick_products', 'ext_pick_toggle', 'ext_price_input', 'ext_product_detail', 'ext_raw_preview', 'ext_remote_orders', 'ext_set_catalog', 'ext_store_menu', 'ext_sync_products', 'ext_toggle_hide', 'ext_view_orders', 'fix_innocent_bans_cmd', 'fix_referrals_cmd', 'hide_coins_menu', 'p_set_first', 'ref_milestone_approve', 'ref_milestone_cancel', 'ref_milestone_view', 'refspam_ban_handler', 'refspam_ok_handler', 'refspam_view_handler', 'show_admin_hist_detail', 'show_user_admin_profile', 'toggle_amount_protection', 'toggle_coin_visibility']
+    try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
+    except: pass
+    time.sleep(5)
+    while True:
+        try: bot.polling(non_stop=True, skip_pending=True,
+                         timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            err = str(e)
+            logger.error(f"Polling Error Critical: {err}")
+            # تشخيص: نسجّل الـ traceback الكامل لمعرفة مصدر الخطأ بالضبط
+            try:
+                import traceback as _tb
+                logger.error("TRACEBACK:\n" + _tb.format_exc())
+            except Exception:
+                pass
+            if '409' in err or 'Conflict' in err:
+                time.sleep(30)
+            else:
+                time.sleep(5)
 
-# [merged] from operations import Operations
-_ops = Operations(globals())
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_bot()
