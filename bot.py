@@ -1251,7 +1251,9 @@ class Runtime:
             pending=self.db.pending_deposits.find_one({'user_id':uid,'status':'pending','base_amount_usd':cents(amt,minimum=10)/100})
             result=self.finance.credit(uid,amt,tx_id,method,pending['pending_id'] if pending else None)
             self._invalidate_user_cache(uid)
-            if not result['already']:self.send(uid,self.get_text(uid,'dep_success',result['amount']))
+            if not result['already']:
+                self.send(uid,self.get_text(uid,'dep_success',result['amount']))
+                self._notify_deposit(uid,result['amount'],method)
             return result
         except ShopError as e:
             self.send(uid,'⚠️ '+html.escape(str(e)));return {'ok':False,'error':str(e)}
@@ -1260,11 +1262,44 @@ class Runtime:
         try:
             result=self.finance.credit(pending['user_id'],amount,tx_id_for_record,method_label,pending['pending_id'])
             self._invalidate_user_cache(pending['user_id'])
-            if not result['already']:self.send(pending['user_id'],self.get_text(pending['user_id'],'dep_success',result['amount']))
+            if not result['already']:
+                self.send(pending['user_id'],self.get_text(pending['user_id'],'dep_success',result['amount']))
+                self._notify_deposit(pending['user_id'],result['amount'],method_label)
             return True
         except Exception:
             self.logger.exception('Deposit not credited; pending retained')
             return False
+    def _notify_deposit(self,uid,amount,method):
+        """يرسل لوق الإيداع للقناة + إشعار لكل الأدمن (بعد إيداع ناجح)."""
+        try:
+            u=self.db.users.find_one({'user_id':uid}) or {}
+            uname=u.get('username') or str(uid)
+            # لوق القناة
+            try:
+                log_ch=self.get_setting('log_channel')
+                if log_ch and log_ch not in ('Not Set','',None):
+                    obs=self.obscure_text(uname) if hasattr(self,'obscure_text') else ('@'+uname if not str(uname).isdigit() else 'مستخدم')
+                    tmpl=self.db.custom_texts.find_one({'lang':'ar','key':'log_deposit'})
+                    txt=(tmpl.get('value') if tmpl and tmpl.get('value') else self.LANG['ar']['log_deposit'])
+                    try:msg=txt.format(obs,f"{amount:.2f}",method)
+                    except Exception:msg=f"💳 إيداع جديد\n💰 ${amount:.2f}\n🔄 {method}"
+                    self.bot.send_message(log_ch,msg,parse_mode="HTML")
+            except Exception as e:self.logger.debug(f"deposit log err: {e}")
+            # إشعار لكل الأدمن
+            try:
+                adm=(f"💳 <b>إيداع جديد</b>\n"
+                     f"👤 {uname} (<code>{uid}</code>)\n"
+                     f"💰 ${amount:.2f}\n🔄 {method}")
+                if self.OWNER_ID:
+                    try:self.bot.send_message(self.OWNER_ID,adm,parse_mode="HTML")
+                    except Exception:pass
+                for a in self.db.users.find({'is_admin':1}):
+                    if a['user_id']!=self.OWNER_ID:
+                        try:self.bot.send_message(a['user_id'],adm,parse_mode="HTML")
+                        except Exception:pass
+            except Exception as e:self.logger.debug(f"deposit admin notify err: {e}")
+        except Exception as e:
+            self.logger.debug(f"_notify_deposit err: {e}")
     def check_duplicate_transaction(self,uid,amount,method,sender_addr=None,receiver_addr=None,tx_timestamp=None,tx_id_clean=None,trusted_txid=False):
         if not tx_id_clean:return None
         r=self.db.used_transactions.find_one({'transaction_id':canonical_tx(tx_id_clean)})
@@ -1295,13 +1330,20 @@ class Runtime:
             return
         if len(order['codes'])!=order['qty']:raise ShopError('الطلب يحتاج مراجعة، لم يُعلن اكتمال التسليم.',409)
         f=io.BytesIO(('\n'.join(order['codes'])).encode());f.name='order_'+order['order_id']+'.txt'
+        _ulang=self.get_lang(uid)
+        if _ulang=='en':
+            _cap=f"✅ Purchase complete — {order['qty']} pcs, ${order['total_price']:.2f}\nOrder ID: {order['order_id']}"
+            _retry_msg='📄 Your codes are saved in your purchase history. You can download them again; no new charge.'
+        else:
+            _cap=f"✅ تم الشراء — {order['qty']} قطعة، ${order['total_price']:.2f}\nرقم الطلب: {order['order_id']}"
+            _retry_msg='📄 الأكواد محفوظة في سجل مشترياتك. يمكنك تنزيلها مجددًا؛ لن يُخصم رصيد جديد.'
         try:
-            self.bot.send_document(uid,f,caption=f"✅ تم الشراء — {order['qty']} قطعة، ${order['total_price']:.2f}\nرقم الطلب: {order['order_id']}")
+            self.bot.send_document(uid,f,caption=_cap)
             self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'delivered'}})
         except Exception:
             # Delivery might have succeeded at Telegram; never refund/re-sell those codes.
             self.db.shop_orders.update_one({'_id':order['_id']},{'$set':{'delivery_status':'retry'}})
-            self.send(uid,'📄 الأكواد محفوظة في سجل مشترياتك. يمكنك تنزيلها مجددًا؛ لن يُخصم رصيد جديد.')
+            self.send(uid,_retry_msg)
         self._notify_purchase(order)
         self.reward_once(order)
     def _notify_purchase(self,order):
@@ -17723,7 +17765,7 @@ def ad_cgpt_panel(call):
         InlineKeyboardButton("🧹 تنظيف النشاطات القديمة", callback_data="cgpt_purge"),
         InlineKeyboardButton("💸 احتساب الأموال المستحقة للإرجاع", callback_data="cgpt_refunds"),
         InlineKeyboardButton("\U0001f504 \u0641\u062d\u0635 \u0648\u062a\u0646\u0638\u064a\u0641 \u0627\u0644\u0622\u0646", callback_data="ad_cgpt_cleanup"),
-        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel")
+        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="admin_panel_main")
     )
     txt = (
         "\U0001f916 <b>ChatGPT Business</b>\n\n"
