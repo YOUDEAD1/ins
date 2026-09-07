@@ -1372,6 +1372,7 @@ def _cgpt_daemon_loop():
             except (ValueError, TypeError):
                 interval = 300
             _t.sleep(interval)
+            _cgpt_retry_api_receipts()
             # ننظّف كل الحسابات (متعددة)
             _accs = _cgpt_all_accounts()
             if _accs:
@@ -2191,7 +2192,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 inv = _mgr.invite_user(buyer_email, cg_minutes)
                 if inv.get('ok'):
                     _CGPT_SEATS_CACHE['exp'] = 0
-                    order_id = "CGAPI" + str(int(time.time()))[-6:]
+                    order_id = "CGAPI" + __import__('uuid').uuid4().hex
                     try:
                         db.api_orders.insert_one({
                             'order_id': order_id, 'api_user_id': uid,
@@ -2202,14 +2203,11 @@ class APIHandler(BaseHTTPRequestHandler):
                         })
                     except Exception:
                         pass
-                    notify_admins(
-                        f"🤖 <b>ChatGPT Business — شراء API</b>\n"
-                        f"👤 <code>{uid}</code>\n"
-                        f"📧 <code>{html.escape(str(buyer_email))}</code>\n"
-                        f"⏱ {cg_minutes} دقيقة\n💰 ${cg_price:.2f}\n"
-                        f"📅 {html.escape(str(inv.get('expires_at', '')))}\n"
-                        f"🆔 <code>{order_id}</code>"
-                    )
+                    try:
+                        _cgpt_api_purchase_receipt(uid, buyer_email, cg_minutes, cg_price,
+                            float(updated.get('balance', 0)), order_id, inv.get('expires_at', ''))
+                    except Exception:
+                        logger.exception('Business API receipt failed after successful purchase: %s', order_id)
                     return _json_resp(self, 200, {
                         'success': True, 'order_id': order_id,
                         'type': 'chatgpt_business',
@@ -5922,6 +5920,70 @@ def check_forced_sub(uid, use_cache=True):
     _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
     return True
 
+def _cgpt_deliver_api_receipt(event):
+    sent = set(event.get('sent_to', []))
+    for recipient in event['recipients']:
+        if recipient in sent:
+            continue
+        text = event['admin_text'] if recipient in event['admin_ids'] else event['buyer_text']
+        try:
+            bot.send_message(recipient, text, parse_mode='HTML')
+        except Exception:
+            try:
+                import re
+                bot.send_message(recipient, html.unescape(re.sub(r'<[^>]*>', '', text)), parse_mode=None)
+            except Exception:
+                logger.exception('Business API receipt delivery failed: order=%s recipient=%s', event['_id'], recipient)
+                continue
+        sent.add(recipient)
+        event['sent_to'] = list(sent)
+        logger.info('Business API receipt delivered: order=%s recipient=%s', event['_id'], recipient)
+        try:
+            db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$addToSet': {'sent_to': recipient}})
+        except Exception:
+            logger.exception('Could not persist Business receipt delivery status')
+    complete = all(recipient in sent for recipient in event['recipients'])
+    try:
+        db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$set': {'complete': complete}, '$inc': {'attempts': 1}})
+    except Exception:
+        logger.exception('Could not persist Business receipt retry status')
+
+
+def _cgpt_api_purchase_receipt(uid, email, minutes, amount, balance_after, order_id, expires_at):
+    esc = lambda value: html.escape(str(value))
+    admin_ids = set()
+    if OWNER_ID:
+        admin_ids.add(int(OWNER_ID))
+    try:
+        admin_ids.update(int(u['user_id']) for u in db.users.find({'is_admin': 1}))
+    except Exception:
+        logger.exception('Could not load Business API receipt admins')
+    receipt = get_text(OWNER_ID, 'cg_admin_purchase', uid, esc(email), str(minutes) + ' min',
+                       format(amount, '.2f'), esc(order_id))
+    receipt += (f"\n🌐 API\n💳 تم خصم / Debited: <b>${amount:.2f}</b>"
+                f"\n👛 الرصيد بعد الخصم / Balance after: <b>${balance_after:.2f}</b>"
+                f"\n📅 {esc(expires_at)}")
+    buyer_text = get_text(uid, 'cg_api_debit', esc(email), format(amount, '.2f'),
+                         format(balance_after, '.2f'), esc(order_id), esc(expires_at))
+    event = {'_id': str(order_id), 'recipients': sorted(admin_ids | {int(uid)}),
+             'admin_ids': sorted(admin_ids), 'admin_text': receipt, 'buyer_text': buyer_text,
+             'sent_to': [], 'complete': False, 'attempts': 0}
+    try:
+        db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$setOnInsert': event}, upsert=True)
+        event = db.cgpt_api_receipts.find_one({'_id': event['_id']}) or event
+    except Exception:
+        logger.exception('Could not queue Business API receipt; trying direct delivery')
+    _cgpt_deliver_api_receipt(event)
+
+
+def _cgpt_retry_api_receipts():
+    try:
+        for event in db.cgpt_api_receipts.find({'complete': False}).limit(50):
+            _cgpt_deliver_api_receipt(event)
+    except Exception:
+        logger.exception('Business API receipt retry failed')
+
+
 def notify_admins(message_text):
     recipients = set()
     if OWNER_ID:
@@ -6165,13 +6227,7 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                 stock_ar = f"{_seats} مقعد"
                 stock_en = f"{_seats} seats"
 
-        if lang == 'en':
-            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
-        else:
-            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
-
-            # Apply Business customization through the existing bilingual text system.
-            text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, stock_en if lang == 'en' else stock_ar) or text
+            text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, stock_en if lang == 'en' else stock_ar)
 
             back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
             markup = InlineKeyboardMarkup(row_width=1)
@@ -8055,13 +8111,7 @@ def shop_detail_ui(call):
         _seats = _cgpt_get_seats_cached()
         _seats = _seats if _seats is not None else 0
 
-    if l == 'en':
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
-    else:
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
-
-        # Apply Business customization through the existing bilingual text system.
-        text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, _seats) or text
+        text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, _seats)
 
         back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
         markup = InlineKeyboardMarkup(row_width=1)
@@ -17561,7 +17611,6 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("🔌 External API Stores", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 Check Transaction (Hash / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
-        markup.add(InlineKeyboardButton("👥 العملاء — Business", callback_data="cgpt_customers"))
         markup.add(InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 Referrals Settings", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
@@ -17585,7 +17634,6 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("🔌 متاجر API الخارجية", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 فحص معاملة (هاش / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
-        markup.add(InlineKeyboardButton("👥 العملاء — Business", callback_data="cgpt_customers"))
         markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
@@ -18806,6 +18854,11 @@ def ad_csv_products(call):
 
 CGPT_CMS_TEXTS = {'cg_page': ('صفحة المنتج', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ التسليم: تلقائي فوري\n📦 المقاعد المتاحة: {3}\n\n🗓 اختر المدة:', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ Delivery: Instant\n📦 Available seats: {3}\n\n🗓 Choose duration:'), 'cg_email_prompt': ('طلب إيميل الشراء', '✅ <b>المدة المختارة: {0} — ${1}</b>\n\n📧 أرسل إيميل حساب ChatGPT الخاص بك:', '✅ <b>Selected: {0} — ${1}</b>\n\n📧 Send your ChatGPT account email:'), 'cg_email_confirm': ('تأكيد الإيميل', '📧 <b>الإيميل:</b> <code>{0}</code>\n\nهل هذا الإيميل صحيح؟', '📧 <b>Email:</b> <code>{0}</code>\n\nIs this email correct?'), 'cg_success': ('رسالة نجاح الشراء', '✅ <b>تم الشراء وإرسال الدعوة بنجاح!</b>\n\n📧 <code>{0}</code>\n⏱ المدة: {1}\n📅 الانتهاء: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nتفقد بريدك واقبل الدعوة.\nاشتراكاتك: /my_chatgpt', '✅ <b>Purchase complete — invitation sent!</b>\n\n📧 <code>{0}</code>\n⏱ Duration: {1}\n📅 Expires: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nCheck your email and accept the invitation.\nYour subscriptions: /my_chatgpt'), 'cg_details': ('تفاصيل الاشتراك', '⚙️ <b>تفاصيل الاشتراك</b>\n\n📧 <code>{0}</code>\n⏳ المتبقي: {1} يوم و{2} ساعة\n📅 الانتهاء: {3}\n\nاختر التجديد أو الترقية:', '⚙️ <b>Subscription details</b>\n\n📧 <code>{0}</code>\n⏳ Remaining: {1} days, {2} hours\n📅 Expires: {3}\n\nChoose renewal or upgrade:'), 'cg_notice_5': ('❌ المنتج غير موجود.', '❌ المنتج غير موجود.', '❌ Product not found.'), 'cg_notice_6': ('❌ المدة غير موجودة.', '❌ المدة غير موجودة.', '❌ Duration not found.'), 'cg_notice_7': ('❌ تم إلغاء عملية الشراء.', '❌ تم إلغاء عملية الشراء.', '❌ Purchase cancelled.'), 'cg_notice_8': ('❌ لا توجد عملية شراء جارية.', '❌ لا توجد عملية شراء جارية.', '❌ No active purchase in progress.'), 'cg_notice_9': ('❌ إيميل غير صحيح، أرسله مجدداً.', '❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>', '❌ <b>Invalid email, please send again.</b>'), 'cg_notice_10': ('📧 أرسل إيميل حساب ChatGPT:', '📧 <b>أرسل إيميل حساب ChatGPT:</b>', '📧 <b>Send your ChatGPT email:</b>'), 'cg_notice_11': ('📧 أرسل الإيميل الصحيح:', '📧 <b>أرسل الإيميل الصحيح:</b>', '📧 <b>Send the correct email:</b>'), 'cg_notice_12': ('⏳ جاري إرسال الدعوة...', '⏳ <b>جاري إرسال الدعوة...</b>', '⏳ <b>Sending invite...</b>'), 'cg_notice_13': ('❌ انتهت الجلسة.', '❌ انتهت الجلسة.', '❌ Session expired.'), 'cg_notice_14': ('❌ عذراً، نفدت المقاعd المتاحة حالياً.', '❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً.', '❌ Sorry, no seats available right now. Try later.'), 'cg_notice_15': ('❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ No seats available. Your balance was refunded.'), 'cg_notice_16': ('📭 لا اشتراكات ChatGPT نشطة لديك.', '📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\nاشترِ باقة من المتجر!', '📭 <b>You have no active ChatGPT subscriptions.</b>'), 'cg_reminder': ('تذكير قرب انتهاء الاشتراك', '⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n📧 <code>{0}</code>\n⏰ يتبقى حوالي {1} ساعة.\nجدد الآن؛ يُلغى الوصول تلقائياً عند الانتهاء.', '⏳ <b>Your ChatGPT subscription expires soon!</b>\n📧 <code>{0}</code>\n⏰ About {1} hours left.\nRenew now; access ends automatically at expiry.'), 'cg_renew_prompt': ('اختيار باقة التجديد', '🔄 <b>تجديد اشتراك ChatGPT</b>\n📧 <code>{0}</code>\nاختر باقة التجديد بالسعر الحالي. يمكنك استخدام الإيميل نفسه أو تغييره.', '🔄 <b>Renew ChatGPT subscription</b>\n📧 <code>{0}</code>\nChoose a package at its current price. You can use the same email or change it.'), 'cg_subs_title': ('عنوان اشتراكاتي', '🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n', '🤖 <b>Your ChatGPT subscriptions</b>\n'), 'cg_refund_cancel': ('إلغاء الشراء وإرجاع الرصيد', '❌ تم إلغاء الشراء وإرجاع <b>${0}</b> إلى رصيدك.', '❌ Purchase cancelled. <b>${0}</b> was refunded to your balance.'), 'cg_invite_failed': ('فشل الدعوة وإرجاع الرصيد', '❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{0}</code>', '❌ <b>Invitation failed. Your balance was refunded.</b>\n<code>{0}</code>'), 'cg_kicked': ('إشعار العميل بعد الطرد', '🚫 ألغت الإدارة وصولك إلى ChatGPT Business.\n📧 {0}', '🚫 Your ChatGPT Business access was removed by the administrator.\n📧 {0}'), 'cg_admin_purchase': ('إشعار شراء للأدمن', '🤖 <b>ChatGPT Business — شراء</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>', '🤖 <b>ChatGPT Business — purchase</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>')}
 CGPT_CMS_BUTTONS = {'cg_buy': ('زر الشراء والمدة', '🛒 شراء', '🛒 Buy'), 'cg_cancel': ('زر إلغاء الشراء', '❌ إلغاء', '❌ Cancel'), 'cg_confirm': ('زر تأكيد الإيميل', '✅ نعم، صحيح', '✅ Yes, correct'), 'cg_change': ('زر تغيير الإيميل', '✏️ تغييره', '✏️ Change it'), 'cg_back': ('زر الرجوع', '🔙 رجوع', '🔙 Back'), 'cg_upgrade': ('زر تجديد / ترقية', '⬆️ تجديد / ترقية', '⬆️ Renew / upgrade'), 'cg_renew': ('زر التجديد', '🔄 تجديد الاشتراك', '🔄 Renew subscription'), 'cg_sub_item': ('زر فتح الاشتراك', '⚙️ الاشتراك', '⚙️ Subscription')}
+CGPT_CMS_TEXTS['cg_api_debit'] = (
+    'إشعار خصم شراء API',
+    '✅ تم شراء ChatGPT Business عبر API وإرسال الدعوة.\n📧 <code>{0}</code>\n💳 المبلغ المخصوم: <b>${1}</b>\n👛 الرصيد بعد الخصم: <b>${2}</b>\n🆔 <code>{3}</code>\n📅 الانتهاء: {4}',
+    '✅ ChatGPT Business purchased via API; invitation sent.\n📧 <code>{0}</code>\n💳 Debited: <b>${1}</b>\n👛 Balance after: <b>${2}</b>\n🆔 <code>{3}</code>\n📅 Expires: {4}'
+)
 for _key, (_title, _ar, _en) in CGPT_CMS_TEXTS.items():
     LANG['ar'][_key] = _ar
     LANG['en'][_key] = _en
