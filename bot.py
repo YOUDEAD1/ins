@@ -1321,15 +1321,10 @@ def _cgpt_send_expiry_reminders(mgr):
             # معرّف المنتج لإعادة الشراء/التجديد
             prod_id = info.get('product_id', '')
             markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔄 تجديد الاشتراك",
-                       callback_data=f"cgpt_renew_{email}"))
+            markup.add(create_btn(tg_uid, 'cg_renew', callback_data='cgsub_back'))
             try:
                 bot.send_message(tg_uid,
-                    f"⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n\n"
-                    f"📧 <b>الإيميل:</b> <code>{html.escape(str(email))}</code>\n"
-                    f"⏰ <b>يتبقّى:</b> ~{hours} ساعة\n\n"
-                    f"🔄 جدد الآن لتستمر بلا انقطاع.\n"
-                    f"<i>عند الانتهاء سيُلغى وصولك تلقائياً.</i>",
+                    get_text(tg_uid, 'cg_reminder', html.escape(str(email)), hours),
                     parse_mode="HTML", reply_markup=markup)
             except Exception:
                 pass
@@ -2207,6 +2202,14 @@ class APIHandler(BaseHTTPRequestHandler):
                         })
                     except Exception:
                         pass
+                    notify_admins(
+                        f"🤖 <b>ChatGPT Business — شراء API</b>\n"
+                        f"👤 <code>{uid}</code>\n"
+                        f"📧 <code>{html.escape(str(buyer_email))}</code>\n"
+                        f"⏱ {cg_minutes} دقيقة\n💰 ${cg_price:.2f}\n"
+                        f"📅 {html.escape(str(inv.get('expires_at', '')))}\n"
+                        f"🆔 <code>{order_id}</code>"
+                    )
                     return _json_resp(self, 200, {
                         'success': True, 'order_id': order_id,
                         'type': 'chatgpt_business',
@@ -5920,14 +5923,24 @@ def check_forced_sub(uid, use_cache=True):
     return True
 
 def notify_admins(message_text):
+    recipients = set()
     if OWNER_ID:
-        try: bot.send_message(OWNER_ID, message_text, parse_mode="HTML")
-        except: pass
-    admins = list(db.users.find({'is_admin': 1}))
-    for admin in admins:
-        if admin['user_id'] != OWNER_ID:
-            try: bot.send_message(admin['user_id'], message_text, parse_mode="HTML")
-            except: pass
+        recipients.add(int(OWNER_ID))
+    try:
+        recipients.update(int(u['user_id']) for u in db.users.find({'is_admin': 1}))
+    except Exception:
+        logger.exception("Could not load admin notification recipients")
+    for recipient in recipients:
+        try:
+            bot.send_message(recipient, message_text, parse_mode="HTML")
+        except Exception:
+            logger.exception("Admin notification failed for recipient %s", recipient)
+            try:
+                import re
+                plain = html.unescape(re.sub(r'<[^>]*>', '', message_text))
+                bot.send_message(recipient, plain, parse_mode=None)
+            except Exception:
+                logger.exception("Plain admin notification also failed for %s", recipient)
 
 
 def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='manual'):
@@ -6152,26 +6165,13 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                 stock_ar = f"{_seats} مقعد"
                 stock_en = f"{_seats} seats"
 
-            if lang == 'ar':
-                text = (
-                    f"{icon_html} <b>{p_name}</b>\n\n"
-                    f"📝 {p_desc}\n\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"⚡ <b>التسليم:</b> تلقائي فوري\n"
-                    f"📦 <b>المقاعd المتاحة:</b> {stock_ar}\n"
-                    f"━━━━━━━━━━━━━━\n\n"
-                    f"🗓 <b>اختر المدة:</b>"
-                )
-            else:
-                text = (
-                    f"{icon_html} <b>{p_name}</b>\n\n"
-                    f"📝 {p_desc}\n\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"⚡ <b>Delivery:</b> Instant\n"
-                    f"📦 <b>Available seats:</b> {stock_en}\n"
-                    f"━━━━━━━━━━━━━━\n\n"
-                    f"🗓 <b>Choose duration:</b>"
-                )
+        if lang == 'en':
+            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
+        else:
+            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
+
+            # Apply Business customization through the existing bilingual text system.
+            text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, stock_en if lang == 'en' else stock_ar) or text
 
             back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
             markup = InlineKeyboardMarkup(row_width=1)
@@ -6203,13 +6203,11 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                 # نضيف عدd الأيام دائماً للوضوح
                 _days = round(_mins / 1440, 1) if _mins else 0
                 _dtxt = f" ({_days}ي)" if lang == 'ar' else f" ({_days}d)"
-                markup.add(CustomInlineButton(
-                    text=f"📅 {dur_label} — ${dur_price:.2f}{_dtxt}",
-                    callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
-                    style="success"
+                markup.add(_cgpt_cms_button(uid, 'cg_buy', f" — {dur_label} · ${dur_price:.2f}{_dtxt}",
+                    callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}"
                 ))
 
-            markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
+            markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
             if is_admin:
                 short_pid = str(pid_actual).replace("cgpt_main_", "") if str(pid_actual).startswith("cgpt_main_") else str(pid_actual)
                 edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
@@ -7704,9 +7702,21 @@ def shop_list_ui(call):
             _cgpt_top = None
             for _cp in db.cgpt_products.find():
                 _cgid = str(_cp['_id'])
+                _aliases = {_cgid, f'cgpt_main_{_cgid}', f'cgpt_{_cgid}'}
+                _linked = next((p for p in _get_all_products_cached()
+                    if str(p.get('cgpt_product_id', '')) == _cgid
+                    or str(p.get('_id', '')) in _aliases
+                    or str(p.get('id', '')) in _aliases), None)
+                if _linked:
+                    _aliases.update(str(_linked[k]) for k in ('id', '_id') if _linked.get(k) is not None)
+                if any(_aliases.intersection(str(x) for x in (c.get('product_ids') or []))
+                       or (_linked and str(_linked.get('catalog_id')) == str(c['_id'])) for c in catalogs):
+                    continue
+                if (_cp.get('is_hidden') or (_linked and _linked.get('is_hidden'))) and not is_admin:
+                    continue
                 _seats = _cgpt_get_seats_cached()
                 _seats = _seats if _seats is not None else 0
-                _cgnm = clean_name(_cp.get('name', 'ChatGPT Business'))
+                _cgnm = clean_name(get_translated_product_name(_cp, l, is_cgpt=True))
                 _bt = f"{_cgnm} | 📦 {_seats}"
                 _bstyle = "success" if _seats > 0 else "danger"
                 _bkw = {'text': _bt, 'callback_data': f"vi_p_cgpt_main_{_cgid}", 'style': _bstyle}
@@ -8045,26 +8055,13 @@ def shop_detail_ui(call):
         _seats = _cgpt_get_seats_cached()
         _seats = _seats if _seats is not None else 0
 
-        if l == 'ar':
-            text = (
-                f"{icon_html} <b>{p_name}</b>\n\n"
-                f"📝 {p_desc}\n\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"⚡ <b>التسليم:</b> تلقائي فوري\n"
-                f"📦 <b>المقاعd المتاحة:</b> {_seats}\n"
-                f"━━━━━━━━━━━━━━\n\n"
-                f"🗓 <b>اختر المدة:</b>"
-            )
-        else:
-            text = (
-                f"{icon_html} <b>{p_name}</b>\n\n"
-                f"📝 {p_desc}\n\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"⚡ <b>Delivery:</b> Instant\n"
-                f"📦 <b>Available seats:</b> {_seats}\n"
-                f"━━━━━━━━━━━━━━\n\n"
-                f"🗓 <b>Choose duration:</b>"
-            )
+    if l == 'en':
+        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> ${p.get('price', 0):.2f}\n📊 <b>Stock:</b> {st_text}{discount_text}"
+    else:
+        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> ${p.get('price', 0):.2f}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
+
+        # Apply Business customization through the existing bilingual text system.
+        text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, _seats) or text
 
         back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
         markup = InlineKeyboardMarkup(row_width=1)
@@ -8094,13 +8091,11 @@ def shop_detail_ui(call):
                     dur_label = f"{_mins // 60} ساعة" if l == 'ar' else f"{_mins // 60} hours"
             _days = round(_mins / 1440, 1) if _mins else 0
             _dtxt = f" ({_days}ي)" if l == 'ar' else f" ({_days}d)"
-            markup.add(CustomInlineButton(
-                text=f"📅 {dur_label} — ${dur_price:.2f}{_dtxt}",
-                callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}",
-                style="success"
+            markup.add(_cgpt_cms_button(uid, 'cg_buy', f" — {dur_label} · ${dur_price:.2f}{_dtxt}",
+                callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}"
             ))
 
-        markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
+        markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
         if is_admin:
             short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
             edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
@@ -8436,12 +8431,12 @@ def cgpt_buy_duration(call):
         parent = None
 
     if not parent:
-        bot.send_message(uid, "❌ المنتج غير موجود." if l == 'ar' else "❌ Product not found.")
+        bot.send_message(uid, get_text(uid, 'cg_notice_5'))
         return
 
     dur = next((d for d in parent.get('durations', []) if d.get('dur_id') == dur_id), None)
     if not dur:
-        bot.send_message(uid, "❌ المدة غير موجودة." if l == 'ar' else "❌ Duration not found.")
+        bot.send_message(uid, get_text(uid, 'cg_notice_6'))
         return
 
     price = float(dur.get('price', 0))
@@ -8487,8 +8482,11 @@ def cgpt_buy_duration(call):
             f"✅ <b>Selected: {label} — ${price:.2f}</b>\n\n"
             f"📧 <b>Send your ChatGPT account email:</b>"
         )
+
+    # Apply Business customization through the existing bilingual text system.
+    msg_txt = get_text(uid, 'cg_email_prompt', html.escape(str(label)), f'{price:.2f}') or msg_txt
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("❌ إلغاء" if l == 'ar' else "❌ Cancel", callback_data=f"cgpt_cancel_buy_{uid}"))
+    markup.add(create_btn(uid, 'cg_cancel', callback_data=f"cgpt_cancel_buy_{uid}"))
     msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l)
 
@@ -8500,16 +8498,14 @@ def _cancel_cgpt_purchase(uid, lang):
         if 'total_price' in pending:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': pending['total_price']}})
             txt = (
-                f"❌ <b>تم إلغاء عملية الشراء وإرجاع رصيدك:</b> <code>${pending['total_price']:.2f}</code>"
-                if lang == 'ar' else
-                f"❌ <b>Purchase cancelled. Refunded:</b> <code>${pending['total_price']:.2f}</code>"
+                get_text(uid, 'cg_refund_cancel', format(pending['total_price'], '.2f'))
             )
         else:
-            txt = "❌ تم إلغاء عملية الشراء." if lang == 'ar' else "❌ Purchase cancelled."
+            txt = get_text(uid, 'cg_notice_7')
         try: bot.send_message(uid, txt, parse_mode="HTML")
         except: pass
     else:
-        try: bot.send_message(uid, "❌ لا توجد عملية شراء جارية." if lang == 'ar' else "❌ No active purchase in progress.")
+        try: bot.send_message(uid, get_text(uid, 'cg_notice_8'))
         except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_cancel_buy_"))
@@ -8530,14 +8526,12 @@ def cgpt_confirm_email_step(message, buyer_uid, lang):
     email = (message.text or "").strip().lower()
     if not _re3.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
         bot.send_message(buyer_uid,
-            "❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>" if lang == 'ar' else
-            "❌ <b>Invalid email, please send again.</b>",
+            get_text(buyer_uid, 'cg_notice_9'),
             parse_mode="HTML")
         pending = _cgpt_pending.get(buyer_uid)
         if pending:
             msg = bot.send_message(buyer_uid,
-                "📧 <b>أرسل إيميل حساب ChatGPT:</b>" if lang == 'ar' else
-                "📧 <b>Send your ChatGPT email:</b>",
+                get_text(buyer_uid, 'cg_notice_10'),
                 parse_mode="HTML")
             bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
         return
@@ -8545,15 +8539,14 @@ def cgpt_confirm_email_step(message, buyer_uid, lang):
     # نطلب التأكيد
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("✅ نعم، صحيح" if lang == 'ar' else "✅ Yes, correct",
+        create_btn(buyer_uid, 'cg_confirm',
             callback_data=f"cgpt_email_ok_{buyer_uid}"),
-        InlineKeyboardButton("✏️ تغييره" if lang == 'ar' else "✏️ Change it",
+        create_btn(buyer_uid, 'cg_change',
             callback_data=f"cgpt_email_change_{buyer_uid}")
     )
     _cgpt_pending[buyer_uid]['email'] = email
     bot.send_message(buyer_uid,
-        f"📧 <b>الإيميل:</b> <code>{email}</code>\n\n"
-        f"{'هل هذا الإيميل صحيح؟' if lang == 'ar' else 'Is this email correct?'}",
+        get_text(buyer_uid, 'cg_email_confirm', html.escape(email)),
         parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_change_"))
@@ -8562,7 +8555,7 @@ def cgpt_email_change(call):
     buyer_uid = int(call.data.replace("cgpt_email_change_", ""))
     lang = get_lang(buyer_uid)
     msg = bot.send_message(call.message.chat.id,
-        "📧 <b>أرسل الإيميل الصحيح:</b>" if lang == 'ar' else "📧 <b>Send the correct email:</b>",
+        get_text(buyer_uid, 'cg_notice_11'),
         parse_mode="HTML")
     bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
 
@@ -8575,7 +8568,7 @@ def cgpt_email_confirmed(call):
     pending = _cgpt_pending.pop(buyer_uid, None)
     if not pending or 'email' not in pending:
         bot.send_message(call.message.chat.id,
-            "❌ انتهت الجلسة." if lang == 'ar' else "❌ Session expired.")
+            get_text(buyer_uid, 'cg_notice_13'))
         return
 
     email   = pending['email']
@@ -8589,8 +8582,7 @@ def cgpt_email_confirmed(call):
     _seats = _cgpt_get_seats_cached()
     if _seats is not None and _seats <= 0:
         bot.send_message(call.message.chat.id,
-            ("❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً." if lang == 'ar'
-             else "❌ Sorry, no seats available right now. Try later."),
+            (get_text(buyer_uid, 'cg_notice_14')),
             parse_mode="HTML")
         return
 
@@ -8605,7 +8597,7 @@ def cgpt_email_confirmed(call):
         return
 
     bot.send_message(buyer_uid,
-        "⏳ <b>جاري إرسال الدعوة...</b>" if lang == 'ar' else "⏳ <b>Sending invite...</b>",
+        get_text(buyer_uid, 'cg_notice_12'),
         parse_mode="HTML")
 
     # 🔀 توزيع تلقائي: نجد حساباً فيه مقعد فارغ (من كل الحسابات)
@@ -8619,8 +8611,7 @@ def cgpt_email_confirmed(call):
         # نمسح الـ cache ليعيد الحساب
         _CGPT_SEATS_CACHE['exp'] = 0
         bot.send_message(buyer_uid,
-            ("❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك." if lang == 'ar'
-             else "❌ No seats available. Your balance was refunded."))
+            (get_text(buyer_uid, 'cg_notice_15')))
         return
     mgr._last_buyer_uid = buyer_uid
     result = mgr.invite_user(email, minutes)
@@ -8635,7 +8626,7 @@ def cgpt_email_confirmed(call):
             'qty': 1, 'total_price': price, 'order_id': order_id,
             'cgpt_email': email, 'cgpt_expires_at': expires_iso, 'cgpt_minutes': minutes
         })
-        u_data = get_user_data_full(buyer_uid)
+        u_data = get_user_data_full(buyer_uid) or {}
         buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
         if lang == 'ar':
             success = (
@@ -8655,12 +8646,15 @@ def cgpt_email_confirmed(call):
                 f"<i>Check your inbox and accept the invite 🎉</i>\n\n"
                 f"🔎 To view your subscriptions & renew, type: /my_chatgpt"
             )
-        bot.send_message(buyer_uid, success, parse_mode="HTML")
+
+        # Apply Business customization through the existing bilingual text system.
+        success = get_text(buyer_uid, 'cg_success', html.escape(email), html.escape(label), expires_iso, format(price, '.2f'), html.escape(str(pending['order_id']))) or success
+        try:
+            bot.send_message(buyer_uid, success, parse_mode="HTML")
+        except Exception:
+            logger.exception("Business buyer receipt failed; continuing admin receipt")
         notify_admins(
-            f"🤖 <b>ChatGPT — شراء</b>\n"
-            f"👤 {buyer_m} (<code>{buyer_uid}</code>)\n"
-            f"📧 <code>{email}</code>\n"
-            f"⏱ {label}\n💰 ${price:.2f}\n🆔 <code>{order_id}</code>"
+            get_text(OWNER_ID, 'cg_admin_purchase', buyer_uid, html.escape(email), html.escape(label), format(price, '.2f'), pending['order_id'])
         )
         # 📢 لوق القناة لشراء ChatGPT Duration/Package
         try:
@@ -8668,7 +8662,7 @@ def cgpt_email_confirmed(call):
             if log_ch and log_ch != "Not Set":
                 obs_user = obscure_text(u_data.get('username') or str(buyer_uid))
                 p_name_clean = clean_name(p_name)
-                product_display = f"ChatGPT Plus ({label})" if p_name_clean == "Plus" else f"{p_name_clean} ({label})"
+                product_display = f"ChatGPT Plus ({html.escape(str(label))})" if p_name_clean == "Plus" else f"{p_name_clean} ({html.escape(str(label))})"
                 product_name_log = f"🤖 <b>{product_display}</b>"
                 pub_msg = LANG['en']['log_purchase'].format(obs_user, product_name_log, 1)
                 custom_pub = db.custom_texts.find_one({'lang': 'en', 'key': 'log_purchase'})
@@ -8681,9 +8675,7 @@ def cgpt_email_confirmed(call):
     else:
         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
         bot.send_message(buyer_uid,
-            f"❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{result.get('error','')}</code>"
-            if lang == 'ar' else
-            f"❌ <b>Invite failed. Balance refunded.</b>\n<code>{result.get('error','')}</code>",
+            get_text(buyer_uid, 'cg_invite_failed', html.escape(str(result.get('error', 'unknown')))),
             parse_mode="HTML")
 
 def _cgpt_handle_email(message, buyer_uid, lang):
@@ -8719,7 +8711,7 @@ def _cgpt_handle_email(message, buyer_uid, lang):
             'cgpt_email': email, 'cgpt_expires_at': expires_iso,
             'cgpt_minutes': pending['minutes']
         })
-        u_data = get_user_data_full(buyer_uid)
+        u_data = get_user_data_full(buyer_uid) or {}
         buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
         if lang == 'ar':
             success = (f"\u2705 <b>\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629 \u0628\u0646\u062c\u0627\u062d!</b>\n\n"
@@ -8733,14 +8725,15 @@ def _cgpt_handle_email(message, buyer_uid, lang):
                 f"\u23f1 <b>Duration:</b> {days} days\n"
                 f"\U0001f4c5 <b>Expires:</b> {expires_iso[:10]}\n\n"
                 f"<i>Check your inbox and accept the invite \U0001f389</i>")
-        bot.send_message(buyer_uid, success, parse_mode="HTML")
+
+        # Apply Business customization through the existing bilingual text system.
+        success = get_text(buyer_uid, 'cg_success', html.escape(email), html.escape(str(days) + (' يوم' if lang == 'ar' else ' days')), expires_iso, format(pending['total_price'], '.2f'), html.escape(str(pending['order_id']))) or success
+        try:
+            bot.send_message(buyer_uid, success, parse_mode="HTML")
+        except Exception:
+            logger.exception("Business buyer receipt failed; continuing admin receipt")
         notify_admins(
-            f"\U0001f916 <b>ChatGPT Seat \u2014 \u0634\u0631\u0627\u0621</b>\n"
-            f"\U0001f464 {buyer_m} (<code>{buyer_uid}</code>)\n"
-            f"\U0001f4e7 <code>{email}</code>\n"
-            f"\u23f1 {days} \u064a\u0648\u0645\n"
-            f"\U0001f4b0 ${pending['total_price']:.2f}\n"
-            f"\U0001f194 <code>{pending['order_id']}</code>"
+            get_text(OWNER_ID, 'cg_admin_purchase', buyer_uid, html.escape(email), html.escape(str(days) + ' days'), format(pending['total_price'], '.2f'), pending['order_id'])
         )
         # 📢 لوق القناة لشراء ChatGPT Seat
         try:
@@ -8762,10 +8755,9 @@ def _cgpt_handle_email(message, buyer_uid, lang):
     else:
         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': pending['total_price']}})
         bot.send_message(buyer_uid,
-            f"\u274c <b>\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062f\u0639\u0648\u0629. \u062a\u0645 \u0625\u0631\u062c\u0627\u0639 \u0631\u0635\u064a\u062f\u0643.</b>\n"
-            f"\u0627\u0644\u0633\u0628\u0628: <code>{result.get('error', 'unknown')}</code>",
+            get_text(buyer_uid, 'cg_invite_failed', html.escape(str(result.get('error', 'unknown')))),
             parse_mode="HTML")
-        notify_admins(f"\U0001f6a8 ChatGPT Seat \u2014 \u0641\u0634\u0644 \u062f\u0639\u0648\u0629\n<code>{buyer_uid}</code> / <code>{email}</code>\n{result.get('error', '')}")
+        notify_admins(f"\U0001f6a8 ChatGPT Seat \u2014 \u0641\u0634\u0644 \u062f\u0639\u0648\u0629\n<code>{buyer_uid}</code> / <code>{html.escape(str(email))}</code>\n{result.get('error', '')}")
 
 
 def _do_purchase(uid, pid, qty, lang):
@@ -12061,9 +12053,7 @@ def _cgpt_show_my_subscriptions(uid, chat_id, message_id=None):
     l = get_lang(uid)
     subs = _cgpt_get_user_subscriptions(uid)
     if not subs:
-        txt = ("📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\n"
-               "اشترِ باقة من المتجر!") if l != 'en' else \
-              ("📭 <b>You have no active ChatGPT subscriptions.</b>")
+        txt = get_text(uid, 'cg_notice_16')
         markup = InlineKeyboardMarkup()
         markup.add(create_btn(uid, 'btn_products', callback_data="open_shop"))
         if message_id:
@@ -12072,16 +12062,14 @@ def _cgpt_show_my_subscriptions(uid, chat_id, message_id=None):
         bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
         return
     markup = InlineKeyboardMarkup(row_width=1)
-    lines = ["🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n"] if l != 'en' else ["🤖 <b>Your ChatGPT Subscriptions</b>\n"]
+    lines = [get_text(uid, 'cg_subs_title')]
     for i, s in enumerate(subs):
         rem = f"{s['remaining_days']} يوم" if l != 'en' else f"{s['remaining_days']} days"
         if s['remaining_days'] == 0:
             rem = f"{s['remaining_hours']} ساعة" if l != 'en' else f"{s['remaining_hours']} hours"
         lines.append(f"{i+1}. 📧 <code>{html.escape(s['email'])}</code>\n   ⏳ {rem}")
         # زر لكل اشتراك (نمرّر index)
-        markup.add(InlineKeyboardButton(
-            f"⚙️ {s['email'][:22]} — {rem}",
-            callback_data=f"cgsub_{i}"))
+        markup.add(_cgpt_cms_button(uid, 'cg_sub_item', f" — {s['email'][:22]} · {rem}", callback_data=f'cgsub_{i}'))
     # نحفظ الاشتراكات مؤقتاً للعميل (للوصول عند الضغط)
     try:
         db.cgpt_sub_cache.update_one({'_id': uid},
@@ -12132,6 +12120,9 @@ def cgpt_sub_detail(call):
             f"يمكنك التجديد أو الترقية (تُضاف المدة للمتبقّي):"
         )
         back_lbl = "🔙 رجوع"
+
+    # Apply Business customization through the existing bilingual text system.
+    txt = get_text(uid, 'cg_details', html.escape(s['email']), s['remaining_days'], s['remaining_hours'], s['expires_at']) or txt
     markup = InlineKeyboardMarkup(row_width=1)
     products = list(db.cgpt_products.find())
     for p in products:
@@ -12139,15 +12130,14 @@ def cgpt_sub_detail(call):
         durations = sorted(p.get('durations', []), key=lambda x: x.get('price', 0))
         for dur in durations:
             dur_id = dur.get('dur_id', '')
-            label = dur.get('label', '')
+            label = (dur.get('label_en') or translate_duration_label(dur.get('label', ''), 'en')) if l == 'en' else dur.get('label', '')
             price = dur.get('price', 0)
             mins = dur.get('minutes', 0)
             days = round(mins / 1440, 1) if mins else 0
             _dsuffix = f"(+{days}d)" if l == 'en' else f"(+{days}ي)"
-            markup.add(InlineKeyboardButton(
-                f"⬆️ {label} — ${price} {_dsuffix}",
+            markup.add(_cgpt_cms_button(uid, 'cg_upgrade', f' — {label} · ${price} {_dsuffix}',
                 callback_data=f"cgsub_act_{idx}_{pid}_{dur_id}"))
-    markup.add(InlineKeyboardButton(back_lbl, callback_data="cgsub_back"))
+    markup.add(create_btn(uid, 'cg_back', callback_data="cgsub_back"))
     bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
 
 
@@ -17571,6 +17561,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("🔌 External API Stores", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 Check Transaction (Hash / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
+        markup.add(InlineKeyboardButton("👥 العملاء — Business", callback_data="cgpt_customers"))
         markup.add(InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 Referrals Settings", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
@@ -17594,6 +17585,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("🔌 متاجر API الخارجية", callback_data="ext_api_main"))
         markup.add(InlineKeyboardButton("🔍 فحص معاملة (هاش / Order ID)", callback_data="ad_check_tx"))
         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
+        markup.add(InlineKeyboardButton("👥 العملاء — Business", callback_data="cgpt_customers"))
         markup.add(InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
         # 🛡 زر الحماية ضد سرقة الحوالات
@@ -18811,11 +18803,43 @@ def ad_csv_products(call):
     bot.send_document(chat_id, f, caption=f"📊 <b>تقرير المنتجات</b>\nإجمالي: <b>{len(products)}</b> منتج", parse_mode="HTML")
 
 
+
+CGPT_CMS_TEXTS = {'cg_page': ('صفحة المنتج', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ التسليم: تلقائي فوري\n📦 المقاعد المتاحة: {3}\n\n🗓 اختر المدة:', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ Delivery: Instant\n📦 Available seats: {3}\n\n🗓 Choose duration:'), 'cg_email_prompt': ('طلب إيميل الشراء', '✅ <b>المدة المختارة: {0} — ${1}</b>\n\n📧 أرسل إيميل حساب ChatGPT الخاص بك:', '✅ <b>Selected: {0} — ${1}</b>\n\n📧 Send your ChatGPT account email:'), 'cg_email_confirm': ('تأكيد الإيميل', '📧 <b>الإيميل:</b> <code>{0}</code>\n\nهل هذا الإيميل صحيح؟', '📧 <b>Email:</b> <code>{0}</code>\n\nIs this email correct?'), 'cg_success': ('رسالة نجاح الشراء', '✅ <b>تم الشراء وإرسال الدعوة بنجاح!</b>\n\n📧 <code>{0}</code>\n⏱ المدة: {1}\n📅 الانتهاء: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nتفقد بريدك واقبل الدعوة.\nاشتراكاتك: /my_chatgpt', '✅ <b>Purchase complete — invitation sent!</b>\n\n📧 <code>{0}</code>\n⏱ Duration: {1}\n📅 Expires: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nCheck your email and accept the invitation.\nYour subscriptions: /my_chatgpt'), 'cg_details': ('تفاصيل الاشتراك', '⚙️ <b>تفاصيل الاشتراك</b>\n\n📧 <code>{0}</code>\n⏳ المتبقي: {1} يوم و{2} ساعة\n📅 الانتهاء: {3}\n\nاختر التجديد أو الترقية:', '⚙️ <b>Subscription details</b>\n\n📧 <code>{0}</code>\n⏳ Remaining: {1} days, {2} hours\n📅 Expires: {3}\n\nChoose renewal or upgrade:'), 'cg_notice_5': ('❌ المنتج غير موجود.', '❌ المنتج غير موجود.', '❌ Product not found.'), 'cg_notice_6': ('❌ المدة غير موجودة.', '❌ المدة غير موجودة.', '❌ Duration not found.'), 'cg_notice_7': ('❌ تم إلغاء عملية الشراء.', '❌ تم إلغاء عملية الشراء.', '❌ Purchase cancelled.'), 'cg_notice_8': ('❌ لا توجد عملية شراء جارية.', '❌ لا توجد عملية شراء جارية.', '❌ No active purchase in progress.'), 'cg_notice_9': ('❌ إيميل غير صحيح، أرسله مجدداً.', '❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>', '❌ <b>Invalid email, please send again.</b>'), 'cg_notice_10': ('📧 أرسل إيميل حساب ChatGPT:', '📧 <b>أرسل إيميل حساب ChatGPT:</b>', '📧 <b>Send your ChatGPT email:</b>'), 'cg_notice_11': ('📧 أرسل الإيميل الصحيح:', '📧 <b>أرسل الإيميل الصحيح:</b>', '📧 <b>Send the correct email:</b>'), 'cg_notice_12': ('⏳ جاري إرسال الدعوة...', '⏳ <b>جاري إرسال الدعوة...</b>', '⏳ <b>Sending invite...</b>'), 'cg_notice_13': ('❌ انتهت الجلسة.', '❌ انتهت الجلسة.', '❌ Session expired.'), 'cg_notice_14': ('❌ عذراً، نفدت المقاعd المتاحة حالياً.', '❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً.', '❌ Sorry, no seats available right now. Try later.'), 'cg_notice_15': ('❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ No seats available. Your balance was refunded.'), 'cg_notice_16': ('📭 لا اشتراكات ChatGPT نشطة لديك.', '📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\nاشترِ باقة من المتجر!', '📭 <b>You have no active ChatGPT subscriptions.</b>'), 'cg_reminder': ('تذكير قرب انتهاء الاشتراك', '⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n📧 <code>{0}</code>\n⏰ يتبقى حوالي {1} ساعة.\nجدد الآن؛ يُلغى الوصول تلقائياً عند الانتهاء.', '⏳ <b>Your ChatGPT subscription expires soon!</b>\n📧 <code>{0}</code>\n⏰ About {1} hours left.\nRenew now; access ends automatically at expiry.'), 'cg_renew_prompt': ('اختيار باقة التجديد', '🔄 <b>تجديد اشتراك ChatGPT</b>\n📧 <code>{0}</code>\nاختر باقة التجديد بالسعر الحالي. يمكنك استخدام الإيميل نفسه أو تغييره.', '🔄 <b>Renew ChatGPT subscription</b>\n📧 <code>{0}</code>\nChoose a package at its current price. You can use the same email or change it.'), 'cg_subs_title': ('عنوان اشتراكاتي', '🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n', '🤖 <b>Your ChatGPT subscriptions</b>\n'), 'cg_refund_cancel': ('إلغاء الشراء وإرجاع الرصيد', '❌ تم إلغاء الشراء وإرجاع <b>${0}</b> إلى رصيدك.', '❌ Purchase cancelled. <b>${0}</b> was refunded to your balance.'), 'cg_invite_failed': ('فشل الدعوة وإرجاع الرصيد', '❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{0}</code>', '❌ <b>Invitation failed. Your balance was refunded.</b>\n<code>{0}</code>'), 'cg_kicked': ('إشعار العميل بعد الطرد', '🚫 ألغت الإدارة وصولك إلى ChatGPT Business.\n📧 {0}', '🚫 Your ChatGPT Business access was removed by the administrator.\n📧 {0}'), 'cg_admin_purchase': ('إشعار شراء للأدمن', '🤖 <b>ChatGPT Business — شراء</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>', '🤖 <b>ChatGPT Business — purchase</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>')}
+CGPT_CMS_BUTTONS = {'cg_buy': ('زر الشراء والمدة', '🛒 شراء', '🛒 Buy'), 'cg_cancel': ('زر إلغاء الشراء', '❌ إلغاء', '❌ Cancel'), 'cg_confirm': ('زر تأكيد الإيميل', '✅ نعم، صحيح', '✅ Yes, correct'), 'cg_change': ('زر تغيير الإيميل', '✏️ تغييره', '✏️ Change it'), 'cg_back': ('زر الرجوع', '🔙 رجوع', '🔙 Back'), 'cg_upgrade': ('زر تجديد / ترقية', '⬆️ تجديد / ترقية', '⬆️ Renew / upgrade'), 'cg_renew': ('زر التجديد', '🔄 تجديد الاشتراك', '🔄 Renew subscription'), 'cg_sub_item': ('زر فتح الاشتراك', '⚙️ الاشتراك', '⚙️ Subscription')}
+for _key, (_title, _ar, _en) in CGPT_CMS_TEXTS.items():
+    LANG['ar'][_key] = _ar
+    LANG['en'][_key] = _en
+for _key, (_title, _ar, _en) in CGPT_CMS_BUTTONS.items():
+    DEFAULT_BUTTONS['ar'][_key] = _ar
+    DEFAULT_BUTTONS['en'][_key] = _en
+
+
+def _cgpt_cms_button(uid, key, suffix='', callback_data=None):
+    button = create_btn(uid, key, callback_data=callback_data)
+    button.text += suffix
+    return button
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_cgpt')
+@admin_required
+def ad_cms_cgpt(call):
+    bot.answer_callback_query(call.id)
+    markup = InlineKeyboardMarkup(row_width=1)
+    for key, (title, ar, en) in CGPT_CMS_BUTTONS.items():
+        markup.add(InlineKeyboardButton('🎛 ' + title, callback_data='edit_btn_' + key))
+    for key, (title, ar, en) in CGPT_CMS_TEXTS.items():
+        markup.add(InlineKeyboardButton('📝 ' + title, callback_data='edit_txt_' + key))
+    markup.add(InlineKeyboardButton('📦 أسماء المنتجات وأوصافها ومددها', callback_data='cgpt_products_list'))
+    markup.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_texts_main'))
+    bot.edit_message_text('🤖 <b>تخصيص ChatGPT Business</b>\n\nاختر الزر أو النص. اكتب بالعربية وستعمل آلية الترجمة المعتادة للإنجليزية.\nاحتفظ بمتغيرات النص مثل {0} و{1}؛ تُملأ ببيانات الطلب تلقائياً.\nاسم زر الشراء قابل للتعديل، وتُضاف المدة والسعر إليه تلقائياً.', call.message.chat.id,
+                         call.message.message_id, parse_mode='HTML', reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_texts_main")
 @admin_required
 def ad_texts_main_ui(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cms_cgpt"))
     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
@@ -18937,9 +18961,19 @@ def ad_cms_btns_list(call):
 
 # ----------- دوال تعديل النصوص (الرسائل) -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_txt_"))
+@admin_required
 def ad_edit_txt_prompt(call):
     bot.answer_callback_query(call.id)
     key = call.data.replace("edit_txt_", "")
+    if key in CGPT_CMS_TEXTS:
+        nav = InlineKeyboardMarkup()
+        nav.add(InlineKeyboardButton("🔙 ChatGPT Business", callback_data="ad_cms_cgpt"))
+        from string import Formatter
+        fields = sorted({field for _, field, _, _ in Formatter().parse(LANG['ar'][key]) if field is not None})
+        guide = "تخصيص نص Business\nاحتفظ بالمتغيرات في مواضعها؛ تظهر بياناتها في النص الحالي أدناه."
+        if fields:
+            guide += "\n" + ', '.join('{' + field + '}' for field in fields)
+        bot.send_message(call.message.chat.id, guide, reply_markup=nav)
 
     # 🔧 جلب النص الحالي مع fallbacks متعددة
     current_text = ""
@@ -19318,6 +19352,8 @@ def _text_fallback_for_lang(key, lang, expected_placeholders):
 
 
 def ad_save_custom_text(message, key):
+    if not _is_admin_check(message.from_user.id):
+        return
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
@@ -19331,6 +19367,19 @@ def ad_save_custom_text(message, key):
     # 🆕 نستخرج النص مع الـ Premium Emojis
     final_text = extract_custom_emojis_to_html(message)
     
+    if key in CGPT_CMS_TEXTS:
+        try:
+            from string import Formatter
+            expected = {field for _, field, _, _ in Formatter().parse(LANG['ar'][key]) if field is not None}
+            actual = {field for _, field, _, _ in Formatter().parse(final_text) if field is not None}
+            if actual != expected:
+                raise ValueError('placeholder mismatch')
+            final_text.format(*['مثال'] * len(expected))
+        except (ValueError, KeyError, IndexError, AttributeError):
+            bot.send_message(message.chat.id, '❌ احتفظ بمتغيرات النص كما هي: ' + ', '.join('{' + x + '}' for x in sorted(expected)))
+            bot.register_next_step_handler_by_chat_id(message.chat.id, ad_save_custom_text, key)
+            return
+
     # 🆕 اكتشاف اللغة: نشيك على النص بعد إزالة HTML والإيموجيات
     text_only = re.sub(r'<[^>]+>', '', final_text)
     text_only = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text_only, flags=re.DOTALL)
@@ -19455,6 +19504,18 @@ def ad_save_custom_text(message, key):
             )
             return
 
+    if key in CGPT_CMS_TEXTS:
+        from string import Formatter
+        for value in (final_text_ar, final_text_en):
+            try:
+                fields = {field for _, field, _, _ in Formatter().parse(value) if field is not None}
+                if fields != expected:
+                    raise ValueError('translated placeholders changed')
+                value.format(*['example'] * len(expected))
+            except (ValueError, KeyError, IndexError, AttributeError):
+                bot.send_message(message.chat.id, '❌ الترجمة غيّرت متغيرات النص. لم يُحفظ التعديل؛ حاول مجدداً.')
+                return
+
     # حفظ النصين
     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
@@ -19482,9 +19543,14 @@ def ad_save_custom_text(message, key):
 
 # ----------- دوال تعديل الأزرار -----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("edit_btn_"))
+@admin_required
 def ad_edit_btn_prompt(call):
     bot.answer_callback_query(call.id)
     key = call.data.replace("edit_btn_", "")
+    if key in CGPT_CMS_BUTTONS:
+        nav = InlineKeyboardMarkup()
+        nav.add(InlineKeyboardButton("🔙 ChatGPT Business", callback_data="ad_cms_cgpt"))
+        bot.send_message(call.message.chat.id, "تخصيص زر Business", reply_markup=nav)
 
     current_text, current_emoji = get_btn_data(call.from_user.id, key)
 
@@ -19516,6 +19582,8 @@ def ad_edit_btn_prompt(call):
 
 @safe_next_step
 def ad_save_custom_btn(message, key):
+    if not _is_admin_check(message.from_user.id):
+        return
     if message.text and message.text.strip() == "الغاء":
         bot.send_message(message.chat.id, "❌ تم إلغاء عملية التعديل.")
         return
@@ -20388,161 +20456,153 @@ def cgpt_diagnose(call):
                      parse_mode="HTML", reply_markup=markup)
 
 
+def _cgpt_customer_context(call, token):
+    cached = db.cgpt_del_cache.find_one({'_id': token, 'admin_id': call.from_user.id})
+    if not cached or time.time() - cached.get('ts', 0) > 86400:
+        bot.answer_callback_query(call.id, "انتهت الجلسة، افتح العملاء مجدداً", show_alert=True)
+        return None
+    record = db.cgpt_invites_data.find_one({'_id': cached['account_id']}) or {}
+    info = record.get('data', {}).get('invites', {}).get(cached['email'])
+    if not info:
+        bot.answer_callback_query(call.id, "السجل لم يعد موجوداً", show_alert=True)
+        return None
+    return cached, info
+
+
+def _cgpt_customer_list(call, mode='all', page=0):
+    bot.answer_callback_query(call.id)
+    items = []
+    for doc in _cgpt_all_accounts():
+        acc_id = str(doc['_id'])
+        record = db.cgpt_invites_data.find_one({'_id': acc_id}) or {}
+        for email, info in record.get('data', {}).get('invites', {}).items():
+            if mode == 'all' or info.get('status') == mode:
+                items.append((email, acc_id, info))
+    items.sort(key=lambda item: (item[0].lower(), item[1]))
+    page = min(max(0, page), max(0, (len(items)-1)//20))
+    markup = InlineKeyboardMarkup(row_width=1)
+    for email, acc_id, info in items[page*20:(page+1)*20]:
+        token = __import__('uuid').uuid4().hex
+        db.cgpt_del_cache.insert_one({'_id': token, 'admin_id': call.from_user.id,
+            'account_id': acc_id, 'email': email, 'mode': mode, 'page': page, 'ts': time.time()})
+        icon = '🟢' if info.get('status') == 'active' else '⚪'
+        markup.add(InlineKeyboardButton(f"{icon} {email}", callback_data=f"cgptclient_{token}"))
+    if page:
+        markup.add(InlineKeyboardButton("⬅️ السابق", callback_data=f"cgptpage_{mode}_{page-1}"))
+    if (page+1)*20 < len(items):
+        markup.add(InlineKeyboardButton("التالي ➡️", callback_data=f"cgptpage_{mode}_{page+1}"))
+    markup.add(InlineKeyboardButton("الكل", callback_data="cgpt_customers"),
+               InlineKeyboardButton("🟢 النشطون", callback_data="cgpt_cust_active"),
+               InlineKeyboardButton("🔴 المنتهون", callback_data="cgpt_cust_expired"),
+               InlineKeyboardButton("⛔ المخالفون", callback_data="cgpt_cust_violated"),
+               InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
+    txt = f"👥 <b>العملاء</b> — {len(items)}\nالصفحة {page+1}\n\nاضغط على الإيميل لعرض معلومات العميل."
+    if not items:
+        txt += "\nلا يوجد عملاء في هذه القائمة."
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_customers")
 @admin_required
 def cgpt_customers(call):
-    bot.answer_callback_query(call.id)
-    mgr = get_cgpt_manager()
-    stats = mgr.get_stats()
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("\U0001f7e2 \u0627\u0644\u0646\u0634\u0637\u0648\u0646", callback_data="cgpt_cust_active"),
-        InlineKeyboardButton("\U0001f534 \u0627\u0644\u0645\u0646\u062a\u0647\u0648\u0646", callback_data="cgpt_cust_expired"),
-        InlineKeyboardButton("\u26d4\ufe0f \u0627\u0644\u0645\u062e\u0627\u0644\u0641\u0648\u0646", callback_data="cgpt_cust_violated"),
-        InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
-    )
-    txt = (
-        "\U0001f465 <b>\u0627\u0644\u0639\u0645\u0644\u0627\u0621</b>\n\n"
-        f"\U0001f7e2 \u0646\u0634\u0637: <b>{stats['active']}</b>\n"
-        f"\U0001f534 \u0645\u0646\u062a\u0647\u064a: <b>{stats['expired']}</b>"
-    )
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
-    except:
-        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
-@bot.callback_query_handler(func=lambda call: call.data in ["cgpt_cust_active", "cgpt_cust_expired", "cgpt_cust_violated"])
+    _cgpt_customer_list(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["cgpt_cust_active", "cgpt_cust_expired", "cgpt_cust_violated"] or call.data.startswith("cgptpage_"))
 @admin_required
 def cgpt_cust_view(call):
-    """يعرض العملاء (عبر كل الحسابات) مع زر حذف لكل واحد."""
-    try: bot.answer_callback_query(call.id)
-    except Exception: pass
-    mode = call.data.replace("cgpt_cust_", "")
-    titles = {"active": "🟢 النشطون", "expired": "🔴 المنتهون", "violated": "⛔️ المخالفون"}
-    title = titles.get(mode, "")
-    # نجمع من كل الحسابات
-    all_items = []  # (email, info, account_id, account_email)
-    for doc in _cgpt_all_accounts():
-        acc_id = str(doc.get('_id'))
-        try:
-            idata = db.cgpt_invites_data.find_one({'_id': acc_id})
-            invites = (idata.get('data', {}).get('invites', {})) if idata else {}
-        except Exception:
-            invites = {}
-        acc_email = doc.get('data', {}).get('user', {}).get('email', 'حساب')
-        for email, info in invites.items():
-            if info.get('status') == mode:
-                all_items.append((email, info, acc_id, acc_email))
-    markup = InlineKeyboardMarkup(row_width=1)
-    if not all_items:
-        txt = title + "\n\nلا يوجد."
+    if call.data.startswith('cgptpage_'):
+        _, mode, page = call.data.split('_')
+        if mode not in ('all', 'active', 'expired', 'violated') or not page.isdigit():
+            return
+        _cgpt_customer_list(call, mode, int(page))
     else:
-        txt = title + f"\n\nالعدد: {len(all_items)}\n\n"
-        for idx, (email, info, acc_id, acc_email) in enumerate(all_items[:25], 1):
-            exp = info.get('expires_at', '')[:10]
-            uid_tg = info.get('telegram_uid', '')
-            line = f"{idx}. <code>{email}</code>"
-            if exp:
-                try:
-                    exp_dt = _dt_mod.datetime.fromisoformat(info.get('expires_at', ''))
-                    rem = exp_dt - _dt_mod.datetime.now()
-                    d = max(0, rem.days)
-                    line += f" — {d}ي"
-                except Exception:
-                    pass
-            txt += line + "\n"
-            # زر حذف لكل إيميل (نمرر index في cache)
-            markup.add(InlineKeyboardButton(
-                f"🗑 حذف: {email[:28]}",
-                callback_data=f"cgptdel_{mode}_{idx-1}"))
-    # نحفظ القائمة مؤقتاً للحذف
+        _cgpt_customer_list(call, call.data.replace('cgpt_cust_', ''))
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cgptclient_'))
+@admin_required
+def cgpt_customer_detail(call):
+    token = call.data.split('_', 1)[1]
+    context = _cgpt_customer_context(call, token)
+    if not context:
+        return
+    cached, info = context
+    bot.answer_callback_query(call.id)
+    uid = info.get('telegram_uid')
+    user = db.users.find_one({'user_id': int(uid)}) if str(uid).isdigit() else None
+    user = user or {}
+    esc = lambda value: html.escape(str(value))
+    status = {'active': '🟢 نشط', 'expired': '🔴 منتهي', 'violated': '⛔ مخالف'}.get(info.get('status'), info.get('status', 'غير معروف'))
+    remaining = 'غير معروف'
     try:
-        db.cgpt_del_cache.update_one({'_id': f"{call.from_user.id}_{mode}"},
-            {'$set': {'items': [(e, a) for e, i, a, ae in all_items], 'ts': int(time.time())}},
-            upsert=True)
-    except Exception:
+        expiry = _dt_mod.datetime.fromisoformat(info['expires_at'])
+        seconds = max(0, int((expiry - _dt_mod.datetime.now(expiry.tzinfo)).total_seconds()))
+        remaining = f"{seconds//86400} يوم و{seconds%86400//3600} ساعة و{seconds%3600//60} دقيقة"
+    except (ValueError, TypeError, KeyError):
         pass
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="cgpt_customers"))
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
-    except Exception:
-        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+    txt = (f"👤 <b>معلومات العميل</b>\n\n📧 <code>{esc(cached['email'])}</code>\n"
+           f"🆔 <code>{esc(uid or 'غير مسجل')}</code>\n"
+           f"👤 {esc(user.get('first_name', user.get('name', '—')))}\n"
+           f"🔗 {esc('@'+user['username'] if user.get('username') else '—')}\n"
+           f"📊 الحالة: {esc(status)}\n"
+           f"📨 تاريخ الدعوة: {esc(info.get('invited_at', '—'))}\n"
+           f"📅 انتهاء الاشتراك: {esc(info.get('expires_at', '—'))}\n"
+           f"⏳ المتبقي: {remaining}\n\n"
+           "الحالة حسب سجل البوت؛ إرسال الدعوة لا يعني قبولها.")
+    markup = InlineKeyboardMarkup(row_width=1)
+    if info.get('status') == 'active':
+        markup.add(InlineKeyboardButton("🚫 طرد", callback_data=f"cgptkick_{token}"))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"cgptpage_{cached['mode']}_{cached['page']}"))
+    bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cgptdel_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cgptkick_'))
 @admin_required
 def cgpt_delete_customer(call):
-    """يحذف إيميل عميل من الحساب (طرد فوري) — أي حالة."""
-    raw = call.data.replace("cgptdel_", "")
-    parts = raw.rsplit("_", 1)
-    if len(parts) != 2:
+    token = call.data.split('_', 1)[1]
+    context = _cgpt_customer_context(call, token)
+    if not context:
         return
-    mode, idx_s = parts[0], parts[1]
-    idx = int(idx_s) if idx_s.isdigit() else -1
-    try:
-        cache = db.cgpt_del_cache.find_one({'_id': f"{call.from_user.id}_{mode}"})
-        items = cache.get('items', []) if cache else []
-    except Exception:
-        items = []
-    if idx < 0 or idx >= len(items):
-        bot.answer_callback_query(call.id, "انتهت الجلسة، افتح القائمة مجدداً", show_alert=True)
+    cached, info = context
+    if info.get('status') != 'active':
+        bot.answer_callback_query(call.id, "الاشتراك غير نشط", show_alert=True)
         return
-    email, acc_id = items[idx][0], items[idx][1]
-    try: bot.answer_callback_query(call.id, "🗑 جاري الحذف...")
-    except Exception: pass
-    # نبني مدير الحساب ونطرد الإيميل فعلياً
-    try:
-        doc = None
-        if acc_id == 'main':
-            m = db.cgpt_cookies.find_one({'_id': 'main'})
-            doc = {'_id': 'main', 'data': m.get('data', {})} if m else None
-        else:
-            doc = db.cgpt_accounts.find_one({'_id': ObjectId(acc_id)})
-    except Exception:
-        doc = None
-    removal_result = 'not_found'
+    bot.answer_callback_query(call.id, "جاري الطرد...")
+    doc = next((d for d in _cgpt_all_accounts() if str(d['_id']) == cached['account_id']), None)
+    result = 'error'
     if doc:
         try:
             mgr = _cgpt_build_manager_from_doc(doc)
-            removal_result = mgr.remove_by_email(email)
-        except Exception as e:
-            logger.debug(f"cgpt del err: {e}")
-    # لو لم نجده في حسابه، نبحث في كل الحسابات (احتياط)
-    if removal_result == 'not_found':
-        for _d in _cgpt_all_accounts():
-            try:
-                _m = _cgpt_build_manager_from_doc(_d)
-                _r = _m.remove_by_email(email)
-                if _r in ('member', 'pending'):
-                    removal_result = _r
-                    break
-            except Exception:
-                pass
-    # نحذف السجل من قاعدة البيانات
-    try:
-        idata = db.cgpt_invites_data.find_one({'_id': acc_id})
-        if idata:
-            data = idata.get('data', {})
-            data.get('invites', {}).pop(email, None)
-            db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}})
-    except Exception:
-        pass
-    if removal_result == 'member':
-        status_txt = "✅ طُرد من الحساب (كان عضواً) وحُذف السجل"
-    elif removal_result == 'pending':
-        status_txt = "✅ أُلغيت دعوته المعلّقة (لم يقبلها بعد) وحُذف السجل"
-    else:
-        status_txt = "⚠️ لم أجده في الحساب (لا عضو ولا دعوة معلّقة) — حُذف السجل فقط"
-    # نمسح cache المقاعd ليُحسب المتاح من جديد (بعd الطرd يزيd مقعd)
-    if removal_result in ('member', 'pending'):
-        try:
-            _CGPT_SEATS_CACHE['exp'] = 0
+            result = mgr.remove_by_email(cached['email'])
         except Exception:
-            pass
-    bot.send_message(call.message.chat.id,
-        f"🗑 <b>{email}</b>\n{status_txt}", parse_mode="HTML")
-    # نعيد عرض القائمة
-    call.data = f"cgpt_cust_{mode}"
-    cgpt_cust_view(call)
+            logger.exception("Business customer removal failed")
+    if result not in ('member', 'pending'):
+        bot.send_message(call.message.chat.id, "❌ لم يتم تأكيد الطرد. بقي سجل الاشتراك محفوظاً؛ افحص اتصال الحساب.")
+        return
+    # Keep the history and change status only after confirmed remote removal.
+    info.update({'status': 'violated', 'removed_at': _dt_mod.datetime.now().isoformat(),
+                 'removed_by': call.from_user.id, 'removal_reason': 'admin_kick'})
+    mgr.invites_data.setdefault('invites', {})[cached['email']] = info
+    mgr.allowed_emails.discard(cached['email'])
+    mgr._save_data()
+    _CGPT_SEATS_CACHE['exp'] = 0
+    uid = info.get('telegram_uid')
+    if str(uid).isdigit():
+        try:
+            bot.send_message(int(uid), get_text(int(uid), 'cg_kicked', cached['email']), parse_mode=None)
+        except Exception:
+            logger.exception("Could not notify removed customer")
+    bot.send_message(call.message.chat.id, f"✅ تم {'طرد العميل' if result == 'member' else 'إلغاء الدعوة المعلقة'}: {cached['email']}", parse_mode=None)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cgptdel_'))
+@admin_required
+def cgpt_old_delete_button(call):
+    bot.answer_callback_query(call.id, "افتح قائمة العملاء الجديدة ثم اختر الإيميل", show_alert=True)
 
 
 def _cgpt_show_products_list(chat_id, msg_id=None):
