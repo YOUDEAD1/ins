@@ -1049,7 +1049,10 @@ def _cgpt_all_accounts():
 def _cgpt_account_seat_info(doc):
     """يفحص حساباً ويرجّع معلومات مقاعده."""
     mgr = _cgpt_build_manager_from_doc(doc)
-    rep = mgr.diagnose()
+    try:
+        rep = mgr.diagnose()
+    except Exception:
+        rep = {'connected': False, 'error': 'تعذر الاتصال بالحساب أثناء الفحص'}
     total = rep.get('total_seats')
     used = rep.get('used_seats', 0)
     avail = rep.get('available_seats')
@@ -1061,7 +1064,7 @@ def _cgpt_account_seat_info(doc):
     return {
         'id': str(doc.get('_id')),
         'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
-        'email': rep.get('owner_email', '?'),
+        'email': doc.get('data', {}).get('user', {}).get('email') or rep.get('owner_email') or '?',
         'connected': rep.get('connected', False),
         'used_seats': used,
         'total_seats': total,
@@ -1215,6 +1218,40 @@ def _cgpt_migrate_dead_account(dead_doc):
 
 
 _CGPT_SEATS_CACHE = {'val': None, 'exp': 0}
+
+
+# Browsing uses a separate snapshot: it never waits for cookie/network checks
+# and never marks the purchase-validation cache as freshly checked.
+_CGPT_DISPLAY_SEATS = {'value': None, 'expires': 0}
+_CGPT_DISPLAY_LOCK = __import__('threading').Lock()
+
+
+def _cgpt_refresh_display_seats():
+    try:
+        value = _cgpt_total_available_seats()
+        _CGPT_DISPLAY_SEATS.update(value=value, expires=time.time() + 30)
+    except Exception:
+        # Keep the last known value and avoid spawning repeated failing checks.
+        _CGPT_DISPLAY_SEATS['expires'] = time.time() + 15
+        logger.warning('Business display stock refresh failed')
+    finally:
+        _CGPT_DISPLAY_LOCK.release()
+
+
+def _cgpt_display_seats():
+    """Return immediately; at most one background refresh runs at a time."""
+    now = time.time()
+    if _CGPT_SEATS_CACHE['exp'] > now:
+        return _CGPT_SEATS_CACHE['val']
+    if _CGPT_DISPLAY_SEATS['expires'] <= now and _CGPT_DISPLAY_LOCK.acquire(blocking=False):
+        try:
+            __import__('threading').Thread(target=_cgpt_refresh_display_seats,
+                daemon=True, name='business-display-stock').start()
+        except Exception:
+            _CGPT_DISPLAY_SEATS['expires'] = now + 15
+            _CGPT_DISPLAY_LOCK.release()
+            logger.warning('Could not start Business display stock refresh')
+    return _CGPT_DISPLAY_SEATS['value']
 
 
 def _cgpt_get_seats_cached():
@@ -6219,10 +6256,10 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
             icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
 
             # نحسب المقاعd المتاحة (المخزون الحقيقي)
-            _seats = _cgpt_get_seats_cached()
+            _seats = _cgpt_display_seats()
             if _seats is None:
-                stock_ar = "غير محدود"
-                stock_en = "Unlimited"
+                stock_ar = "…"
+                stock_en = "…"
             else:
                 stock_ar = f"{_seats} مقعد"
                 stock_en = f"{_seats} seats"
@@ -6394,7 +6431,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             is_cgpt = p.get('product_type') == 'cgpt_main'
             if is_cgpt:
                 if not _cgpt_computed:
-                    _cgpt_seats = _cgpt_get_seats_cached()
+                    _cgpt_seats = _cgpt_display_seats()
                     _cgpt_computed = True
                 st = _cgpt_seats if _cgpt_seats is not None else 0
                 in_stock = st > 0
@@ -6419,7 +6456,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             is_cgpt_main = p.get('product_type') == 'cgpt_main'
             # الاسم + العدد (ستوك) — لمنتج ChatGPT نعرض المقاعd المتاحة
             if is_cgpt_main:
-                st_text = str(st)  # عddد المقاعd المتاحة
+                st_text = str(st) if _cgpt_seats is not None else "…"  # عddد المقاعd المتاحة
             else:
                 st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
@@ -7641,8 +7678,8 @@ def _shop_flat_view(call, uid, l, is_admin, page=0):
     for typ, iid, nm, emoji_id, price, st, in_stock, is_manual, is_cgpt in page_items:
         short_n = nm[:25] + ".." if len(nm) > 25 else nm
         if is_cgpt:
-            _s = _cgpt_get_seats_cached()
-            st_text = "FW" if _s is None else str(_s)
+            _s = _cgpt_display_seats()
+            st_text = "…" if _s is None else str(_s)
         else:
             st_text = "FW" if is_manual else str(st)
         btn_text = f"{short_n} | ${price:.2f} | 📦 {st_text}"
@@ -7770,10 +7807,10 @@ def shop_list_ui(call):
                     continue
                 if (_cp.get('is_hidden') or (_linked and _linked.get('is_hidden'))) and not is_admin:
                     continue
-                _seats = _cgpt_get_seats_cached()
+                _seats = _cgpt_display_seats()
                 _seats = _seats if _seats is not None else 0
                 _cgnm = clean_name(get_translated_product_name(_cp, l, is_cgpt=True))
-                _bt = f"{_cgnm} | 📦 {_seats}"
+                _bt = f"{_cgnm} | 📦 {_seats if _CGPT_DISPLAY_SEATS['value'] is not None or _CGPT_SEATS_CACHE['val'] is not None else '…'}"
                 _bstyle = "success" if _seats > 0 else "danger"
                 _bkw = {'text': _bt, 'callback_data': f"vi_p_cgpt_main_{_cgid}", 'style': _bstyle}
                 if _cp.get('custom_emoji_id'):
@@ -7888,10 +7925,10 @@ def shop_list_ui(call):
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
             if is_cgpt:
-                _cg_seats = _cgpt_get_seats_cached()
+                _cg_seats = _cgpt_display_seats()
                 _cg_seats = _cg_seats if _cg_seats is not None else 0
                 in_stock = _cg_seats > 0
-                st_text = str(_cg_seats)
+                st_text = str(_cg_seats) if _CGPT_DISPLAY_SEATS['value'] is not None or _CGPT_SEATS_CACHE['val'] is not None else "…"
                 btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
             else:
                 st_text = "FW" if is_manual else str(st)
@@ -7976,7 +8013,7 @@ def shop_list_ui(call):
             is_cgpt = p.get('product_type') == 'cgpt_main'
             if is_cgpt:
                 if not _nc_seats_done:
-                    _nc_seats = _cgpt_get_seats_cached()
+                    _nc_seats = _cgpt_display_seats()
                     _nc_seats_done = True
                 st = _nc_seats if _nc_seats is not None else 0
                 in_stock = st > 0
@@ -8001,7 +8038,7 @@ def shop_list_ui(call):
             n = clean_name(p.get('name_en') if l == 'en' else p.get('name_ar'))
             short_n = n[:25] + ".." if len(n) > 25 else n
             if is_cgpt:
-                st_text = str(st)  # المقاعd المتاحة
+                st_text = str(st) if _nc_seats is not None else "…"  # المقاعd المتاحة
             else:
                 st_text = "FW" if is_manual else str(st)
             btn_text = f"{short_n} | 📦 {st_text}{hidden_icon}"
@@ -8108,8 +8145,8 @@ def shop_detail_ui(call):
         icon_html = f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji>' if custom_emoji_id else '🤖'
 
         # المقاعd المتاحة (المخزون الحقيقي)
-        _seats = _cgpt_get_seats_cached()
-        _seats = _seats if _seats is not None else 0
+        _seats = _cgpt_display_seats()
+        _seats = _seats if _seats is not None else "…"
 
         text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, _seats)
 
@@ -12643,8 +12680,127 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
-def _ext_broadcast_new_product(ep):
+# External-store broadcasts require the owner's explicit approval.
+_EXT_BC_REQUEST_LOCK = threading.Lock()
+_EXT_BC_WORKER_LOCK = threading.Lock()
+_EXT_BC_WAKE = threading.Event()
+
+
+def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
+    if not ep or not OWNER_ID:
+        return
+    with _EXT_BC_REQUEST_LOCK:
+        # Repeated sync ticks do not create repeated approval requests.
+        if db.ext_broadcast_approvals.find_one({'product_id': str(ep['_id']), 'kind': kind,
+                'status': {'$in': ['pending', 'queued', 'sending']}}):
+            return
+        token = __import__('uuid').uuid4().hex
+        job = {'_id': token, 'product_id': str(ep['_id']), 'kind': kind,
+               'status': 'pending', 'owner_id': int(OWNER_ID), 'old_price': old_price,
+               'new_price': new_price, 'created_at': time.time()}
+        db.ext_broadcast_approvals.insert_one(job)
+        labels = {'stock': 'توفّر ستوك', 'new': 'منتج جديد', 'price': 'تخفيض سعر'}
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton('✅ إرسال البرودكاست', callback_data='extbc_yes_' + token))
+        markup.add(InlineKeyboardButton('❌ تجاهل', callback_data='extbc_no_' + token))
+        price = float(ep.get('sell_price', ep.get('base_price', 0)) or 0)
+        if new_price is not None:
+            price = float(new_price)
+        text = (f"📢 <b>طلب موافقة على برودكاست متجر API</b>\n"
+                f"{labels[kind]}\n📦 {html.escape(str(ep.get('name', '')))}\n"
+                f"🪑 الستوك: {html.escape(str(ep.get('stock', 0)))}\n💰 السعر: ${price:.2f}\n\n"
+                'هل تريد إرسال الإعلان للعملاء؟ لن يُرسل دون موافقتك.')
+        try:
+            bot.send_message(int(OWNER_ID), text, parse_mode='HTML', reply_markup=markup)
+        except Exception:
+            db.ext_broadcast_approvals.update_one({'_id': token}, {'$set': {'status': 'notification_failed'}})
+            logger.exception('External broadcast approval notification failed')
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('extbc_yes_', 'extbc_no_')))
+def _ext_broadcast_decision(call):
+    # Approval belongs to the owner, not to arbitrary callback senders.
+    if int(call.from_user.id) != int(OWNER_ID):
+        bot.answer_callback_query(call.id, 'هذا الطلب لصاحب البوت فقط.', show_alert=True)
+        return
+    approved = call.data.startswith('extbc_yes_')
+    token = call.data.split('_', 2)[2]
+    job = db.ext_broadcast_approvals.find_one_and_update(
+        {'_id': token, 'owner_id': int(OWNER_ID), 'status': 'pending'},
+        {'$set': {'status': 'queued' if approved else 'declined', 'decided_at': time.time()}},
+        return_document=True)
+    if not job:
+        bot.answer_callback_query(call.id, 'تم التعامل مع هذا الطلب مسبقاً.', show_alert=True)
+        return
+    bot.answer_callback_query(call.id, 'أُضيف إلى طابور الإرسال.' if approved else 'تم التجاهل؛ لن يُرسل الإعلان.')
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    if approved:
+        _ext_start_broadcast_worker()
+        _EXT_BC_WAKE.set()
+
+
+def _ext_start_broadcast_worker():
+    if not _EXT_BC_WORKER_LOCK.acquire(blocking=False):
+        return
+    try:
+        threading.Thread(target=_ext_approved_broadcast_worker, daemon=True,
+                         name='approved-api-broadcasts').start()
+    except Exception:
+        _EXT_BC_WORKER_LOCK.release()
+        logger.exception('Could not start approved API broadcast worker')
+
+
+def _ext_approved_broadcast_worker():
+    try:
+        while True:
+            try:
+                job = db.ext_broadcast_approvals.find_one_and_update({'status': 'queued'},
+                    {'$set': {'status': 'sending', 'started_at': time.time()}}, return_document=True)
+                if not job:
+                    _EXT_BC_WAKE.wait(30)
+                    _EXT_BC_WAKE.clear()
+                    continue
+                try:
+                    ep = db.ext_products.find_one({'_id': ObjectId(job['product_id'])})
+                    if not ep or ep.get('hidden'):
+                        raise ValueError('المنتج محذوف أو مخفي')
+                    if job['kind'] == 'stock' and not float(ep.get('stock', 0) or 0) > 0:
+                        raise ValueError('نفد الستوك قبل بدء الإرسال')
+                    if job['kind'] == 'price' and float(ep.get('sell_price', ep.get('base_price', 0)) or 0) != float(job['new_price']):
+                        raise ValueError('تغيّر السعر بعد طلب الموافقة')
+                    if job['kind'] == 'stock':
+                        sent, failed = _ext_broadcast_stock(ep, _approved=True)
+                    elif job['kind'] == 'new':
+                        sent, failed = _ext_broadcast_new_product(ep, _approved=True)
+                    else:
+                        sent, failed = _ext_broadcast_price_drop(ep, job['old_price'], job['new_price'], _approved=True)
+                    db.ext_broadcast_approvals.update_one({'_id': job['_id']},
+                        {'$set': {'status': 'completed', 'sent': sent, 'failed': failed}})
+                    bot.send_message(job['owner_id'], f'📢 انتهى البرودكاست. وصل: {sent}، تعذّر: {failed}.')
+                except Exception:
+                    db.ext_broadcast_approvals.update_one({'_id': job['_id'], 'status': 'sending'},
+                        {'$set': {'status': 'failed'}})
+                    logger.exception('Approved API broadcast failed')
+                    try:
+                        bot.send_message(job['owner_id'], '⚠️ تعذّر إكمال البرودكاست أو تغيّر المنتج. لم تُعَد الحملة تلقائياً لتجنب التكرار.')
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception('Approved API broadcast queue unavailable')
+                _EXT_BC_WAKE.wait(30)
+                _EXT_BC_WAKE.clear()
+    finally:
+        _EXT_BC_WORKER_LOCK.release()
+
+
+def _ext_broadcast_new_product(ep, _approved=False):
     """يبثّ رسالة 'منتج جديد' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    if not _approved:
+        return _ext_request_broadcast('new', ep)
+    sent = failed = 0
     if not ep:
         return
     try:
@@ -12652,10 +12808,12 @@ def _ext_broadcast_new_product(ep):
         emoji_id = ep.get('emoji_id')
         price = float(ep.get('sell_price', ep.get('base_price', 0)))
         stk = ep.get('stock', 0)
-        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
         for u in users:
             try:
                 uid_u = u['user_id']
+                if is_user_banned(uid_u):
+                    continue
                 u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
@@ -12668,23 +12826,32 @@ def _ext_broadcast_new_product(ep):
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
                 bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                sent += 1
                 time.sleep(0.05)
             except Exception:
-                pass
+                failed += 1
     except Exception as _e:
         logger.debug(f"_ext_broadcast_new_product err: {_e}")
 
+        raise
+    return sent, failed
 
-def _ext_broadcast_stock(ep):
+
+def _ext_broadcast_stock(ep, _approved=False):
     """يبثّ رسالة 'توفّر ستوك' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
+    if not _approved:
+        return _ext_request_broadcast('stock', ep)
+    sent = failed = 0
     try:
         epid = str(ep['_id'])
         stk = ep.get('stock', 0)
         emoji_id = ep.get('emoji_id')
-        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
         for u in users:
             try:
                 uid_u = u['user_id']
+                if is_user_banned(uid_u):
+                    continue
                 u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
@@ -12697,22 +12864,31 @@ def _ext_broadcast_stock(ep):
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
                 bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                sent += 1
                 time.sleep(0.05)
             except Exception:
-                pass
+                failed += 1
     except Exception as _e:
         logger.debug(f"_ext_broadcast_stock err: {_e}")
 
+        raise
+    return sent, failed
 
-def _ext_broadcast_price_drop(ep, old_price, new_price):
+
+def _ext_broadcast_price_drop(ep, old_price, new_price, _approved=False):
     """يبثّ رسالة 'تخفيض السعر' لكل مستخدمي البوت لمنتج API."""
+    if not _approved:
+        return _ext_request_broadcast('price', ep, old_price, new_price)
+    sent = failed = 0
     try:
         epid = str(ep['_id'])
         emoji_id = ep.get('emoji_id')
-        users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
         for u in users:
             try:
                 uid_u = u['user_id']
+                if is_user_banned(uid_u):
+                    continue
                 u_lang = u.get('lang', 'ar') if u.get('lang_chosen') else 'en'
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
@@ -12730,11 +12906,15 @@ def _ext_broadcast_price_drop(ep, old_price, new_price):
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
                 bot.send_message(uid_u, msg, parse_mode="HTML", reply_markup=markup)
+                sent += 1
                 time.sleep(0.05)
             except Exception:
-                pass
+                failed += 1
     except Exception as _e:
         logger.debug(f"_ext_broadcast_price_drop err: {_e}")
+
+        raise
+    return sent, failed
 
 
 def _auto_sync_ext_stores():
@@ -12857,11 +13037,7 @@ def _auto_sync_ext_stores():
                                 db.ext_products.update_one({'_id': existing['_id']},
                                     {'$set': {'last_stock_broadcast': time.time()}})
                                 _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
-                                threading.Thread(
-                                    target=_ext_broadcast_stock,
-                                    args=(_updated_ep,),
-                                    daemon=True
-                                ).start()
+                                _ext_broadcast_stock(_updated_ep)
                             except Exception:
                                 pass
 
@@ -16154,8 +16330,7 @@ def ext_add_new_product(call):
     # 📢 برودكاست للمستخدمين (رسالة "منتج جديد" مثل المنتج العادي)
     try:
         _new_ep = db.ext_products.find_one({'_id': res.inserted_id})
-        threading.Thread(target=_ext_broadcast_new_product,
-                         args=(_new_ep,), daemon=True).start()
+        _ext_broadcast_new_product(_new_ep)
     except Exception:
         pass
     try:
@@ -16729,8 +16904,7 @@ def _ext_save_price(message, pid, ptype):
     # 📢 لو انخفض السعر → برودكاست تخفيض للمستخدمين + إشعار المطوّرين
     if old_sell > 0 and sell < old_sell and not p.get('hidden'):
         try:
-            threading.Thread(target=_ext_broadcast_price_drop,
-                             args=(p, old_sell, sell), daemon=True).start()
+            _ext_broadcast_price_drop(p, old_sell, sell)
         except Exception:
             pass
         try:
@@ -18859,6 +19033,11 @@ CGPT_CMS_TEXTS['cg_api_debit'] = (
     '✅ تم شراء ChatGPT Business عبر API وإرسال الدعوة.\n📧 <code>{0}</code>\n💳 المبلغ المخصوم: <b>${1}</b>\n👛 الرصيد بعد الخصم: <b>${2}</b>\n🆔 <code>{3}</code>\n📅 الانتهاء: {4}',
     '✅ ChatGPT Business purchased via API; invitation sent.\n📧 <code>{0}</code>\n💳 Debited: <b>${1}</b>\n👛 Balance after: <b>${2}</b>\n🆔 <code>{3}</code>\n📅 Expires: {4}'
 )
+CGPT_CMS_TEXTS['cg_seats_broadcast'] = (
+    'برودكاست توفر مقاعد Business',
+    '🤖 <b>توفرت مقاعد ChatGPT Business!</b>\n\n🛍 <b>{0}</b>\n🪑 المقاعد المتاحة: <b>{1}</b>\n\n<i>سارع بالحصول على مقعدك قبل النفاد!</i>',
+    '🤖 <b>ChatGPT Business Seats Available!</b>\n\n🛍 <b>{0}</b>\n🪑 Available seats: <b>{1}</b>\n\n<i>Grab yours now before they run out!</i>'
+)
 for _key, (_title, _ar, _en) in CGPT_CMS_TEXTS.items():
     LANG['ar'][_key] = _ar
     LANG['en'][_key] = _en
@@ -20163,8 +20342,11 @@ def cgpt_accounts(call):
                 else:
                     seat_txt = f" | 👥 {used} مستخdم"
             else:
-                seat_txt = f" | {info.get('error','')[:30]}"
+                seat_txt = f" | {html.escape(str(info.get('error') or 'تعذر الاتصال')[:30])}"
             lines.append(f"{icon} <code>{html.escape(str(info['email']))}</code>{seat_txt}")
+            markup.add(InlineKeyboardButton(
+                f"🔄 تحديث كوكيز: {str(info['email'])[:25]}",
+                callback_data=f"cgpt_refreshcookies_{info['id']}"))
             markup.add(InlineKeyboardButton(
                 f"🗑 حذف: {str(info['email'])[:25]}",
                 callback_data=f"cgpt_delacc_{info['id']}"))
@@ -20172,7 +20354,9 @@ def cgpt_accounts(call):
                 f"🪑 ضبط مقاعد: {str(info['email'])[:20]}",
                 callback_data=f"cgpt_setseats_{info['id']}"))
         lines.append(f"\n🟢 <b>إجمالي المقاعد المتاحة: {total_avail}</b>")
-    markup.add(InlineKeyboardButton("➕ إضافة حساب جديد", callback_data="cgpt_addacc"))
+    markup.add(InlineKeyboardButton("🔬 تفاصيل الحساب الرئيسي", callback_data="cgpt_main_diagnose_details"))
+    markup.add(InlineKeyboardButton("🔄 إعادة فحص الجلسات", callback_data="cgpt_accounts"))
+    markup.add(InlineKeyboardButton("➕ إضافة / تحديث كوكيز", callback_data="cgpt_addacc"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cgpt_panel"))
     bot.send_message(call.message.chat.id, "\n".join(lines),
                      parse_mode="HTML", reply_markup=markup)
@@ -20185,41 +20369,124 @@ def cgpt_add_account(call):
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     msg = bot.send_message(call.message.chat.id,
-        "➕ <b>إضافة حساب ChatGPT جديد</b>\n\n"
+        "🍪 <b>إضافة / تحديث كوكيز ChatGPT</b>\n\n"
+        "إذا كان الإيميل موجوداً سأحدّثه دون إنشاء حساب آخر، ثم أعرض نتيجة الفحص.\n"
         "أرسل كوكيز الحساب (JSON) — نفس صيغة الحساب الرئيسي:\n"
         "<code>{\"accessToken\":\"...\",\"sessionToken\":\"...\",\"account\":{...},\"user\":{...}}</code>",
         parse_mode="HTML")
     bot.register_next_step_handler(msg, _cgpt_save_new_account)
 
 
-def _cgpt_save_new_account(message):
-    if not message.text:
+_CGPT_COOKIE_UPDATE_LOCK = __import__('threading').Lock()
+
+
+def _cgpt_cookie_email(data):
+    return str((data.get('user') or {}).get('email') or '').strip().casefold()
+
+
+def _cgpt_store_verified_cookies(data, target_id=None):
+    """Validate the actual connection, then update the existing email in place."""
+    if not isinstance(data, dict) or not isinstance(data.get('user'), dict) or not isinstance(data.get('account'), dict):
+        raise ValueError('يلزم JSON كامل يحتوي user وaccount.')
+    email = _cgpt_cookie_email(data)
+    if not email or '@' not in email or not data.get('account', {}).get('id'):
+        raise ValueError('ينقص إيميل الحساب أو account.id.')
+    if not all(isinstance(data.get(k), str) and data[k].strip() for k in ('accessToken', 'sessionToken')):
+        raise ValueError('ينقص accessToken أو sessionToken.')
+    with _CGPT_COOKIE_UPDATE_LOCK:
+        # Read directly: an incomplete account listing must not cause a duplicate insert.
+        accounts = list(db.cgpt_accounts.find())
+        main = db.cgpt_cookies.find_one({'_id': 'main'})
+        if main and main.get('data'):
+            accounts.append(main)
+        matches = [d for d in accounts if _cgpt_cookie_email(d.get('data', {})) == email]
+        if target_id is not None:
+            target = next((d for d in accounts if str(d['_id']) == target_id), None)
+            if not target:
+                raise ValueError('الجلسة لم تعد موجودة. افتح قائمة الجلسات مجدداً.')
+            if _cgpt_cookie_email(target.get('data', {})) != email:
+                raise ValueError('إيميل الكوكيز مختلف عن الجلسة المختارة؛ لم يُعدّل أي حساب.')
+        workspace = str(data['account']['id'])
+        if any(str(d.get('data', {}).get('account', {}).get('id', '')) not in ('', workspace) for d in matches):
+            raise ValueError('الإيميل موجود لكن مساحة العمل مختلفة. لم أستبدل حساب الاشتراكات بمساحة أخرى.')
+        if matches:
+            record = next((d for d in matches if str(d['_id']) == target_id), matches[0])
+            record_id = record['_id']
+        elif not accounts:
+            record_id = 'main'
+        else:
+            # Stable id makes repeated uploads an upsert, even across bot processes.
+            import hashlib
+            record_id = ObjectId(hashlib.sha256(email.encode()).hexdigest()[:24])
+        candidate = {'_id': record_id, 'data': data}
+        info = _cgpt_account_seat_info(candidate)
+        if not info.get('connected'):
+            raise ValueError('فشل اختبار الاتصال بالكوكيز الجديدة. لم أستبدل الكوكيز المحفوظة؛ حدّثها وحاول مجدداً.')
+        targets = matches or [candidate]
+        for record in targets:
+            collection = db.cgpt_cookies if str(record['_id']) == 'main' else db.cgpt_accounts
+            collection.update_one({'_id': record['_id']},
+                {'$set': {'data': data, 'updated_at': int(time.time()), 'cookie_test_ok': True},
+                 '$setOnInsert': {'name': email, 'created_at': int(time.time())}}, upsert=True)
+        global _cgpt_manager_instance
+        with _cgpt_lock:
+            _cgpt_manager_instance = None
+        _CGPT_SEATS_CACHE['exp'] = 0
+        return {'updated': bool(matches), 'id': str(record_id), 'email': email, 'info': info, 'records': len(targets)}
+
+
+def _cgpt_receive_cookie_update(message, target_id=None):
+    if not _is_admin_check(message.from_user.id):
         return
-    import json as _json
+    raw = (message.text or '').strip()
+    if raw.lower() in ('/cancel', 'cancel', 'الغاء', 'إلغاء'):
+        bot.send_message(message.chat.id, 'تم إلغاء تحديث الكوكيز.')
+        return
     try:
-        data = _json.loads(message.text.strip())
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        bot.send_message(message.chat.id, '❌ JSON غير صالح؛ أرسل الكوكيز كاملة أو /cancel.')
+        bot.register_next_step_handler_by_chat_id(message.chat.id, _cgpt_receive_cookie_update, target_id)
+        return
+    bot.send_message(message.chat.id, '⏳ جاري اختبار الاتصال بالكوكيز...')
+    try:
+        result = _cgpt_store_verified_cookies(data, target_id)
+    except ValueError as exc:
+        bot.send_message(message.chat.id, str(exc), parse_mode=None)
+        bot.register_next_step_handler_by_chat_id(message.chat.id, _cgpt_receive_cookie_update, target_id)
+        return
     except Exception:
-        bot.send_message(message.chat.id, "❌ JSON غير صالح. حاول مجدداً.")
+        logger.error('Business cookie update failed; inspect database/connectivity availability')
+        bot.send_message(message.chat.id, '❌ تعذّر إكمال الحفظ. أعد فحص الجلسات ثم حاول مجدداً.')
         return
-    if not data.get('accessToken') or not data.get('sessionToken'):
-        bot.send_message(message.chat.id, "❌ ينقص accessToken أو sessionToken.")
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton('🩺 فحص الجلسات', callback_data='cgpt_accounts'))
+    markup.add(InlineKeyboardButton('🪑 ضبط المقاعد', callback_data=f"cgpt_setseats_{result['id']}"))
+    markup.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_cgpt_panel'))
+    action = 'تم تحديث الكوكيز في الحساب الموجود' if result['updated'] else 'تمت إضافة الحساب الجديد'
+    text = f"✅ {action}\n📧 {html.escape(result['email'])}\n✅ اختبار الاتصال: ناجح"
+    if result['updated']:
+        text += '\nبقيت الاشتراكات وإعدادات المقاعد مرتبطة بنفس السجلات.'
+    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cgpt_refreshcookies_'))
+@admin_required
+def cgpt_refresh_account_cookies(call):
+    bot.answer_callback_query(call.id)
+    target_id = call.data.replace('cgpt_refreshcookies_', '', 1)
+    target = next((d for d in _cgpt_all_accounts() if str(d['_id']) == target_id), None)
+    if not target:
+        bot.send_message(call.message.chat.id, 'الجلسة غير موجودة؛ افتح قائمة الجلسات مجدداً.')
         return
-    email = data.get('user', {}).get('email', 'حساب جديد')
-    res = db.cgpt_accounts.insert_one({
-        'data': data, 'name': email, 'created_at': int(time.time())
-    })
-    # نفحص الاتصال والمستخدمين الحاليين
-    info = _cgpt_account_seat_info({'_id': res.inserted_id, 'data': data, 'name': email})
-    status = "✅ متصل" if info['connected'] else f"⚠️ {info.get('error','')[:50]}"
-    used = info.get('used_seats', 0)
-    # نطلب عدد المقاعد مباشرة
-    msg = bot.send_message(message.chat.id,
-        f"✅ <b>أُضيف الحساب:</b> <code>{html.escape(str(email))}</code>\n{status}\n"
-        f"👥 المستخدمون الحاليون: {used}\n\n"
-        f"🪑 <b>الآن أرسل عدد المقاعد الإجمالي لهذا الحساب</b> (رقم):\n"
-        f"<i>مثال: 5 — لو اشتراكك فيه 5 مقاعد. سيحسب البوت المتاح تلقائياً.</i>",
-        parse_mode="HTML")
-    bot.register_next_step_handler(msg, _cgpt_save_seats, str(res.inserted_id))
+    email = _cgpt_cookie_email(target.get('data', {}))
+    msg = bot.send_message(call.message.chat.id,
+        f'🔄 تحديث كوكيز: {email}\nأرسل JSON الكامل لنفس الإيميل. سأفحصه قبل الحفظ.\nللإلغاء: /cancel', parse_mode=None)
+    bot.register_next_step_handler(msg, _cgpt_receive_cookie_update, target_id)
+
+
+def _cgpt_save_new_account(message):
+    return _cgpt_receive_cookie_update(message)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_bcast_"))
@@ -20296,6 +20563,8 @@ def cgpt_broadcast_send(call):
                            f"🪑 المقاعد المتاحة: <b>{total_avail}</b>\n\n"
                            f"<i>سارع بالحصول على مقعدك قبل النفاد!</i>")
                     btn = f"🛒 شراء — {name}"
+                # Use the existing CMS and each recipient's language.
+                txt = get_text(uid_u, 'cg_seats_broadcast', html.escape(name), total_avail) or txt
                 markup = InlineKeyboardMarkup()
                 bkw = {'text': btn, 'callback_data': f"vi_p_cgpt_main_{prod_id}", 'style': 'success'}
                 if emoji_id:
@@ -20467,6 +20736,13 @@ def _cgpt_save_seats(message, acc_id):
 @bot.callback_query_handler(func=lambda call: call.data == "cgpt_diagnose")
 @admin_required
 def cgpt_diagnose(call):
+    """Check all stored cookie sessions and offer per-account refresh."""
+    return cgpt_accounts(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'cgpt_main_diagnose_details')
+@admin_required
+def cgpt_main_diagnose_details(call):
     """يعرض حالة الاتصال والإيميل والمقاعد المتاحة."""
     try: bot.answer_callback_query(call.id, "🩺 جاري الفحص...")
     except Exception: pass
@@ -21058,21 +21334,7 @@ def cgpt_paste_json(call):
     bot.register_next_step_handler(msg, cgpt_save_json_cookies)
 
 def cgpt_save_json_cookies(message):
-    try:
-        data = json.loads(message.text.strip())
-        # نحفظ في قاعدة البيانات (دائم)
-        db.cgpt_cookies.update_one({'_id': 'main'}, {'$set': {'data': data}}, upsert=True)
-        # نعيد تحميل المدير
-        global _cgpt_manager_instance
-        with _cgpt_lock:
-            _cgpt_manager_instance = None
-        ok = get_cgpt_manager()._loaded
-        icon = "\u2705" if ok else "\u274c"
-        bot.send_message(message.chat.id,
-            f"{icon} <b>{'\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 \u0641\u064a \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a!' if ok else '\u062a\u0645 \u0627\u0644\u062d\u0641\u0638 \u0644\u0643\u0646 \u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0645\u064a\u0644!'}</b>",
-            parse_mode="HTML")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"\u274c <b>JSON \u063a\u064a\u0631 \u0635\u062d\u064a\u062d!</b>\n<code>{e}</code>", parse_mode="HTML")
+    return _cgpt_receive_cookie_update(message)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cgpt_cleanup")
@@ -25322,6 +25584,8 @@ def api_disable(call):
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
+    # Only queued (owner-approved) campaigns may be consumed after restart.
+    _ext_start_broadcast_worker()
     # تشغيل الـ daemon في thread خلفية عند بدء البوت
     try:
         _cgpt_daemon_thread = __import__('threading').Thread(
