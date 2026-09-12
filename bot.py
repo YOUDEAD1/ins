@@ -9247,6 +9247,10 @@ def set_coin_hidden(coin_key, hidden):
     try:
         db.settings.update_one({'key': f'hide_coin_{coin_key}'},
                                {'$set': {'value': '1' if hidden else '0'}}, upsert=True)
+        if coin_key == 'bybit' and not hidden:
+            db.settings.update_one({'key': 'bybit_disabled'}, {'$set': {'value': '0'}}, upsert=True)
+            global _BYBIT_INVALID_KEY_COUNT
+            _BYBIT_INVALID_KEY_COUNT = 0
         return True
     except Exception:
         return False
@@ -9356,7 +9360,7 @@ def dep_init_ui(call):
         markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
     # 🟠 Bybit — تحت Binance مباشرة (تظهر فقط لو فيه طريقة مفعّلة وغير مخفية)
     try:
-        if bybit_available_methods() and not is_coin_hidden('bybit'):
+        if not is_coin_hidden('bybit'):
             markup.add(create_btn(uid, 'btn_bybit', callback_data="dep_bybit"))
     except Exception:
         pass
@@ -9572,10 +9576,7 @@ def pay_exact_confirm(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "dep_binance")
 def dep_binance_ui(call):
-    # ⚠️ تنبيه المبلغ الدقيق أولاً (كل الطرق عدا نجوم تيليجرام)
-    if _needs_exact_warning(call.from_user.id, 'binance'):
-        _show_exact_amount_warning(call, 'binance')
-        return
+    """Open the Binance amount prompt directly."""
     _dep_binance_real(call)
 
 
@@ -9669,8 +9670,7 @@ def ask_binance_deposit_amount(message):
     cancel_markup = InlineKeyboardMarkup(row_width=2)
     # صف أزرار النسخ
     cancel_markup.add(
-        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.4f}"),
-        _copy_button(get_text(uid, 'dep_btn_copy_wallet'), wallet)
+        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.4f}")
     )
     # زر نسخ الآيدي (مهم — Binance يحتاجه في الـ Notes)
     cancel_markup.add(
@@ -11184,17 +11184,11 @@ def bybit_is_configured():
 
 
 def bybit_available_methods():
-    """يرجّع قائمة الطرق المفعّلة فعلياً (حتى لا نعرض زراً بلا إعداد)."""
+    """Only internal UID deposits are offered; keep legacy settlement code."""
     if not bybit_is_configured():
         return []
-    out = []
     _k, _s, uid_set, _b = _bybit_creds()
-    if uid_set:
-        out.append('UID')
-    for net in BYBIT_NETWORKS:
-        if _bybit_net_address(net):
-            out.append(net)
-    return out
+    return ['UID'] if uid_set else []
 
 
 def _bybit_signed_request(path, params=None, timeout=8):
@@ -11745,81 +11739,34 @@ def check_bybit_auto():
 # ------------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data == "dep_bybit")
 def dep_bybit_menu(call):
-    """القائمة الفرعية: تحويل داخلي (UID) أو اختيار شبكة USDT."""
+    """Bybit opens the amount prompt directly, with the configured receiver UID."""
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid):
         return
-    bot.clear_step_handler_by_chat_id(chat_id=uid)
-
-    methods = bybit_available_methods()
-    if not methods:
-        bot.send_message(uid, bil(uid,
-            "⚠️ طريقة Bybit غير مفعّلة حالياً. جرّب طريقة أخرى.",
-            "⚠️ Bybit is not available right now. Please use another method."),
-            parse_mode="HTML")
+    if is_coin_hidden('bybit'):
+        bot.send_message(uid, bil(uid, 'طريقة Bybit مخفية حالياً.', 'Bybit is currently hidden.'))
         return
-
-    markup = InlineKeyboardMarkup(row_width=1)
-    if 'UID' in methods:
-        markup.add(create_btn(uid, 'btn_bybit_uid', callback_data="dep_bybit_m_UID"))
-    for net_key, cfg in BYBIT_NETWORKS.items():
-        if net_key in methods:
-            markup.add(create_btn(uid, cfg['btn_key'], callback_data=f"dep_bybit_m_{net_key}"))
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
-
-    bot.send_message(uid, get_text(uid, 'bybit_choose'), parse_mode="HTML", reply_markup=markup)
+    _k, _s, receiver_uid, _b = _bybit_creds()
+    if not receiver_uid or not _k or not _s or not bybit_is_configured():
+        bot.send_message(uid, bil(uid,
+            '⚠️ Bybit ظاهر، لكن إعدادات الاستلام أو التحقق غير مكتملة أو الفحص متوقف. تواصل مع الإدارة.',
+            '⚠️ Bybit is visible, but receiving/verification settings are incomplete or verification is paused. Contact support.'))
+        return
+    _dep_bybit_start_flow(uid, 'UID')
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_m_"))
 def dep_bybit_method(call):
-    """اختار المستخدم طريقة Bybit → نعرض تنبيهاً إجبارياً قبل طلب المبلغ."""
-    uid = call.from_user.id
-    if is_user_banned(uid):
-        return
-    method = call.data.replace("dep_bybit_m_", "")
-    if method not in bybit_available_methods():
-        bot.answer_callback_query(call.id)
-        bot.send_message(uid, bil(uid,
-            "⚠️ هذه الطريقة غير متاحة حالياً.",
-            "⚠️ This method is not available right now."), parse_mode="HTML")
-        return
-
-    # 1️⃣ نافذة منبثقة إجبارية (لازم يضغط "موافق")
-    try:
-        bot.answer_callback_query(call.id, get_text(uid, 'bybit_alert_popup'), show_alert=True)
-    except Exception:
-        bot.answer_callback_query(call.id)
-
-    # 2️⃣ رسالة تحذير مع زر تأكيد قبل المتابعة
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
-                         callback_data=f"dep_bybit_go_{method}"))
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
-
-    # فقرة الرسوم: للشبكات (BEP20/TRC20) لا للـ UID (تحويل داخلي بلا رسوم شبكة)
-    warn = get_text(uid, 'bybit_warn_exact')
-    if method != 'UID':
-        warn = warn + "\n\n" + _fee_note_for_dest(uid, method)
-
-    bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
+    return dep_bybit_menu(call)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_bybit_go_"))
 def dep_bybit_confirm_and_ask(call):
-    """بعد تأكيد المستخدم قراءة التنبيه → نكمل لطلب المبلغ/UID."""
-    bot.answer_callback_query(call.id)
-    uid = call.from_user.id
-    if is_user_banned(uid):
-        return
-    method = call.data.replace("dep_bybit_go_", "")
-    if method not in bybit_available_methods():
-        bot.send_message(uid, bil(uid,
-            "⚠️ هذه الطريقة غير متاحة حالياً.",
-            "⚠️ This method is not available right now."), parse_mode="HTML")
-        return
+    return dep_bybit_menu(call)
 
-    _dep_bybit_start_flow(uid, method)
+
+
 
 
 def _dep_bybit_start_flow(uid, method):
@@ -11835,15 +11782,8 @@ def _dep_bybit_start_flow(uid, method):
     except Exception:
         pass
 
-    # 🆔 طريقة UID: نطلب أولاً رقم UID الخاص بالمستخدم في Bybit (للمطابقة المزدوجة)
-    if method == 'UID':
-        markup = InlineKeyboardMarkup()
-        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
-        msg = bot.send_message(uid, get_text(uid, 'bybit_ask_uid'),
-                               parse_mode="HTML", reply_markup=markup)
-        bot.register_next_step_handler(msg, ask_bybit_sender_uid, method)
-        return
-
+    # UID matching can use the existing unique-amount fallback; no sender UID prompt.
+    method = 'UID'
     msg_text = get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method))
     markup = InlineKeyboardMarkup()
     markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
@@ -11903,6 +11843,9 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
     uid = message.from_user.id
     if is_user_banned(uid):
         return
+    if method != 'UID':
+        _dep_bybit_start_flow(uid, 'UID')
+        return
     l = get_lang(uid)
     coin = _bybit_coin_of(method)
 
@@ -11922,6 +11865,8 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
     except ValueError:
         _retry(); return
 
+    if not __import__('math').isfinite(base_amount):
+        _retry(); return
     if base_amount < 1:
         bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML"); _retry(); return
     if base_amount > 10000:
