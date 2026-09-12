@@ -12305,6 +12305,51 @@ def cmd_ping(message):
             pass
 
 
+@bot.message_handler(commands=['bybit_status'])
+def bybit_status_command(message):
+    """Read-only diagnostic: report effective settings without revealing secrets."""
+    if not _is_admin_check(message.from_user.id):
+        return
+    try:
+        keys = [('bybit_api_key', 'BYBIT_API_KEY', 'API Key'),
+                ('bybit_api_secret', 'BYBIT_API_SECRET', 'API Secret'),
+                ('bybit_uid', 'BYBIT_UID', 'UID الاستلام')]
+        lines = ['🔎 فحص إعدادات Bybit — قراءة فقط']
+        problems = []
+        for key, env_name, label in keys:
+            rows = list(db.settings.find({'key': key}, {'value': 1}).limit(10))
+            value = get_setting(key, '')
+            from_db = bool(value) and value != 'Not Set'
+            raw = value if from_db else os.getenv(env_name, '')
+            valid_type = isinstance(raw, str)
+            effective = raw.strip() if valid_type else ''
+            source = 'قاعدة البيانات' if from_db else ('متغيرات Render' if raw else 'غير موجود')
+            lines.append(f"{'✅' if effective else '❌'} {label}: {'موجود' if effective else 'ناقص/غير صالح'} — {source}")
+            if not effective:
+                problems.append(f'{label} ناقص أو غير صالح')
+            if raw and not valid_type:
+                lines.append('⚠️ القيمة ليست نصاً؛ أعد حفظها من إعدادات الأدمن.')
+            if from_db and isinstance(raw, str) and not raw.strip():
+                lines.append('⚠️ قيمة قاعدة البيانات مسافات فقط وتحجب قيمة Render.')
+            if from_db and os.getenv(env_name):
+                lines.append(f'ℹ️ توجد قيمة في Render أيضاً؛ البوت يستخدم قيمة قاعدة البيانات لـ {label}.')
+            if len(rows) > 1:
+                lines.append(f'⚠️ يوجد أكثر من سجل للإعداد {key} في قاعدة البيانات.')
+        disabled = str(get_setting('bybit_disabled', '0')) == '1'
+        hidden = str(get_setting('hide_coin_bybit', '0')) == '1'
+        lines.append('🛑 bybit_disabled = 1: الفحص متوقف' if disabled else '✅ bybit_disabled ليس 1: لا يوجد إيقاف صريح')
+        lines.append('👁 زر Bybit مخفي' if hidden else '👁 زر Bybit ظاهر')
+        if disabled:
+            problems.append('الفحص متوقف بالقيمة bybit_disabled=1')
+        if hidden:
+            problems.append('زر Bybit مخفي بإعدادات الأدمن')
+        lines.append('\nسبب المنع: ' + ('؛ '.join(problems) if problems else 'لا يظهر مانع في الإعدادات المقروءة الآن.'))
+        lines.append('\nهذا فحص للقيم المحفوظة؛ لا يختبر صلاحية المفتاح لدى Bybit ولا حالة توثيق الحساب.')
+        bot.send_message(message.chat.id, '\n'.join(lines), parse_mode=None)
+    except Exception:
+        bot.send_message(message.chat.id, '❌ تعذّر قراءة إعدادات Bybit من قاعدة البيانات. لم يتم تغيير أي قيمة.', parse_mode=None)
+
+
 @bot.message_handler(commands=['bybit_off'])
 def cmd_bybit_off(message):
     """يوقف Bybit تماماً (يوقف أخطاء API key invalid بعد الانتقال لـ Trust Wallet)."""
