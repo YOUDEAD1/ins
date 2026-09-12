@@ -11293,18 +11293,33 @@ def _bybit_signed_request(path, params=None, timeout=8):
     return None
 
 
-def get_bybit_deposits(kind='internal', coin=None, limit=50):
-    """kind='internal' → داخل Bybit | kind='onchain' → على البلوكشين"""
+def get_bybit_deposits(kind='internal', coin=None, limit=50, tx_id=None):
+    """Fetch bounded pages (Bybit accepts at most 50 records per request)."""
     path = ('/v5/asset/deposit/query-internal-record' if kind == 'internal'
             else '/v5/asset/deposit/query-record')
-    params = {'limit': int(limit)}
-    if coin:
-        params['coin'] = coin
-    res = _bybit_signed_request(path, params)
-    if not res:
-        return []
-    rows = res.get('rows') or []
-    return rows if isinstance(rows, list) else []
+    wanted = max(1, min(int(limit), 500))
+    rows, seen_cursors = [], set()
+    cursor = None
+    while len(rows) < wanted:
+        params = {'limit': min(50, wanted - len(rows))}
+        if coin:
+            params['coin'] = coin
+        if tx_id and kind == 'internal':
+            params['txID'] = str(tx_id)
+        if cursor:
+            params['cursor'] = cursor
+        res = _bybit_signed_request(path, params)
+        if not isinstance(res, dict):
+            raise RuntimeError('Bybit API request failed; check [BYBIT] retCode/connection logs')
+        page = res.get('rows', [])
+        if not isinstance(page, list):
+            raise RuntimeError('Invalid Bybit deposit response')
+        rows.extend(page[:wanted-len(rows)])
+        cursor = res.get('nextPageCursor')
+        if not page or not cursor or cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
+    return rows
 
 
 def _bybit_row_txid(row):
@@ -11332,17 +11347,11 @@ def _bybit_row_txid(row):
 
 
 def _bybit_all_ids(row):
-    """يرجّع كل القيم التي قد تكون معرّفات في السجل (للمطابقة الشاملة)."""
-    ids = []
     if not isinstance(row, dict):
-        return ids
-    for k, v in row.items():
-        if v in (None, '', 0, '0'):
-            continue
-        sv = str(v)
-        if 8 <= len(sv) <= 80 and re.match(r'^[A-Za-z0-9_\-]+$', sv):
-            ids.append(sv)
-    return ids
+        return []
+    return [str(row[k]).strip() for k in ('txID', 'txId', 'id', 'transactionId', 'orderId',
+            'depositId', 'internalId', 'transferId', 'orderNo', 'bizId')
+            if row.get(k) not in (None, '', 0, '0')]
 
 
 def _bybit_row_note(row):
@@ -11380,7 +11389,7 @@ def _bybit_row_is_success(row, kind):
        للتحويل الداخلي نتساهل (فوري داخل المنصة)."""
     st = row.get('status', None)
     if st is None:
-        return kind == 'internal'
+        return False
     try:
         st = int(st)
     except Exception:
@@ -11567,7 +11576,7 @@ def check_bybit_auto():
         for kind, label in (('internal', 'Bybit (UID Transfer)'),
                             ('onchain', 'Bybit (Network)')):
             try:
-                rows = get_bybit_deposits(kind=kind, limit=50)
+                rows = get_bybit_deposits(kind=kind, limit=200)
             except Exception as e:
                 logger.debug(f"[BYBIT] fetch {kind} err: {e}")
                 continue
@@ -11963,6 +11972,11 @@ def bybit_check_payment(call):
     except Exception:
         pass
 
+    if not bybit_is_configured():
+        bot.send_message(uid, bil(uid, '⚠️ التحقق من Bybit متوقف حالياً. تواصل مع الإدارة؛ لا تُعد التحويل.',
+            '⚠️ Bybit verification is currently paused. Contact support; do not pay again.'))
+        return
+
     checking = bot.send_message(
         uid,
         bil(uid, "🔍 <b>جاري فحص Bybit...</b>\nانتظر ثوانٍ.",
@@ -12016,14 +12030,16 @@ def bybit_check_payment(call):
 def admin_search_bybit_tx(query):
     """يبحث عن معاملة Bybit بأي معرّف (TxID/OrderId/...) لفحص المعاملات."""
     if not bybit_is_configured():
-        return None
+        raise RuntimeError('Bybit verification disabled or API credentials missing')
     q = str(query).strip().lower()
-    if len(q) < 6:          # 🛡 استعلام قصير جداً يطابق أي شيء — نرفضه
+    if not q:          # 🛡 استعلام قصير جداً يطابق أي شيء — نرفضه
         return None
+    errors = []
     for kind, label in (('internal', 'Bybit (UID Transfer)'), ('onchain', 'Bybit (Network)')):
         try:
             rows = get_bybit_deposits(kind=kind, limit=200)   # وسّعنا من 50
         except Exception:
+            errors.append(kind)
             continue
         for row in rows or []:
             # 🔧 نطابق ضد كل المعرّفات المحتملة في السجل، مو حقلاً واحداً
@@ -12032,12 +12048,13 @@ def admin_search_bybit_tx(query):
             matched = False
             for cand in candidates:
                 t = cand.strip().lower()
-                if (q == t) or (len(q) >= 12 and q in t) or (len(t) >= 12 and t in q) \
-                   or _tx_hash_matches(query, cand):
+                if q == t:
                     matched = True
-                    main_tx = cand
+                    main_tx = _bybit_row_txid(row) or cand
                     break
             if not matched:
+                continue
+            if not _bybit_row_is_success(row, kind) or not _bybit_verify_legit(row, kind)[0]:
                 continue
             usd, coin_name = _bybit_row_usd(row)
             return {
@@ -12045,6 +12062,8 @@ def admin_search_bybit_tx(query):
                 'amount_usd': usd, 'crypto_amount': float(row.get('amount') or 0),
                 'when': _bybit_row_time_ms(row), 'note': _bybit_row_note(row), 'kind': kind,
             }
+    if errors:
+        raise RuntimeError('Bybit search incomplete: ' + ', '.join(errors))
     return None
 
 
@@ -18499,10 +18518,42 @@ def ad_check_tx_handle(message):
         onchain_match = None       # dict فيه coin/amount_usd/...
         onchain_is_sender = None   # (coin, hash) لو الحوالة صادرة من محفظتنا
         try:
+            # --- 🟠 Bybit (سجلات داخلية + on-chain) ---
+            if not onchain_match and not onchain_is_sender and bybit_is_configured():
+                try:
+                    by_r = admin_search_bybit_tx(query)
+                except Exception:
+                    by_r = None
+                    bot.send_message(uid, '⚠️ تعذّر إكمال بحث Bybit؛ هذا لا يعني أن التحويل غير موجود. راجع /bybit_status وسجل [BYBIT].')
+                if by_r:
+                    if by_r.get('amount_usd'):
+                        onchain_match = {
+                            'coin': by_r.get('coin', 'USDT'),
+                            'label': by_r.get('label', '🟠 Bybit'),
+                            'amount_usd': by_r['amount_usd'],
+                            'crypto_amount': by_r.get('crypto_amount', 0),
+                            'hash': by_r.get('hash', query),
+                            'when': int(by_r.get('when', 0) or 0) // 1000,
+                            'source_addr': by_r.get('note', '') or '',
+                        }
+                    else:
+                        bot.send_message(
+                            uid,
+                            f"⚠️ <b>لقيت العملية في Bybit</b> "
+                            f"({by_r.get('crypto_amount', 0)} {html.escape(str(by_r.get('coin','')))}) "
+                            f"لكن تعذّر تحويلها للدولار الآن.\n"
+                            f"🆔 <code>{html.escape(str(by_r.get('hash', query))[:70])}</code>\n\n"
+                            f"<i>جرّب بعد دقيقة، أو أضف الرصيد يدوياً من (شحن رصيد).</i>",
+                            parse_mode="HTML"
+                        )
+                        return
+            elif not bybit_is_configured():
+                bot.send_message(uid, '⚠️ بحث Bybit متوقف أو مفاتيحه ناقصة. استخدم /bybit_status لمعرفة السبب.')
+
             bot.send_message(uid, "🔍 لم تُوجد في Binance... جاري الفحص في شبكات TON و LTC مباشرة...")
 
             # --- TON (TONCenter + TonAPI) ---
-            ton_r = _admin_search_ton_tx(query)
+            ton_r = _admin_search_ton_tx(query) if not onchain_match else None
             if ton_r:
                 if ton_r.get('is_sender'):
                     onchain_is_sender = ('TON', ton_r.get('hash', query))
@@ -18577,31 +18628,6 @@ def ad_check_tx_handle(message):
                 if usdt_r:
                     onchain_match = usdt_r
 
-            # --- 🟠 Bybit (سجلات داخلية + on-chain) ---
-            if not onchain_match and not onchain_is_sender and bybit_is_configured():
-                by_r = admin_search_bybit_tx(query)
-                if by_r:
-                    if by_r.get('amount_usd'):
-                        onchain_match = {
-                            'coin': by_r.get('coin', 'USDT'),
-                            'label': by_r.get('label', '🟠 Bybit'),
-                            'amount_usd': by_r['amount_usd'],
-                            'crypto_amount': by_r.get('crypto_amount', 0),
-                            'hash': by_r.get('hash', query),
-                            'when': int(by_r.get('when', 0) or 0) // 1000,
-                            'source_addr': by_r.get('note', '') or '',
-                        }
-                    else:
-                        bot.send_message(
-                            uid,
-                            f"⚠️ <b>لقيت العملية في Bybit</b> "
-                            f"({by_r.get('crypto_amount', 0)} {html.escape(str(by_r.get('coin','')))}) "
-                            f"لكن تعذّر تحويلها للدولار الآن.\n"
-                            f"🆔 <code>{html.escape(str(by_r.get('hash', query))[:70])}</code>\n\n"
-                            f"<i>جرّب بعد دقيقة، أو أضف الرصيد يدوياً من (شحن رصيد).</i>",
-                            parse_mode="HTML"
-                        )
-                        return
         except Exception as oe:
             logger.debug(f"[CHECK_TX] on-chain search err: {oe}")
 
