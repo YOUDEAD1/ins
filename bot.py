@@ -9820,11 +9820,11 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     🛡 يولّد مبلغ فريد عشوائي لكل عملية إيداع.
 
     ⚠️ مهم: Bybit أحياناً لا تقرأ كل الخانات العشرية عند الإدخال.
-    لذا لعملات Bybit نولّد خانتين فقط (مثل 5.37) — قصيرة، سهلة النسخ،
+    لذا لعملات Bybit نولّد خانتين فقط (مثل 5.01) — قصيرة، سهلة النسخ،
     وتُقرأ بموثوقية على كل واجهات Bybit. المسافة بينها 0.01 تكفي للتمييز.
 
     أمثلة:
-    - Bybit:  $5 → $5.37 / $5.42 / $5.08 (خانتان)
+    - Bybit:  $5 → $5.01 / $5.04 / $5.07 (خانتان)
     - غيرها:  $5 → $5.001847 (6 خانات، دقة أعلى للشبكات الأخرى)
     """
     base = float(base_amount_usd)
@@ -9834,9 +9834,9 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     if is_bybit:
         decimals = 2
         MIN_SPACING = 0.02     # أكبر من خطوة الخانتين (0.01)
-        # الكسور بوحدات 0.01: من 0.05 إلى 0.99 (نبدأ من 5 لتجنّب الأصفار المربكة)
-        lo, hi, div = 5, 99, 100.0
-        lo2, hi2 = 5, 99            # نفس المدى (خانتان محدودتان أصلاً)
+        # الكسور بوحدات 0.01: من 0.01 إلى 0.09 (حد أقصى تسعة سنتات)
+        lo, hi, div = 1, 9, 100.0
+        lo2, hi2 = 1, 9            # نفس المدى (خانتان محدودتان أصلاً)
     else:
         decimals = 6
         MIN_SPACING = 0.0002
@@ -9868,7 +9868,18 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
             })
             return clash is None
         except Exception:
-            return True
+            return False if is_bybit else True
+
+    if is_bybit:
+        # Try the cheapest distinct amount first. Never widen the surcharge.
+        from decimal import Decimal, ROUND_HALF_UP
+        base_decimal = Decimal(str(base_amount_usd))
+        for cents in range(1, 10):
+            candidate = (base_decimal + Decimal(cents) / 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            difference = candidate - base_decimal
+            if Decimal('0') < difference <= Decimal('0.09') and _is_free(float(candidate)):
+                return float(candidate)
+        return None
 
     # المحاولة 1: المدى الأساسي
     for _ in range(400):
@@ -11873,6 +11884,12 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
         bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML"); _retry(); return
 
     unique_amount = generate_unique_amount_for_user(base_amount, uid, coin)
+    if unique_amount is None:
+        bot.send_message(uid, bil(uid,
+            '⏳ لم يتوفر مبلغ مميز بزيادة لا تتجاوز 0.09 دولار. حاول بعد قليل أو اختر مبلغ إيداع آخر.',
+            '⏳ No unique amount is available with an extra amount of at most $0.09. Try later or choose another deposit amount.'))
+        _retry()
+        return
     pending = register_pending_deposit(uid, base_amount, unique_amount, coin, sender_uid=sender_uid)
     if not pending:
         bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
@@ -11884,20 +11901,20 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
         _k, _s, bybit_uid, _b = _bybit_creds()
         # نص قابل للتعديل: {0}=UID  {1}=المبلغ الفريد  {2}=آيدي المستخدم
         msg_text = get_text(uid, 'bybit_msg_uid', html.escape(bybit_uid),
-                            f"{unique_amount:.6f}", str(uid))
+                            f"{unique_amount:.2f}", str(uid))
         # صف 1: المبلغ + الـ UID (اللي يحوّل له)
         markup.add(
-            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.2f}"),
             _copy_button(get_text(uid, 'bybit_btn_copy_uid'), bybit_uid)
         )
     else:
         addr = _bybit_net_address(method)
         # نص قابل للتعديل: {0}=اسم الشبكة  {1}=العنوان  {2}=المبلغ الفريد
         msg_text = get_text(uid, 'bybit_msg_net', _bybit_method_label(uid, method),
-                            html.escape(addr), f"{unique_amount:.6f}")
+                            html.escape(addr), f"{unique_amount:.2f}")
         # صف 1: المبلغ + العنوان
         markup.add(
-            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+            _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.2f}"),
             _copy_button(get_text(uid, 'dep_btn_copy_wallet'), addr)
         )
 
