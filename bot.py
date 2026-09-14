@@ -17082,6 +17082,58 @@ def ext_view_orders(call):
     bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
 
 
+def _ext_safe_product_html(value, limit=2800):
+    """Keep balanced Telegram formatting; render broken supplier HTML as text."""
+    from html.parser import HTMLParser
+
+    class ProductHTML(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.stack, self.parts = [], []
+            self.valid = True
+
+        def handle_starttag(self, tag, attrs):
+            allowed = {'b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike',
+                       'del', 'span', 'tg-spoiler', 'a', 'code', 'pre',
+                       'blockquote', 'tg-emoji'}
+            if tag not in allowed:
+                self.valid = False
+            if tag == 'br':
+                self.parts.append('\n')
+            else:
+                self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if self.stack and self.stack[-1] == tag:
+                self.stack.pop()
+            else:
+                self.valid = False
+            if tag in ('p', 'div', 'blockquote'):
+                self.parts.append('\n')
+
+        def handle_startendtag(self, tag, attrs):
+            self.valid = False
+            if tag == 'br':
+                self.parts.append('\n')
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    raw = str(value or '')
+    parser = ProductHTML()
+    try:
+        parser.feed(raw)
+        parser.close()
+        plain = ''.join(parser.parts)
+        # UTF-16 budget also leaves room for price, stock and delivery labels.
+        if parser.valid and not parser.stack and len(raw.encode('utf-16-le')) <= limit * 2:
+            return raw if '<' in raw else html.escape(plain)
+    except Exception:
+        plain = raw
+    plain = plain.encode('utf-16-le')[:limit * 2].decode('utf-16-le', errors='ignore')
+    return html.escape(plain)
+
+
 def _ext_send_product_view(chat_id, uid, ep, l):
     """يعرض منتج API كرسالة جديدة (للـ deeplink)."""
     price = float(ep.get('sell_price', ep.get('base_price', 0)))
@@ -17089,9 +17141,9 @@ def _ext_send_product_view(chat_id, uid, ep, l):
     desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
     def _is_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
-    name_out = name if _is_html(name) else html.escape(name)
-    desc_out = desc if _is_html(desc) else html.escape(desc[:600])
-    icon_html = ep.get('emoji_char') or '📦'
+    name_out = _ext_safe_product_html(name, 200)
+    desc_out = _ext_safe_product_html(desc)
+    icon_html = html.escape(str(ep.get('emoji_char') or '📦'))
     stock = ep.get('stock', 0)
     epid = str(ep['_id'])
     if l == 'en':
@@ -17117,7 +17169,12 @@ def _ext_send_product_view(chat_id, uid, ep, l):
                        callback_data=f"ext_p_{epid}"))
     except Exception:
         pass
-    bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
+    try:
+        bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=markup)
+    except Exception as exc:
+        if "parse entities" not in str(exc).lower():
+            raise
+        bot.send_message(chat_id, html.escape(txt), parse_mode="HTML", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("vext_"))
@@ -17143,10 +17200,10 @@ def ext_customer_view(call):
     desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
     def _is_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
-    name_out = name if _is_html(name) else html.escape(name)
-    desc_out = desc if _is_html(desc) else html.escape(desc[:600])
+    name_out = _ext_safe_product_html(name, 200)
+    desc_out = _ext_safe_product_html(desc)
     # الرمز البريميوم يظهر فقط في الأزرار — في النص رمز عادي
-    icon_html = ep.get('emoji_char') or '📦'
+    icon_html = html.escape(str(ep.get('emoji_char') or '📦'))
     stock = ep.get('stock', 0)
     if l == 'en':
         delivery_type = "Auto ⚡ (Instant delivery)"
@@ -17179,8 +17236,15 @@ def ext_customer_view(call):
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
                               parse_mode="HTML", reply_markup=markup)
-    except Exception:
-        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        if "parse entities" in str(exc).lower():
+            txt = html.escape(txt)
+        try:
+            bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            logger.exception("[EXT] Failed to display product %s", epid)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("extqty_"))
