@@ -1797,7 +1797,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     ext_item = {
                         'id': epid,
                         'name_ar': ep_name, 'name_en': ep_name,
-                        'desc_ar': ep_desc, 'desc_en': ep_desc,
+                        'desc_ar': _ext_description_for_lang(ep, 'ar'), 'desc_en': _ext_description_for_lang(ep, 'en'),
                         'store_price': ep_price,
                         'your_price': your_price,
                         'price_locked': your_price is not None,
@@ -1809,16 +1809,16 @@ class APIHandler(BaseHTTPRequestHandler):
                         'has_premium_emoji': bool(ep_emoji_id),
                         'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
                         'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
-                        'desc_ar_html': ep_desc,
-                        'desc_en_html': ep_desc,
+                        'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
+                        'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                         'source': 'external_api',
                     }
                     ext_item['emoji_guide'] = {
                         'parse_mode': 'HTML',
                         'name_ar_html': ext_item['name_ar_html'],
                         'name_en_html': ext_item['name_en_html'],
-                        'desc_ar_html': ep_desc,
-                        'desc_en_html': ep_desc,
+                        'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
+                        'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                         'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
                     }
                     result.append(ext_item)
@@ -1922,14 +1922,14 @@ class APIHandler(BaseHTTPRequestHandler):
                 ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
                 return _json_resp(self, 200, {'success': True, 'product': {
                     'id': pid, 'name_ar': ep_name, 'name_en': ep_name,
-                    'desc_ar': ep_desc, 'desc_en': ep_desc,
+                    'desc_ar': _ext_description_for_lang(ep, 'ar'), 'desc_en': _ext_description_for_lang(ep, 'en'),
                     'store_price': ep_price, 'stock': ep.get('stock', 0),
                     'is_manual': False,
                     'custom_emoji_id': ep_emoji_id,
                     'has_premium_emoji': bool(ep_emoji_id),
                     'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
                     'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
-                    'desc_ar_html': ep_desc, 'desc_en_html': ep_desc,
+                    'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')), 'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                     'source': 'external_api',
                 }})
             pr = find_product(pid)
@@ -5114,11 +5114,15 @@ def get_translated_product_desc(p, lang, is_cgpt=False):
             try:
                 _pid = p['_id']
                 _coll = 'cgpt_products' if is_cgpt else 'products'
-                def _bg_translate_desc(pid=_pid, coll=_coll, src=d):
+                def _bg_translate_desc(pid=_pid, coll=_coll, src=d, previous=p.get('desc_en'),
+                                       original=p.get('desc' if is_cgpt else 'desc_ar'),
+                                       source_field='desc' if is_cgpt else 'desc_ar'):
                     try:
                         tr = safe_translate_for_cms(src, 'en')
                         if tr and tr != src and not re.search(r'[\u0600-\u06FF]', tr):
-                            db[coll].update_one({'_id': pid}, {'$set': {'desc_en': tr}})
+                            db[coll].update_one({'_id': pid, 'desc_en': previous, source_field: original},
+                                                {'$set': {'desc_en': tr}})
+                            _invalidate_products_cache()
                     except Exception:
                         pass
                 threading.Thread(target=_bg_translate_desc, daemon=True).start()
@@ -16476,6 +16480,10 @@ def ext_sync_products(call):
             'raw': p,
         }
         if existing:
+            if existing.get('desc_edited'):
+                for desc_key in ('desc', 'desc_text', 'desc_ar', 'desc_en',
+                                 'desc_ar_html', 'desc_en_html'):
+                    doc.pop(desc_key, None)
             # نحافظ على الرمز المعيّن يدوياً لو الـ API لا يعطي رمزاً
             if not doc.get('emoji_id') and existing.get('emoji_id'):
                 doc['emoji_id'] = existing['emoji_id']
@@ -16800,7 +16808,7 @@ def ext_product_detail(call):
     link = f"https://t.me/{bot_username}?start=vext_{pid}"
     # نعرض الاسم والوصف بالـ HTML الأصلي (فيه رموز <tg-emoji> البريميوم)
     _name = str(p.get('name', ''))
-    _desc = str(p.get('desc', ''))
+    _desc = str(_ext_description_for_lang(p, get_lang(call.from_user.id)))
     def _has_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_disp = _ext_safe_product_html(_name, 200)
@@ -16826,7 +16834,8 @@ def ext_product_detail(call):
     )
     markup.add(
         InlineKeyboardButton("✏️ تعديل الاسم", callback_data=f"ext_editname_{pid}"),
-        InlineKeyboardButton("📝 تعديل الوصف", callback_data=f"ext_editdesc_{pid}")
+        InlineKeyboardButton("📝 تعديل الوصف العربي", callback_data=f"ext_editdesc_ar_{pid}"),
+        InlineKeyboardButton("📝 Edit English description", callback_data=f"ext_editdesc_en_{pid}")
     )
     markup.add(InlineKeyboardButton("📁 إضافة لمجلد", callback_data=f"ext_setcat_{pid}"))
     sid = p.get('store_id', '')
@@ -16978,8 +16987,7 @@ def _ext_save_text(message, pid):
     desc = parts[1].strip() if len(parts) > 1 else ''
     try:
         db.ext_products.update_one({'_id': ObjectId(pid)},
-            {'$set': {'name': name, 'desc': desc,
-                      'name_edited': True, 'desc_edited': True}})
+            {'$set': dict(_ext_description_update(desc), name=name, name_edited=True)})
         bot.send_message(message.chat.id, "✅ تم تعديل الاسم والوصف.")
     except Exception:
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
@@ -17010,6 +17018,27 @@ def _ext_save_name(message, pid):
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
 
 
+def _ext_description_for_lang(product, lang):
+    lang = 'en' if lang == 'en' else 'ar'
+    return (product.get('desc_' + lang) or product.get('desc_' + lang + '_html')
+            or product.get('desc') or product.get('desc_text') or '')
+
+
+def _ext_description_update(desc, lang='ar'):
+    """Use the existing CMS translator; explicit English text stays unchanged."""
+    fields = {'desc_edited': True, 'desc_' + lang: desc,
+              'desc_' + lang + '_html': desc}
+    if lang == 'ar':
+        translated = safe_translate_for_cms(desc, 'en')
+        fields.update({'desc': desc, 'desc_text': desc,
+                       'desc_en': translated, 'desc_en_html': translated})
+        visible = re.sub(r'<[^>]+>', '', translated or '')
+        fields['desc_translation_pending'] = bool(re.search(r'[\u0600-\u06FF]', visible))
+    else:
+        fields['desc_translation_pending'] = False
+    return fields
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_editdesc_"))
 @admin_required
 def ext_edit_desc(call):
@@ -17017,20 +17046,35 @@ def ext_edit_desc(call):
     try: bot.answer_callback_query(call.id)
     except Exception: pass
     pid = call.data.replace("ext_editdesc_", "")
+    lang = 'ar'
+    if pid.startswith(('ar_', 'en_')):
+        lang, pid = pid.split('_', 1)
     msg = bot.send_message(call.message.chat.id,
-        "📝 أرسل الوصف الجديد للمنتج:\n<i>(يدعم وسوم HTML مثل &lt;b&gt; و&lt;i&gt;)</i>",
+        ("📝 أرسل الوصف العربي؛ سيُترجم للإنجليزية باستخدام ترجمة البوت."
+         if lang == 'ar' else "📝 Send the English description. It will be saved exactly as entered."),
         parse_mode="HTML")
-    bot.register_next_step_handler(msg, _ext_save_desc, pid)
+    bot.register_next_step_handler(msg, _ext_save_desc, pid, lang)
 
 
-def _ext_save_desc(message, pid):
+def _ext_save_desc(message, pid, lang='ar'):
     if not message.text:
         return
-    desc = message.text.strip()
+    if message.text.strip().lower() in ('cancel', '/cancel', 'الغاء'):
+        bot.send_message(message.chat.id, "تم إلغاء التعديل.")
+        return
+    desc = extract_custom_emojis_to_html(message)
     try:
-        db.ext_products.update_one({'_id': ObjectId(pid)},
-            {'$set': {'desc': desc, 'desc_edited': True}})
-        bot.send_message(message.chat.id, "✅ تم تعديل الوصف.")
+        fields = _ext_description_update(desc, lang)
+        result = db.ext_products.update_one({'_id': ObjectId(pid)},
+            {'$set': fields})
+        if not result.matched_count:
+            raise ValueError('Product no longer exists')
+        _invalidate_products_cache()
+        notice = ("✅ تم حفظ الوصف الإنجليزي كما أدخلته." if lang == 'en'
+                  else "✅ تم حفظ الوصف العربي والإنجليزي.")
+        if fields.get('desc_translation_pending'):
+            notice = "✅ حُفظ العربي. ⚠️ الترجمة لم تكتمل؛ أعد المحاولة أو أدخل الوصف الإنجليزي من زره."
+        bot.send_message(message.chat.id, notice)
     except Exception:
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
 
@@ -17147,7 +17191,7 @@ def _ext_send_product_view(chat_id, uid, ep, l):
     """يعرض منتج API كرسالة جديدة (للـ deeplink)."""
     price = float(ep.get('sell_price', ep.get('base_price', 0)))
     name = str(ep.get('name', ''))
-    desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+    desc = str(_ext_description_for_lang(ep, l))
     def _is_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_out = _ext_safe_product_html(name, 200)
@@ -17206,7 +17250,7 @@ def ext_customer_view(call):
     price = float(ep.get('sell_price', ep.get('base_price', 0)))
     name = str(ep.get('name', ''))
     # الوصف: desc (HTML آمن من الدوكس) — يُعرض كما هو
-    desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+    desc = str(_ext_description_for_lang(ep, l))
     def _is_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
     name_out = _ext_safe_product_html(name, 200)
@@ -22164,6 +22208,7 @@ def _emit_product_updated_after_edit(func):
             pass
 
         result = func(message, field, pid, cat_id_back, *a, **kw)
+        _invalidate_products_cache()
 
         # لقطة "بعد" + بثّ التغييرات
         try:
@@ -22353,7 +22398,10 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
                     
                 back_markup3 = InlineKeyboardMarkup()
                 back_markup3.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
-                bot.send_message(message.chat.id, "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>", parse_mode="HTML", reply_markup=back_markup3)
+                desc_notice = "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>"
+                if re.search(r'[\u0600-\u06FF]', re.sub(r'<[^>]+>', '', translated or '')):
+                    desc_notice = "✅ حُفظ الوصف العربي. ⚠️ الترجمة لم تكتمل؛ أعد المحاولة أو أدخل الوصف الإنجليزي من زره."
+                bot.send_message(message.chat.id, desc_notice, parse_mode="HTML", reply_markup=back_markup3)
         else:
             # إنجليزي فقط
             db.products.update_one({'_id': p['_id']}, {'$set': {keys[field]: final_text}})
