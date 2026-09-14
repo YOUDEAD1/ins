@@ -16792,7 +16792,8 @@ def ext_product_detail(call):
     mt = p.get('markup_type', 'percent')
     mv = p.get('markup_value', 0)
     mt_label = {'percent': f'نسبة +{mv}%', 'fixed': f'ثابت +${mv}', 'manual': 'سعر يدوي'}.get(mt, mt)
-    emoji_line = f"✨ رمز مميّز: <code>{p.get('emoji_id')}</code>\n" if p.get('emoji_id') else ""
+    emoji_line = f"✨ رمز مميّز: <code>{html.escape(str(p.get('emoji_id')))}</code>\n" if p.get('emoji_id') else ""
+    mt_label = html.escape(str(mt_label))
     hidden = p.get('hidden', False)
     # رابط المنتج (deep link) — مثل المنتج العادي
     bot_username = get_bot_username()
@@ -16802,11 +16803,11 @@ def ext_product_detail(call):
     _desc = str(p.get('desc', ''))
     def _has_html(s):
         return '<tg-emoji' in s or '<b>' in s or '<i>' in s or '<a' in s or '<code>' in s
-    name_disp = _name if _has_html(_name) else html.escape(_name)
-    desc_disp = _desc if _has_html(_desc) else html.escape(_desc[:400])
+    name_disp = _ext_safe_product_html(_name, 200)
+    desc_disp = _ext_safe_product_html(_desc, 2400)
     icon_prefix = ""
     if p.get('emoji_id') and '<tg-emoji' not in _name:
-        icon_prefix = f'<tg-emoji emoji-id="{p["emoji_id"]}">{p.get("emoji_char","✨")}</tg-emoji> '
+        icon_prefix = f'<tg-emoji emoji-id="{html.escape(str(p["emoji_id"]), quote=True)}">{html.escape(str(p.get("emoji_char","✨")))}</tg-emoji> '
     txt = (
         f"{icon_prefix}<b>{name_disp}</b>\n\n"
         f"{emoji_line}"
@@ -16814,9 +16815,9 @@ def ext_product_detail(call):
         f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
         f"🏷 التسعير: {mt_label}\n"
         f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
-        f"📊 المخزون: <b>{p.get('stock', 0)}</b>\n"
+        f"📊 المخزون: <b>{html.escape(str(p.get('stock', 0)))}</b>\n"
         f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}\n\n"
-        f"🔗 <b>رابط المنتج:</b>\n<code>{link}</code>"
+        f"🔗 <b>رابط المنتج:</b>\n<code>{html.escape(link)}</code>"
     )
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -16833,8 +16834,16 @@ def ext_product_detail(call):
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id,
                               parse_mode="HTML", reply_markup=markup)
-    except Exception:
-        bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        if "parse entities" in str(exc).lower():
+            # Do not retry the rejected HTML unchanged.
+            txt = html.escape(txt)
+        try:
+            bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            logger.exception("[EXT] Failed to display admin product %s", pid)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_hide_"))
