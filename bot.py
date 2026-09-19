@@ -12971,6 +12971,9 @@ def _auto_sync_ext_stores():
                 continue
             seen_ext_ids.add(ext_id)
             existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+            if existing:
+                db.ext_products.update_one({'_id': existing['_id']},
+                    {'$set': {'unlimited': _f.get('unlimited', False)}})
             new_stock = _f['stock']
             if _f['available'] is False:
                 new_stock = 0
@@ -16007,6 +16010,9 @@ def _ext_extract_fields(p):
         available = (stock > 0)
     else:
         available = bool(available)
+    unlimited = p.get('unlimited') is True
+    if unlimited and available:
+        stock = 999999
     # الرمز المميّز (premium)
     emoji_id = _ext_deep_get(p, ['emoji_custom_id', 'custom_emoji_id', 'emoji_id',
                                  'customEmojiId', 'premium_emoji_id', 'tg_emoji_id'], None)
@@ -16036,9 +16042,79 @@ def _ext_extract_fields(p):
     return {
         'ext_id': ext_id, 'name': str(name), 'desc': str(desc), 'desc_text': str(desc_text),
         'sell_price': sell_f, 'cost_price': cost_f,
-        'stock': stock, 'available': available,
+        'stock': stock, 'available': available, 'unlimited': unlimited,
         'emoji_id': emoji_id, 'emoji_char': emoji_char,
     }
+
+
+def _ext_is_insight(store):
+    from urllib.parse import urlsplit
+    return urlsplit(str(store.get('base_url', ''))).hostname == 'api.insightxpro.store'
+
+
+def _insight_request(store, method, path, body=None, idem_key=None, test=False):
+    """Insight Store v1 contract (docs reviewed 2026-09-19)."""
+    headers = _ext_api_headers(store)
+    payload = dict(body or {})
+    if test:
+        headers['X-Test-Mode'] = 'true'
+    if idem_key:
+        headers['Idempotency-Key'] = idem_key
+        payload['idempotency_key'] = idem_key
+    purchase = method == 'POST' and path == '/orders' and not test
+    if purchase:
+        if not idem_key:
+            return False, {'error': 'idempotency key required'}
+        try:
+            db.ext_request_attempts.update_one({'_id': idem_key}, {'$setOnInsert': {
+                'store_id': str(store['_id']), 'body': payload,
+                'status': 'pending', 'created_at': int(time.time())}}, upsert=True)
+        except Exception:
+            return False, {'error': 'could not persist order reference; request not sent'}
+    try:
+        response = requests.request(method, 'https://api.insightxpro.store/api/v1' + path,
+            headers=headers, json=payload if method in ('POST', 'PATCH') else None,
+            timeout=60 if purchase else 20, allow_redirects=False)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError('unexpected response format')
+        if response.status_code == 200:
+            if path == '/products' and method == 'GET':
+                if not isinstance(data.get('products'), list) or any(
+                        not isinstance(item, dict) or 'id' not in item
+                        for item in data['products']):
+                    raise ValueError('invalid catalog response')
+            if purchase:
+                order = data.get('order', {})
+                if (not isinstance(order, dict) or order.get('test')
+                        or order.get('status') != 'completed'
+                        or not order.get('order_id', order.get('id'))
+                        or any(str(code).startswith('TEST-') for code in _ext_extract_codes(data))):
+                    return False, {'uncertain': True, 'error': 'unconfirmed live order',
+                                   'idempotency_key': idem_key}
+                db.ext_request_attempts.update_one({'_id': idem_key},
+                    {'$set': {'status': 'completed', 'response': data}})
+            return True, data
+        # No alternate-path retries on authentication/rate-limit errors.
+        data['http_status'] = response.status_code
+        if purchase and response.status_code not in (400, 401, 403, 404, 429, 500, 503):
+            data['uncertain'] = True
+        return False, data
+    except Exception as exc:
+        logger.warning('[INSIGHT] %s %s failed: %s', method, path, type(exc).__name__)
+        return False, {'error': 'connection or response error', 'uncertain': purchase,
+                       'idempotency_key': idem_key}
+
+
+def _ext_hold_uncertain_order(uid, order_rec, response, lang):
+    """Keep an ambiguous charge pending for reconciliation, never auto-refund it."""
+    order_rec.update(status='pending_verification', error=str(response)[:300])
+    db.ext_orders.insert_one(order_rec)
+    bot.send_message(uid, "⏳ طلبك قيد التحقق. لا تكرر الشراء؛ لم يُحسم رد المتجر بعد."
+                     if lang != 'en' else
+                     "⏳ Your order is being verified. Do not repeat the purchase.")
+    notify_admins("⚠️ طلب Insight يحتاج التحقق قبل التسليم أو رد الرصيد.\n"
+                  + "User: " + str(uid) + "\nReference: " + str(order_rec['idempotency_key']))
 
 
 def _ext_api_headers(store):
@@ -16068,6 +16144,9 @@ def _ext_api_base(store):
 
 def _ext_api_diagnose(store):
     """يشخّص الاتصال بالمتجر — يرجّع تقريراً مفصّلاً عن كل محاولة."""
+    if _ext_is_insight(store):
+        ok, data = _insight_request(store, 'GET', '/balance')
+        return '✅ Insight API connected' if ok else str(data)
     base = str(store.get('base_url', '')).rstrip('/')
     report = [f"🌐 Base URL: {base}"]
     if not base.startswith('http'):
@@ -16109,6 +16188,9 @@ def _ext_api_diagnose(store):
 
 def _ext_api_get(store, path):
     """GET من متجر API خارجي — يكتشف الـ prefix تلقائياً. يرجّع JSON أو None."""
+    if _ext_is_insight(store):
+        ok, data = _insight_request(store, 'GET', path)
+        return data if ok else None
     base = str(store.get('base_url', '')).rstrip('/')
     # المسارات المحتملة للـ prefix
     if '/api/v1' in base or '/shop-api/v1' in base:
@@ -16142,6 +16224,8 @@ def _ext_api_get(store, path):
 
 def _ext_api_post(store, path, body, idem_key=None):
     """POST لمتجر API خارجي (طلب) — يستخdم الـ prefix المكتشف. يرجّع (ok, json|error_str)."""
+    if _ext_is_insight(store):
+        return _insight_request(store, 'POST', path, body, idem_key)
     base = str(store.get('base_url', '')).rstrip('/')
     if '/api/v1' in base or '/shop-api/v1' in base:
         prefixes = ['']
@@ -16276,9 +16360,18 @@ def ext_store_menu(call):
     markup.add(InlineKeyboardButton("🔬 معاينة رد API الخام", callback_data=f"ext_raw_{sid}"))
     markup.add(InlineKeyboardButton("💰 فحص رصيدي في المتجر", callback_data=f"ext_bal_{sid}"))
     markup.add(InlineKeyboardButton("📊 تسعير كل المنتجات (نسبة موحّدة)", callback_data=f"ext_bulkprice_{sid}"))
+    markup.add(InlineKeyboardButton("🔑 تحديث مفتاح API", callback_data=f"ext_credentials_key_{sid}"))
+    markup.add(InlineKeyboardButton("🌐 تحديث رابط المتجر (Base URL)", callback_data=f"ext_credentials_url_{sid}"))
     markup.add(InlineKeyboardButton("📡 طلباتي في المتجر (API)", callback_data=f"ext_rorders_{sid}"))
     markup.add(InlineKeyboardButton("🧾 الطلبات المنفّذة (المحلية)", callback_data=f"ext_orders_{sid}"))
     markup.add(InlineKeyboardButton("🩺 فحص الاتصال (health)", callback_data=f"ext_health_{sid}"))
+    if _ext_is_insight(store):
+        for action, label in (('test', '🧪 طلب تجريبي بلا خصم'),
+                              ('order', '🔎 فحص طلب برقم الأوردر'),
+                              ('price', '🏷 ضبط سعر البيع في Insight'),
+                              ('bulk', '🏷 ضبط أسعار Insight دفعة واحدة'),
+                              ('reset', '↩️ إلغاء سعر Insight المخصص')):
+            markup.add(InlineKeyboardButton(label, callback_data=f"ix_{action}_{sid}"))
     markup.add(InlineKeyboardButton("🗑 حذف المتجر", callback_data=f"ext_delstore_{sid}"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ext_api_main"))
     txt = (f"🏪 <b>{html.escape(store.get('name',''))}</b>\n\n"
@@ -16427,6 +16520,76 @@ def ext_raw_preview(call):
         parse_mode="HTML")
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ext_credentials_'))
+@admin_required
+def ext_edit_credentials(call):
+    try:
+        field, sid = call.data[len('ext_credentials_'):].split('_', 1)
+        if field not in ('key', 'url'):
+            return
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+        if not store:
+            bot.answer_callback_query(call.id, 'المتجر غير موجود.', show_alert=True)
+            return
+        bot.answer_callback_query(call.id)
+        prompt = ('🔑 أرسل مفتاح API الجديد فقط.' if field == 'key' else
+                  '🌐 أرسل رابط Base URL الجديد، مثل https://api.insightxpro.store')
+        msg = bot.send_message(call.message.chat.id, prompt + '\nللإلغاء: /cancel')
+        bot.register_next_step_handler(msg, ext_save_credentials, field, sid, call.from_user.id)
+    except Exception:
+        bot.send_message(call.message.chat.id, '❌ تعذر فتح إعدادات المتجر.')
+
+
+def _ext_validate_base_url(value):
+    from urllib.parse import urlsplit, urlunsplit
+    value = value.strip()
+    if any(char.isspace() for char in value):
+        raise ValueError('الرابط لا يقبل مسافات.')
+    parsed = urlsplit(value)
+    if (parsed.scheme not in ('https', 'http') or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError('أرسل رابط http/https بدون مفتاح أو بيانات تسجيل دخول أو معاملات إضافية.')
+    # Validate port and accept either the service root or its explicit API prefix.
+    parsed.port
+    path = parsed.path.rstrip('/')
+    if path.endswith('/docs'):
+        path = path[:-5]
+    return urlunsplit((parsed.scheme, parsed.netloc, path, '', ''))
+
+
+def ext_save_credentials(message, field, sid, admin_id):
+    if message.from_user.id != admin_id or not _is_admin_check(admin_id):
+        return
+    value = (message.text or '').strip()
+    if value.lower() in ('الغاء', 'إلغاء', 'cancel', '/cancel'):
+        bot.send_message(message.chat.id, 'تم إلغاء التعديل.')
+        return
+    try:
+        if field == 'url':
+            update = {'$set': {'base_url': _ext_validate_base_url(value)},
+                      '$unset': {'api_prefix': ''}}
+        elif field == 'key':
+            if not value or any(char.isspace() for char in value):
+                raise ValueError('أرسل مفتاح API فقط في سطر واحد دون مسافات.')
+            update = {'$set': {'api_key': value}}
+        else:
+            return
+        result = db.ext_stores.update_one({'_id': ObjectId(sid)}, update)
+        if not result.matched_count:
+            raise ValueError('المتجر غير موجود.')
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton('🩺 فحص الاتصال', callback_data=f'ext_health_{sid}'))
+        markup.add(InlineKeyboardButton('🏪 رجوع للمتجر', callback_data=f'ext_store_{sid}'))
+        bot.send_message(message.chat.id,
+            '✅ تم تحديث مفتاح API.' if field == 'key' else '✅ تم تحديث رابط المتجر.',
+            reply_markup=markup)
+    except ValueError as exc:
+        bot.send_message(message.chat.id, '❌ ' + str(exc))
+    except Exception:
+        # Never echo submitted credentials or database exception details.
+        bot.send_message(message.chat.id, '❌ تعذر حفظ التعديل. أعد المحاولة من إعدادات المتجر.')
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_sync_"))
 @admin_required
 def ext_sync_products(call):
@@ -16444,7 +16607,8 @@ def ext_sync_products(call):
     data = _ext_api_get(store, '/products')
     # الرد قد يكون {'products': [...]} أو قائمة مباشرة
     prods = _ext_parse_products(data)
-    if not prods:
+    if not prods and not (_ext_is_insight(store) and isinstance(data, dict)
+                          and data.get('products') == []):
         bot.send_message(call.message.chat.id,
             "⚠️ لم أجلب منتجات (تأكد من الـ URL والمفتاح، أو أن endpoint /api/v1/products يعمل).")
         return
@@ -16477,7 +16641,7 @@ def ext_sync_products(call):
             'emoji_id': emoji_id,
             'emoji_char': emoji_char,
             'stock': stock,
-            'raw': p,
+            'raw': p, 'unlimited': _f.get('unlimited', False),
         }
         if existing:
             if existing.get('desc_edited'):
@@ -16823,7 +16987,7 @@ def ext_product_detail(call):
         f"💵 سعر API الأصلي: <b>${float(p.get('base_price',0)):.2f}</b>\n"
         f"🏷 التسعير: {mt_label}\n"
         f"💰 سعر البيع: <b>${float(p.get('sell_price',0)):.2f}</b>\n"
-        f"📊 المخزون: <b>{html.escape(str(p.get('stock', 0)))}</b>\n"
+        f"📊 المخزون: <b>{_ext_stock_label(p)}</b>\n"
         f"👁 الحالة: {'🚫 مخفي' if hidden else '✅ ظاهر'}\n\n"
         f"🔗 <b>رابط المنتج:</b>\n<code>{html.escape(link)}</code>"
     )
@@ -17018,6 +17182,12 @@ def _ext_save_name(message, pid):
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
 
 
+def _ext_stock_label(product):
+    raw = product.get('raw') or {}
+    unlimited = product.get('unlimited', raw.get('unlimited', False))
+    return '∞' if unlimited and (product.get('stock') or 0) > 0 else str(product.get('stock', 0))
+
+
 def _ext_description_for_lang(product, lang):
     lang = 'en' if lang == 'en' else 'ar'
     return (product.get('desc_' + lang) or product.get('desc_' + lang + '_html')
@@ -17202,11 +17372,11 @@ def _ext_send_product_view(chat_id, uid, ep, l):
     if l == 'en':
         txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
                f"🚚 <b>Delivery:</b> Auto ⚡ (Instant delivery)\n"
-               f"💰 <b>Price:</b> ${price:.2f}\n📊 <b>Stock:</b> {stock} pcs")
+               f"💰 <b>Price:</b> ${price:.2f}\n📊 <b>Stock:</b> {_ext_stock_label(ep)} pcs")
     else:
         txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
                f"🚚 <b>نوع التسليم:</b> تلقائي ⚡ (تسليم فوري)\n"
-               f"💰 <b>السعر:</b> ${price:.2f}\n📊 <b>المتوفر:</b> {stock} قطعة")
+               f"💰 <b>السعر:</b> ${price:.2f}\n📊 <b>المتوفر:</b> {_ext_stock_label(ep)} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
     # زر الشراء يظهر فقط لو متوفر (مثل المنتج العادي) — لو نفد يختفي
     if stock and stock > 0:
@@ -17263,13 +17433,13 @@ def ext_customer_view(call):
         txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
                f"🚚 <b>Delivery:</b> {delivery_type}\n"
                f"💰 <b>Price:</b> ${price:.2f}\n"
-               f"📊 <b>Stock:</b> {stock} pcs")
+               f"📊 <b>Stock:</b> {_ext_stock_label(ep)} pcs")
     else:
         delivery_type = "تلقائي ⚡ (تسليم فوري)"
         txt = (f"{icon_html} <b>{name_out}</b>\n\n📝 {desc_out}\n\n"
                f"🚚 <b>نوع التسليم:</b> {delivery_type}\n"
                f"💰 <b>السعر:</b> ${price:.2f}\n"
-               f"📊 <b>المتوفر:</b> {stock} قطعة")
+               f"📊 <b>المتوفر:</b> {_ext_stock_label(ep)} قطعة")
     markup = InlineKeyboardMarkup(row_width=1)
     # زر الشراء يظهر فقط لو متوفر (مثل المنتج العادي) — لو نفد يختفي
     if stock and stock > 0:
@@ -17409,6 +17579,9 @@ def _ext_execute_buy(message, epid, lang):
         'idempotency_key': idem,
     }
 
+    if not ok and isinstance(resp, dict) and resp.get('uncertain'):
+        _ext_hold_uncertain_order(uid, order_rec, resp, l)
+        return
     if not ok:
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': total}})
         _invalidate_user_cache(uid)
@@ -17554,6 +17727,9 @@ def ext_customer_buy(call):
         'idempotency_key': idem,
     }
 
+    if not ok and isinstance(resp, dict) and resp.get('uncertain'):
+        _ext_hold_uncertain_order(uid, order_rec, resp, l)
+        return
     if not ok:
         # فشل الطلب → نرجّع الرصيد
         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
@@ -17723,6 +17899,91 @@ def _ext_bulk_apply(message, sid, ptype):
         parse_mode="HTML")
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ix_'))
+@admin_required
+def insight_admin_action(call):
+    _, action, sid = call.data.split('_', 2)
+    prompts = {
+        'test': 'أرسل رقم المنتج في Insight والكمية، مثال: 14 2. اختبار فقط بلا خصم أو تسليم للزبائن.',
+        'order': 'أرسل رقم الأوردر في Insight لعرض حالته وأكواده. الفحص لا يغير رصيد الزبون.',
+        'price': 'أرسل رقم المنتج وسعر البيع في Insight، مثال: 14 1.50. هذا يعدل سعرك لدى المورد؛ لا يغير تسعير البوت المحلي.',
+        'bulk': 'أرسل كل منتج وسعره في سطر، مثال: 14 1.50. بحد أقصى 500 منتج. ستُحفظ الأسعار الصحيحة وتظهر الأخطاء لكل منتج.',
+        'reset': 'أرسل رقم المنتج لإلغاء سعر البيع المخصص في Insight والعودة لسعر المورد.',
+    }
+    if action not in prompts:
+        return
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, prompts[action] + '\nللإلغاء: /cancel')
+    bot.register_next_step_handler(msg, insight_admin_input, action, sid)
+
+
+def insight_admin_input(message, action, sid):
+    if not _is_admin_check(message.from_user.id):
+        return
+    raw = (message.text or '').strip()
+    if raw.lower() in ('/cancel', 'cancel', 'الغاء'):
+        bot.send_message(message.chat.id, 'تم الإلغاء.')
+        return
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(sid)})
+        if not store or not _ext_is_insight(store):
+            raise ValueError('متجر Insight غير موجود')
+        parts = raw.split()
+        if action == 'bulk':
+            from decimal import Decimal
+            prices = []
+            for line in raw.splitlines():
+                item_id, price = line.split()
+                value = Decimal(price)
+                if int(item_id) <= 0 or not value.is_finite() or value < 0:
+                    raise ValueError('رقم المنتج أو السعر غير صالح')
+                prices.append({'id': int(item_id), 'price': float(value)})
+            if not 1 <= len(prices) <= 500:
+                raise ValueError('الحد 500 منتج')
+            ok, data = _insight_request(store, 'PATCH', '/products', {'prices': prices})
+        else:
+            item_id = int(parts[0])
+            if item_id <= 0:
+                raise ValueError('الرقم يجب أن يكون موجباً')
+            if action == 'test':
+                if len(parts) not in (1, 2):
+                    raise ValueError('أرسل رقم المنتج والكمية')
+                qty = int(parts[1]) if len(parts) == 2 else 1
+                if not 1 <= qty <= 100:
+                    raise ValueError('كمية الاختبار من 1 إلى 100')
+                ok, data = _insight_request(store, 'POST', '/orders',
+                    {'product_id': item_id, 'quantity': qty}, test=True)
+                if ok and data.get('order', {}).get('test') is not True:
+                    raise ValueError('رد غير متوقع: لم يؤكد المورد أنه اختبار. لا تعتبر الأكواد بضاعة حقيقية.')
+            elif action == 'order':
+                if len(parts) != 1:
+                    raise ValueError('أرسل رقم الأوردر فقط')
+                ok, data = _insight_request(store, 'GET', f'/orders/{item_id}')
+            elif action == 'reset':
+                if len(parts) != 1:
+                    raise ValueError('أرسل رقم المنتج فقط')
+                ok, data = _insight_request(store, 'DELETE', f'/products/{item_id}/price')
+            elif action == 'price':
+                from decimal import Decimal
+                if len(parts) != 2:
+                    raise ValueError('أرسل رقم المنتج والسعر')
+                value = Decimal(parts[1])
+                if not value.is_finite() or value < 0:
+                    raise ValueError('السعر غير صالح')
+                ok, data = _insight_request(store, 'PATCH', f'/products/{item_id}', {'price': float(value)})
+            else:
+                return
+        # File output preserves every per-item error and long delivered code.
+        import io
+        result = io.BytesIO(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
+        result.name = 'insight_test.json' if action == 'test' else 'insight_result.json'
+        caption = ('🧪 نتيجة اختبار فقط — الأكواد ليست للبيع.' if action == 'test' else
+                   'نتيجة Insight. راجع حالة الطلب أو تفاصيل نجاح وفشل كل منتج داخل الملف.')
+        bot.send_document(message.chat.id, result, caption=caption if ok else '❌ رفض Insight الطلب؛ التفاصيل في الملف.')
+    except Exception as exc:
+        bot.send_message(message.chat.id, '❌ تعذر تنفيذ العملية: ' + str(exc)[:300])
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ext_bal_"))
 @admin_required
 def ext_check_balance(call):
@@ -17745,18 +18006,18 @@ def ext_check_balance(call):
     # الرصيد قد يكون بمفاتيح مختلفة
     bal = None
     if isinstance(data, dict):
-        bal = data.get('balance', data.get('wallet', data.get('amount')))
+        bal = data.get('balance_usdt', data.get('balance', data.get('wallet', data.get('amount'))))
     lines = [f"💰 <b>رصيدك في {html.escape(store.get('name',''))}:</b>\n"]
     if bal is not None:
         lines.append(f"<b>${float(bal):.2f} USDT</b>\n")
     # السجل الأخير لو موجود
-    ledger = data.get('ledger') or data.get('recent') or [] if isinstance(data, dict) else []
+    ledger = data.get('recent_transactions') or data.get('ledger') or data.get('recent') or [] if isinstance(data, dict) else []
     if ledger:
         lines.append("\n📜 <b>آخر الحركات:</b>")
         for e in ledger[:8]:
             if isinstance(e, dict):
-                amt = e.get('amount', e.get('value', ''))
-                desc = e.get('description', e.get('type', e.get('note', '')))
+                amt = e.get('amount_usdt', e.get('amount', e.get('value', '')))
+                desc = e.get('kind', e.get('description', e.get('type', e.get('note', ''))))
                 lines.append(f"• {amt} — {str(desc)[:30]}")
     if bal is None and not ledger:
         lines.append(f"<code>{html.escape(str(data)[:300])}</code>")
@@ -17793,7 +18054,7 @@ def ext_remote_orders(call):
             continue
         oid = o.get('order_id', o.get('id', ''))
         st = o.get('status', '')
-        amt = o.get('total', o.get('amount', o.get('price', '')))
+        amt = o.get('total_usdt', o.get('amount_usdt', o.get('total', o.get('amount', o.get('price', '')))))
         when = o.get('created_at', o.get('timestamp', ''))
         lines.append(f"• #{oid} — {st} — {amt} — {str(when)[:19]}")
     bot.send_message(call.message.chat.id, "\n".join(lines), parse_mode="HTML")
