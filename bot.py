@@ -5312,20 +5312,61 @@ def _translate_text_raw(text, target_lang, tries=3):
         return None
 
 def _translate_text_raw(text, target_lang, tries=1):
-    """يترجم نصاً. مهم: مهلة قصيرة جداً ومحاولة واحدة فقط لتجنّب تعليق الواجهة.
-    لو الترجمة فشلت، نرجّع None فوراً ويُستخدم النص الأصلي — أفضل من تعليق 30 ثانية."""
-    _warned = False
-    # محاولة واحدة سريعة فقط (لا تكرار، لا بروكسيات بطيئة)
+    """Bounded translation requests; reject an unchanged Arabic result for English."""
+    if not text or not text.strip():
+        return None
+    source = 'ar' if re.search(r'[\u0600-\u06FF]', text) and target_lang == 'en' else 'auto'
+    if target_lang == 'en' and source == 'auto':
+        return text
+    # Split long text before the provider's input limit, preserving separators.
+    if len(text) > 3500:
+        pieces = re.findall(r'.{1,3000}(?:\s+|$)|.{1,3000}', text, re.DOTALL)
+        translated = [_translate_text_raw(piece, target_lang) for piece in pieces]
+        return ' '.join(translated) if all(translated) else None
+    def accepted(value):
+        return (isinstance(value, str) and not _is_bad_translation(text, value)
+                and not (source == 'ar' and (value.strip() == text.strip()
+                         or re.search(r'[\u0600-\u06FF]', value))))
+    import requests
+    # Structured response avoids depending solely on Google's page markup.
     try:
-        r = GoogleTranslator(source='auto', target=target_lang).translate(text)
-        if r and not _is_bad_translation(text, r):
-            return str(r)
-        if r and not _warned:
-            logger.warning(f"translate: bad response rejected ({str(r)[:60]!r})")
-    except Exception as e:
-        logger.debug(f"translate direct err: {e}")
-    # لا بروكسيات (كانت تعلّق حتى 32 ثانية عند الفشل) — نرجّع None فوراً
+        response = requests.get('https://translate.googleapis.com/translate_a/single',
+            params={'client': 'gtx', 'sl': source, 'tl': target_lang, 'dt': 't', 'q': text},
+            timeout=(5, 15))
+        response.raise_for_status()
+        payload = response.json()
+        result = ''.join(row[0] for row in payload[0] if isinstance(row, list)
+                         and row and isinstance(row[0], str))
+        if accepted(result):
+            return result
+    except Exception as exc:
+        logger.warning('Translation structured request failed: %s', type(exc).__name__)
+    # Same provider as the existing library, with a local timeout (no global patch).
+    try:
+        from bs4 import BeautifulSoup
+        response = requests.get('https://translate.google.com/m',
+            params={'sl': source, 'tl': target_lang, 'q': text}, timeout=(5, 15))
+        response.raise_for_status()
+        page = BeautifulSoup(response.text, 'html.parser')
+        element = page.find('div', {'class': 'result-container'}) or page.find('div', {'class': 't0'})
+        result = element.get_text() if element else None
+        if accepted(result):
+            return result
+    except Exception as exc:
+        logger.warning('Translation page request failed: %s', type(exc).__name__)
+    logger.warning('Translation unavailable: target=%s source=%s length=%s', target_lang, source, len(text))
     return None
+
+
+def _translate_product_description(text):
+    result = safe_translate_for_cms(text, 'en')
+    # Protected code, links, variables and emoji must remain untouched.
+    for segment in _PRESERVE_RE.split(result or ''):
+        if segment and not _PRESERVE_RE.fullmatch(segment) and re.search(r'[\u0600-\u06FF]', segment):
+            raise ValueError('تعذرت ترجمة الوصف للإنجليزية. لم نحفظ التعديل؛ أعد المحاولة أو عدّل الوصف الإنجليزي يدوياً.')
+    if text.strip() and not (result or '').strip():
+        raise ValueError('خدمة الترجمة أعادت نصاً فارغاً؛ لم نحفظ التعديل.')
+    return result
 
 
 def _translate_single_line(line, target_lang='en'):
@@ -5350,8 +5391,8 @@ def _translate_single_line(line, target_lang='en'):
             lead = p[:len(p) - len(p.lstrip())]
             trail = p[len(p.rstrip()):]
             core = p.strip()
-            tr = _translate_text_raw(core, target_lang)
-            out.append(lead + (tr if tr else core) + trail)
+            tr = _translate_text_raw(html.unescape(core), target_lang)
+            out.append(lead + (html.escape(tr, quote=False) if tr else core) + trail)
         result = ''.join(out)
 
         # 🛡 حارس أخير: لو تسلّل محتوى صفحة خطأ إلى الناتج، نرفضه كلياً
@@ -5961,21 +6002,57 @@ def check_forced_sub(uid, use_cache=True):
     _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
     return True
 
+def _telegram_delivery_kind(exc):
+    text = str(exc).lower()
+    if any(token in text for token in ('user is deactivated', 'bot was blocked by the user',
+                                      'chat not found', 'bot was kicked')):
+        return 'unreachable'
+    if 'parse entities' in text or "can't parse" in text:
+        return 'format'
+    if getattr(exc, 'error_code', None) == 429 or 'too many requests' in text:
+        return 'rate_limit'
+    return 'other'
+
+
+def _broadcast_deliver(operation, *args, **kwargs):
+    """Retry explicit Telegram rejections only; never retry an ambiguous timeout."""
+    for attempt in range(3):
+        try:
+            return operation(*args, **kwargs)
+        except Exception as exc:
+            kind = _telegram_delivery_kind(exc)
+            if kind == 'rate_limit' and attempt < 2:
+                result = getattr(exc, 'result_json', {}) or {}
+                delay = max(1, int((result.get('parameters') or {}).get('retry_after', 1)))
+                time.sleep(delay + 1)
+                continue
+            if kind == 'format' and kwargs.get('parse_mode') == 'HTML' and attempt < 2:
+                # Escape the whole message; do not repeat malformed custom markup.
+                args = (args[0], html.escape(str(args[1]))) + args[2:]
+                continue
+            raise
+
+
 def _cgpt_deliver_api_receipt(event):
     sent = set(event.get('sent_to', []))
+    undeliverable = set(event.get('undeliverable_to', []))
     for recipient in event['recipients']:
-        if recipient in sent:
+        if recipient in sent or recipient in undeliverable:
             continue
         text = event['admin_text'] if recipient in event['admin_ids'] else event['buyer_text']
         try:
-            bot.send_message(recipient, text, parse_mode='HTML')
-        except Exception:
-            try:
-                import re
-                bot.send_message(recipient, html.unescape(re.sub(r'<[^>]*>', '', text)), parse_mode=None)
-            except Exception:
-                logger.exception('Business API receipt delivery failed: order=%s recipient=%s', event['_id'], recipient)
-                continue
+            _broadcast_deliver(bot.send_message, recipient, text, parse_mode='HTML')
+        except Exception as exc:
+            if _telegram_delivery_kind(exc) == 'unreachable':
+                undeliverable.add(recipient)
+                event['undeliverable_to'] = list(undeliverable)
+                db.cgpt_api_receipts.update_one({'_id': event['_id']},
+                    {'$addToSet': {'undeliverable_to': recipient}})
+                logger.warning('Business receipt unreachable: order=%s recipient=%s', event['_id'], recipient)
+            else:
+                logger.warning('Business receipt retry needed: order=%s recipient=%s kind=%s',
+                               event['_id'], recipient, _telegram_delivery_kind(exc))
+            continue
         sent.add(recipient)
         event['sent_to'] = list(sent)
         logger.info('Business API receipt delivered: order=%s recipient=%s', event['_id'], recipient)
@@ -5983,9 +6060,9 @@ def _cgpt_deliver_api_receipt(event):
             db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$addToSet': {'sent_to': recipient}})
         except Exception:
             logger.exception('Could not persist Business receipt delivery status')
-    complete = all(recipient in sent for recipient in event['recipients'])
+    complete = all(recipient in sent or recipient in undeliverable for recipient in event['recipients'])
     try:
-        db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$set': {'complete': complete}, '$inc': {'attempts': 1}})
+        db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$set': {'complete': complete, 'all_delivered': all(r in sent for r in event['recipients'])}, '$inc': {'attempts': 1}})
     except Exception:
         logger.exception('Could not persist Business receipt retry status')
 
@@ -12848,18 +12925,21 @@ def _ext_broadcast_new_product(ep, _approved=False):
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
                 delivery = "تلقائي ⚡" if u_lang == 'ar' else "Auto ⚡"
-                p_desc = str(ep.get('desc', ''))[:200]
-                alert_msg = get_text(uid_u, 'new_product', p_name, f"{price:.2f}", delivery, p_desc)
+                p_desc = _ext_safe_product_html(_ext_description_for_lang(ep, u_lang), 1200)
+                alert_msg = get_text(uid_u, 'new_product', html.escape(p_name), f"{price:.2f}", delivery, p_desc)
                 markup = InlineKeyboardMarkup()
                 markup.add(CustomInlineButton(
                     text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
-                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
-            except Exception:
+            except Exception as exc:
                 failed += 1
+                if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
+                    logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
+                                   u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
     except Exception as _e:
         logger.debug(f"_ext_broadcast_new_product err: {_e}")
 
@@ -12886,18 +12966,21 @@ def _ext_broadcast_stock(ep, _approved=False):
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
                 price = float(ep.get('sell_price', ep.get('base_price', 0)))
-                alert_msg = get_text(uid_u, 'new_stock', p_name, stk)
+                alert_msg = get_text(uid_u, 'new_stock', html.escape(p_name), stk)
                 alert_msg += f"\n\n💰 <b>{'السعر' if u_lang == 'ar' else 'Price'}:</b> ${price:.2f}"
                 markup = InlineKeyboardMarkup()
                 markup.add(CustomInlineButton(
                     text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
-                bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
-            except Exception:
+            except Exception as exc:
                 failed += 1
+                if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
+                    logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
+                                   u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
     except Exception as _e:
         logger.debug(f"_ext_broadcast_stock err: {_e}")
 
@@ -12923,11 +13006,11 @@ def _ext_broadcast_price_drop(ep, old_price, new_price, _approved=False):
                 if u_lang not in ['ar', 'en']: u_lang = 'en'
                 p_name = clean_name(str(ep.get('name', '')))
                 if u_lang == 'ar':
-                    msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{p_name}</b>\n"
+                    msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{html.escape(p_name)}</b>\n"
                            f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
                            f"<i>سارع بالشراء الآن!</i>")
                 else:
-                    msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{p_name}</b>\n"
+                    msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{html.escape(p_name)}</b>\n"
                            f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
                            f"<i>Buy now!</i>")
                 markup = InlineKeyboardMarkup()
@@ -12935,11 +13018,14 @@ def _ext_broadcast_price_drop(ep, old_price, new_price, _approved=False):
                     text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
                     style="success",
                     icon_custom_emoji_id=emoji_id if emoji_id else None))
-                bot.send_message(uid_u, msg, parse_mode="HTML", reply_markup=markup)
+                _broadcast_deliver(bot.send_message, uid_u, msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
-            except Exception:
+            except Exception as exc:
                 failed += 1
+                if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
+                    logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
+                                   u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
     except Exception as _e:
         logger.debug(f"_ext_broadcast_price_drop err: {_e}")
 
@@ -17199,7 +17285,7 @@ def _ext_description_update(desc, lang='ar'):
     fields = {'desc_edited': True, 'desc_' + lang: desc,
               'desc_' + lang + '_html': desc}
     if lang == 'ar':
-        translated = safe_translate_for_cms(desc, 'en')
+        translated = _translate_product_description(desc)
         fields.update({'desc': desc, 'desc_text': desc,
                        'desc_en': translated, 'desc_en_html': translated})
         visible = re.sub(r'<[^>]+>', '', translated or '')
@@ -17245,6 +17331,8 @@ def _ext_save_desc(message, pid, lang='ar'):
         if fields.get('desc_translation_pending'):
             notice = "✅ حُفظ العربي. ⚠️ الترجمة لم تكتمل؛ أعد المحاولة أو أدخل الوصف الإنجليزي من زره."
         bot.send_message(message.chat.id, notice)
+    except ValueError as exc:
+        bot.send_message(message.chat.id, str(exc))
     except Exception:
         bot.send_message(message.chat.id, "❌ فشل التعديل.")
 
@@ -22631,7 +22719,12 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
         
         if field in ['nar', 'dar']:
             # عربي → ترجم للإنجليزي تلقائياً
-            translated = safe_translate_for_cms(final_text, 'en')
+            try:
+                translated = (_translate_product_description(final_text) if field == 'dar'
+                              else safe_translate_for_cms(final_text, 'en'))
+            except ValueError as exc:
+                bot.send_message(message.chat.id, str(exc))
+                return
             if field == 'nar':
                 db.products.update_one({'_id': p['_id']}, {'$set': {'name_ar': final_text, 'name_en': translated}})
                 
@@ -24344,7 +24437,7 @@ def admin_bc_confirm(call):
         InlineKeyboardButton("❌ لا", callback_data="admin_panel_main")
     )
     bot.send_message(uid,
-        f"📋 سيُرسل البرودكاست لـ <b>{label}</b>\n\nموافق؟",
+        f"📋 سيُرسل البرودكاست لـ <b>{html.escape(label)}</b>\n\nموافق؟",
         parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "bc_go")
@@ -24365,7 +24458,7 @@ def admin_bc_exe(call):
     catalog_id  = pending.get('catalog_id')
 
     bot.send_message(uid,
-        f"📢 <b>بدأ البرودكاست!</b> ({label})\n"
+        f"📢 <b>بدأ البرودكاست!</b> ({html.escape(label)})\n"
         f"⏳ البوت يعمل بشكل طبيعي. سيصلك تقرير عند الانتهاء.",
         parse_mode="HTML")
 
@@ -24401,19 +24494,21 @@ def admin_bc_exe(call):
                             markup = InlineKeyboardMarkup()
                             markup.add(CustomInlineButton(btn_text, callback_data=f"cat_{catalog_id}", style="primary"))
 
-                bot.copy_message(tuid, src_chat_id, src_msg_id, reply_markup=markup)
+                _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
                 sent += 1
             except Exception as e:
                 err = str(e).lower()
-                if any(w in err for w in ['blocked', 'deactivated', 'not found', 'kicked']):
+                if _telegram_delivery_kind(e) == 'unreachable':
                     blocked += 1
                 else:
                     failed += 1
+                    if failed <= 5:
+                        logger.warning('Manual broadcast failed: recipient=%s error=%s', tuid, str(e)[:200])
             time.sleep(0.035)
         try:
             bot.send_message(uid,
                 f"✅ <b>اكتمل البرودكاست!</b>\n\n"
-                f"🎯 {label}\n"
+                f"🎯 {html.escape(label)}\n"
                 f"📤 أُرسل: <b>{sent}</b>\n"
                 f"🚫 محظور: <b>{blocked}</b>\n"
                 f"❌ فشل: <b>{failed}</b>",
