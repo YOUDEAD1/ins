@@ -22306,11 +22306,12 @@ def ep_disc_clear(call):
     """زر مباشر لحذف كل خصومات المنتج."""
     bot.answer_callback_query(call.id)
     pid = call.data.replace("ep_disc_clr_", "")
-    p = find_product(pid)
+    p = _find_product_db(pid)
     if not p:
         bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
         return
     res = db.products.update_one({'_id': p['_id']}, {'$set': {'discount_tiers': []}})
+    _invalidate_products_cache()
     try:
         pid_e = str(p.get('id', str(p.get('_id', ''))))
         _emit_event('product.updated', {'product_id': pid_e,
@@ -22329,17 +22330,21 @@ def _save_discount_tier(message, pid):
     uid = message.from_user.id
     if not _is_admin_check(uid): return
 
-    text = message.text.strip()
+    text = (message.text or '').strip()
+    if text.lower() in ('/cancel', 'cancel', 'الغاء', 'إلغاء'):
+        bot.send_message(uid, "تم إلغاء تعديل الخصم.")
+        return
 
     if text.lower() == 'clear':
         # 🔧 نستخدم نفس طريقة البحث الموثوقة (find_product ثم _id)
         #    الطريقة القديمة {'id': pid} كانت تفشل في إيجاد المنتج فلا تمسح شيئاً.
-        p = find_product(pid)
+        p = _find_product_db(pid)
         if not p:
             bot.send_message(uid, "❌ المنتج غير موجود.")
             return
         res = db.products.update_one({'_id': p['_id']},
                                      {'$set': {'discount_tiers': []}})
+        _invalidate_products_cache()
         # بثّ التحديث للمزامنة
         try:
             pid_e = str(p.get('id', str(p.get('_id', ''))))
@@ -22356,16 +22361,19 @@ def _save_discount_tier(message, pid):
         return
 
     try:
+        import math
         parts = text.split()
+        if len(parts) != 2:
+            raise ValueError()
         min_qty = int(parts[0])
         price = float(parts[1])
-        if min_qty < 1 or price <= 0:
+        if min_qty < 1 or not math.isfinite(price) or price <= 0:
             raise ValueError()
     except:
         bot.send_message(uid, "❌ صيغة خاطئة. مثال: <code>3 4.50</code>\n(العدد ثم السعر بالدولار)", parse_mode="HTML")
         return
 
-    p = find_product(pid)
+    p = _find_product_db(pid)
     if not p:
         bot.send_message(uid, "❌ المنتج غير موجود.")
         return
@@ -22376,7 +22384,18 @@ def _save_discount_tier(message, pid):
     tiers.append({'min_qty': min_qty, 'price': price})
     tiers = sorted(tiers, key=lambda x: x.get('min_qty', 0))
 
-    db.products.update_one({'_id': p['_id']}, {'$set': {'discount_tiers': tiers}})
+    result = db.products.update_one({'_id': p['_id']}, {'$set': {'discount_tiers': tiers}})
+    if not result.matched_count:
+        bot.send_message(uid, "❌ لم يُحفظ الخصم: المنتج غير موجود في قائمة المنتجات القابلة للتعديل.")
+        return
+    _invalidate_products_cache()
+    try:
+        pid_e = str(p.get('id', str(p.get('_id', ''))))
+        _emit_event('product.updated', {'product_id': pid_e,
+                    'changes': {'discount_tiers': tiers}}, product_id=pid_e)
+    except Exception:
+        logger.warning('Could not publish discount update for product %s', pid)
+
     bot.send_message(
         uid,
         f"✅ <b>تم حفظ الخصم!</b>\n\n"
