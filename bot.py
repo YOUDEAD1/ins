@@ -2880,6 +2880,13 @@ try:
     mongo_client.server_info()
     db = mongo_client[MONGO_DB_NAME] 
     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
+    for collection, fields in (('users', [('user_id', 1)]),
+                               ('custom_buttons', [('lang', 1), ('key', 1)]),
+                               ('settings', [('key', 1)])):
+        try:
+            db[collection].create_index(fields, background=True)
+        except Exception as exc:
+            logger.warning('Could not ensure lookup index: %s (%s)', collection, type(exc).__name__)
     # ⚡ فهارس الأداء الحرجة — تُنشأ في كل إقلاع (idempotent، آمنة للتكرار)
     #    بدونها كل استعلام يمسح المجموعة كاملة → بطء شديد في عرض القائمة.
     try:
@@ -5073,6 +5080,35 @@ def translate_duration_label(label, target_lang='en'):
 
     return res
 
+_PRODUCT_TRANSLATION_LOCK = threading.Lock()
+_PRODUCT_TRANSLATION_ACTIVE = set()
+_PRODUCT_TRANSLATION_LAST = {}
+
+
+def _schedule_product_translation(key, work):
+    with _PRODUCT_TRANSLATION_LOCK:
+        now = time.monotonic()
+        if (key in _PRODUCT_TRANSLATION_ACTIVE or len(_PRODUCT_TRANSLATION_ACTIVE) >= 2
+                or now - _PRODUCT_TRANSLATION_LAST.get(key, -300) < 60):
+            return
+        if len(_PRODUCT_TRANSLATION_LAST) >= 2048:
+            _PRODUCT_TRANSLATION_LAST.clear()
+        _PRODUCT_TRANSLATION_ACTIVE.add(key)
+        _PRODUCT_TRANSLATION_LAST[key] = now
+    def run():
+        try:
+            work()
+        finally:
+            with _PRODUCT_TRANSLATION_LOCK:
+                _PRODUCT_TRANSLATION_ACTIVE.discard(key)
+    try:
+        threading.Thread(target=run, daemon=True, name='product-translation').start()
+    except Exception:
+        with _PRODUCT_TRANSLATION_LOCK:
+            _PRODUCT_TRANSLATION_ACTIVE.discard(key)
+        logger.exception('Could not start product translation')
+
+
 def get_translated_product_name(p, lang, is_cgpt=False):
     if not p:
         return "Unknown Product"
@@ -5094,7 +5130,7 @@ def get_translated_product_name(p, lang, is_cgpt=False):
                             db[coll].update_one({'_id': pid}, {'$set': {'name_en': tr}})
                     except Exception:
                         pass
-                threading.Thread(target=_bg_translate, daemon=True).start()
+                _schedule_product_translation((_coll, str(_pid), 'name'), _bg_translate)
             except Exception:
                 pass
         return n
@@ -5125,7 +5161,7 @@ def get_translated_product_desc(p, lang, is_cgpt=False):
                             _invalidate_products_cache()
                     except Exception:
                         pass
-                threading.Thread(target=_bg_translate_desc, daemon=True).start()
+                _schedule_product_translation((_coll, str(_pid), 'desc'), _bg_translate_desc)
             except Exception:
                 pass
         return d
@@ -5311,11 +5347,45 @@ def _translate_text_raw(text, target_lang, tries=3):
     if not text or not text.strip():
         return None
 
+_LEGACY_TRANSLATOR_SLOTS = threading.BoundedSemaphore(2)
+
+
+def _has_arabic_letters(text):
+    import unicodedata
+    return any('\u0600' <= ch <= '\u08ff' and unicodedata.category(ch).startswith('L')
+               for ch in str(text))
+
+
+def _try_previous_translator(text, target_lang):
+    """Restore the original library without letting stalled calls consume all workers."""
+    if not _LEGACY_TRANSLATOR_SLOTS.acquire(blocking=False):
+        return None
+    done = threading.Event()
+    result = []
+    def work():
+        try:
+            result.append(GoogleTranslator(source='auto', target=target_lang).translate(text))
+        except Exception as exc:
+            logger.warning('Original translator failed: %s', type(exc).__name__)
+        finally:
+            _LEGACY_TRANSLATOR_SLOTS.release()
+            done.set()
+    try:
+        threading.Thread(target=work, daemon=True, name='original-translator').start()
+    except Exception:
+        _LEGACY_TRANSLATOR_SLOTS.release()
+        return None
+    if not done.wait(6):
+        logger.warning('Original translator timed out')
+        return None
+    return result[0] if result else None
+
+
 def _translate_text_raw(text, target_lang, tries=1):
     """Bounded translation requests; reject an unchanged Arabic result for English."""
     if not text or not text.strip():
         return None
-    source = 'ar' if re.search(r'[\u0600-\u06FF]', text) and target_lang == 'en' else 'auto'
+    source = 'ar' if _has_arabic_letters(text) and target_lang == 'en' else 'auto'
     if target_lang == 'en' and source == 'auto':
         return text
     # Split long text before the provider's input limit, preserving separators.
@@ -5326,7 +5396,32 @@ def _translate_text_raw(text, target_lang, tries=1):
     def accepted(value):
         return (isinstance(value, str) and not _is_bad_translation(text, value)
                 and not (source == 'ar' and (value.strip() == text.strip()
-                         or re.search(r'[\u0600-\u06FF]', value))))
+                         or _has_arabic_letters(value))))
+    # Use the system HTTPS transport when available; no shell or proxy rewriting.
+    # Some deployments fail Python HTTP requests while curl reaches the same endpoint.
+    try:
+        import shutil
+        import subprocess
+        import json as _translation_json
+        executable = shutil.which('curl')
+        if executable:
+            response = subprocess.run([executable, '--get', '--silent', '--show-error',
+                '--fail', '--connect-timeout', '4', '--max-time', '10',
+                'https://translate.googleapis.com/translate_a/single',
+                '--data-urlencode', 'client=gtx', '--data-urlencode', 'sl=' + source,
+                '--data-urlencode', 'tl=' + target_lang, '--data-urlencode', 'dt=t',
+                '--data-urlencode', 'q=' + text], capture_output=True, text=True,
+                timeout=12, check=True)
+            payload = _translation_json.loads(response.stdout)
+            value = ''.join(row[0] for row in payload[0] if isinstance(row, list)
+                            and row and isinstance(row[0], str))
+            if accepted(value):
+                return value
+    except Exception as exc:
+        logger.warning('Translation HTTPS transport failed: %s', type(exc).__name__)
+    previous = _try_previous_translator(text, target_lang)
+    if accepted(previous):
+        return previous
     import requests
     # Structured response avoids depending solely on Google's page markup.
     try:
@@ -5362,10 +5457,12 @@ def _translate_product_description(text):
     result = safe_translate_for_cms(text, 'en')
     # Protected code, links, variables and emoji must remain untouched.
     for segment in _PRESERVE_RE.split(result or ''):
-        if segment and not _PRESERVE_RE.fullmatch(segment) and re.search(r'[\u0600-\u06FF]', segment):
-            raise ValueError('تعذرت ترجمة الوصف للإنجليزية. لم نحفظ التعديل؛ أعد المحاولة أو عدّل الوصف الإنجليزي يدوياً.')
+        if segment and not _PRESERVE_RE.fullmatch(segment) and _has_arabic_letters(segment):
+            logger.warning('Product description translation incomplete')
+            return None
     if text.strip() and not (result or '').strip():
-        raise ValueError('خدمة الترجمة أعادت نصاً فارغاً؛ لم نحفظ التعديل.')
+        logger.warning('Product description translation empty')
+        return None
     return result
 
 
@@ -5691,13 +5788,87 @@ def get_text(uid, key, *args):
     
     return base_text
 
+_START_VIEW_CONTEXT = threading.local()
+
+
+def _custom_button_for_view(lang, key):
+    # Request-local snapshot: edits remain visible on the very next menu open.
+    if getattr(_START_VIEW_CONTEXT, 'active', False):
+        if _START_VIEW_CONTEXT.buttons is None:
+            _START_VIEW_CONTEXT.buttons = {
+                (row.get('lang'), row.get('key')): row for row in db.custom_buttons.find({})}
+        return _START_VIEW_CONTEXT.buttons.get((lang, key))
+    return db.custom_buttons.find_one({'lang': lang, 'key': key})
+
+
+import queue as _start_queue_module
+_START_REWARD_QUEUE = _start_queue_module.Queue(maxsize=512)
+_START_REWARD_PENDING = set()
+_START_REWARD_LOCK = threading.Lock()
+_START_REWARD_WORKER_STARTED = False
+
+
+def _start_reward_worker():
+    while True:
+        uid = _START_REWARD_QUEUE.get()
+        try:
+            update_referrer_balance(uid)
+            _invalidate_user_cache(uid)
+        except Exception:
+            logger.exception('Deferred start reward check failed for %s', uid)
+        finally:
+            with _START_REWARD_LOCK:
+                _START_REWARD_PENDING.discard(uid)
+            _START_REWARD_QUEUE.task_done()
+
+
+def _queue_start_reward_check(uid):
+    global _START_REWARD_WORKER_STARTED
+    with _START_REWARD_LOCK:
+        if uid in _START_REWARD_PENDING:
+            return
+        if not _START_REWARD_WORKER_STARTED:
+            threading.Thread(target=_start_reward_worker, daemon=True,
+                             name='start-reward-checks').start()
+            _START_REWARD_WORKER_STARTED = True
+        try:
+            _START_REWARD_PENDING.add(uid)
+            _START_REWARD_QUEUE.put_nowait(uid)
+        except _start_queue_module.Full:
+            _START_REWARD_PENDING.discard(uid)
+            # This is a retrospective check; referral events still calculate rewards.
+            logger.warning('Start reward queue full; retrospective check deferred for %s', uid)
+
+
+def _start_view_guard(func):
+    import functools
+    @functools.wraps(func)
+    def wrapped(message, *args, **kwargs):
+        began = time.monotonic()
+        _START_VIEW_CONTEXT.active = True
+        _START_VIEW_CONTEXT.buttons = None
+        try:
+            return func(message, *args, **kwargs)
+        except Exception as exc:
+            if _telegram_delivery_kind(exc) == 'unreachable':
+                logger.info('Start delivery unavailable for %s', message.from_user.id)
+                return
+            raise
+        finally:
+            _START_VIEW_CONTEXT.active = False
+            _START_VIEW_CONTEXT.buttons = None
+            logger.info('[START_PERF] uid=%s duration_ms=%d', message.from_user.id,
+                        int((time.monotonic() - began) * 1000))
+    return wrapped
+
+
 def get_btn_data(uid, key):
     l = get_lang(uid)
     if l not in ['ar', 'en']:
         l = 'ar'
     
     try:
-        custom = db.custom_buttons.find_one({'lang': l, 'key': key})
+        custom = _custom_button_for_view(l, key)
         if custom:
             text = custom.get('text', '').strip()
             emoji_id = custom.get('emoji_id', None)
@@ -5717,7 +5888,7 @@ def create_btn(uid, key, callback_data=None, url=None, style=None):
     if style is None:
         try:
             l = get_lang(uid) if get_lang(uid) in ['ar', 'en'] else 'ar'
-            custom = db.custom_buttons.find_one({'lang': l, 'key': key})
+            custom = _custom_button_for_view(l, key)
             if custom and custom.get('style'):
                 style = custom['style']
         except Exception: pass
@@ -6384,6 +6555,8 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
             markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
             if is_admin:
                 short_pid = str(pid_actual).replace("cgpt_main_", "") if str(pid_actual).startswith("cgpt_main_") else str(pid_actual)
+                _remember_product_edit_parent(uid, short_pid,
+                    f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}")
                 edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
                 markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
@@ -6440,6 +6613,8 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
         markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
 
         if is_admin:
+            _remember_product_edit_parent(uid, short_pid,
+                f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}")
             edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
@@ -6594,6 +6769,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
 # 🏠 8. معالج البداية 
 # ============================================================
 @bot.message_handler(commands=['start'])
+@_start_view_guard
 def start_handler(message):
     is_callback = isinstance(message, types.CallbackQuery)
     chat_id = message.message.chat.id if is_callback else message.chat.id
@@ -6637,11 +6813,13 @@ def start_handler(message):
                 logger.error(f"Error registering new referral: {e}")
     else:
         # ⚠️ المستخدم موجود من قبل — لا تُسجَّل أي إحالة جديدة له
-        db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
+        if user.get('username') != uname:
+            db.users.update_one({'user_id': uid}, {'$set': {'username': uname}})
+            _invalidate_user_cache(uid)
     
     # 🆕 مكافآت رجعية: نتأكد إن المستخدم استلم كل مكافآته (لو فاته شي)
     try:
-        update_referrer_balance(uid)
+        _queue_start_reward_check(uid)
     except Exception as ref_err:
         logger.debug(f"Retroactive reward check error: {ref_err}")
 
@@ -8266,6 +8444,8 @@ def shop_detail_ui(call):
         markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
         if is_admin:
             short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
+            _remember_product_edit_parent(uid, short_pid,
+                f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}")
             edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
@@ -8318,6 +8498,8 @@ def shop_detail_ui(call):
     markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
 
     if _is_admin_check(uid):
+        _remember_product_edit_parent(uid, short_pid,
+            f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}")
         edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
         markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
@@ -17286,10 +17468,11 @@ def _ext_description_update(desc, lang='ar'):
               'desc_' + lang + '_html': desc}
     if lang == 'ar':
         translated = _translate_product_description(desc)
-        fields.update({'desc': desc, 'desc_text': desc,
-                       'desc_en': translated, 'desc_en_html': translated})
+        fields.update({'desc': desc, 'desc_text': desc})
+        if translated is not None:
+            fields.update({'desc_en': translated, 'desc_en_html': translated})
         visible = re.sub(r'<[^>]+>', '', translated or '')
-        fields['desc_translation_pending'] = bool(re.search(r'[\u0600-\u06FF]', visible))
+        fields['desc_translation_pending'] = translated is None
     else:
         fields['desc_translation_pending'] = False
     return fields
@@ -22078,6 +22261,29 @@ def ad_p_final(call):
     type_txt = "التسليم اليدوي 🤝" if is_manual else "التسليم التلقائي ⚡"
     bot.edit_message_text(f"✅ <b>تم إضافة المنتج بنجاح بنظام ({type_txt})!</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML")
 
+_PRODUCT_EDIT_NAV = {}
+_PRODUCT_EDIT_NAV_LOCK = threading.Lock()
+
+
+def _remember_product_edit_parent(uid, pid, parent):
+    key = (int(uid), str(pid).removeprefix('cgpt_main_'))
+    with _PRODUCT_EDIT_NAV_LOCK:
+        now = time.monotonic()
+        if len(_PRODUCT_EDIT_NAV) >= 4096:
+            oldest = min(_PRODUCT_EDIT_NAV, key=lambda k: _PRODUCT_EDIT_NAV[k][1])
+            _PRODUCT_EDIT_NAV.pop(oldest, None)
+        _PRODUCT_EDIT_NAV[key] = (parent, now)
+
+
+def _product_edit_parent(uid, pid, cat_id=None):
+    key = (int(uid), str(pid).removeprefix('cgpt_main_'))
+    with _PRODUCT_EDIT_NAV_LOCK:
+        found = _PRODUCT_EDIT_NAV.get(key)
+    if found and time.monotonic() - found[1] < 86400:
+        return found[0]
+    return f"vi_p_{key[1]}_c_{cat_id}" if cat_id else 'ad_p_edit'
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "ad_p_edit")
 @admin_required
 def admin_edit_list(call):
@@ -22103,6 +22309,7 @@ def admin_edit_list(call):
             p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
         
         btn_text = f"📝 {clean_name(p_name)}{hidden_icon}"
+        _remember_product_edit_parent(call.from_user.id, pid, 'ad_p_edit')
         btn_kwargs = {'text': btn_text, 'callback_data': f"edit_p_{pid}"}
         
         # إضافة الإيموجي المميز (Premium Emoji) للزر
@@ -22145,7 +22352,7 @@ def admin_edit_opts(call):
     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{short_pid}{c_sfx}"))
     # زر رجوع: للمنتج نفسه وليس لقائمة الأدمن
-    back_cb = f"vi_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{short_pid}"
+    back_cb = _product_edit_parent(call.from_user.id, short_pid, cat_id_back)
     # زر جعله أول في مجلده
     p_doc = find_product(pid)
     if p_doc:
@@ -22615,7 +22822,7 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
     val = message.text or ""
     
     # زر رجوع: يرجع للمنتج وليس للقائمة
-    back_cb = f"vi_p_{pid}_c_{cat_id_back}" if cat_id_back else f"vi_p_{pid}"
+    back_cb = f"edit_p_{pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{pid}"
     
     # دعم الإلغاء
     if val.strip().lower() in ['الغاء', 'cancel', '/cancel']:
@@ -22759,21 +22966,23 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
                 back_markup2.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
                 bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML", reply_markup=back_markup2)
             else:
-                db.products.update_one({'_id': p['_id']}, {'$set': {'desc_ar': final_text, 'desc_en': translated}})
+                db.products.update_one({'_id': p['_id']}, {'$set': dict({'desc_ar': final_text, 'desc_translation_pending': translated is None},
+                             **({'desc_en': translated} if translated is not None else {}))})
                 
                 # 🆕 مزامنة مع db.cgpt_products
                 cgpt_id = p.get('cgpt_product_id')
                 if cgpt_id:
                     try:
                         from bson import ObjectId
-                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': {'desc': final_text, 'desc_en': translated}})
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': dict({'desc': final_text, 'desc_translation_pending': translated is None},
+                                         **({'desc_en': translated} if translated is not None else {}))})
                     except: pass
                     
                 back_markup3 = InlineKeyboardMarkup()
                 back_markup3.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
                 desc_notice = "✅ <b>تم تحديث الوصف العربي + ترجمته للإنجليزي تلقائياً.</b>"
-                if re.search(r'[\u0600-\u06FF]', re.sub(r'<[^>]+>', '', translated or '')):
-                    desc_notice = "✅ حُفظ الوصف العربي. ⚠️ الترجمة لم تكتمل؛ أعد المحاولة أو أدخل الوصف الإنجليزي من زره."
+                if translated is None:
+                    desc_notice = "✅ حُفظ الوصف العربي. ⚠️ تعذر الاتصال بالمترجم أو لم يرجع ترجمة مكتملة. بقي الوصف الإنجليزي السابق؛ أعد المحاولة أو عدّله من زره."
                 bot.send_message(message.chat.id, desc_notice, parse_mode="HTML", reply_markup=back_markup3)
         else:
             # إنجليزي فقط
