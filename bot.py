@@ -6064,6 +6064,13 @@ def get_user_data_full(uid, use_cache=True):
     data = db.users.find_one({'user_id': uid})
     # لا نخزّن None في الـ cache (يسبب بيانات قديمة بعد إنشاء المستخدم)
     if data is not None:
+        if len(_USER_CACHE) >= 1024:
+            now = time.time()
+            for old_uid, (_, expiry) in list(_USER_CACHE.items()):
+                if expiry <= now:
+                    _USER_CACHE.pop(old_uid, None)
+            if len(_USER_CACHE) >= 1024:
+                _USER_CACHE.pop(next(iter(_USER_CACHE), None), None)
         _USER_CACHE[uid] = (data, time.time() + _USER_CACHE_TTL)
     else:
         _USER_CACHE.pop(uid, None)
@@ -6187,7 +6194,10 @@ def _telegram_delivery_kind(exc):
 
 def _broadcast_deliver(operation, *args, **kwargs):
     """Retry explicit Telegram rejections only; never retry an ambiguous timeout."""
+    kwargs.setdefault('timeout', 20)
     for attempt in range(3):
+        if getattr(globals().get('_BC_CONTEXT'), 'job', None) is not None:
+            _bc_save()
         try:
             return operation(*args, **kwargs)
         except Exception as exc:
@@ -6195,7 +6205,12 @@ def _broadcast_deliver(operation, *args, **kwargs):
             if kind == 'rate_limit' and attempt < 2:
                 result = getattr(exc, 'result_json', {}) or {}
                 delay = max(1, int((result.get('parameters') or {}).get('retry_after', 1)))
-                time.sleep(delay + 1)
+                remaining = delay + 1
+                while remaining > 0:
+                    time.sleep(min(remaining, 30))
+                    remaining -= min(remaining, 30)
+                    if getattr(globals().get('_BC_CONTEXT'), 'job', None) is not None:
+                        _bc_save()
                 continue
             if kind == 'format' and kwargs.get('parse_mode') == 'HTML' and attempt < 2:
                 # Escape the whole message; do not repeat malformed custom markup.
@@ -12969,7 +12984,7 @@ def cmd_bybit_match(message):
         bot.send_message(uid, txt[i:i+3800], parse_mode="HTML")
 
 
-# External-store broadcasts require the owner's explicit approval.
+# External-store broadcasts require explicit administrator approval.
 _EXT_BC_REQUEST_LOCK = threading.Lock()
 _EXT_BC_WORKER_LOCK = threading.Lock()
 _EXT_BC_WAKE = threading.Event()
@@ -12980,14 +12995,19 @@ def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
         return
     with _EXT_BC_REQUEST_LOCK:
         # Repeated sync ticks do not create repeated approval requests.
-        if db.ext_broadcast_approvals.find_one({'product_id': str(ep['_id']), 'kind': kind,
-                'status': {'$in': ['pending', 'queued', 'sending']}}):
+        if db.ext_broadcast_approvals.find_one({'product_id': str(ep['_id']), 'kind': {'$in': ['stock', 'new']} if kind in ('stock', 'new') else kind,
+                'status': {'$in': ['pending', 'notification_failed', 'queued', 'sending']}}):
             return
-        token = __import__('uuid').uuid4().hex
+        token = ep.get('_notice_token') or __import__('uuid').uuid4().hex
+        if db.ext_broadcast_approvals.find_one({'_id': token}):
+            return token
         job = {'_id': token, 'product_id': str(ep['_id']), 'kind': kind,
                'status': 'pending', 'owner_id': int(OWNER_ID), 'old_price': old_price,
-               'new_price': new_price, 'created_at': time.time()}
-        db.ext_broadcast_approvals.insert_one(job)
+               'new_price': new_price, 'store_id': str(ep.get('store_id', '')),
+               'created_at': time.time()}
+        inserted = db.ext_broadcast_approvals.update_one({'_id': token}, {'$setOnInsert': job}, upsert=True)
+        if inserted.upserted_id is None:
+            return token
         labels = {'stock': 'توفّر ستوك', 'new': 'منتج جديد', 'price': 'تخفيض سعر'}
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton('✅ إرسال البرودكاست', callback_data='extbc_yes_' + token))
@@ -13002,21 +13022,21 @@ def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
         try:
             bot.send_message(int(OWNER_ID), text, parse_mode='HTML', reply_markup=markup)
         except Exception:
-            db.ext_broadcast_approvals.update_one({'_id': token}, {'$set': {'status': 'notification_failed'}})
+            db.ext_broadcast_approvals.update_one({'_id': token}, {'$set': {'notification_failed': True}})
             logger.exception('External broadcast approval notification failed')
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('extbc_yes_', 'extbc_no_')))
 def _ext_broadcast_decision(call):
-    # Approval belongs to the owner, not to arbitrary callback senders.
-    if int(call.from_user.id) != int(OWNER_ID):
-        bot.answer_callback_query(call.id, 'هذا الطلب لصاحب البوت فقط.', show_alert=True)
+    # Validate administrator rights on every approval callback.
+    if not _is_admin_check(call.from_user.id):
+        bot.answer_callback_query(call.id, 'هذا الطلب لأدمن البوت فقط.', show_alert=True)
         return
     approved = call.data.startswith('extbc_yes_')
     token = call.data.split('_', 2)[2]
     job = db.ext_broadcast_approvals.find_one_and_update(
-        {'_id': token, 'owner_id': int(OWNER_ID), 'status': 'pending'},
-        {'$set': {'status': 'queued' if approved else 'declined', 'decided_at': time.time()}},
+        {'_id': token, 'status': {'$in': ['pending', 'notification_failed']}},
+        {'$set': {'status': 'queued' if approved else 'declined', 'decided_at': time.time(), 'owner_id': int(call.from_user.id)}},
         return_document=True)
     if not job:
         bot.answer_callback_query(call.id, 'تم التعامل مع هذا الطلب مسبقاً.', show_alert=True)
@@ -13031,6 +13051,43 @@ def _ext_broadcast_decision(call):
         _EXT_BC_WAKE.set()
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ext_approvals_'))
+@admin_required
+def ext_broadcast_approvals_menu(call):
+    bot.answer_callback_query(call.id)
+    raw = call.data[len('ext_approvals_'):].split(':', 1)
+    sid = raw[0]
+    page = int(raw[1]) if len(raw) > 1 and raw[1].isdigit() else 0
+    # Backfill only legacy approvals; no full-user list is loaded.
+    for job in db.ext_broadcast_approvals.find({'store_id': {'$exists': False},
+            'status': {'$in': ['pending', 'notification_failed']}}).batch_size(50):
+        try:
+            ep = db.ext_products.find_one({'_id': ObjectId(job['product_id'])}, {'store_id': 1})
+            if ep:
+                db.ext_broadcast_approvals.update_one({'_id': job['_id']},
+                    {'$set': {'store_id': str(ep.get('store_id', ''))}})
+        except (ValueError, TypeError):
+            continue
+    jobs = list(db.ext_broadcast_approvals.find({'store_id': sid,
+        'status': {'$in': ['pending', 'notification_failed']}}).sort('created_at', -1).skip(page * 5).limit(6))
+    markup = InlineKeyboardMarkup()
+    lines = ['📢 موافقات برودكاست المتجر']
+    labels = {'stock': 'توفّر', 'new': 'منتج جديد', 'price': 'تخفيض'}
+    for n, job in enumerate(jobs[:5], 1):
+        ep = db.ext_products.find_one({'_id': ObjectId(job['product_id'])}, {'name': 1}) or {}
+        lines.append(f"{n}. {str(ep.get('name', 'منتج محذوف'))[:100]} — {labels.get(job['kind'], '')}")
+        markup.row(InlineKeyboardButton(f'✅ إرسال {n}', callback_data='extbc_yes_' + job['_id']),
+                   InlineKeyboardButton(f'❌ تجاهل {n}', callback_data='extbc_no_' + job['_id']))
+    if not jobs:
+        lines.append('لا توجد موافقات معلّقة في هذه الصفحة.')
+    if page:
+        markup.add(InlineKeyboardButton('السابق', callback_data=f'ext_approvals_{sid}:{page-1}'))
+    if len(jobs) > 5:
+        markup.add(InlineKeyboardButton('التالي', callback_data=f'ext_approvals_{sid}:{page+1}'))
+    markup.add(InlineKeyboardButton('رجوع', callback_data=f'ext_store_{sid}'))
+    bot.send_message(call.message.chat.id, '\n'.join(lines), reply_markup=markup)
+
+
 def _ext_start_broadcast_worker():
     if not _EXT_BC_WORKER_LOCK.acquire(blocking=False):
         return
@@ -13042,21 +13099,85 @@ def _ext_start_broadcast_worker():
         logger.exception('Could not start approved API broadcast worker')
 
 
+_BC_CONTEXT = threading.local()
+
+
+class _BroadcastLeaseLost(RuntimeError):
+    pass
+
+
+def _bc_save(**fields):
+    job = getattr(_BC_CONTEXT, 'job', None)
+    if job is None:
+        return
+    fields['lease_until'] = time.time() + 180
+    result = db.ext_broadcast_approvals.update_one(
+        {'_id': job['_id'], 'status': 'sending', 'worker_token': job['worker_token']},
+        {'$set': fields})
+    if not result.matched_count:
+        raise _BroadcastLeaseLost('Broadcast lease no longer belongs to this worker')
+    job.update(fields)
+
+
+def _bc_users():
+    """Persist intent before sending; an interrupted recipient is not sent twice."""
+    job = getattr(_BC_CONTEXT, 'job', None)
+    if job is None:
+        yield from db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(50)
+        return
+    last = job.get('last_user')
+    while True:
+        bounds = {'$lte': job['recipient_cutoff']}
+        if last is not None:
+            bounds['$gt'] = last
+        batch = list(db.users.find({'_id': bounds},
+            {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).sort('_id', 1).limit(50))
+        if not batch:
+            return
+        for user in batch:
+            _bc_save(last_user=user['_id'], in_flight=True)
+            yield user
+            _bc_save(in_flight=False)
+            last = user['_id']
+
+
+def _bc_result(sent, failed):
+    if getattr(_BC_CONTEXT, 'job', None) is not None:
+        _bc_save(sent=sent, failed=failed, in_flight=False)
+
+
 def _ext_approved_broadcast_worker():
     try:
         while True:
+            job = None
             try:
-                job = db.ext_broadcast_approvals.find_one_and_update({'status': 'queued'},
-                    {'$set': {'status': 'sending', 'started_at': time.time()}}, return_document=True)
+                now = time.time()
+                token = __import__('uuid').uuid4().hex
+                job = db.ext_broadcast_approvals.find_one_and_update(
+                    {'$or': [{'status': 'queued'}, {'status': 'sending',
+                        'resume_version': 1, 'lease_until': {'$lt': now}}]},
+                    {'$set': {'status': 'sending', 'worker_token': token,
+                              'lease_until': now + 180, 'resume_version': 1}}, return_document=True)
                 if not job:
                     _EXT_BC_WAKE.wait(30)
                     _EXT_BC_WAKE.clear()
                     continue
-                try:
+                _BC_CONTEXT.job = job
+                if job.get('in_flight'):
+                    # Telegram has no idempotency key. Keep this one as uncertain,
+                    # rather than replaying a message that may already have arrived.
+                    _bc_save(uncertain=job.get('uncertain', 0) + 1, in_flight=False)
+                if 'recipient_cutoff' not in job:
+                    tail = db.users.find_one({}, {'_id': 1}, sort=[('_id', -1)])
+                    _bc_save(recipient_cutoff=tail['_id'] if tail else ObjectId('000000000000000000000000'),
+                             resume_version=1, started_at=time.time())
+                if job['kind'] == 'manual':
+                    sent, failed = _run_manual_broadcast_job(job)
+                else:
                     ep = db.ext_products.find_one({'_id': ObjectId(job['product_id'])})
                     if not ep or ep.get('hidden'):
                         raise ValueError('المنتج محذوف أو مخفي')
-                    if job['kind'] == 'stock' and not float(ep.get('stock', 0) or 0) > 0:
+                    if job['kind'] in ('stock', 'new') and not float(ep.get('stock', 0) or 0) > 0:
                         raise ValueError('نفد الستوك قبل بدء الإرسال')
                     if job['kind'] == 'price' and float(ep.get('sell_price', ep.get('base_price', 0)) or 0) != float(job['new_price']):
                         raise ValueError('تغيّر السعر بعد طلب الموافقة')
@@ -13066,21 +13187,28 @@ def _ext_approved_broadcast_worker():
                         sent, failed = _ext_broadcast_new_product(ep, _approved=True)
                     else:
                         sent, failed = _ext_broadcast_price_drop(ep, job['old_price'], job['new_price'], _approved=True)
-                    db.ext_broadcast_approvals.update_one({'_id': job['_id']},
-                        {'$set': {'status': 'completed', 'sent': sent, 'failed': failed}})
-                    bot.send_message(job['owner_id'], f'📢 انتهى البرودكاست. وصل: {sent}، تعذّر: {failed}.')
+                _bc_save(status='completed', sent=sent, failed=failed, completed_at=time.time())
+                try:
+                    bot.send_message(job['owner_id'],
+                        f"📢 انتهى البرودكاست. وصل: {sent}، تعذّر: {failed}، "
+                        f"منها غير قابل للاستلام: {job.get('blocked', 0)}، "
+                        f"غير مؤكد بسبب انقطاع: {job.get('uncertain', 0)}.")
                 except Exception:
-                    db.ext_broadcast_approvals.update_one({'_id': job['_id'], 'status': 'sending'},
-                        {'$set': {'status': 'failed'}})
-                    logger.exception('Approved API broadcast failed')
+                    logger.warning('Broadcast completed, but admin report could not be delivered')
+            except ValueError as exc:
+                if job:
                     try:
-                        bot.send_message(job['owner_id'], '⚠️ تعذّر إكمال البرودكاست أو تغيّر المنتج. لم تُعَد الحملة تلقائياً لتجنب التكرار.')
+                        _bc_save(status='cancelled', reason=str(exc)[:200])
+                        bot.send_message(job['owner_id'], '⚠️ أُلغي البرودكاست: ' + str(exc)[:200])
                     except Exception:
-                        pass
+                        logger.exception('Could not record/report cancelled broadcast')
             except Exception:
-                logger.exception('Approved API broadcast queue unavailable')
+                # Leave saved progress intact. An expired lease can be reclaimed.
+                logger.exception('Broadcast interrupted; persisted progress retained')
                 _EXT_BC_WAKE.wait(30)
                 _EXT_BC_WAKE.clear()
+            finally:
+                _BC_CONTEXT.job = None
     finally:
         _EXT_BC_WORKER_LOCK.release()
 
@@ -13089,7 +13217,8 @@ def _ext_broadcast_new_product(ep, _approved=False):
     """يبثّ رسالة 'منتج جديد' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
     if not _approved:
         return _ext_request_broadcast('new', ep)
-    sent = failed = 0
+    job = getattr(_BC_CONTEXT, 'job', None) or {}
+    sent, failed = job.get('sent', 0), job.get('failed', 0)
     if not ep:
         return
     try:
@@ -13097,7 +13226,7 @@ def _ext_broadcast_new_product(ep, _approved=False):
         emoji_id = ep.get('emoji_id')
         price = float(ep.get('sell_price', ep.get('base_price', 0)))
         stk = ep.get('stock', 0)
-        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
+        users = _bc_users()
         for u in users:
             try:
                 uid_u = u['user_id']
@@ -13117,11 +13246,15 @@ def _ext_broadcast_new_product(ep, _approved=False):
                 _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
+            except _BroadcastLeaseLost:
+                raise
             except Exception as exc:
                 failed += 1
                 if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
                     logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
                                    u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
+            finally:
+                _bc_result(sent, failed)
     except Exception as _e:
         logger.debug(f"_ext_broadcast_new_product err: {_e}")
 
@@ -13133,12 +13266,13 @@ def _ext_broadcast_stock(ep, _approved=False):
     """يبثّ رسالة 'توفّر ستوك' لكل مستخدمي البوت لمنتج API (مثل المنتج العادي)."""
     if not _approved:
         return _ext_request_broadcast('stock', ep)
-    sent = failed = 0
+    job = getattr(_BC_CONTEXT, 'job', None) or {}
+    sent, failed = job.get('sent', 0), job.get('failed', 0)
     try:
         epid = str(ep['_id'])
         stk = ep.get('stock', 0)
         emoji_id = ep.get('emoji_id')
-        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
+        users = _bc_users()
         for u in users:
             try:
                 uid_u = u['user_id']
@@ -13158,11 +13292,15 @@ def _ext_broadcast_stock(ep, _approved=False):
                 _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
+            except _BroadcastLeaseLost:
+                raise
             except Exception as exc:
                 failed += 1
                 if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
                     logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
                                    u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
+            finally:
+                _bc_result(sent, failed)
     except Exception as _e:
         logger.debug(f"_ext_broadcast_stock err: {_e}")
 
@@ -13174,11 +13312,12 @@ def _ext_broadcast_price_drop(ep, old_price, new_price, _approved=False):
     """يبثّ رسالة 'تخفيض السعر' لكل مستخدمي البوت لمنتج API."""
     if not _approved:
         return _ext_request_broadcast('price', ep, old_price, new_price)
-    sent = failed = 0
+    job = getattr(_BC_CONTEXT, 'job', None) or {}
+    sent, failed = job.get('sent', 0), job.get('failed', 0)
     try:
         epid = str(ep['_id'])
         emoji_id = ep.get('emoji_id')
-        users = db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(100)
+        users = _bc_users()
         for u in users:
             try:
                 uid_u = u['user_id']
@@ -13203,16 +13342,117 @@ def _ext_broadcast_price_drop(ep, old_price, new_price, _approved=False):
                 _broadcast_deliver(bot.send_message, uid_u, msg, parse_mode="HTML", reply_markup=markup)
                 sent += 1
                 time.sleep(0.05)
+            except _BroadcastLeaseLost:
+                raise
             except Exception as exc:
                 failed += 1
                 if _telegram_delivery_kind(exc) != 'unreachable' and failed <= 5:
                     logger.warning('API broadcast failed: recipient=%s kind=%s error=%s',
                                    u.get('user_id'), _telegram_delivery_kind(exc), str(exc)[:200])
+            finally:
+                _bc_result(sent, failed)
     except Exception as _e:
         logger.debug(f"_ext_broadcast_price_drop err: {_e}")
 
         raise
     return sent, failed
+
+
+def _ext_valid_catalog(data):
+    """Reject errors and partial pages before interpreting absence as sold out."""
+    if isinstance(data, dict):
+        if data.get('error') or data.get('success') is False:
+            return False
+        for obj in (data, data.get('pagination', {}), data.get('meta', {})):
+            if isinstance(obj, dict) and (obj.get('has_more') or obj.get('next_cursor')
+                                         or obj.get('next_page') or obj.get('next')):
+                return False
+        values = [data.get(k) for k in ('products', 'data', 'items', 'result', 'results', 'catalog', 'list', 'response')]
+        recognized = any(isinstance(v, list) or (isinstance(v, dict) and any(
+            isinstance(v.get(k), list) for k in ('products', 'data', 'items'))) for v in values)
+        if not recognized:
+            return False
+    elif not isinstance(data, list):
+        return False
+    rows = _ext_parse_products(data)
+    if isinstance(data, dict):
+        for obj in (data, data.get('pagination', {}), data.get('meta', {})):
+            if isinstance(obj, dict):
+                total = obj.get('total', obj.get('total_count'))
+                if total is not None:
+                    try:
+                        if int(total) > len(rows):
+                            return False
+                    except (TypeError, ValueError):
+                        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        stock = _ext_deep_get(row, ['stock', 'stock_count', 'quantity', 'qty', 'available_qty',
+            'inventory', 'stockCount', 'in_stock_count', 'count'], None)
+        available = _ext_deep_get(row, ['available', 'in_stock', 'is_available', 'active',
+            'inStock', 'isAvailable'], None)
+        if stock is None and available is None and not row.get('unlimited'):
+            return False
+        if stock is not None:
+            try:
+                if not __import__('math').isfinite(float(stock)) or float(stock) < 0:
+                    return False
+            except (ValueError, TypeError):
+                return False
+    ids = [_ext_extract_fields(row)['ext_id'] for row in rows if isinstance(row, dict)]
+    return len(ids) == len(rows) and all(ids) and len(set(ids)) == len(ids)
+
+
+def _ext_mark_missing(ep):
+    now = time.time()
+    since = ep.get('_missing_since')
+    if since is None:
+        db.ext_products.update_one({'_id': ep['_id'], '_missing_since': {'$exists': False}},
+            {'$set': {'_missing_since': now}})
+    elif now - float(since) >= 90 and (ep.get('stock', 0) or 0) != 0:
+        db.ext_products.update_one({'_id': ep['_id'], 'stock': ep.get('stock')},
+            {'$set': {'stock': 0}, '$unset': {'_stock_notice': ''}})
+
+
+def _ext_flush_new_notice(ep):
+    if ep and ep.get('_new_notice') and not ep.get('hidden') and (ep.get('stock', 0) or 0) > 0:
+        token = ep['_new_notice']
+        _ext_request_broadcast('new', dict(ep, _notice_token=token))
+        db.ext_products.update_one({'_id': ep['_id'], '_new_notice': token},
+            {'$unset': {'_new_notice': ''}})
+
+
+def _ext_commit_stock(previous, new_stock):
+    old = previous.get('stock', 0) or 0
+    fields = {'stock': new_stock}
+    if old <= 0 and new_stock > 0 and not previous.get('_new_notice'):
+        fields['_stock_notice'] = __import__('uuid').uuid4().hex
+    query = {'_id': previous['_id'], 'stock': previous.get('stock')}
+    db.ext_products.update_one(query, {'$set': fields, '$unset': {'_missing_since': ''}})
+    current = db.ext_products.find_one({'_id': previous['_id']})
+    _ext_flush_new_notice(current)
+    _ext_stock_announcement(previous, current)
+
+
+def _ext_stock_announcement(previous, current):
+    """Flush a persisted availability event; retry if the queue was unavailable."""
+    if not current:
+        return False
+    token = current.get('_stock_notice')
+    if not token or float(current.get('stock', 0) or 0) <= 0 or current.get('hidden'):
+        return False
+    _ext_request_broadcast('stock', dict(current, _notice_token=token))
+    result = db.ext_products.update_one({'_id': current['_id'], '_stock_notice': token},
+        {'$unset': {'_stock_notice': ''}})
+    if result.modified_count:
+        _emit_event('stock.added', {
+            'source': 'external_api', 'product_id': f"ext_{current['_id']}",
+            'name_ar': current.get('name', ''), 'name_en': current.get('name', ''),
+            'price': current.get('sell_price', current.get('base_price')),
+            'stock': current.get('stock'), 'added': current.get('stock'),
+        }, product_id=f"ext_{current['_id']}")
+    return True
 
 
 def _auto_sync_ext_stores():
@@ -13229,7 +13469,7 @@ def _auto_sync_ext_stores():
         data = _ext_api_get(store, '/products')
         prods = _ext_parse_products(data)
         # لو الرد فشل (None) نتخطّى المتجر — لا نصفّر بالخطأ
-        if data is None:
+        if not _ext_valid_catalog(data):
             continue
         seen_ext_ids = set()
         for p in prods:
@@ -13302,54 +13542,17 @@ def _auto_sync_ext_stores():
 
                 # منتج مضاف: نتحقق من تغيّر الستوك
                 old_stock = existing.get('stock', 0) or 0
-                if new_stock != old_stock:
-                    db.ext_products.update_one({'_id': existing['_id']},
-                                               {'$set': {'stock': new_stock}})
-                    # لو توفّر ستوك جديد (كان 0 وصار متوفر) → برودكاست + إشعار
-                    # نرسل الإشعار عند أي زيادة في الستوك (مثل المنتج العادي)
-                    if new_stock > old_stock and not existing.get('hidden'):
-                        # حماية: لا نكرّر البرودكاست لنفس المنتج خلال 10 دقائق
-                        _last_bc = existing.get('last_stock_broadcast', 0)
-                        _skip_bc = (time.time() - _last_bc) < 600
-                        try:
-                            _emit_event('stock.added', {
-                                'source': 'external_api',
-                                'product_id': f"ext_{existing['_id']}",
-                                'name_ar': existing.get('name', p_name),
-                                'name_en': existing.get('name', p_name),
-                                'price': existing.get('sell_price', existing.get('base_price')),
-                                'stock': new_stock, 'added': new_stock,
-                            }, product_id=f"ext_{existing['_id']}")
-                        except Exception:
-                            pass
-                        # إشعار الأدمن بتوفّر الستوك
-                        try:
-                            notify_admins(
-                                f"📦 <b>توفّر ستوك (API)</b>\n"
-                                f"🏪 {html.escape(store.get('name',''))}\n"
-                                f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
-                                f"🔢 المتوفر الآن: <b>{new_stock}</b>"
-                            )
-                        except Exception:
-                            pass
-                        # 📢 برودكاست للمستخدمين (مثل المنتج العادي) — مع حماية التكرار
-                        if not _skip_bc:
-                            try:
-                                db.ext_products.update_one({'_id': existing['_id']},
-                                    {'$set': {'last_stock_broadcast': time.time()}})
-                                _updated_ep = db.ext_products.find_one({'_id': existing['_id']})
-                                _ext_broadcast_stock(_updated_ep)
-                            except Exception:
-                                pass
+                try:
+                    _ext_commit_stock(existing, new_stock)
+                except Exception:
+                    logger.exception('Could not update/queue external stock transition')
 
         # 🔴 المنتجات المضافة عندك لكن غير موجودة في رد المتجر = نفدت (out of stock)
         #    حسب الدوكس: المنتجات النافدة تُحذف من /products. فنصفّر ستوكها.
         try:
             for ep in db.ext_products.find({'store_id': sid}):
                 if str(ep.get('ext_id', '')) not in seen_ext_ids:
-                    if (ep.get('stock', 0) or 0) != 0:
-                        db.ext_products.update_one({'_id': ep['_id']},
-                                                   {'$set': {'stock': 0}})
+                    _ext_mark_missing(ep)
         except Exception as _ze:
             logger.debug(f"zero out-of-stock err: {_ze}")
 
@@ -13369,7 +13572,7 @@ def _notify_admins_new_ext_product(store, sid, ext_id, name, stock):
             f"🔢 المتوفر: {stock}\n\n"
             f"هل تريد إضافته لبوتك؟"
         )
-        for admin in db.users.find({'is_admin': 1}):
+        for admin in db.users.find({'is_admin': 1, 'user_id': {'$ne': int(OWNER_ID)}}):
             try:
                 bot.send_message(admin['user_id'], txt, parse_mode="HTML", reply_markup=markup)
             except Exception:
@@ -16277,7 +16480,12 @@ def _ext_extract_fields(p):
     if available is None:
         available = (stock > 0)
     else:
-        available = bool(available)
+        if isinstance(available, str):
+            available = available.strip().lower() not in ('false', '0', 'no', 'off', 'unavailable', 'out_of_stock')
+        else:
+            available = bool(available)
+    if not available:
+        stock = 0
     unlimited = p.get('unlimited') is True
     if unlimited and available:
         stock = 999999
@@ -16631,6 +16839,7 @@ def ext_store_menu(call):
     markup.add(InlineKeyboardButton("🔑 تحديث مفتاح API", callback_data=f"ext_credentials_key_{sid}"))
     markup.add(InlineKeyboardButton("🌐 تحديث رابط المتجر (Base URL)", callback_data=f"ext_credentials_url_{sid}"))
     markup.add(InlineKeyboardButton("📡 طلباتي في المتجر (API)", callback_data=f"ext_rorders_{sid}"))
+    markup.add(InlineKeyboardButton('📢 موافقات البرودكاست', callback_data=f'ext_approvals_{sid}'))
     markup.add(InlineKeyboardButton("🧾 الطلبات المنفّذة (المحلية)", callback_data=f"ext_orders_{sid}"))
     markup.add(InlineKeyboardButton("🩺 فحص الاتصال (health)", callback_data=f"ext_health_{sid}"))
     if _ext_is_insight(store):
@@ -16704,6 +16913,7 @@ def ext_add_new_product(call):
         'markup_type': _def_mt, 'markup_value': _def_mv,
         'sell_price': _sell0, 'hidden': False, 'raw': p,
     }
+    doc['_new_notice'] = __import__('uuid').uuid4().hex
     res = db.ext_products.insert_one(doc)
     db.ext_pending_new.delete_many({'store_id': sid, 'ext_id': ext_id})
     # برودكاست منتج جديد — للعملاء عبر API + لمستخدمي البوت
@@ -16721,7 +16931,7 @@ def ext_add_new_product(call):
     # 📢 برودكاست للمستخدمين (رسالة "منتج جديد" مثل المنتج العادي)
     try:
         _new_ep = db.ext_products.find_one({'_id': res.inserted_id})
-        _ext_broadcast_new_product(_new_ep)
+        _ext_flush_new_notice(_new_ep)
     except Exception:
         pass
     try:
@@ -16874,6 +17084,9 @@ def ext_sync_products(call):
         return
     data = _ext_api_get(store, '/products')
     # الرد قد يكون {'products': [...]} أو قائمة مباشرة
+    if not _ext_valid_catalog(data):
+        bot.send_message(call.message.chat.id, '⚠️ رد المتجر غير صالح أو غير مكتمل؛ لم نغيّر المخزون.')
+        return
     prods = _ext_parse_products(data)
     if not prods and not (_ext_is_insight(store) and isinstance(data, dict)
                           and data.get('products') == []):
@@ -16883,7 +17096,7 @@ def ext_sync_products(call):
     added, updated = 0, 0
     _seen_manual = set()
     for p in prods:
-        ext_id = str(p.get('id', p.get('product_id', '')))
+        ext_id = _ext_extract_fields(p)['ext_id']
         if not ext_id:
             continue
         _seen_manual.add(ext_id)
@@ -16920,34 +17133,28 @@ def ext_sync_products(call):
             if not doc.get('emoji_id') and existing.get('emoji_id'):
                 doc['emoji_id'] = existing['emoji_id']
             # نحدّث السعر الأساسي والبيانات، نُبقي التسعير والإخفاء
+            stock_value = doc.pop('stock')
             db.ext_products.update_one({'_id': existing['_id']}, {'$set': doc})
             # نعيد حساب سعر البيع لو التسعير نسبة/ثابت
             mt = existing.get('markup_type', 'percent')
             if mt in ('percent', 'fixed'):
                 sp = _ext_compute_sell_price(doc['base_price'], mt, existing.get('markup_value', 0))
                 db.ext_products.update_one({'_id': existing['_id']}, {'$set': {'sell_price': sp}})
+            _ext_commit_stock(existing, stock_value)
             updated += 1
             # 🔔 بثّ حدث تحديث للمطوّرين (كأنه منتج عادي) — للمنتجات الظاهرة فقط
             if not existing.get('hidden'):
                 old_stock = existing.get('stock', 0) or 0
                 new_stock = stock or 0
                 try:
-                    _emit_event('product.updated', {
-                        'source': 'external_api', 'store_id': sid,
-                        'product_id': f"ext_{existing['_id']}",
-                        'name_ar': name, 'name_en': name,
-                        'price': doc.get('base_price'),
-                        'description': desc, 'stock': new_stock,
-                        'is_manual': False, 'is_hidden': False,
-                    }, product_id=f"ext_{existing['_id']}")
-                    # لو توفّر ستوك جديد (كان 0 وصار أكثر) → بثّ stock.added
-                    if old_stock <= 0 and new_stock > 0:
-                        _emit_event('stock.added', {
-                            'source': 'external_api',
+                    if old_stock != new_stock or any(existing.get(k) != v for k, v in doc.items() if k != 'raw'):
+                        _emit_event('product.updated', {
+                            'source': 'external_api', 'store_id': sid,
                             'product_id': f"ext_{existing['_id']}",
                             'name_ar': name, 'name_en': name,
                             'price': doc.get('base_price'),
-                            'stock': new_stock, 'added': new_stock,
+                            'description': desc, 'stock': new_stock,
+                            'is_manual': False, 'is_hidden': False,
                         }, product_id=f"ext_{existing['_id']}")
                 except Exception:
                     pass
@@ -16962,8 +17169,10 @@ def ext_sync_products(call):
         for ep in db.ext_products.find({'store_id': sid}):
             if str(ep.get('ext_id', '')) not in _seen_manual:
                 if (ep.get('stock', 0) or 0) != 0:
-                    db.ext_products.update_one({'_id': ep['_id']}, {'$set': {'stock': 0}})
-                    zeroed += 1
+                    _ext_mark_missing(ep)
+                    current = db.ext_products.find_one({'_id': ep['_id']}, {'stock': 1})
+                    if current and not current.get('stock'):
+                        zeroed += 1
     except Exception:
         pass
 
@@ -17154,8 +17363,13 @@ def ext_pick_confirm(call):
             'markup_type': _def_mt, 'markup_value': _def_mv,
             'sell_price': _sell, 'hidden': False, 'raw': p,
         }
+        doc['_new_notice'] = __import__('uuid').uuid4().hex
         res = db.ext_products.insert_one(doc)
         added += 1
+        try:
+            _ext_flush_new_notice(dict(doc, _id=res.inserted_id))
+        except Exception:
+            logger.exception('New product announcement saved for retry')
         # بثّ منتج جديد (للعملاء + المستخدمين) — مثل المنتج العادي
         try:
             _emit_event('product.created', {
@@ -24577,10 +24791,10 @@ def bc_sendcat_handler(call):
         cat = db.catalogs.find_one({'_id': ObjectId(cat_id)})
         if not cat: return
         
-        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
-        label = f"📁 مجلد: {cat.get('name_ar', '')} ({len(target_ids)} مستخدم)"
+        target_count = db.users.count_documents({})
+        label = f"📁 مجلد: {cat.get('name_ar', '')} ({target_count} مستخدم)"
         
-        pending['target_ids'] = target_ids
+        pending['target_count'] = target_count
         pending['label'] = label
         pending['catalog_id'] = cat_id
         pending['product_id'] = None
@@ -24610,10 +24824,10 @@ def bc_sendnocat_handler(call):
         bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
         
     try:
-        target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
-        label = f"📦 المنتجات غير المصنفة ({len(target_ids)} مستخدم)"
+        target_count = db.users.count_documents({})
+        label = f"📦 المنتجات غير المصنفة ({target_count} مستخدم)"
         
-        pending['target_ids'] = target_ids
+        pending['target_count'] = target_count
         pending['label'] = label
         pending['catalog_id'] = 'nocat'
         pending['product_id'] = None
@@ -24643,20 +24857,20 @@ def admin_bc_confirm(call):
         bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
 
     target = call.data.replace("bc_pick_", "")
-    target_ids = [u['user_id'] for u in db.users.find({}, {'user_id': 1})]
+    target_count = db.users.count_documents({})
     
     if target == "all":
-        label = f"👥 الكل ({len(target_ids)} مستخدم)"
+        label = f"👥 الكل ({target_count} مستخدم)"
         pending['product_id'] = None
         pending['catalog_id'] = None
     else:
         p = find_product(target)
         p_name = clean_name(p.get('name_ar') or p.get('name_en', '')) if p else target
-        label = f"📦 {p_name} ({len(target_ids)} مستخدم)"
+        label = f"📦 {p_name} ({target_count} مستخدم)"
         pending['product_id'] = p['_id'] if p else target
         pending['catalog_id'] = None
 
-    pending['target_ids'] = target_ids
+    pending['target_count'] = target_count
     pending['label'] = label
 
     markup = InlineKeyboardMarkup(row_width=2)
@@ -24671,79 +24885,79 @@ def admin_bc_confirm(call):
 @bot.callback_query_handler(func=lambda call: call.data == "bc_go")
 @admin_required
 def admin_bc_exe(call):
-    """تنفيذ البرودكاست في thread خلفية"""
+    """Persist the confirmed broadcast and use the shared, bounded worker."""
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
-    pending = _bc_pending.pop(uid, None)
+    pending = _bc_pending.get(uid)
     if not pending:
-        bot.answer_callback_query(call.id, "❌ انتهت الجلسة.", show_alert=True); return
+        bot.send_message(uid, '❌ انتهت الجلسة.')
+        return
+    token = pending.setdefault('job_token', __import__('uuid').uuid4().hex)
+    job = {'_id': token, 'kind': 'manual', 'status': 'queued', 'owner_id': uid,
+           'created_at': time.time(), 'source_message': pending['msg_id'],
+           'source_chat': pending['chat_id'], 'product_id': pending.get('product_id'),
+           'catalog_id': pending.get('catalog_id'), 'label': pending.get('label', '')}
+    db.ext_broadcast_approvals.update_one({'_id': token}, {'$setOnInsert': job}, upsert=True)
+    _bc_pending.pop(uid, None)
+    _ext_start_broadcast_worker()
+    _EXT_BC_WAKE.set()
+    bot.send_message(uid, '📢 أُضيف البرودكاست إلى طابور الإرسال. سيصلك تقرير عند الانتهاء.')
 
-    src_msg_id = pending['msg_id']
-    src_chat_id = pending['chat_id']
-    target_ids  = pending.get('target_ids', [])
-    label       = pending.get('label', '?')
-    product_id  = pending.get('product_id')
-    catalog_id  = pending.get('catalog_id')
 
-    bot.send_message(uid,
-        f"📢 <b>بدأ البرودكاست!</b> ({html.escape(label)})\n"
-        f"⏳ البوت يعمل بشكل طبيعي. سيصلك تقرير عند الانتهاء.",
-        parse_mode="HTML")
-
-    def _bc_thread():
-        sent = failed = blocked = 0
-        for tuid in target_ids:
-            try:
-                markup = None
-                if product_id:
-                    p = find_product(product_id)
-                    if p:
-                        lang = get_lang(tuid)
-                        p_name = p.get('name_ar') or p.get('name_en', '') if lang == 'ar' else p.get('name_en') or p.get('name_ar', '')
-                        p_name = clean_name(p_name)[:25]
-                        btn_text = f"🛒 عرض المنتج: {p_name}" if lang == 'ar' else f"🛒 View Product: {p_name}"
-                        short_pid = str(product_id).replace("cgpt_main_", "") if str(product_id).startswith("cgpt_main_") else str(product_id)
-                        markup = InlineKeyboardMarkup()
-                        markup.add(CustomInlineButton(btn_text, callback_data=f"vi_p_{short_pid}", style="success"))
-                elif catalog_id:
-                    if catalog_id == 'nocat':
-                        lang = get_lang(tuid)
-                        btn_text = f"🛍️ المنتجات غير المصنفة" if lang == 'ar' else f"🛍️ Uncategorized Products"
-                        markup = InlineKeyboardMarkup()
-                        markup.add(CustomInlineButton(btn_text, callback_data="open_shop", style="primary"))
-                    else:
-                        from bson import ObjectId
-                        cat = db.catalogs.find_one({'_id': ObjectId(catalog_id)})
-                        if cat:
-                            lang = get_lang(tuid)
-                            cat_name = cat.get('name_ar') or cat.get('name', '') if lang == 'ar' else cat.get('name_en') or cat.get('name', '')
-                            cat_name = clean_name(cat_name)[:25]
-                            btn_text = f"📁 فتح المجلد: {cat_name}" if lang == 'ar' else f"📁 Open Folder: {cat_name}"
-                            markup = InlineKeyboardMarkup()
-                            markup.add(CustomInlineButton(btn_text, callback_data=f"cat_{catalog_id}", style="primary"))
-
-                _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
-                sent += 1
-            except Exception as e:
-                err = str(e).lower()
-                if _telegram_delivery_kind(e) == 'unreachable':
-                    blocked += 1
-                else:
-                    failed += 1
-                    if failed <= 5:
-                        logger.warning('Manual broadcast failed: recipient=%s error=%s', tuid, str(e)[:200])
-            time.sleep(0.035)
+def _run_manual_broadcast_job(job):
+    src_msg_id, src_chat_id = job['source_message'], job['source_chat']
+    product_id, catalog_id = job.get('product_id'), job.get('catalog_id')
+    sent, failed, blocked = job.get('sent', 0), job.get('failed', 0), job.get('blocked', 0)
+    for user in _bc_users():
+        tuid = user['user_id']
         try:
-            bot.send_message(uid,
-                f"✅ <b>اكتمل البرودكاست!</b>\n\n"
-                f"🎯 {html.escape(label)}\n"
-                f"📤 أُرسل: <b>{sent}</b>\n"
-                f"🚫 محظور: <b>{blocked}</b>\n"
-                f"❌ فشل: <b>{failed}</b>",
-                parse_mode="HTML")
-        except: pass
+            markup = None
+            if product_id:
+                p = find_product(product_id)
+                if p:
+                    lang = get_lang(tuid)
+                    p_name = p.get('name_ar') or p.get('name_en', '') if lang == 'ar' else p.get('name_en') or p.get('name_ar', '')
+                    p_name = clean_name(p_name)[:25]
+                    btn_text = f"🛒 عرض المنتج: {p_name}" if lang == 'ar' else f"🛒 View Product: {p_name}"
+                    short_pid = str(product_id).replace("cgpt_main_", "") if str(product_id).startswith("cgpt_main_") else str(product_id)
+                    markup = InlineKeyboardMarkup()
+                    markup.add(CustomInlineButton(btn_text, callback_data=f"vi_p_{short_pid}", style="success"))
+            elif catalog_id:
+                if catalog_id == 'nocat':
+                    lang = get_lang(tuid)
+                    btn_text = f"🛍️ المنتجات غير المصنفة" if lang == 'ar' else f"🛍️ Uncategorized Products"
+                    markup = InlineKeyboardMarkup()
+                    markup.add(CustomInlineButton(btn_text, callback_data="open_shop", style="primary"))
+                else:
+                    from bson import ObjectId
+                    cat = db.catalogs.find_one({'_id': ObjectId(catalog_id)})
+                    if cat:
+                        lang = get_lang(tuid)
+                        cat_name = cat.get('name_ar') or cat.get('name', '') if lang == 'ar' else cat.get('name_en') or cat.get('name', '')
+                        cat_name = clean_name(cat_name)[:25]
+                        btn_text = f"📁 فتح المجلد: {cat_name}" if lang == 'ar' else f"📁 Open Folder: {cat_name}"
+                        markup = InlineKeyboardMarkup()
+                        markup.add(CustomInlineButton(btn_text, callback_data=f"cat_{catalog_id}", style="primary"))
 
-    threading.Thread(target=_bc_thread, daemon=True, name="bc_thread").start()
+            _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
+            sent += 1
+        except _BroadcastLeaseLost:
+            raise
+        except Exception as e:
+            err = str(e).lower()
+            if _telegram_delivery_kind(e) == 'unreachable':
+                blocked += 1
+                failed += 1
+            else:
+                failed += 1
+                if failed <= 5:
+                    logger.warning('Manual broadcast failed: recipient=%s error=%s', tuid, str(e)[:200])
+        finally:
+            _bc_save(blocked=blocked)
+            _bc_result(sent, failed)
+        time.sleep(0.05)
+    return sent, failed
+
 
 _bc_pending = {}
 @bot.callback_query_handler(func=lambda call: call.data == "ad_shop_settings")
