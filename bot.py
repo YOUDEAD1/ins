@@ -1722,8 +1722,13 @@ def _api_external_supplier_order(store, product_id, qty, reference):
             if result.get('success') is not False and not result.get('error'):
                 return True, result
         # Only explicit client rejections are safe to refund automatically.
-        return False, {'uncertain': response.status_code not in (400, 401, 403, 404, 409, 422, 429),
-                       'http_status': response.status_code}
+        rejection = {'uncertain': response.status_code not in (400, 401, 403, 404, 409, 422, 429),
+                     'http_status': response.status_code}
+        if isinstance(result, dict):
+            # Used only for classification, never forwarded to the reseller or logs.
+            rejection['code'] = result.get('code', '')
+            rejection['error'] = result.get('error', '')
+        return False, rejection
     except Exception:
         return False, {'uncertain': True}
 
@@ -1734,6 +1739,53 @@ def _api_external_replay(order):
     return 202, {'success': True, 'order_id': order['order_id'],
         'product_id': order['product_id'], 'status': order.get('status', 'processing'),
         'codes': [], 'message': 'Order is being verified. Do not submit a new purchase; check /order/' + order['order_id']}
+
+
+def _api_external_live_stock(store, ep, qty):
+    """Check the supplier, not a stale local count, before any reseller debit."""
+    data = _ext_api_get(store, '/products')
+    if not _ext_valid_catalog(data):
+        logger.warning('Reseller external stock check unavailable: product=%s', ep['_id'])
+        return None, (503, {'success': False, 'code': 'supplier_stock_check_failed',
+            'error': 'Unable to verify supplier stock. No balance was deducted.',
+            'source': 'supplier_catalog', 'charged': False})
+    remote = next((row for row in _ext_parse_products(data)
+        if _ext_extract_fields(row)['ext_id'] == str(ep.get('ext_id', ''))), None)
+    fields = _ext_extract_fields(remote) if remote is not None else {
+        'stock': 0, 'available': False, 'unlimited': False}
+    current = dict(ep, stock=fields['stock'], unlimited=fields.get('unlimited', False))
+    # A valid snapshot can refresh the displayed stock. Invalid replies never zero it.
+    db.ext_products.update_one({'_id': ep['_id']}, {'$set': {
+        'stock': current['stock'], 'unlimited': current['unlimited'],
+        'stock_checked_at': int(time.time())}})
+    global _PRODUCTS_CACHE
+    _PRODUCTS_CACHE = None
+    if not fields['available'] or (not current['unlimited'] and current['stock'] < qty):
+        logger.info('Reseller external stock insufficient: product=%s quantity=%s available=%s',
+                    ep['_id'], qty, current['stock'])
+        return None, (409, {'success': False, 'code': 'supplier_out_of_stock',
+            'error': 'Not enough stock at supplier', 'available': current['stock'],
+            'source': 'supplier_catalog', 'charged': False})
+    return current, None
+
+
+def _api_external_rejection(response):
+    """Classify rejection without exposing supplier credentials or raw messages."""
+    error = response.get('error', '')
+    if isinstance(error, dict):
+        code = error.get('code', '')
+    else:
+        code = response.get('code') or error
+    code = str(code).strip().lower().replace(' ', '_').replace('-', '_')
+    if code in ('out_of_stock', 'insufficient_stock', 'not_enough_stock',
+                'stock_unavailable', 'product_out_of_stock', 'insufficient_quantity'):
+        return 409, 'supplier_out_of_stock', 'Supplier stock changed before the order was placed; balance refunded'
+    status = int(response.get('http_status', 0) or 0)
+    if status in (401, 403):
+        return 502, 'supplier_auth_failed', 'Supplier authentication failed; balance refunded'
+    if status == 429:
+        return 503, 'supplier_rate_limited', 'Supplier is busy; balance refunded'
+    return 502, 'supplier_rejected', 'Supplier rejected the order; balance refunded'
 
 
 def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=None):
@@ -1763,21 +1815,17 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
             raise
     if not ep or ep.get('hidden') or db.api_hidden.find_one({'api_user_id': uid, 'product_id': product_id}):
         return 404, {'error': 'Product not found'}
-    if not ep.get('unlimited') and float(ep.get('stock', 0) or 0) < qty:
-        return 409, {'error': 'Not enough stock', 'available': ep.get('stock', 0), 'charged': False}
     try:
         store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
     except Exception:
         store = None
     if not store:
         return 503, {'error': 'Supplier unavailable', 'charged': False}
-    # Resolve a missing prefix using a read-only catalog request BEFORE debiting.
-    base = str(store.get('base_url', '')).rstrip('/')
-    if not _ext_is_insight(store) and not store.get('api_prefix') and not any(
-            prefix in base for prefix in ('/api/v1', '/shop-api/v1')):
-        if _ext_api_get(store, '/products') is None:
-            return 503, {'error': 'Supplier connection could not be verified', 'charged': False}
-        store = db.ext_stores.find_one({'_id': store['_id']}) or store
+    ep, stock_error = _api_external_live_stock(store, ep, qty)
+    if stock_error:
+        return stock_error
+    # Catalog discovery may have populated api_prefix on this store document.
+    store = db.ext_stores.find_one({'_id': store['_id']}) or store
     unit = float(ep.get('sell_price', ep.get('base_price', 0)) or 0)
     total = round(unit * qty, 2)
     if not math.isfinite(total) or unit < 0:
@@ -1833,12 +1881,16 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
         if refunded is None:
             uncertain = True
         else:
-            result = {'success': False, 'error': 'Supplier rejected the order; balance refunded',
+            failure_http, failure_code, failure_message = _api_external_rejection(response)
+            logger.warning('Reseller external purchase rejected: order=%s reason=%s supplier_http=%s',
+                           reference, failure_code, response.get('http_status', 0))
+            result = {'success': False, 'error': failure_message, 'code': failure_code,
+                'source': 'supplier_order',
                 'order_id': reference, 'product_id': product_id, 'status': 'failed',
                 'refunded': True, 'new_balance': round(float(refunded.get('balance', 0)), 2)}
             db.api_orders.update_one({'_id': reference}, {'$set': {'status': 'failed',
-                'response_code': 409, 'response': result, 'refunded': True}})
-            return 409, result
+                'response_code': failure_http, 'response': result, 'refunded': True}})
+            return failure_http, result
     status = 'completed' if complete else 'pending_verification'
     result = {'success': True, 'order_id': reference, 'product_id': product_id,
         'qty': qty, 'unit_price': unit, 'total_price': total,
