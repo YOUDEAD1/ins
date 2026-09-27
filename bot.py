@@ -258,18 +258,28 @@ class CustomInlineButton(InlineKeyboardButton):
 # 🔗 API بسيط للمنتجات - يسمح لأي شخص يعرض منتجاتك في بوته/موقعه
 # ============================================================
 
+_API_GATEWAY_CACHE = None
+_API_GATEWAY_LOCK = threading.Lock()
+
+
 def _get_api_gateway():
-    """ينشئ مسار سري للـ API - كل مستخدم له مسار مختلف"""
-    try:
-        s = db.settings.find_one({'key': 'api_secret_path'})
-        if s and s.get('value'):
-            return s['value']
-    except: pass
-    secret = secrets.token_hex(16)
-    try:
-        db.settings.update_one({'key': 'api_secret_path'}, {'$set': {'value': secret}}, upsert=True)
-    except: pass
-    return secret
+    """Keep the persisted gateway stable; never invent a URL during a DB outage."""
+    global _API_GATEWAY_CACHE
+    with _API_GATEWAY_LOCK:
+        if _API_GATEWAY_CACHE:
+            return _API_GATEWAY_CACHE
+        doc = db.settings.find_one_and_update({'key': 'api_secret_path'},
+            {'$setOnInsert': {'value': secrets.token_hex(16)}},
+            upsert=True, return_document=True)
+        if not doc or not doc.get('value'):
+            candidate = secrets.token_hex(16)
+            db.settings.update_one({'key': 'api_secret_path', 'value': doc.get('value') if doc else None},
+                {'$set': {'value': candidate}})
+            doc = db.settings.find_one({'key': 'api_secret_path'})
+        if not doc or not doc.get('value'):
+            raise RuntimeError('API gateway configuration unavailable')
+        _API_GATEWAY_CACHE = str(doc['value']).strip('/')
+        return _API_GATEWAY_CACHE
 
 
 def _get_server_url():
@@ -299,18 +309,42 @@ def _generate_api_key():
     return f"sk_{secrets.token_hex(24)}"
 
 def _get_api_user(api_key):
-    try:
-        doc = db.api_keys.find_one({'api_key': api_key, 'is_active': True})
-        if not doc: return None, None
-        return doc, get_user_data_full(doc['user_id'])
-    except: return None, None
+    doc = db.api_keys.find_one({'api_key': api_key, 'is_active': True})
+    if not doc:
+        return None, None
+    return doc, get_user_data_full(doc['user_id'])
+
+
+def _api_json_body(handler):
+    data = json.loads(_read_body(handler))
+    if not isinstance(data, dict):
+        raise ValueError('JSON body must be an object')
+    return data
+
+
+def _api_http_guard(func):
+    @functools.wraps(func)
+    def wrapped(self):
+        try:
+            return func(self)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            # Never put the secret URL, authentication headers or body into logs.
+            logger.error('Reseller API %s failed (%s)', func.__name__, type(exc).__name__)
+            return _json_resp(self, 503, {
+                'success': False, 'error': 'API temporarily unavailable',
+                'code': 'service_unavailable',
+                'message': 'For a purchase, check your orders before retrying; its outcome may be unknown.'})
+    return wrapped
+
 
 def _json_resp(h, code, data):
     try:
         h.send_response(code)
         h.send_header('Content-Type', 'application/json; charset=utf-8')
         h.send_header('Access-Control-Allow-Origin', '*')
-        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key')
         h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         h.end_headers()
         h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
@@ -1660,26 +1694,39 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.end_headers()
 
     def _auth(self):
-        auth = self.headers.get('Authorization', '')
-        if not auth.startswith('Bearer '): return None, None
-        key = auth[7:].strip()
+        auth = self.headers.get('Authorization', '').strip()
+        key = ''
+        if auth:
+            parts = auth.split(None, 1)
+            if len(parts) != 2 or parts[0].lower() != 'bearer':
+                return None, None
+            key = parts[1].strip()
+        for name in ('X-API-Key', 'X-Shop-API-Key'):
+            alternative = self.headers.get(name, '').strip()
+            if alternative:
+                if key and key != alternative:
+                    return None, None
+                key = alternative
+        if not key:
+            return None, None
         return _get_api_user(key)
 
+    @_api_http_guard
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        gw = _get_api_gateway()
-
         if p in ('', '/'):
             return _json_resp(self, 200, {'status': 'online'})
 
+        gw = _get_api_gateway()
+
         # فحص المسار السري — لو ما يطابق، 404 عادي
-        if not p.startswith(f'/{gw}'):
+        if p != f'/{gw}' and not p.startswith(f'/{gw}/'):
             return _json_resp(self, 404, {'error': 'Not found'})
 
         # نشيل المسار السري من الرابط ونحلل الباقي
@@ -1692,6 +1739,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
         if not _check_rate_limit(doc['api_key']):
             return _json_resp(self, 429, {'error': 'Rate limit exceeded. Max 30 requests/minute.'})
+
+        if route in ('', '/health'):
+            return _json_resp(self, 200, {'success': True, 'status': 'connected',
+                'user_id': uid, 'endpoints': ['/products', '/balance', '/orders', '/purchase']})
 
         if route == '/products':
             # ⚡ cache 30 ثانية — لو عدة عملاء يطلبون بسرعة، نبني الرد مرة واحدة
@@ -1981,7 +2032,10 @@ class APIHandler(BaseHTTPRequestHandler):
             return _json_resp(self, 200, {'success': True, 'balance': round(u.get('balance', 0), 2), 'user_id': uid})
 
         if route == '/orders':
-            limit = min(int(params.get('limit', ['20'])[0]), 100)
+            try:
+                limit = max(1, min(int(params.get('limit', ['20'])[0]), 100))
+            except (ValueError, TypeError):
+                return _json_resp(self, 400, {'error': 'limit must be an integer'})
             orders = list(db.api_orders.find({'api_user_id': uid}).sort('_id', -1).limit(limit))
             result = []
             for o in orders:
@@ -2148,11 +2202,12 @@ class APIHandler(BaseHTTPRequestHandler):
 
         return _json_resp(self, 404, {'error': 'Not found'})
 
+    @_api_http_guard
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
         gw = _get_api_gateway()
 
-        if not p.startswith(f'/{gw}'):
+        if p != f'/{gw}' and not p.startswith(f'/{gw}/'):
             return _json_resp(self, 404, {'error': 'Not found'})
 
         route = p[len(f'/{gw}'):]
@@ -2166,7 +2221,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         if route == '/purchase':
             try:
-                body = json.loads(_read_body(self))
+                body = _api_json_body(self)
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -2175,6 +2230,20 @@ class APIHandler(BaseHTTPRequestHandler):
             buyer_email = str(body.get('email', '')).strip()  # إيميل المشتري (لمنتج ChatGPT)
 
             if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
+
+            if product_id.startswith('ext_'):
+                return _json_resp(self, 501, {'success': False,
+                    'error': 'External product purchasing is not supported by this reseller endpoint yet',
+                    'code': 'external_purchase_not_supported', 'charged': False})
+
+            try:
+                if isinstance(qty, bool) or not str(qty).isdigit() or not 1 <= int(qty) <= 50:
+                    raise ValueError()
+                qty = int(qty)
+            except (ValueError, TypeError):
+                return _json_resp(self, 400, {'error': 'qty must be an integer from 1 to 50'})
+            if product_id.startswith('cgpt_') and qty != 1:
+                return _json_resp(self, 400, {'error': 'ChatGPT purchases require qty=1 and one buyer email'})
 
             # 🤖 منتج ChatGPT Business؟ (يحتاج معاملة خاصة + إيميل)
             if product_id.startswith('cgpt_'):
@@ -2472,7 +2541,7 @@ class APIHandler(BaseHTTPRequestHandler):
         # POST /set_price — المطوّر يحدد سعر البيع لعملائه
         if route == '/set_price':
             try:
-                body = json.loads(_read_body(self))
+                body = _api_json_body(self)
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -2520,7 +2589,7 @@ class APIHandler(BaseHTTPRequestHandler):
         # Body: {"url": "https://...", "secret": "اختياري", "event_filter": [...]}
         if route == '/set_webhook':
             try:
-                body = json.loads(_read_body(self))
+                body = _api_json_body(self)
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             url = str(body.get('url', '')).strip()
@@ -2607,7 +2676,7 @@ class APIHandler(BaseHTTPRequestHandler):
         # POST /set_product — المطوّر يعدّل اسم/وصف المنتج لعملائه
         if route == '/set_product':
             try:
-                body = json.loads(_read_body(self))
+                body = _api_json_body(self)
             except: return _json_resp(self, 400, {'error': 'Invalid JSON'})
 
             product_id = str(body.get('product_id', '')).strip()
@@ -25656,13 +25725,15 @@ def open_api(call):
         
         txt = f"🤖 <b>API Control Panel</b>\n"
         txt += f"━━━━━━━━━━━━━━━━━━━\n"
-        txt += f"🟢 Status: <b>Connected</b>\n"
+        txt += f"🟢 API Key: <b>Active</b>\n"
         txt += f"💰 Balance: <b>${balance:.2f}</b>\n"
         txt += f"📦 Products: <b>{active_count}/{total_prods}</b>\n"
         txt += f"📊 Orders: <b>{total_orders}</b> | Spent: <b>${total_spent:.2f}</b>\n"
         txt += f"━━━━━━━━━━━━━━━━━━━\n"
         if conn_code:
             txt += f"🔗 <code>{conn_code}</code>"
+            txt += (f"\n\n🌐 API Base URL:\n<code>{html.escape(_get_server_url() + '/' + gw)}</code>"
+                    f"\n🔑 API Key:\n<code>{html.escape(existing['api_key'])}</code>")
         else:
             txt += f"🔑 <code>{existing['api_key']}</code>"
 
