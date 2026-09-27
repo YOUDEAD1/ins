@@ -356,6 +356,7 @@ def _json_resp(h, code, data):
     try:
         h.send_response(code)
         h.send_header('Content-Type', 'application/json; charset=utf-8')
+        h.send_header('X-Bot-API-Revision', 'ext-purchase-v3')
         h.send_header('Access-Control-Allow-Origin', '*')
         h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key')
         h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -525,7 +526,7 @@ def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, i
             f"\U0001f194 <b>\u0631\u0642\u0645 \u0627\u0644\u0637\u0644\u0628:</b> <code>{order_id}</code>\n"
             f"{status_line}"
         )
-        notify_admins(msg)
+        _queue_api_purchase_notice(order_id, msg)
     except Exception as _ne:
         logger.debug(f"_notify_all_admins_api_purchase error: {_ne}")
 
@@ -1701,6 +1702,53 @@ threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").sta
 _PRODUCTS_CACHE = None  # cache لرد /products (يقلّل استعلامات DB المتكررة)
 
 
+def _api_find_external_product(public_id):
+    raw_id = str(public_id)[4:]
+    candidates = [raw_id]
+    try:
+        candidates.insert(0, ObjectId(raw_id))
+    except Exception:
+        pass
+    return db.ext_products.find_one({'_id': {'$in': candidates}})
+
+
+def _queue_api_purchase_notice(order_id, text):
+    db.api_purchase_notices.update_one({'_id': str(order_id)}, {'$setOnInsert': {
+        'text': text, 'status': 'pending', 'created_at': time.time()}}, upsert=True)
+
+
+def _retry_api_purchase_notices():
+    # API purchase receipts go to all registered admins plus the environment owner.
+    for _ in range(20):
+        now = time.time()
+        token = secrets.token_hex(12)
+        job = db.api_purchase_notices.find_one_and_update({'$or': [
+            {'status': 'pending', 'retry_at': {'$exists': False}},
+            {'status': 'pending', 'retry_at': {'$lte': now}},
+            {'status': 'sending', 'lease_until': {'$lt': now}}]},
+            {'$set': {'status': 'sending', 'lease_until': now + 120, 'worker_token': token}},
+            return_document=True)
+        if not job:
+            break
+        recipients = {int(u['user_id']) for u in db.users.find({'is_admin': 1}, {'user_id': 1})}
+        if OWNER_ID:
+            recipients.add(int(OWNER_ID))
+        sent_to = set(job.get('sent_to', []))
+        for recipient in sorted(recipients - sent_to):
+            claim = {'_id': job['_id'], 'worker_token': token, 'status': 'sending'}
+            renewed = db.api_purchase_notices.update_one(claim,
+                {'$set': {'lease_until': time.time() + 120}})
+            if not renewed.matched_count:
+                break
+            if notify_admins(job['text'], recipient_ids={recipient}):
+                db.api_purchase_notices.update_one(claim, {'$addToSet': {'sent_to': recipient}})
+                sent_to.add(recipient)
+        delivered = bool(recipients) and recipients.issubset(sent_to)
+        db.api_purchase_notices.update_one({'_id': job['_id'], 'worker_token': token},
+            {'$set': {'status': 'sent' if delivered else 'pending',
+                      'retry_at': time.time() + 60}})
+
+
 def _api_external_supplier_order(store, product_id, qty, reference):
     """One purchase attempt only. Never probe alternative URLs with a paid POST."""
     payload = {'product_id': _ext_int_or_str(product_id), 'quantity': qty}
@@ -1803,18 +1851,12 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
         if existing.get('request_signature') != signature:
             return 409, {'error': 'Idempotency-Key already used for a different purchase'}
         return _api_external_replay(existing)
-    try:
-        ep = db.ext_products.find_one({'_id': ObjectId(product_id[4:])})
-    except (ValueError, TypeError):
-        ep = None
-    except Exception as exc:
-        # bson InvalidId is not a database failure.
-        if type(exc).__name__ == 'InvalidId':
-            ep = None
-        else:
-            raise
+    logger.info('Reseller external purchase received: uid=%s product=%s qty=%s revision=ext-purchase-v3',
+                uid, product_id, qty)
+    ep = _api_find_external_product(product_id)
     if not ep or ep.get('hidden') or db.api_hidden.find_one({'api_user_id': uid, 'product_id': product_id}):
-        return 404, {'error': 'Product not found'}
+        return 404, {'error': 'Product not found', 'code': 'external_product_not_found',
+                     'source': 'local_catalog', 'product_id': product_id}
     try:
         store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
     except Exception:
@@ -1919,7 +1961,7 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
     except Exception:
         logger.warning('External reseller receipt saved; auxiliary update failed: %s', reference)
     try:
-        notify_admins(f"{'✅ بيع عبر الموزّعين' if complete else '⚠️ طلب موزّع يحتاج التحقق'}\n"
+        _queue_api_purchase_notice(reference, f"{'✅ بيع عبر الموزّعين' if complete else '⚠️ طلب موزّع يحتاج التحقق'}\n"
             f"User: {uid}\nProduct: {html.escape(order['product_name'])} ×{qty}\n"
             f"Total: ${total:.2f}\nOrder: {reference}\nSupplier order: {html.escape(remote_id)}")
     except Exception:
@@ -6600,15 +6642,15 @@ def _cgpt_retry_api_receipts():
 _ADMIN_NOTICE_PAUSED = {}
 
 
-def notify_admins(message_text):
-    recipients = set()
-    if OWNER_ID:
+def notify_admins(message_text, recipient_ids=None):
+    recipients = set(int(uid) for uid in recipient_ids) if recipient_ids is not None else set()
+    if recipient_ids is None and OWNER_ID:
         recipients.add(int(OWNER_ID))
-    # Notification destination comes exclusively from OWNER_ID in the environment.
-    # Database administrator roles remain unchanged and are not mailing targets.
+    # Default destination is OWNER_ID; API receipts pass each authorized admin explicitly.
     if not recipients:
         logger.warning('Admin notification skipped: configure OWNER_ID in .env / Render')
-        return
+        return False
+    delivered = False
     now = time.time()
     for old_id, until in list(_ADMIN_NOTICE_PAUSED.items()):
         if until <= now:
@@ -6629,6 +6671,8 @@ def notify_admins(message_text):
                     failure = None
                 except Exception as plain_exc:
                     failure = plain_exc
+        if failure is None:
+            delivered = True
         if failure is not None:
             kind = _telegram_delivery_kind(failure)
             if kind == 'unreachable':
@@ -6639,6 +6683,7 @@ def notify_admins(message_text):
             else:
                 logger.warning('Admin notification failed: recipient=%s kind=%s error_type=%s',
                                recipient, kind, type(failure).__name__)
+    return delivered
 
 
 def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='manual'):
@@ -6753,9 +6798,6 @@ def diag_alerts_cmd(message):
     targets = set()
     if OWNER_ID:
         targets.add(OWNER_ID)
-    for a in admin_ids:
-        if a:
-            targets.add(a)
 
     report = (
         f"🔧 <b>تشخيص الإشعارات</b>\n"
@@ -9056,6 +9098,18 @@ def confirm_buy_handler(call):
 
 # قاموس مؤقت لبيانات شراء ChatGPT
 _cgpt_pending = {}
+_CGPT_PENDING_LOCK = threading.RLock()
+
+
+def _cgpt_take_pending(uid, order_id=None, require_email=False):
+    with _CGPT_PENDING_LOCK:
+        pending = _cgpt_pending.get(uid)
+        if not pending or (order_id is not None and pending.get('order_id') != order_id):
+            return None
+        if require_email and ('price' not in pending or not pending.get('email')):
+            return None
+        return _cgpt_pending.pop(uid, None)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "close_msg")
 def _close_msg_handler(call):
@@ -9158,16 +9212,17 @@ def cgpt_buy_duration(call):
         return
 
     # نحفظ بيانات الشراء
-    order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
-    _cgpt_pending[uid] = {
-        'cgpt_pid': cgpt_pid,
-        'dur_id': dur_id,
-        'label': label,
-        'price': price,
-        'minutes': minutes,
-        'order_id': order_id,
-        'p_name': parent.get('name', ''),
-    }
+    order_id = "CG" + secrets.token_hex(10)
+    with _CGPT_PENDING_LOCK:
+        _cgpt_pending[uid] = {
+            'cgpt_pid': cgpt_pid,
+            'dur_id': dur_id,
+            'label': label,
+            'price': price,
+            'minutes': minutes,
+            'order_id': order_id,
+            'p_name': parent.get('name', ''),
+        }
 
     if l == 'ar':
         msg_txt = (
@@ -9185,12 +9240,12 @@ def cgpt_buy_duration(call):
     markup = InlineKeyboardMarkup()
     markup.add(create_btn(uid, 'cg_cancel', callback_data=f"cgpt_cancel_buy_{uid}"))
     msg = bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=markup)
-    bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l)
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, uid, l, order_id)
 
 def _cancel_cgpt_purchase(uid, lang):
     try: bot.clear_step_handler_by_chat_id(uid)
     except: pass
-    pending = _cgpt_pending.pop(uid, None)
+    pending = _cgpt_take_pending(uid)
     if pending:
         if 'total_price' in pending:
             db.users.update_one({'user_id': uid}, {'$inc': {'balance': pending['total_price']}})
@@ -9213,8 +9268,16 @@ def cgpt_cancel_buy_callback(call):
     lang = get_lang(uid)
     _cancel_cgpt_purchase(uid, lang)
 
-def cgpt_confirm_email_step(message, buyer_uid, lang):
+def cgpt_confirm_email_step(message, buyer_uid, lang, expected_order_id=None):
     """الخطوة 1: يرسل الإيميل → نطلب تأكيده"""
+    if message.from_user.id != buyer_uid:
+        return
+    pending = _cgpt_pending.get(buyer_uid)
+    if (not pending or 'price' not in pending or
+            (expected_order_id is not None and pending.get('order_id') != expected_order_id)):
+        bot.send_message(buyer_uid, get_text(buyer_uid, 'cg_notice_13'))
+        return
+    expected_order_id = pending.get('order_id')
     text_cmd = (message.text or "").strip().lower()
     if text_cmd in ['الغاء', 'cancel', '/cancel']:
         _cancel_cgpt_purchase(buyer_uid, lang)
@@ -9230,18 +9293,25 @@ def cgpt_confirm_email_step(message, buyer_uid, lang):
             msg = bot.send_message(buyer_uid,
                 get_text(buyer_uid, 'cg_notice_10'),
                 parse_mode="HTML")
-            bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
+            bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang, expected_order_id)
         return
 
     # نطلب التأكيد
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         create_btn(buyer_uid, 'cg_confirm',
-            callback_data=f"cgpt_email_ok_{buyer_uid}"),
+            callback_data=f"cgpt_email_ok_{buyer_uid}_{expected_order_id}"),
         create_btn(buyer_uid, 'cg_change',
-            callback_data=f"cgpt_email_change_{buyer_uid}")
+            callback_data=f"cgpt_email_change_{buyer_uid}_{expected_order_id}")
     )
-    _cgpt_pending[buyer_uid]['email'] = email
+    # Work with the captured session; never recreate a cancelled/consumed order.
+    with _CGPT_PENDING_LOCK:
+        still_current = _cgpt_pending.get(buyer_uid) is pending
+        if still_current:
+            pending['email'] = email
+    if not still_current:
+        bot.send_message(buyer_uid, get_text(buyer_uid, 'cg_notice_13'))
+        return
     bot.send_message(buyer_uid,
         get_text(buyer_uid, 'cg_email_confirm', html.escape(email)),
         parse_mode="HTML", reply_markup=markup)
@@ -9249,20 +9319,34 @@ def cgpt_confirm_email_step(message, buyer_uid, lang):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_change_"))
 def cgpt_email_change(call):
     bot.answer_callback_query(call.id)
-    buyer_uid = int(call.data.replace("cgpt_email_change_", ""))
+    uid_text, _, session_id = call.data[len('cgpt_email_change_'):].partition('_')
+    buyer_uid = int(uid_text)
+    if call.from_user.id != buyer_uid:
+        return
+    pending = _cgpt_pending.get(buyer_uid)
+    if not pending or 'price' not in pending or (session_id and pending.get('order_id') != session_id):
+        bot.send_message(buyer_uid, get_text(buyer_uid, 'cg_notice_13'))
+        return
     lang = get_lang(buyer_uid)
     msg = bot.send_message(call.message.chat.id,
         get_text(buyer_uid, 'cg_notice_11'),
         parse_mode="HTML")
-    bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang)
+    bot.register_next_step_handler(msg, cgpt_confirm_email_step, buyer_uid, lang, pending.get('order_id'))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cgpt_email_ok_"))
 def cgpt_email_confirmed(call):
     """تأكيد الإيميل → تنفيذ الشراء"""
     bot.answer_callback_query(call.id)
-    buyer_uid = int(call.data.replace("cgpt_email_ok_", ""))
+    uid_text, _, session_id = call.data[len('cgpt_email_ok_'):].partition('_')
+    buyer_uid = int(uid_text)
+    if call.from_user.id != buyer_uid:
+        return
     lang = get_lang(buyer_uid)
-    pending = _cgpt_pending.pop(buyer_uid, None)
+    pending = _cgpt_pending.get(buyer_uid)
+    if not pending or 'price' not in pending or (session_id and pending.get('order_id') != session_id):
+        bot.send_message(buyer_uid, get_text(buyer_uid, 'cg_notice_13'))
+        return
+    pending = _cgpt_take_pending(buyer_uid, pending.get('order_id'), require_email=True)
     if not pending or 'email' not in pending:
         bot.send_message(call.message.chat.id,
             get_text(buyer_uid, 'cg_notice_13'))
@@ -9380,7 +9464,7 @@ def _cgpt_handle_email(message, buyer_uid, lang):
     if text_cmd in ['الغاء', 'cancel', '/cancel']:
         _cancel_cgpt_purchase(buyer_uid, lang)
         return
-    pending = _cgpt_pending.pop(buyer_uid, None)
+    pending = _cgpt_take_pending(buyer_uid)
     if not pending:
         bot.send_message(buyer_uid, "\u274c \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u0629 \u0627\u0644\u0637\u0644\u0628. \u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0627\u0644\u062f\u0639\u0645.", parse_mode="HTML")
         return
@@ -9557,14 +9641,15 @@ def _do_purchase(uid, pid, qty, lang):
             # نطلب الإيميل أولاً ثم ندعوه
             cgpt_minutes = int(p.get('cgpt_minutes', 10080))
             _release_purchase_lock(uid)  # نفك الـ lock ريثما يكتب الإيميل
-            order_id = "CG" + str(int(time.time()))[-6:] + str(uid)[-4:]
+            order_id = "CG" + secrets.token_hex(10)
             # نحفظ بيانات الشراء مؤقتاً
-            _cgpt_pending[uid] = {
-                'pid': str(pid), 'qty': qty, 'total_price': total_price,
-                'order_id': order_id, 'minutes': cgpt_minutes,
-                'p_name_ar': clean_name(p.get('name_ar', '')),
-                'p_name_en': clean_name(p.get('name_en', p.get('name_ar', '')))
-            }
+            with _CGPT_PENDING_LOCK:
+                _cgpt_pending[uid] = {
+                    'pid': str(pid), 'qty': qty, 'total_price': total_price,
+                    'order_id': order_id, 'minutes': cgpt_minutes,
+                    'p_name_ar': clean_name(p.get('name_ar', '')),
+                    'p_name_en': clean_name(p.get('name_en', p.get('name_ar', '')))
+                }
             if lang == 'ar':
                 msg_txt = (
                     f"✅ <b>تم خصم ${total_price:.2f} من رصيدك!</b>\n\n"
@@ -26879,7 +26964,9 @@ def api_disable(call):
 def run_bot():
     # All functions, imports and database initialization are now complete.
     _API_READY.set()
-    logger.info('✅ Reseller API ready')
+    logger.info('✅ Reseller API ready — ext-purchase-v3')
+    threading.Thread(target=_run_periodic, args=(_retry_api_purchase_notices, 60, 10,
+                     'API purchase notices'), daemon=True, name='api-purchase-notices').start()
     # Only queued (owner-approved) campaigns may be consumed after restart.
     _ext_start_broadcast_worker()
     # تشغيل الـ daemon في thread خلفية عند بدء البوت
