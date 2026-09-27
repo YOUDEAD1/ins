@@ -258,6 +258,8 @@ class CustomInlineButton(InlineKeyboardButton):
 # 🔗 API بسيط للمنتجات - يسمح لأي شخص يعرض منتجاتك في بوته/موقعه
 # ============================================================
 
+# The HTTP port opens early for Render health checks; API routes wait for initialization.
+_API_READY = threading.Event()
 _API_GATEWAY_CACHE = None
 _API_GATEWAY_LOCK = threading.Lock()
 
@@ -325,13 +327,24 @@ def _api_json_body(handler):
 def _api_http_guard(func):
     @functools.wraps(func)
     def wrapped(self):
+        # Only the public health probe may run while module definitions and DB
+        # initialization are still being loaded by the main thread.
+        if not _API_READY.is_set() and not (
+                func.__name__ == 'do_GET' and urllib.parse.urlparse(self.path).path.rstrip('/') == ''):
+            return _json_resp(self, 503, {'success': False, 'code': 'initializing',
+                'error': 'API is starting. Retry shortly.'})
         try:
             return func(self)
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
             # Never put the secret URL, authentication headers or body into logs.
-            logger.error('Reseller API %s failed (%s)', func.__name__, type(exc).__name__)
+            import traceback
+            frames = traceback.extract_tb(exc.__traceback__)
+            location = ' > '.join(f'{f.name}:{f.lineno}' for f in frames[-6:])
+            missing = getattr(exc, 'name', '') if isinstance(exc, NameError) else ''
+            logger.error('Reseller API %s failed (%s) missing=%s at=%s',
+                         func.__name__, type(exc).__name__, missing, location)
             return _json_resp(self, 503, {
                 'success': False, 'error': 'API temporarily unavailable',
                 'code': 'service_unavailable',
@@ -26607,6 +26620,9 @@ def api_disable(call):
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
+    # All functions, imports and database initialization are now complete.
+    _API_READY.set()
+    logger.info('✅ Reseller API ready')
     # Only queued (owner-approved) campaigns may be consumed after restart.
     _ext_start_broadcast_worker()
     # تشغيل الـ daemon في thread خلفية عند بدء البوت
