@@ -6596,25 +6596,49 @@ def _cgpt_retry_api_receipts():
         logger.exception('Business API receipt retry failed')
 
 
+# Temporary delivery backoff only; never remove administrator permissions.
+_ADMIN_NOTICE_PAUSED = {}
+
+
 def notify_admins(message_text):
     recipients = set()
     if OWNER_ID:
         recipients.add(int(OWNER_ID))
-    try:
-        recipients.update(int(u['user_id']) for u in db.users.find({'is_admin': 1}))
-    except Exception:
-        logger.exception("Could not load admin notification recipients")
+    # Notification destination comes exclusively from OWNER_ID in the environment.
+    # Database administrator roles remain unchanged and are not mailing targets.
+    if not recipients:
+        logger.warning('Admin notification skipped: configure OWNER_ID in .env / Render')
+        return
+    now = time.time()
+    for old_id, until in list(_ADMIN_NOTICE_PAUSED.items()):
+        if until <= now:
+            _ADMIN_NOTICE_PAUSED.pop(old_id, None)
     for recipient in recipients:
+        if _ADMIN_NOTICE_PAUSED.get(recipient, 0) > now:
+            continue
+        failure = None
         try:
-            bot.send_message(recipient, message_text, parse_mode="HTML")
-        except Exception:
-            logger.exception("Admin notification failed for recipient %s", recipient)
-            try:
-                import re
-                plain = html.unescape(re.sub(r'<[^>]*>', '', message_text))
-                bot.send_message(recipient, plain, parse_mode=None)
-            except Exception:
-                logger.exception("Plain admin notification also failed for %s", recipient)
+            bot.send_message(recipient, message_text, parse_mode="HTML", timeout=20)
+        except Exception as exc:
+            failure = exc
+            # Plain text fixes HTML parsing only, not 403 or an ambiguous timeout.
+            if _telegram_delivery_kind(exc) == 'format':
+                try:
+                    plain = html.unescape(re.sub(r'<[^>]*>', '', message_text))
+                    bot.send_message(recipient, plain, parse_mode=None, timeout=20)
+                    failure = None
+                except Exception as plain_exc:
+                    failure = plain_exc
+        if failure is not None:
+            kind = _telegram_delivery_kind(failure)
+            if kind == 'unreachable':
+                if len(_ADMIN_NOTICE_PAUSED) >= 256:
+                    _ADMIN_NOTICE_PAUSED.pop(next(iter(_ADMIN_NOTICE_PAUSED), None), None)
+                _ADMIN_NOTICE_PAUSED[recipient] = now + 3600
+                logger.warning('Admin notification unreachable: recipient=%s; paused for 1 hour', recipient)
+            else:
+                logger.warning('Admin notification failed: recipient=%s kind=%s error_type=%s',
+                               recipient, kind, type(failure).__name__)
 
 
 def notify_balance_gift(target_uid, amount, by_admin=True, note='', gift_type='manual'):
