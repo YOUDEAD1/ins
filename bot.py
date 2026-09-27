@@ -1701,6 +1701,180 @@ threading.Thread(target=_webhook_worker, daemon=True, name="webhook_worker").sta
 _PRODUCTS_CACHE = None  # cache لرد /products (يقلّل استعلامات DB المتكررة)
 
 
+def _api_external_supplier_order(store, product_id, qty, reference):
+    """One purchase attempt only. Never probe alternative URLs with a paid POST."""
+    payload = {'product_id': _ext_int_or_str(product_id), 'quantity': qty}
+    if _ext_is_insight(store):
+        ok, result = _insight_request(store, 'POST', '/orders', payload, reference)
+        if not ok and isinstance(result, dict) and int(result.get('http_status', 0) or 0) >= 500:
+            result['uncertain'] = True
+        return ok, result
+    headers = _ext_api_headers(store)
+    headers['Idempotency-Key'] = reference
+    try:
+        response = requests.post(_ext_api_base(store) + '/orders', headers=headers,
+            json=payload, timeout=25, allow_redirects=False)
+        try:
+            result = response.json()
+        except Exception:
+            return False, {'uncertain': True}
+        if response.status_code in (200, 201) and isinstance(result, dict):
+            if result.get('success') is not False and not result.get('error'):
+                return True, result
+        # Only explicit client rejections are safe to refund automatically.
+        return False, {'uncertain': response.status_code not in (400, 401, 403, 404, 409, 422, 429),
+                       'http_status': response.status_code}
+    except Exception:
+        return False, {'uncertain': True}
+
+
+def _api_external_replay(order):
+    if order.get('response') is not None:
+        return int(order.get('response_code', 200)), order['response']
+    return 202, {'success': True, 'order_id': order['order_id'],
+        'product_id': order['product_id'], 'status': order.get('status', 'processing'),
+        'codes': [], 'message': 'Order is being verified. Do not submit a new purchase; check /order/' + order['order_id']}
+
+
+def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=None):
+    """Resolve the public ext_ ID and journal the debit before contacting its supplier."""
+    import hashlib
+    import math
+    supplied_key = idempotency_key is not None
+    if supplied_key and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.strip()) <= 128):
+        return 400, {'error': 'Idempotency-Key must be a nonempty string of at most 128 characters'}
+    request_key = idempotency_key.strip() if supplied_key else secrets.token_hex(24)
+    reference = 'APIEXT_' + hashlib.sha256(f'{uid}:{request_key}'.encode()).hexdigest()[:40]
+    signature = {'product_id': product_id, 'qty': qty, 'buyer_info': buyer_info}
+    existing = db.api_orders.find_one({'_id': reference, 'api_user_id': uid})
+    if existing:
+        if existing.get('request_signature') != signature:
+            return 409, {'error': 'Idempotency-Key already used for a different purchase'}
+        return _api_external_replay(existing)
+    try:
+        ep = db.ext_products.find_one({'_id': ObjectId(product_id[4:])})
+    except (ValueError, TypeError):
+        ep = None
+    except Exception as exc:
+        # bson InvalidId is not a database failure.
+        if type(exc).__name__ == 'InvalidId':
+            ep = None
+        else:
+            raise
+    if not ep or ep.get('hidden') or db.api_hidden.find_one({'api_user_id': uid, 'product_id': product_id}):
+        return 404, {'error': 'Product not found'}
+    if not ep.get('unlimited') and float(ep.get('stock', 0) or 0) < qty:
+        return 409, {'error': 'Not enough stock', 'available': ep.get('stock', 0), 'charged': False}
+    try:
+        store = db.ext_stores.find_one({'_id': ObjectId(ep.get('store_id', ''))})
+    except Exception:
+        store = None
+    if not store:
+        return 503, {'error': 'Supplier unavailable', 'charged': False}
+    # Resolve a missing prefix using a read-only catalog request BEFORE debiting.
+    base = str(store.get('base_url', '')).rstrip('/')
+    if not _ext_is_insight(store) and not store.get('api_prefix') and not any(
+            prefix in base for prefix in ('/api/v1', '/shop-api/v1')):
+        if _ext_api_get(store, '/products') is None:
+            return 503, {'error': 'Supplier connection could not be verified', 'charged': False}
+        store = db.ext_stores.find_one({'_id': store['_id']}) or store
+    unit = float(ep.get('sell_price', ep.get('base_price', 0)) or 0)
+    total = round(unit * qty, 2)
+    if not math.isfinite(total) or unit < 0:
+        return 503, {'error': 'Product price is invalid', 'charged': False}
+    order = {'_id': reference, 'order_id': reference, 'api_user_id': uid,
+        **signature, 'request_signature': signature, 'product_name': str(ep.get('name', '')),
+        'total_price': total, 'unit_price': unit, 'codes': [], 'status': 'processing',
+        'created_at': int(time.time()), 'date': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'store_id': str(store['_id']), 'ext_product_id': str(ep['_id']),
+        'supplier_reference': reference, 'idempotency_supplied': supplied_key}
+    try:
+        db.api_orders.insert_one(order)
+    except Exception as exc:
+        if type(exc).__name__ != 'DuplicateKeyError':
+            raise
+        existing = db.api_orders.find_one({'_id': reference, 'api_user_id': uid})
+        if not existing or existing.get('request_signature') != signature:
+            return 409, {'error': 'Conflicting purchase reference'}
+        return _api_external_replay(existing)
+    debit_field = '_api_ext_debits.' + reference
+    # Debit and its marker are a single atomic change to the user's document.
+    # An interrupted order remains pending; replay never charges it a second time.
+    updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total},
+            debit_field: {'$exists': False}},
+        {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
+    _invalidate_user_cache(uid)
+    if not updated:
+        result = {'success': False, 'error': 'Insufficient balance', 'order_id': reference,
+                  'required': total, 'charged': False, 'status': 'failed'}
+        db.api_orders.update_one({'_id': reference}, {'$set': {'status': 'failed',
+            'response_code': 402, 'response': result}})
+        return 402, result
+    db.api_orders.update_one({'_id': reference}, {'$set': {'debited': True}})
+    try:
+        ok, response = _api_external_supplier_order(store, ep.get('ext_id'), qty, reference)
+    except Exception:
+        ok, response = False, {'uncertain': True}
+    uncertain = not isinstance(response, dict) or bool(response.get('uncertain'))
+    codes = _ext_extract_codes(response) if ok and isinstance(response, dict) else []
+    remote = response.get('order') if isinstance(response, dict) else None
+    if not isinstance(remote, dict):
+        remote = response if isinstance(response, dict) else {}
+    remote_status = str(remote.get('status', '')).lower()
+    remote_id = str(remote.get('order_id') or remote.get('id') or '')
+    # A success HTTP response without delivery is not a completed customer order.
+    complete = ok and not uncertain and len(codes) >= qty and remote_status not in (
+        'failed', 'cancelled', 'canceled', 'pending', 'processing') and not remote.get('test') and not any(
+            str(code).startswith('TEST-') for code in codes)
+    if not ok and not uncertain:
+        refunded = db.users.find_one_and_update({'user_id': uid, debit_field: total},
+            {'$inc': {'balance': total}, '$unset': {debit_field: ''}}, return_document=True)
+        _invalidate_user_cache(uid)
+        if refunded is None:
+            uncertain = True
+        else:
+            result = {'success': False, 'error': 'Supplier rejected the order; balance refunded',
+                'order_id': reference, 'product_id': product_id, 'status': 'failed',
+                'refunded': True, 'new_balance': round(float(refunded.get('balance', 0)), 2)}
+            db.api_orders.update_one({'_id': reference}, {'$set': {'status': 'failed',
+                'response_code': 409, 'response': result, 'refunded': True}})
+            return 409, result
+    status = 'completed' if complete else 'pending_verification'
+    result = {'success': True, 'order_id': reference, 'product_id': product_id,
+        'qty': qty, 'unit_price': unit, 'total_price': total,
+        'new_balance': round(float(updated.get('balance', 0)), 2), 'status': status,
+        'codes': codes if complete else [], 'codes_count': len(codes) if complete else 0}
+    if not complete:
+        result['message'] = 'Awaiting supplier verification. Do not repurchase; check /order/' + reference
+    # Save delivery before side effects or notifications; replay returns this receipt.
+    db.api_orders.update_one({'_id': reference}, {'$set': {'status': status,
+        'codes': result['codes'], 'supplier_codes': codes, 'ext_order_id': remote_id,
+        'response_code': 200 if complete else 202, 'response': result}})
+    try:
+        db.ext_orders.update_one({'api_order_id': reference}, {'$setOnInsert': {
+            'api_order_id': reference, 'store_id': str(store['_id']),
+            'ext_product_id': str(ep['_id']), 'user_id': uid, 'product_name': order['product_name'],
+            'price': total, 'quantity': qty, 'created_at': int(time.time()),
+            'idempotency_key': reference, 'ext_order_id': remote_id,
+            'status': 'success' if complete else status, 'codes': result['codes']}}, upsert=True)
+        if complete:
+            db.users.update_one({'user_id': uid}, {'$unset': {debit_field: ''}})
+            if not ep.get('unlimited'):
+                db.ext_products.update_one({'_id': ep['_id'], 'stock': {'$gte': qty}},
+                    {'$inc': {'stock': -qty}})
+            global _PRODUCTS_CACHE
+            _PRODUCTS_CACHE = None
+    except Exception:
+        logger.warning('External reseller receipt saved; auxiliary update failed: %s', reference)
+    try:
+        notify_admins(f"{'✅ بيع عبر الموزّعين' if complete else '⚠️ طلب موزّع يحتاج التحقق'}\n"
+            f"User: {uid}\nProduct: {html.escape(order['product_name'])} ×{qty}\n"
+            f"Total: ${total:.2f}\nOrder: {reference}\nSupplier order: {html.escape(remote_id)}")
+    except Exception:
+        logger.warning('External reseller admin notice failed: %s', reference)
+    return (200 if complete else 202), result
+
+
 class APIHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -2244,17 +2418,17 @@ class APIHandler(BaseHTTPRequestHandler):
 
             if not product_id: return _json_resp(self, 400, {'error': 'product_id required'})
 
-            if product_id.startswith('ext_'):
-                return _json_resp(self, 501, {'success': False,
-                    'error': 'External product purchasing is not supported by this reseller endpoint yet',
-                    'code': 'external_purchase_not_supported', 'charged': False})
-
             try:
                 if isinstance(qty, bool) or not str(qty).isdigit() or not 1 <= int(qty) <= 50:
                     raise ValueError()
                 qty = int(qty)
             except (ValueError, TypeError):
                 return _json_resp(self, 400, {'error': 'qty must be an integer from 1 to 50'})
+            if product_id.startswith('ext_'):
+                code, result = _api_purchase_external(uid, product_id, qty, buyer_info,
+                    self.headers.get('Idempotency-Key') or body.get('idempotency_key'))
+                return _json_resp(self, code, result)
+
             if product_id.startswith('cgpt_') and qty != 1:
                 return _json_resp(self, 400, {'error': 'ChatGPT purchases require qty=1 and one buyer email'})
 
@@ -25821,6 +25995,13 @@ All requests require this header:
 ```
 Authorization: Bearer {api_key}
 ```
+
+External-store products use the same `ext_...` ID returned by GET /products in
+POST /purchase with `product_id` and `qty`. Send a unique `Idempotency-Key`
+header for each purchase; reuse that key only when retrying the SAME purchase.
+HTTP 202 / pending_verification means the supplier outcome is pending: do not
+start another purchase. Check GET /order/ORDER_ID. HTTP 200 / completed
+contains delivery in `codes`.
 
 The base URL and key are inside `connection_code` (base64-encoded):
 ```
