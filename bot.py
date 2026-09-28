@@ -1738,7 +1738,9 @@ def _retry_api_purchase_notices():
         markup = None
         if job.get('approval_token'):
             approval = db.ext_broadcast_approvals.find_one({'_id': job['approval_token']})
-            if not approval or approval.get('status') not in ('pending', 'notification_failed'):
+            if (not approval or approval.get('status') not in ('pending', 'notification_failed')
+                    or approval.get('kind') not in ('stock', 'new')
+                    or approval.get('created_at', 0) < _EXT_APPROVAL_EPOCH):
                 db.api_purchase_notices.update_one({'_id': job['_id'], 'worker_token': token},
                     {'$set': {'status': 'cancelled'}})
                 continue
@@ -13451,29 +13453,22 @@ def cmd_bybit_match(message):
 
 # External-store broadcasts require explicit administrator approval.
 _EXT_BC_REQUEST_LOCK = threading.Lock()
+_EXT_APPROVAL_EPOCH = time.time()
 _EXT_BC_WORKER_LOCK = threading.Lock()
 _EXT_BC_WAKE = threading.Event()
 
 
 def _recover_external_approval_notices():
-    # Older pending approvals may have been sent only to an unreachable owner.
-    for job in db.ext_broadcast_approvals.find({
-            'status': {'$in': ['pending', 'notification_failed']},
-            'notification_enqueued': {'$ne': True}}).limit(20):
-        ep = _api_find_external_product('ext_' + job['product_id'])
-        if not ep:
-            continue
-        text = (f"📢 <b>طلب موافقة برودكاست متجر API</b>\n"
-                f"📦 {html.escape(str(ep.get('name', '')))}\n"
-                f"🪑 {html.escape(str(ep.get('stock', 0)))}\n"
-                'لن يُرسل للعملاء قبل موافقة أحد الأدمن.')
-        _queue_api_purchase_notice('EXT_APPROVAL_' + job['_id'], text, approval_token=job['_id'])
-        db.ext_broadcast_approvals.update_one({'_id': job['_id']},
-            {'$set': {'notification_enqueued': True}})
+    # Never replay historical approval requests on deploy/restart. This cleanup
+    # touches unapproved advertisements only, not purchase/deposit receipts.
+    db.ext_broadcast_approvals.update_many({
+        'status': {'$in': ['pending', 'notification_failed']},
+        'created_at': {'$lt': _EXT_APPROVAL_EPOCH}},
+        {'$set': {'status': 'cancelled', 'reason': 'Old availability approval; not replayed'}})
 
 
 def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
-    if not ep:
+    if not ep or kind not in ('stock', 'new') or not ep.get('_notice_token'):
         return
     with _EXT_BC_REQUEST_LOCK:
         # Repeated sync ticks do not create repeated approval requests.
@@ -13518,7 +13513,8 @@ def _ext_broadcast_decision(call):
     approved = call.data.startswith('extbc_yes_')
     token = call.data.split('_', 2)[2]
     job = db.ext_broadcast_approvals.find_one_and_update(
-        {'_id': token, 'status': {'$in': ['pending', 'notification_failed']}},
+        {'_id': token, 'status': {'$in': ['pending', 'notification_failed']},
+         'created_at': {'$gte': _EXT_APPROVAL_EPOCH}, 'kind': {'$in': ['stock', 'new']}},
         {'$set': {'status': 'queued' if approved else 'declined', 'decided_at': time.time(), 'owner_id': int(call.from_user.id)}},
         return_document=True)
     if not job:
@@ -13893,9 +13889,9 @@ def _ext_mark_missing(ep):
     if since is None:
         db.ext_products.update_one({'_id': ep['_id'], '_missing_since': {'$exists': False}},
             {'$set': {'_missing_since': now}})
-    elif now - float(since) >= 90 and (ep.get('stock', 0) or 0) != 0:
+    elif now - float(since) >= 90:
         db.ext_products.update_one({'_id': ep['_id'], 'stock': ep.get('stock')},
-            {'$set': {'stock': 0}, '$unset': {'_stock_notice': ''}})
+            {'$set': {'stock': 0, '_supplier_available': False}, '$unset': {'_stock_notice': ''}})
 
 
 def _ext_flush_new_notice(ep):
@@ -13907,12 +13903,29 @@ def _ext_flush_new_notice(ep):
 
 
 def _ext_commit_stock(previous, new_stock):
-    old = previous.get('stock', 0) or 0
+    now = time.time()
+    supplier_was_available = previous.get('_supplier_available')
     fields = {'stock': new_stock}
-    if old <= 0 and new_stock > 0 and not previous.get('_new_notice'):
-        fields['_stock_notice'] = __import__('uuid').uuid4().hex
-    query = {'_id': previous['_id'], 'stock': previous.get('stock')}
-    db.ext_products.update_one(query, {'$set': fields, '$unset': {'_missing_since': ''}})
+    unset = {'_missing_since': ''}
+    if supplier_was_available is None:
+        # First reliable snapshot is a baseline, not a restock event.
+        fields['_supplier_available'] = new_stock > 0
+        unset['_stock_notice'] = ''
+    elif new_stock > 0:
+        fields['_supplier_available'] = True
+        unset['_supplier_empty_since'] = ''
+        if supplier_was_available is False and not previous.get('_new_notice'):
+            fields['_stock_notice'] = __import__('uuid').uuid4().hex
+    else:
+        since = previous.get('_supplier_empty_since')
+        if since is None:
+            fields['_supplier_empty_since'] = now
+        elif now - float(since) >= 90:
+            fields['_supplier_available'] = False
+            unset['_stock_notice'] = ''
+    query = {'_id': previous['_id'], 'stock': previous.get('stock'),
+             '_supplier_available': supplier_was_available}
+    db.ext_products.update_one(query, {'$set': fields, '$unset': unset})
     current = db.ext_products.find_one({'_id': previous['_id']})
     _ext_flush_new_notice(current)
     _ext_stock_announcement(previous, current)
@@ -13971,6 +13984,8 @@ def _auto_sync_ext_stores():
             p_name = _f['name']
 
             if not existing:
+                if new_stock <= 0:
+                    continue
                 already = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
                 if already:
                     continue
