@@ -1712,12 +1712,17 @@ def _api_find_external_product(public_id):
     return db.ext_products.find_one({'_id': {'$in': candidates}})
 
 
-def _queue_api_purchase_notice(order_id, text):
+def _queue_api_purchase_notice(order_id, text, approval_token=None):
     db.api_purchase_notices.update_one({'_id': str(order_id)}, {'$setOnInsert': {
-        'text': text, 'status': 'pending', 'created_at': time.time()}}, upsert=True)
+        'text': text, 'status': 'pending', 'created_at': time.time(),
+        'approval_token': approval_token}}, upsert=True)
 
 
 def _retry_api_purchase_notices():
+    try:
+        _recover_external_approval_notices()
+    except Exception:
+        logger.warning('Could not recover pending API broadcast approval notices')
     # API purchase receipts go to all registered admins plus the environment owner.
     for _ in range(20):
         now = time.time()
@@ -1730,6 +1735,16 @@ def _retry_api_purchase_notices():
             return_document=True)
         if not job:
             break
+        markup = None
+        if job.get('approval_token'):
+            approval = db.ext_broadcast_approvals.find_one({'_id': job['approval_token']})
+            if not approval or approval.get('status') not in ('pending', 'notification_failed'):
+                db.api_purchase_notices.update_one({'_id': job['_id'], 'worker_token': token},
+                    {'$set': {'status': 'cancelled'}})
+                continue
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(InlineKeyboardButton('✅ إرسال البرودكاست', callback_data='extbc_yes_' + job['approval_token']))
+            markup.add(InlineKeyboardButton('❌ تجاهل', callback_data='extbc_no_' + job['approval_token']))
         recipients = {int(u['user_id']) for u in db.users.find({'is_admin': 1}, {'user_id': 1})}
         if OWNER_ID:
             recipients.add(int(OWNER_ID))
@@ -1740,7 +1755,7 @@ def _retry_api_purchase_notices():
                 {'$set': {'lease_until': time.time() + 120}})
             if not renewed.matched_count:
                 break
-            if notify_admins(job['text'], recipient_ids={recipient}):
+            if notify_admins(job['text'], recipient_ids={recipient}, reply_markup=markup):
                 db.api_purchase_notices.update_one(claim, {'$addToSet': {'sent_to': recipient}})
                 sent_to.add(recipient)
         delivered = bool(recipients) and recipients.issubset(sent_to)
@@ -6605,6 +6620,25 @@ def _cgpt_deliver_api_receipt(event):
         logger.exception('Could not persist Business receipt retry status')
 
 
+def _cgpt_admin_purchase_text(uid, email, duration, amount, order_id):
+    try:
+        text = get_text(OWNER_ID, 'cg_admin_purchase', uid, html.escape(str(email)),
+            html.escape(str(duration)), format(amount, '.2f'), html.escape(str(order_id)))
+        if text and text != 'cg_admin_purchase':
+            return text
+    except Exception:
+        logger.warning('Business admin template failed; using complete fallback receipt')
+    return (f"✅ <b>شراء مقعد ChatGPT Business</b>\n👤 <code>{uid}</code>"
+            f"\n📧 <code>{html.escape(str(email))}</code>\n⏱ {html.escape(str(duration))}"
+            f"\n💰 ${amount:.2f}\n🆔 <code>{html.escape(str(order_id))}</code>")
+
+
+def _cgpt_queue_admin_purchase(uid, email, duration, amount, order_id, expires_at):
+    text = _cgpt_admin_purchase_text(uid, email, duration, amount, order_id)
+    text += '\n📅 ' + html.escape(str(expires_at))
+    _queue_api_purchase_notice('CGPT_' + str(order_id), text)
+
+
 def _cgpt_api_purchase_receipt(uid, email, minutes, amount, balance_after, order_id, expires_at):
     esc = lambda value: html.escape(str(value))
     admin_ids = set()
@@ -6614,15 +6648,15 @@ def _cgpt_api_purchase_receipt(uid, email, minutes, amount, balance_after, order
         admin_ids.update(int(u['user_id']) for u in db.users.find({'is_admin': 1}))
     except Exception:
         logger.exception('Could not load Business API receipt admins')
-    receipt = get_text(OWNER_ID, 'cg_admin_purchase', uid, esc(email), str(minutes) + ' min',
-                       format(amount, '.2f'), esc(order_id))
+    receipt = _cgpt_admin_purchase_text(uid, email, str(minutes) + ' min', amount, order_id)
     receipt += (f"\n🌐 API\n💳 تم خصم / Debited: <b>${amount:.2f}</b>"
                 f"\n👛 الرصيد بعد الخصم / Balance after: <b>${balance_after:.2f}</b>"
                 f"\n📅 {esc(expires_at)}")
+    _queue_api_purchase_notice('CGPT_API_' + str(order_id), receipt)
     buyer_text = get_text(uid, 'cg_api_debit', esc(email), format(amount, '.2f'),
                          format(balance_after, '.2f'), esc(order_id), esc(expires_at))
-    event = {'_id': str(order_id), 'recipients': sorted(admin_ids | {int(uid)}),
-             'admin_ids': sorted(admin_ids), 'admin_text': receipt, 'buyer_text': buyer_text,
+    event = {'_id': str(order_id), 'recipients': [int(uid)],
+             'admin_ids': [], 'admin_text': receipt, 'buyer_text': buyer_text,
              'sent_to': [], 'complete': False, 'attempts': 0}
     try:
         db.cgpt_api_receipts.update_one({'_id': event['_id']}, {'$setOnInsert': event}, upsert=True)
@@ -6644,7 +6678,7 @@ def _cgpt_retry_api_receipts():
 _ADMIN_NOTICE_PAUSED = {}
 
 
-def notify_admins(message_text, recipient_ids=None):
+def notify_admins(message_text, recipient_ids=None, reply_markup=None):
     if recipient_ids is None:
         # All general admin alerts (including normal purchases and deposits) use
         # the same durable queue as API purchases. Explicit recipients are worker deliveries.
@@ -6675,14 +6709,14 @@ def notify_admins(message_text, recipient_ids=None):
             continue
         failure = None
         try:
-            bot.send_message(recipient, message_text, parse_mode="HTML", timeout=20)
+            bot.send_message(recipient, message_text, parse_mode="HTML", timeout=20, reply_markup=reply_markup)
         except Exception as exc:
             failure = exc
             # Plain text fixes HTML parsing only, not 403 or an ambiguous timeout.
             if _telegram_delivery_kind(exc) == 'format':
                 try:
                     plain = html.unescape(re.sub(r'<[^>]*>', '', message_text))
-                    bot.send_message(recipient, plain, parse_mode=None, timeout=20)
+                    bot.send_message(recipient, plain, parse_mode=None, timeout=20, reply_markup=reply_markup)
                     failure = None
                 except Exception as plain_exc:
                     failure = plain_exc
@@ -9423,6 +9457,7 @@ def cgpt_email_confirmed(call):
             'qty': 1, 'total_price': price, 'order_id': order_id,
             'cgpt_email': email, 'cgpt_expires_at': expires_iso, 'cgpt_minutes': minutes
         })
+        _cgpt_queue_admin_purchase(buyer_uid, email, label, price, order_id, expires_iso)
         u_data = get_user_data_full(buyer_uid) or {}
         buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
         if lang == 'ar':
@@ -9450,9 +9485,7 @@ def cgpt_email_confirmed(call):
             bot.send_message(buyer_uid, success, parse_mode="HTML")
         except Exception:
             logger.exception("Business buyer receipt failed; continuing admin receipt")
-        notify_admins(
-            get_text(OWNER_ID, 'cg_admin_purchase', buyer_uid, html.escape(email), html.escape(label), format(price, '.2f'), pending['order_id'])
-        )
+
         # 📢 لوق القناة لشراء ChatGPT Duration/Package
         try:
             log_ch = get_setting('log_channel')
@@ -9508,6 +9541,7 @@ def _cgpt_handle_email(message, buyer_uid, lang):
             'cgpt_email': email, 'cgpt_expires_at': expires_iso,
             'cgpt_minutes': pending['minutes']
         })
+        _cgpt_queue_admin_purchase(buyer_uid, email, str(days) + ' days', pending['total_price'], pending['order_id'], expires_iso)
         u_data = get_user_data_full(buyer_uid) or {}
         buyer_m = f"@{u_data.get('username')}" if u_data and u_data.get('username') else str(buyer_uid)
         if lang == 'ar':
@@ -9529,9 +9563,7 @@ def _cgpt_handle_email(message, buyer_uid, lang):
             bot.send_message(buyer_uid, success, parse_mode="HTML")
         except Exception:
             logger.exception("Business buyer receipt failed; continuing admin receipt")
-        notify_admins(
-            get_text(OWNER_ID, 'cg_admin_purchase', buyer_uid, html.escape(email), html.escape(str(days) + ' days'), format(pending['total_price'], '.2f'), pending['order_id'])
-        )
+
         # 📢 لوق القناة لشراء ChatGPT Seat
         try:
             log_ch = get_setting('log_channel')
@@ -13423,8 +13455,25 @@ _EXT_BC_WORKER_LOCK = threading.Lock()
 _EXT_BC_WAKE = threading.Event()
 
 
+def _recover_external_approval_notices():
+    # Older pending approvals may have been sent only to an unreachable owner.
+    for job in db.ext_broadcast_approvals.find({
+            'status': {'$in': ['pending', 'notification_failed']},
+            'notification_enqueued': {'$ne': True}}).limit(20):
+        ep = _api_find_external_product('ext_' + job['product_id'])
+        if not ep:
+            continue
+        text = (f"📢 <b>طلب موافقة برودكاست متجر API</b>\n"
+                f"📦 {html.escape(str(ep.get('name', '')))}\n"
+                f"🪑 {html.escape(str(ep.get('stock', 0)))}\n"
+                'لن يُرسل للعملاء قبل موافقة أحد الأدمن.')
+        _queue_api_purchase_notice('EXT_APPROVAL_' + job['_id'], text, approval_token=job['_id'])
+        db.ext_broadcast_approvals.update_one({'_id': job['_id']},
+            {'$set': {'notification_enqueued': True}})
+
+
 def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
-    if not ep or not OWNER_ID:
+    if not ep:
         return
     with _EXT_BC_REQUEST_LOCK:
         # Repeated sync ticks do not create repeated approval requests.
@@ -13453,7 +13502,8 @@ def _ext_request_broadcast(kind, ep, old_price=None, new_price=None):
                 f"🪑 الستوك: {html.escape(str(ep.get('stock', 0)))}\n💰 السعر: ${price:.2f}\n\n"
                 'هل تريد إرسال الإعلان للعملاء؟ لن يُرسل دون موافقتك.')
         try:
-            bot.send_message(int(OWNER_ID), text, parse_mode='HTML', reply_markup=markup)
+            _queue_api_purchase_notice('EXT_APPROVAL_' + token, text, approval_token=token)
+            db.ext_broadcast_approvals.update_one({'_id': token}, {'$set': {'notification_enqueued': True}})
         except Exception:
             db.ext_broadcast_approvals.update_one({'_id': token}, {'$set': {'notification_failed': True}})
             logger.exception('External broadcast approval notification failed')
@@ -22143,7 +22193,20 @@ def _cgpt_customer_list(call, mode='all', page=0):
         for email, info in record.get('data', {}).get('invites', {}).items():
             if mode == 'all' or info.get('status') == mode:
                 items.append((email, acc_id, info))
-    items.sort(key=lambda item: (item[0].lower(), item[1]))
+    if mode == 'active':
+        def expiry_order(item):
+            raw = item[2].get('expires_at')
+            try:
+                expiry = raw if isinstance(raw, datetime.datetime) else datetime.datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=datetime.timezone.utc)
+                expiry_timestamp = expiry.timestamp()
+            except (ValueError, TypeError, OverflowError, OSError):
+                expiry_timestamp = float('inf')  # Unknown expiration stays at the end.
+            return (expiry_timestamp, item[0].lower(), item[1])
+        items.sort(key=expiry_order)
+    else:
+        items.sort(key=lambda item: (item[0].lower(), item[1]))
     page = min(max(0, page), max(0, (len(items)-1)//20))
     markup = InlineKeyboardMarkup(row_width=1)
     for email, acc_id, info in items[page*20:(page+1)*20]:
