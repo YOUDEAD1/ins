@@ -1744,9 +1744,11 @@ def _retry_api_purchase_notices():
                 db.api_purchase_notices.update_one(claim, {'$addToSet': {'sent_to': recipient}})
                 sent_to.add(recipient)
         delivered = bool(recipients) and recipients.issubset(sent_to)
+        retry_at = min((max(time.time() + 60, _ADMIN_NOTICE_PAUSED.get(uid, 0))
+                        for uid in recipients - sent_to), default=time.time() + 60)
         db.api_purchase_notices.update_one({'_id': job['_id'], 'worker_token': token},
             {'$set': {'status': 'sent' if delivered else 'pending',
-                      'retry_at': time.time() + 60}})
+                      'retry_at': retry_at}})
 
 
 def _api_external_supplier_order(store, product_id, qty, reference):
@@ -6643,10 +6645,23 @@ _ADMIN_NOTICE_PAUSED = {}
 
 
 def notify_admins(message_text, recipient_ids=None):
+    if recipient_ids is None:
+        # All general admin alerts (including normal purchases and deposits) use
+        # the same durable queue as API purchases. Explicit recipients are worker deliveries.
+        try:
+            _queue_api_purchase_notice('ADMIN_' + secrets.token_hex(16), message_text)
+            return True  # Accepted for delivery, not a claim of Telegram receipt.
+        except Exception:
+            logger.exception('Could not persist admin alert; trying direct delivery')
     recipients = set(int(uid) for uid in recipient_ids) if recipient_ids is not None else set()
     if recipient_ids is None and OWNER_ID:
         recipients.add(int(OWNER_ID))
-    # Default destination is OWNER_ID; API receipts pass each authorized admin explicitly.
+    if recipient_ids is None:
+        try:
+            recipients.update(int(u['user_id']) for u in db.users.find({'is_admin': 1}, {'user_id': 1}))
+        except Exception:
+            logger.warning('Could not load admin recipients for fallback delivery')
+    # Explicit recipients preserve per-admin delivery tracking in the queue worker.
     if not recipients:
         logger.warning('Admin notification skipped: configure OWNER_ID in .env / Render')
         return False
@@ -6798,6 +6813,7 @@ def diag_alerts_cmd(message):
     targets = set()
     if OWNER_ID:
         targets.add(OWNER_ID)
+    targets.update(int(admin_id) for admin_id in admin_ids if admin_id)
 
     report = (
         f"🔧 <b>تشخيص الإشعارات</b>\n"
@@ -16284,8 +16300,15 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
     except Exception:
         pass
     
-    bot.send_message(uid, get_text(uid, 'dep_success', amt), parse_mode="HTML")
-    
+    _invalidate_user_cache(uid)
+    try:
+        bot.send_message(uid, get_text(uid, 'dep_success', amt), parse_mode="HTML")
+    except Exception as exc:
+        # Credit has succeeded. A blocked/deactivated customer's chat must not
+        # abort admin notification or make callers treat this deposit as failed.
+        logger.warning('Deposit credited; customer notice failed: uid=%s kind=%s',
+                       uid, _telegram_delivery_kind(exc))
+
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
     
