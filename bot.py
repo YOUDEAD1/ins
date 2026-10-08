@@ -1712,19 +1712,26 @@ def _api_find_external_product(public_id):
     return db.ext_products.find_one({'_id': {'$in': candidates}})
 
 
+_ADMIN_NOTICE_WAKE = threading.Event()
+
+
 def _queue_api_purchase_notice(order_id, text, approval_token=None):
-    db.api_purchase_notices.update_one({'_id': str(order_id)}, {'$setOnInsert': {
+    # Keep financial notices ahead of routine alerts when the durable queue has a backlog.
+    message_lower = str(text or '').lower()
+    priority = 20 if (str(order_id).startswith('CGPT_') or any(term in message_lower for term in
+                         ('إيداع', 'deposit', 'إشعار إدارة (شراء)', 'شراء مقعد', 'purchase',
+                          'تم خصم', 'business seat', 'بيع عبر الموزعين'))) else 0
+    result = db.api_purchase_notices.update_one({'_id': str(order_id)}, {'$setOnInsert': {
         'text': text, 'status': 'pending', 'created_at': time.time(),
-        'approval_token': approval_token}}, upsert=True)
+        'priority': priority, 'approval_token': approval_token}}, upsert=True)
+    if result.upserted_id is not None:
+        _ADMIN_NOTICE_WAKE.set()
 
 
 def _retry_api_purchase_notices():
-    try:
-        _recover_external_approval_notices()
-    except Exception:
-        logger.warning('Could not recover pending API broadcast approval notices')
     # API purchase receipts go to all registered admins plus the environment owner.
-    for _ in range(20):
+    processed = 0
+    for _ in range(100):
         now = time.time()
         token = secrets.token_hex(12)
         job = db.api_purchase_notices.find_one_and_update({'$or': [
@@ -1732,9 +1739,10 @@ def _retry_api_purchase_notices():
             {'status': 'pending', 'retry_at': {'$lte': now}},
             {'status': 'sending', 'lease_until': {'$lt': now}}]},
             {'$set': {'status': 'sending', 'lease_until': now + 120, 'worker_token': token}},
-            return_document=True)
+            sort=[('priority', -1), ('created_at', 1)], return_document=True)
         if not job:
             break
+        processed += 1
         markup = None
         if job.get('approval_token'):
             approval = db.ext_broadcast_approvals.find_one({'_id': job['approval_token']})
@@ -1766,6 +1774,21 @@ def _retry_api_purchase_notices():
         db.api_purchase_notices.update_one({'_id': job['_id'], 'worker_token': token},
             {'$set': {'status': 'sent' if delivered else 'pending',
                       'retry_at': retry_at}})
+    return processed
+
+
+def _admin_notification_worker():
+    """Deliver durable admin notices promptly and drain bursts without minute-long polling gaps."""
+    while True:
+        _ADMIN_NOTICE_WAKE.wait(timeout=3)
+        _ADMIN_NOTICE_WAKE.clear()
+        try:
+            # Continue in bounded chunks while work is immediately available.
+            while _retry_api_purchase_notices() >= 100:
+                pass
+        except Exception:
+            logger.exception('Admin notification queue worker failed')
+            time.sleep(2)
 
 
 def _api_external_supplier_order(store, product_id, qty, reference):
@@ -5750,14 +5773,51 @@ def _try_previous_translator(text, target_lang):
     return result[0] if result else None
 
 
+def _translate_text_raw_legacy_transport(text, source, target_lang, accepted):
+    """Retain the former curl and HTML-page transports as bounded fallbacks."""
+    try:
+        import shutil
+        import subprocess
+        import json as _translation_json
+        executable = shutil.which('curl')
+        if executable:
+            response = subprocess.run([executable, '--get', '--silent', '--show-error',
+                '--fail', '--connect-timeout', '3', '--max-time', '8',
+                'https://translate.googleapis.com/translate_a/single',
+                '--data-urlencode', 'client=gtx', '--data-urlencode', 'sl=' + source,
+                '--data-urlencode', 'tl=' + target_lang, '--data-urlencode', 'dt=t',
+                '--data-urlencode', 'q=' + text], capture_output=True, text=True,
+                timeout=9, check=True)
+            payload = _translation_json.loads(response.stdout)
+            result = ''.join(row[0] for row in payload[0] if isinstance(row, list)
+                             and row and isinstance(row[0], str))
+            if accepted(result):
+                return result
+    except Exception as exc:
+        logger.warning('Translation HTTPS transport failed: %s', type(exc).__name__)
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        response = requests.get('https://translate.google.com/m',
+            params={'sl': source, 'tl': target_lang, 'q': text}, timeout=(2.5, 7))
+        response.raise_for_status()
+        page = BeautifulSoup(response.text, 'html.parser')
+        element = page.find('div', {'class': 'result-container'}) or page.find('div', {'class': 't0'})
+        result = element.get_text() if element else None
+        if accepted(result):
+            return result
+    except Exception as exc:
+        logger.warning('Translation page fallback failed: %s', type(exc).__name__)
+    return None
+
+
 def _translate_text_raw(text, target_lang, tries=1):
-    """Bounded translation requests; reject an unchanged Arabic result for English."""
+    """Translate plain text with bounded network time; reject unchanged Arabic output."""
     if not text or not text.strip():
         return None
     source = 'ar' if _has_arabic_letters(text) and target_lang == 'en' else 'auto'
     if target_lang == 'en' and source == 'auto':
         return text
-    # Split long text before the provider's input limit, preserving separators.
     if len(text) > 3500:
         pieces = re.findall(r'.{1,3000}(?:\s+|$)|.{1,3000}', text, re.DOTALL)
         translated = [_translate_text_raw(piece, target_lang) for piece in pieces]
@@ -5766,73 +5826,92 @@ def _translate_text_raw(text, target_lang, tries=1):
         return (isinstance(value, str) and not _is_bad_translation(text, value)
                 and not (source == 'ar' and (value.strip() == text.strip()
                          or _has_arabic_letters(value))))
-    # Use the system HTTPS transport when available; no shell or proxy rewriting.
-    # Some deployments fail Python HTTP requests while curl reaches the same endpoint.
-    try:
-        import shutil
-        import subprocess
-        import json as _translation_json
-        executable = shutil.which('curl')
-        if executable:
-            response = subprocess.run([executable, '--get', '--silent', '--show-error',
-                '--fail', '--connect-timeout', '4', '--max-time', '10',
-                'https://translate.googleapis.com/translate_a/single',
-                '--data-urlencode', 'client=gtx', '--data-urlencode', 'sl=' + source,
-                '--data-urlencode', 'tl=' + target_lang, '--data-urlencode', 'dt=t',
-                '--data-urlencode', 'q=' + text], capture_output=True, text=True,
-                timeout=12, check=True)
-            payload = _translation_json.loads(response.stdout)
-            value = ''.join(row[0] for row in payload[0] if isinstance(row, list)
-                            and row and isinstance(row[0], str))
-            if accepted(value):
-                return value
-    except Exception as exc:
-        logger.warning('Translation HTTPS transport failed: %s', type(exc).__name__)
-    previous = _try_previous_translator(text, target_lang)
-    if accepted(previous):
-        return previous
     import requests
-    # Structured response avoids depending solely on Google's page markup.
     try:
         response = requests.get('https://translate.googleapis.com/translate_a/single',
             params={'client': 'gtx', 'sl': source, 'tl': target_lang, 'dt': 't', 'q': text},
-            timeout=(5, 15))
+            timeout=(2.5, 7))
         response.raise_for_status()
         payload = response.json()
-        result = ''.join(row[0] for row in payload[0] if isinstance(row, list)
-                         and row and isinstance(row[0], str))
-        if accepted(result):
-            return result
+        value = ''.join(row[0] for row in payload[0] if isinstance(row, list)
+                        and row and isinstance(row[0], str))
+        if accepted(value):
+            return value
     except Exception as exc:
         logger.warning('Translation structured request failed: %s', type(exc).__name__)
-    # Same provider as the existing library, with a local timeout (no global patch).
-    try:
-        from bs4 import BeautifulSoup
-        response = requests.get('https://translate.google.com/m',
-            params={'sl': source, 'tl': target_lang, 'q': text}, timeout=(5, 15))
-        response.raise_for_status()
-        page = BeautifulSoup(response.text, 'html.parser')
-        element = page.find('div', {'class': 'result-container'}) or page.find('div', {'class': 't0'})
-        result = element.get_text() if element else None
-        if accepted(result):
-            return result
-    except Exception as exc:
-        logger.warning('Translation page request failed: %s', type(exc).__name__)
+    previous = _try_previous_translator(text, target_lang)
+    if accepted(previous):
+        return previous
+    legacy = _translate_text_raw_legacy_transport(text, source, target_lang, accepted)
+    if accepted(legacy):
+        return legacy
     logger.warning('Translation unavailable: target=%s source=%s length=%s', target_lang, source, len(text))
     return None
 
 
 def _translate_product_description(text):
-    result = safe_translate_for_cms(text, 'en')
-    # Protected code, links, variables and emoji must remain untouched.
-    for segment in _PRESERVE_RE.split(result or ''):
-        if segment and not _PRESERVE_RE.fullmatch(segment) and _has_arabic_letters(segment):
+    """Translate a full description in one bounded request while protecting markup."""
+    if not text or not str(text).strip() or not _has_arabic_letters(text):
+        return text
+    try:
+        vault = {}
+        def protect(match):
+            token = f"XQ{len(vault)}QX"
+            vault[token] = match.group(0)
+            return f" {token} "
+        source = _PRESERVE_RE.sub(protect, str(text))
+        result = _translate_text_raw(source, 'en')
+        if not result:
+            logger.warning('Product description translation unavailable')
+            return None
+        result = re.sub(r'(?i)x\s*q\s*(\d{1,3})\s*q\s*x',
+                        lambda m: f"XQ{m.group(1)}QX", result)
+        if _has_arabic_letters(result):
             logger.warning('Product description translation incomplete')
             return None
-    if text.strip() and not (result or '').strip():
-        logger.warning('Product description translation empty')
+        for token, original in vault.items():
+            if not re.search(re.escape(token), result, re.IGNORECASE):
+                logger.warning('Product description translation lost protected markup')
+                return None
+            result = re.sub(re.escape(token), lambda _m, value=original: value,
+                            result, flags=re.IGNORECASE)
+        return result.strip()
+    except Exception as exc:
+        logger.warning('Product description translation failed: %s', type(exc).__name__)
         return None
-    return result
+
+
+def _retry_product_description_translations():
+    """Retry a few explicitly pending product descriptions after a temporary provider failure."""
+    for collection_name, source_field in (
+            ('products', 'desc_ar'), ('cgpt_products', 'desc'), ('ext_products', 'desc_ar')):
+        try:
+            for product in db[collection_name].find({
+                    'desc_translation_pending': True,
+                    '$or': [{'desc_translation_attempts': {'$lt': 3}},
+                            {'desc_translation_attempts': {'$exists': False}}]}).limit(2):
+                source = product.get(source_field) or ''
+                if not source:
+                    db[collection_name].update_one({'_id': product['_id']},
+                        {'$set': {'desc_translation_pending': False}})
+                    continue
+                translated = _translate_product_description(source)
+                selector = {'_id': product['_id'], 'desc_translation_pending': True,
+                            source_field: source}
+                if translated:
+                    values = {'desc_en': translated, 'desc_translation_pending': False,
+                              'desc_translation_attempts': 0}
+                    if collection_name == 'ext_products':
+                        values['desc_en_html'] = translated
+                    db[collection_name].update_one(selector,
+                        {'$set': values, '$unset': {'desc_en_html': ''}
+                         if collection_name != 'ext_products' else {}})
+                    _invalidate_products_cache()
+                else:
+                    db[collection_name].update_one(selector,
+                        {'$inc': {'desc_translation_attempts': 1}})
+        except Exception:
+            logger.exception('Pending product description translation retry failed: %s', collection_name)
 
 
 def _translate_single_line(line, target_lang='en'):
@@ -18192,6 +18271,7 @@ def _ext_description_update(desc, lang='ar'):
             fields.update({'desc_en': translated, 'desc_en_html': translated})
         visible = re.sub(r'<[^>]+>', '', translated or '')
         fields['desc_translation_pending'] = translated is None
+        fields['desc_translation_attempts'] = 0
     else:
         fields['desc_translation_pending'] = False
     return fields
@@ -18223,6 +18303,8 @@ def _ext_save_desc(message, pid, lang='ar'):
     desc = extract_custom_emojis_to_html(message)
     try:
         fields = _ext_description_update(desc, lang)
+        if lang == 'ar':
+            fields['desc_translation_attempts'] = 0
         result = db.ext_products.update_one({'_id': ObjectId(pid)},
             {'$set': fields})
         if not result.matched_count:
@@ -21772,7 +21854,7 @@ def cgpt_add_account(call):
     msg = bot.send_message(call.message.chat.id,
         "🍪 <b>إضافة / تحديث كوكيز ChatGPT</b>\n\n"
         "إذا كان الإيميل موجوداً سأحدّثه دون إنشاء حساب آخر، ثم أعرض نتيجة الفحص.\n"
-        "أرسل كوكيز الحساب (JSON) — نفس صيغة الحساب الرئيسي:\n"
+        "أرسل ملف .txt أو الصق كوكيز الحساب (JSON) — نفس صيغة الحساب الرئيسي:\n"
         "<code>{\"accessToken\":\"...\",\"sessionToken\":\"...\",\"account\":{...},\"user\":{...}}</code>",
         parse_mode="HTML")
     bot.register_next_step_handler(msg, _cgpt_save_new_account)
@@ -21836,17 +21918,53 @@ def _cgpt_store_verified_cookies(data, target_id=None):
         return {'updated': bool(matches), 'id': str(record_id), 'email': email, 'info': info, 'records': len(targets)}
 
 
+def _cgpt_cookie_message_text(message):
+    """Read pasted JSON or a bounded TXT document without logging credentials."""
+    document = getattr(message, 'document', None)
+    if document is None:
+        return (getattr(message, 'text', None) or '').strip()
+    if not str(getattr(document, 'file_name', '') or '').lower().endswith('.txt'):
+        raise ValueError('أرسل ملف .txt يحتوي JSON الكامل للكوكيز، أو الصقه كنص.')
+    limit = 1024 * 1024
+    if (getattr(document, 'file_size', None) or 0) > limit:
+        raise ValueError('ملف الكوكيز كبير؛ الحد الأقصى 1 MB.')
+    try:
+        file_info = bot.get_file(document.file_id)
+        if (getattr(file_info, 'file_size', None) or 0) > limit:
+            raise ValueError('ملف الكوكيز كبير؛ الحد الأقصى 1 MB.')
+        payload = bot.download_file(file_info.file_path)
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError('تعذّر تنزيل الملف؛ أعد إرساله أو الصق الكوكيز كنص.') from None
+    if len(payload) > limit:
+        raise ValueError('ملف الكوكيز كبير؛ الحد الأقصى 1 MB.')
+    try:
+        encoding = 'utf-16' if payload.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+        raw = payload.decode(encoding).strip()
+    except UnicodeError:
+        raise ValueError('تعذّر قراءة النص؛ احفظ الملف بترميز UTF-8 ثم أعد إرساله.') from None
+    if not raw:
+        raise ValueError('الملف فارغ؛ أرسل ملف .txt يحتوي الكوكيز كاملة.')
+    return raw
+
+
 def _cgpt_receive_cookie_update(message, target_id=None):
     if not _is_admin_check(message.from_user.id):
         return
-    raw = (message.text or '').strip()
+    try:
+        raw = _cgpt_cookie_message_text(message)
+    except ValueError as exc:
+        bot.send_message(message.chat.id, str(exc), parse_mode=None)
+        bot.register_next_step_handler_by_chat_id(message.chat.id, _cgpt_receive_cookie_update, target_id)
+        return
     if raw.lower() in ('/cancel', 'cancel', 'الغاء', 'إلغاء'):
         bot.send_message(message.chat.id, 'تم إلغاء تحديث الكوكيز.')
         return
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
-        bot.send_message(message.chat.id, '❌ JSON غير صالح؛ أرسل الكوكيز كاملة أو /cancel.')
+        bot.send_message(message.chat.id, '❌ JSON غير صالح؛ أرسل الكوكيز كاملة كنص أو ملف .txt أو /cancel.')
         bot.register_next_step_handler_by_chat_id(message.chat.id, _cgpt_receive_cookie_update, target_id)
         return
     bot.send_message(message.chat.id, '⏳ جاري اختبار الاتصال بالكوكيز...')
@@ -21882,7 +22000,7 @@ def cgpt_refresh_account_cookies(call):
         return
     email = _cgpt_cookie_email(target.get('data', {}))
     msg = bot.send_message(call.message.chat.id,
-        f'🔄 تحديث كوكيز: {email}\nأرسل JSON الكامل لنفس الإيميل. سأفحصه قبل الحفظ.\nللإلغاء: /cancel', parse_mode=None)
+        f'🔄 تحديث كوكيز: {email}\nأرسل JSON الكامل لنفس الإيميل كنص أو ملف .txt. سأفحصه قبل الحفظ.\nللإلغاء: /cancel', parse_mode=None)
     bot.register_next_step_handler(msg, _cgpt_receive_cookie_update, target_id)
 
 
@@ -22428,12 +22546,14 @@ def cgpt_add_product_name(message):
 def cgpt_add_product_desc(message, name_ar, name_en, emoji_id):
     raw = (message.text or "").strip()
     desc_ar = extract_custom_emojis_to_html(message) if raw else ''
-    desc_en = safe_translate_for_cms(desc_ar, 'en') if desc_ar else ''
+    desc_en = _translate_product_description(desc_ar) if desc_ar else ''
     result = db.cgpt_products.insert_one({
         'name': name_ar,
         'name_en': name_en,
         'desc': desc_ar,
         'desc_en': desc_en,
+        'desc_translation_pending': bool(desc_ar and desc_en is None),
+        'desc_translation_attempts': 0,
         'durations': [],
         'custom_emoji_id': emoji_id,
         'created_at': _dt_mod.datetime.now().isoformat()
@@ -22730,7 +22850,7 @@ def cgpt_set_cookies(call):
     loaded_icon = "\u2705" if mgr._loaded else "\u274c"
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("\U0001f4cb \u0644\u0635\u0642 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON)", callback_data="cgpt_paste_json"),
+        InlineKeyboardButton("📋 إرسال الكوكيز (نص / TXT)", callback_data="cgpt_paste_json"),
         InlineKeyboardButton("\U0001f504 \u0625\u0639\u0627\u062f\u0629 \u062a\u062d\u0645\u064a\u0644 \u0645\u0646 DB", callback_data="ad_cgpt_reload_token"),
         InlineKeyboardButton("\U0001f519 \u0631\u062c\u0648\u0639", callback_data="ad_cgpt_panel")
     )
@@ -22744,7 +22864,7 @@ def cgpt_set_cookies(call):
 @admin_required
 def cgpt_paste_json(call):
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.from_user.id, "\U0001f4cb <b>\u0627\u0644\u0635\u0642 \u0645\u062d\u062a\u0648\u0649 \u0645\u0644\u0641 \u0627\u0644\u0643\u0648\u0643\u064a\u0632 (JSON \u0643\u0627\u0645\u0644):</b>", parse_mode="HTML")
+    msg = bot.send_message(call.from_user.id, "📋 <b>أرسل ملف .txt يحتوي الكوكيز (JSON كامل)، أو الصق المحتوى هنا:</b>\nللإلغاء: /cancel", parse_mode="HTML")
     bot.register_next_step_handler(msg, cgpt_save_json_cookies)
 
 def cgpt_save_json_cookies(message):
@@ -22839,7 +22959,7 @@ def ad_p_step3(message):
     # نستخرج Premium Emojis ونحولها لـ HTML
     d_ar = extract_custom_emojis_to_html(message)
     # نترجم مع الحفاظ على كل التنسيقات والإيموجي
-    d_en = safe_translate_for_cms(d_ar, 'en')
+    d_en = _translate_product_description(d_ar)
     temp_product[uid].update({'d_ar': d_ar, 'd_en': d_en})
     try:
         bot.send_message(uid,
@@ -22847,7 +22967,7 @@ def ad_p_step3(message):
             f"━━━━━━━━━━━━━━\n"
             f"🇸🇦 <b>العربي:</b>\n{d_ar}\n\n"
             f"━━━━━━━━━━━━━━\n"
-            f"🇬🇧 <b>الإنجليزي:</b>\n{d_en}\n"
+        f"🇬🇧 <b>الإنجليزي:</b>\n{d_en or 'الترجمة لم تكتمل؛ يمكنك إدخال الإنجليزية من تعديل المنتج.'}\n"
             f"━━━━━━━━━━━━━━",
             parse_mode="HTML")
     except:
@@ -22930,6 +23050,8 @@ def ad_p_cgpt_cat_selected(call):
         'name_en':      p.get('n_en', ''),
         'desc_ar':      p.get('d_ar', ''),
         'desc_en':      p.get('d_en', ''),
+        'desc_translation_pending': bool(p.get('d_ar') and not p.get('d_en')),
+        'desc_translation_attempts': 0,
         'price':        float(p.get('price', 0)),
         'is_manual':    False,
         'product_type': 'chatgpt_seat',
@@ -22972,7 +23094,9 @@ def ad_p_final(call):
     pid = str(int(time.time()))
     db.products.insert_one({
         'id': pid, 'name_ar': p['n_ar'], 'name_en': p['n_en'], 
-        'desc_ar': p['d_ar'], 'desc_en': p['d_en'], 
+        'desc_ar': p['d_ar'], 'desc_en': p['d_en'],
+        'desc_translation_pending': bool(p.get('d_ar') and not p.get('d_en')),
+        'desc_translation_attempts': 0,
         'price': p['price'], 'is_manual': is_manual, 'is_hidden': False
     })
     _invalidate_products_cache()
@@ -23698,7 +23822,8 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
                 back_markup2.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
                 bot.send_message(message.chat.id, f"✅ <b>تم تحديث الاسم!</b>\n\n🇸🇦 العربي: {final_text}\n🇬🇧 الإنجليزي (مترجم تلقائياً): {translated}", parse_mode="HTML", reply_markup=back_markup2)
             else:
-                db.products.update_one({'_id': p['_id']}, {'$set': dict({'desc_ar': final_text, 'desc_translation_pending': translated is None},
+                db.products.update_one({'_id': p['_id']}, {'$set': dict({'desc_ar': final_text, 'desc_translation_pending': translated is None,
+                                                                          'desc_translation_attempts': 0},
                              **({'desc_en': translated} if translated is not None else {}))})
                 
                 # 🆕 مزامنة مع db.cgpt_products
@@ -23706,7 +23831,8 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
                 if cgpt_id:
                     try:
                         from bson import ObjectId
-                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': dict({'desc': final_text, 'desc_translation_pending': translated is None},
+                        db.cgpt_products.update_one({'_id': ObjectId(cgpt_id)}, {'$set': dict({'desc': final_text, 'desc_translation_pending': translated is None,
+                                                                                              'desc_translation_attempts': 0},
                                          **({'desc_en': translated} if translated is not None else {}))})
                     except: pass
                     
@@ -27066,8 +27192,17 @@ def run_bot():
     # All functions, imports and database initialization are now complete.
     _API_READY.set()
     logger.info('✅ Reseller API ready — ext-purchase-v3')
-    threading.Thread(target=_run_periodic, args=(_retry_api_purchase_notices, 60, 10,
-                     'API purchase notices'), daemon=True, name='api-purchase-notices').start()
+    try:
+        _recover_external_approval_notices()
+    except Exception:
+        logger.warning('Could not recover pending API broadcast approval notices')
+    threading.Thread(target=_admin_notification_worker, daemon=True,
+                     name='admin-notification-queue').start()
+    _ADMIN_NOTICE_WAKE.set()
+    threading.Thread(target=_run_periodic,
+                     args=(_retry_product_description_translations, 60, 15,
+                           'Product description translations'),
+                     daemon=True, name='product-description-translations').start()
     # Only queued (owner-approved) campaigns may be consumed after restart.
     _ext_start_broadcast_worker()
     # تشغيل الـ daemon في thread خلفية عند بدء البوت
