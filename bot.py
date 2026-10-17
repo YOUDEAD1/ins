@@ -13,6 +13,8 @@ import io
 import random
 import json
 import urllib.parse
+import hashlib
+import hmac
 import base64
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -322,6 +324,100 @@ def _api_json_body(handler):
     if not isinstance(data, dict):
         raise ValueError('JSON body must be an object')
     return data
+
+
+def _webapp_telegram_user(init_data):
+    """Verify Telegram Mini App initData before reading a user's shop records."""
+    try:
+        if not TOKEN or not isinstance(init_data, str) or len(init_data) > 8192:
+            return None
+        values = urllib.parse.parse_qs(init_data, strict_parsing=True, keep_blank_values=True)
+        if any(len(v) != 1 for v in values.values()):
+            return None
+        supplied = values.pop('hash', [None])[0]
+        auth_date = int(values.get('auth_date', ['0'])[0])
+        if not supplied or abs(time.time() - auth_date) > 3600:
+            return None
+        check_string = '\n'.join(f'{key}={values[key][0]}' for key in sorted(values))
+        secret = hmac.new(b'WebAppData', TOKEN.encode(), hashlib.sha256).digest()
+        actual = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(supplied, actual):
+            return None
+        identity = json.loads(values.get('user', [''])[0])
+        uid = identity.get('id')
+        return identity if isinstance(uid, int) and uid > 0 else None
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _webapp_store_snapshot(identity):
+    """A bounded, read-only view of the same collections used by the bot."""
+    uid = identity['id']
+    user = db.users.find_one({'user_id': uid}, {'balance': 1, 'is_banned': 1})
+    if not user or user.get('is_banned') == 1:
+        return None
+    products = []
+    for p in db.products.find({'is_hidden': {'$ne': True}},
+            {'id': 1, 'name_ar': 1, 'desc_ar': 1, 'price': 1, 'stock': 1, 'category': 1}).limit(100):
+        products.append({'id': str(p.get('id') or p['_id']),
+                         'name': str(p.get('name_ar') or 'منتج رقمي')[:100],
+                         'description': str(p.get('desc_ar') or '')[:220],
+                         'price': float(p.get('price') or 0),
+                         'stock': p.get('stock'), 'category': str(p.get('category') or '')[:50]})
+    orders = []
+    for o in db.orders.find({'user_id': uid},
+            {'product_id': 1, 'total_price': 1, 'price': 1, 'status': 1}).sort('_id', -1).limit(20):
+        orders.append({'id': str(o['_id']), 'product': str(o.get('product_id') or '')[:80],
+                       'date': o['_id'].generation_time.strftime('%Y-%m-%d'),
+                       'amount': float(o.get('total_price') or o.get('price') or 0),
+                       'status': str(o.get('status') or 'completed')[:30]})
+    return {'connected': True, 'user': {'id': uid, 'first_name': str(identity.get('first_name') or '')[:80]},
+            'balance': float(user.get('balance') or 0), 'products': products, 'orders': orders}
+
+
+def _webapp_translate(identity, lang, items):
+    """Translate only requested public UI/product copy; cache by language and source hash."""
+    if not isinstance(lang, str) or not isinstance(items, list) or len(items) > 30:
+        raise ValueError('Invalid translation request')
+    supported = set(GoogleTranslator().get_supported_languages(as_dict=True).values())
+    if lang not in supported and lang != 'ar':
+        raise ValueError('Unsupported language')
+    if any(not isinstance(x, str) or len(x) > 600 for x in items):
+        raise ValueError('Invalid translation text')
+    output = []
+    for value in items:
+        if not value.strip() or lang == 'ar':
+            output.append(value)
+            continue
+        cache_id = hashlib.sha256((lang + '\0' + value).encode()).hexdigest()
+        cached = db.webapp_i18n.find_one({'_id': cache_id}, {'value': 1})
+        if cached:
+            output.append(cached['value'])
+            continue
+        # Bound new provider calls to protect the bot's bandwidth and translation quota.
+        day = time.strftime('%Y-%m-%d', time.gmtime())
+        usage = db.webapp_translation_usage.find_one_and_update(
+            {'_id': f"{identity['id']}:{day}", 'count': {'$lt': 50}},
+            {'$inc': {'count': 1}}, return_document=True)
+        if usage is None:
+            existing = db.webapp_translation_usage.find_one({'_id': f"{identity['id']}:{day}"})
+            if existing:
+                output.append(value)
+                continue
+            try:
+                db.webapp_translation_usage.insert_one({'_id': f"{identity['id']}:{day}", 'count': 1})
+            except Exception:
+                output.append(value)
+                continue
+        try:
+            translated = GoogleTranslator(source='auto', target=lang).translate(value)
+            result = str(translated or value)[:1200]
+            db.webapp_i18n.update_one({'_id': cache_id},
+                {'$setOnInsert': {'value': result}}, upsert=True)
+            output.append(result)
+        except Exception:
+            output.append(value)
+    return output
 
 
 def _api_http_guard(func):
@@ -2528,6 +2624,30 @@ class APIHandler(BaseHTTPRequestHandler):
     @_api_http_guard
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
+        if p == '/webapp/session':
+            try:
+                if int(self.headers.get('Content-Length', '0')) > 10000:
+                    return _json_resp(self, 413, {'message': 'Request too large'})
+                identity = _webapp_telegram_user(_api_json_body(self).get('initData'))
+                if not identity:
+                    return _json_resp(self, 401, {'message': 'Open this page from the Telegram bot'})
+                snapshot = _webapp_store_snapshot(identity)
+                return _json_resp(self, 200, snapshot) if snapshot else _json_resp(
+                    self, 403, {'message': 'Account unavailable'})
+            except (ValueError, TypeError, json.JSONDecodeError):
+                return _json_resp(self, 400, {'message': 'Invalid request'})
+        if p == '/webapp/translate':
+            try:
+                if int(self.headers.get('Content-Length', '0')) > 22000:
+                    return _json_resp(self, 413, {'message': 'Request too large'})
+                body = _api_json_body(self)
+                identity = _webapp_telegram_user(body.get('initData'))
+                if not identity or not db.users.find_one({'user_id': identity['id'], 'is_banned': {'$ne': 1}}):
+                    return _json_resp(self, 401, {'message': 'Open this page from the Telegram bot'})
+                return _json_resp(self, 200, {'items': _webapp_translate(
+                    identity, body.get('lang'), body.get('items'))})
+            except (ValueError, TypeError, json.JSONDecodeError):
+                return _json_resp(self, 400, {'message': 'Invalid translation request'})
         gw = _get_api_gateway()
 
         if p != f'/{gw}' and not p.startswith(f'/{gw}/'):
