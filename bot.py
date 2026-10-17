@@ -364,6 +364,13 @@ def _webapp_store_snapshot(identity):
                          'description': str(p.get('desc_ar') or '')[:220],
                          'price': float(p.get('price') or 0),
                          'stock': p.get('stock'), 'category': str(p.get('category') or '')[:50]})
+    # Keep catalog names in English regardless of the visitor's description language.
+    names_en = {str(p.get('id') or p['_id']): p.get('name_en')
+                for p in db.products.find({'is_hidden': {'$ne': True}},
+                    {'id': 1, 'name_en': 1}).limit(100)}
+    for item in products:
+        if names_en.get(item['id']):
+            item['name'] = str(names_en[item['id']])[:100]
     orders = []
     for o in db.orders.find({'user_id': uid},
             {'product_id': 1, 'total_price': 1, 'price': 1, 'status': 1}).sort('_id', -1).limit(20):
