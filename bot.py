@@ -3736,6 +3736,10 @@ def ensure_critical_indexes():
 
 # نُفّذها فوراً عند بدء البوت
 initialize_referrals_v2()
+try:
+    db.referral_milestones.create_index([('referrer_id', 1), ('batch_no', 1)], unique=True)
+except Exception:
+    logger.exception('Could not create unique referral milestone index')
 ensure_critical_indexes()
 
 # 🛡 ضمان أن الأونر مسجّل كأدمن (عشان يستقبل تنبيهات الستوك وكل إشعارات الأدمن بثبات)
@@ -4108,12 +4112,14 @@ def _notify_admin_referral_milestone(referrer_id):
         f"💰 <b>المكافأة المقترحة:</b> ${reward:.2f}\n\n"
         f"<i>المكافأة تُمنح فقط بضغطك على زر المنح.</i>"
     )
+    txt += "\n\n🔎 <b>الإحالات تحت المراجعة؛ افحصها قبل قرار المنح أو الحظر.</b>"
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{referrer_id}_{batch_no}"),
         InlineKeyboardButton("👁 عرض الإحالات", callback_data=f"refwd_view_{referrer_id}")
     )
     markup.add(InlineKeyboardButton("❌ إلغاء", callback_data=f"refwd_no_{referrer_id}_{batch_no}"))
+    markup.add(InlineKeyboardButton("🚫 حظر المحيل", callback_data=f"refwd_ban_{referrer_id}_{batch_no}"))
 
     # نسجّل الدفعة كـ "بانتظار" حتى لا يتكرر الإشعار
     try:
@@ -4227,6 +4233,19 @@ def ref_milestone_approve(call):
         bot.send_message(call.message.chat.id, "❌ بيانات غير صالحة.")
         return
 
+    milestone = db.referral_milestones.find_one({
+        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
+    referrer = db.users.find_one({'user_id': referrer_id}) or {}
+    active_count = db.referrals_v2.count_documents({
+        'referrer_id': referrer_id, 'status': 'active'})
+    if (not milestone or not referrer or referrer.get('is_banned') == 1
+            or active_count < batch_no * get_referral_threshold()):
+        bot.send_message(call.message.chat.id, '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.')
+        return
+    if float(referrer.get('ref_v2_earned') or 0) >= batch_no * get_referral_reward() - 0.001:
+        bot.send_message(call.message.chat.id, '⚠️ هذه الدفعة سبق صرفها تلقائياً في النسخة القديمة.')
+        return
+
     # 🛡 منع الصرف المزدوج: نعلّم الدفعة كـ paid ذرياً
     res = db.referral_milestones.find_one_and_update(
         {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$ne': 'paid'}},
@@ -4282,6 +4301,31 @@ def ref_milestone_cancel(call):
         bot.send_message(call.message.chat.id, "❌ أُلغي.")
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('refwd_ban_'))
+@admin_required
+def ref_milestone_ban(call):
+    """Ban a reviewed referrer and cancel unpaid referral milestone requests."""
+    try:
+        referrer_id, batch_no = map(int, call.data[len('refwd_ban_'):].rsplit('_', 1))
+        pending = db.referral_milestones.find_one({
+            'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
+        if not pending:
+            bot.answer_callback_query(call.id, 'الطلب مغلق بالفعل', show_alert=True)
+            return
+        db.users.update_one({'user_id': referrer_id}, {'$set': {
+            'is_banned': 1, 'banned_reason': 'Referral review',
+            'banned_at': int(time.time())}})
+        db.referrals_v2.update_many({'referrer_id': referrer_id},
+                                    {'$set': {'status': 'cancelled'}})
+        db.referral_milestones.update_many(
+            {'referrer_id': referrer_id, 'status': 'pending'},
+            {'$set': {'status': 'cancelled', 'cancelled_by': call.from_user.id}})
+        bot.answer_callback_query(call.id, 'تم الحظر وإلغاء الطلبات المعلقة', show_alert=True)
+    except Exception:
+        logger.exception('Referral review ban failed')
+        bot.answer_callback_query(call.id, 'تعذر تنفيذ الحظر', show_alert=True)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_view_"))
 @admin_required
 def ref_milestone_view(call):
@@ -4313,6 +4357,10 @@ def update_referrer_balance(referrer_id):
     تحديث رصيد المُحيل.
     الإصلاح الرئيسي: الـ optimistic lock يفشل لو ref_v2_earned غير موجود في DB.
     """
+    # Manual review is now the only way to pay a referral milestone.
+    # Preserve the historical settlement implementation below for reference.
+    _notify_admin_referral_milestone(int(referrer_id))
+    return
     try:
         rid = int(referrer_id)
         with _get_referrer_lock(rid):
@@ -14054,6 +14102,17 @@ def _auto_sync_ext_stores():
                 continue
             seen_ext_ids.add(ext_id)
             existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
+            # Skip the original write/read path when an available product is unchanged.
+            if (existing and _f['stock'] > 0 and _f['available'] is not False
+                    and existing.get('_supplier_available') is True
+                    and existing.get('stock') == _f['stock']
+                    and existing.get('unlimited', False) == _f.get('unlimited', False)
+                    and not any(existing.get(key) for key in
+                                ('_new_notice', '_stock_notice', '_missing_since',
+                                 '_supplier_empty_since'))
+                    and (not _f['cost_price'] or abs(float(_f['cost_price']) -
+                         float(existing.get('cost_price', existing.get('base_price', 0)) or 0)) <= 0.001)):
+                continue
             if existing:
                 db.ext_products.update_one({'_id': existing['_id']},
                     {'$set': {'unlimited': _f.get('unlimited', False)}})
@@ -14061,6 +14120,7 @@ def _auto_sync_ext_stores():
             if _f['available'] is False:
                 new_stock = 0
             p_name = _f['name']
+
 
             if not existing:
                 if new_stock <= 0:
@@ -17135,6 +17195,9 @@ def _insight_request(store, method, path, body=None, idem_key=None, test=False):
         response = requests.request(method, 'https://api.insightxpro.store/api/v1' + path,
             headers=headers, json=payload if method in ('POST', 'PATCH') else None,
             timeout=60 if purchase else 20, allow_redirects=False)
+        if method == 'GET' and path == '/products':
+            logger.info('[EXT_SYNC] catalog response bytes=%d status=%d',
+                        len(response.content), response.status_code)
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError('unexpected response format')
@@ -17265,6 +17328,9 @@ def _ext_api_get(store, path):
         url = f"{base}{prefix}{path}"
         try:
             r = requests.get(url, headers=_ext_api_headers(store), timeout=15)
+            if path == '/products':
+                logger.info('[EXT_SYNC] catalog response bytes=%d status=%d',
+                            len(r.content), r.status_code)
             if r.status_code == 200:
                 # نحفظ الـ prefix الناجح للمرات القادمة
                 if prefix and not store.get('api_prefix'):
