@@ -1,0 +1,752 @@
+--- a/bot.py
++++ b/bot.py
+@@ -9026,6 +9026,118 @@
+ _FOLDER_INDEX_LOCK = threading.RLock()
+ _STOCK_VISIBILITY_LOCK = threading.RLock()
+ _STOCK_HIDE_SECONDS = 3 * 86400
++_STOCK_VISIBILITY_STATE = {'last_success': 0.0, 'retry_at': 0.0}
++
++
++def _stock_timestamp(value, now):
++    """Normalize recorded event times only; product creation dates are never outage evidence."""
++    try:
++        if isinstance(value, bool) or value is None:
++            return None
++        if isinstance(value, ObjectId):
++            number = value.generation_time.timestamp()
++        elif isinstance(value, _dt_mod.datetime):
++            number = (value if value.tzinfo else value.replace(tzinfo=_dt_mod.timezone.utc)).timestamp()
++        elif isinstance(value, (int, float)):
++            number = float(value)
++        else:
++            value = str(value).strip()
++            if re.fullmatch(r'\d+(?:\.\d+)?', value):
++                number = float(value)
++            else:
++                date = _dt_mod.datetime.fromisoformat(value.replace('Z', '+00:00'))
++                number = (date if date.tzinfo else date.replace(tzinfo=_dt_mod.timezone.utc)).timestamp()
++        if number > 100_000_000_000:
++            number /= 1000  # Some supplier records store milliseconds.
++        return min(int(now), int(number)) if number == number and 0 < number <= now + 1 else None
++    except (ValueError, TypeError, OverflowError):
++        return None
++
++
++def _stock_visibility_history(collection, unavailable, stamp):
++    """Seed old outages once from supplier evidence or completed local sales, without inventory secrets."""
++    fields = {'id': 1, 'stock_oos_since': 1, 'stock_oos_source': 1, 'stock_last_available_at': 1,
++              '_supplier_empty_since': 1, '_missing_since': 1}
++    candidates = list(collection.find({'$and': [unavailable, {'$or': [
++        {'stock_history_version': {'$ne': 38}}, {'stock_oos_since': {'$exists': False}}]}]}, fields))
++    if not candidates:
++        return 0
++    inventory, sales = {}, {}
++    if collection.name == 'products':
++        refs = set()
++        for p in candidates:
++            raw = p.get('id') if p.get('id') is not None else p['_id']
++            refs.add(raw)
++            for alias in _visibility_aliases(raw):
++                refs.add(alias)
++                if alias.isdigit(): refs.add(int(alias))
++        for row in db.product_stock.aggregate([{'$match': {'product_id': {'$in': list(refs)}}},
++                {'$group': {'_id': '$product_id', 'count': {'$sum': 1}, 'last_id': {'$max': '$_id'},
++                    'unsold': {'$sum': {'$cond': [{'$eq': ['$is_sold', False]}, 1, 0]}},
++                    'reserved': {'$sum': {'$cond': [{'$ne': [{'$ifNull': ['$reservation_id', None]}, None]}, 1, 0]}}}}]):
++            key = _wa_norm_id(row['_id'])
++            bucket = inventory.setdefault(key, {'count': 0, 'unsold': 0, 'reserved': 0, 'last_added': 0})
++            for field in ('count', 'unsold', 'reserved'):
++                bucket[field] += int(row.get(field, 0))
++            added = _stock_timestamp(row['last_id'], stamp) if isinstance(row.get('last_id'), ObjectId) else None
++            bucket['last_added'] = max(bucket['last_added'], added or 0)
++        eligible = [raw for raw in refs if (inventory.get(_wa_norm_id(raw)) or {}).get('count') and
++                    not inventory[_wa_norm_id(raw)]['unsold'] and not inventory[_wa_norm_id(raw)]['reserved']]
++        if eligible:
++            for row in db.orders.aggregate([{'$match': {'product_id': {'$in': eligible},
++                    'status': {'$nin': ['failed', 'refunded', 'cancelled', 'canceled']}}}, {'$group': {
++                    '_id': '$product_id', 'last_id': {'$max': '$_id'}, 'date': {'$max': '$date'},
++                    'created_at': {'$max': '$created_at'}, 'purchased_at': {'$max': '$purchased_at'}}}]):
++                times = [_stock_timestamp(row.get(key), stamp) for key in ('date', 'created_at', 'purchased_at')]
++                if isinstance(row.get('last_id'), ObjectId):
++                    times.append(_stock_timestamp(row['last_id'], stamp))
++                sales[_wa_norm_id(row['_id'])] = max(sales.get(_wa_norm_id(row['_id']), 0), *(x or 0 for x in times))
++    changed = 0
++    for p in candidates:
++        previous = _stock_timestamp(p.get('stock_oos_since'), stamp)
++        last_available = _stock_timestamp(p.get('stock_last_available_at'), stamp) or 0
++        if previous and previous < last_available:
++            previous = None
++        evidence, source = [], 'observed'
++        if collection.name == 'ext_products':
++            evidence = [_stock_timestamp(p.get(key), stamp) for key in ('_supplier_empty_since', '_missing_since')]
++            source = 'supplier_history'
++        elif collection.name == 'products':
++            raw = p.get('id') if p.get('id') is not None else p['_id']
++            state, sold = inventory.get(_wa_norm_id(raw), {}), sales.get(_wa_norm_id(raw), 0)
++            if (state.get('count') and not state.get('unsold') and not state.get('reserved') and
++                    state.get('last_added') and sold >= state['last_added']):
++                evidence, source = [sold], 'completed_sales'
++        evidence = [value for value in evidence if value and value >= last_available]
++        since = min([previous or stamp] + evidence)
++        since = max(since, last_available)
++        changes = {'stock_history_version': 38, 'stock_oos_since': since}
++        if evidence and min(evidence) <= (previous or stamp):
++            changes['stock_oos_source'] = source
++        elif not previous:
++            changes['stock_oos_source'] = 'observed'
++        # Restock arriving during this read wins; it cannot inherit a stale outage.
++        query = {'$and': [unavailable, {'_id': p['_id'], 'stock_oos_since': p.get('stock_oos_since'),
++                    'stock_last_available_at': p.get('stock_last_available_at')}]}
++        changed += collection.update_one(query, {'$set': changes}).modified_count
++    return changed
++
++
++def _stock_visibility_ensure():
++    """Catch up before showing a store, once per five minutes; never call a supplier here."""
++    now = time.time()
++    if now - _STOCK_VISIBILITY_STATE['last_success'] < 300 or _STOCK_VISIBILITY_STATE['retry_at'] > now:
++        return
++    if not _STOCK_VISIBILITY_LOCK.acquire(blocking=False):
++        return
++    try:
++        if now - _STOCK_VISIBILITY_STATE['last_success'] >= 300:
++            _stock_visibility_tick()
++    except Exception:
++        _STOCK_VISIBILITY_STATE['retry_at'] = now + 60
++        logger.warning('Stock visibility catch-up deferred; existing visibility is preserved')
++    finally:
++        _STOCK_VISIBILITY_LOCK.release()
+ 
+ 
+ def _visibility_aliases(value):
+@@ -9100,6 +9212,8 @@
+     changes, remove = {}, {}
+     since = document.get('stock_oos_since')
+     if available:
++        if document.get('stock_last_available_at') != now:
++            changes['stock_last_available_at'] = now
+         if since is not None:
+             query['stock_oos_since'] = since; remove['stock_oos_since'] = ''
+         if document.get('stock_auto_hidden'):
+@@ -9140,7 +9254,7 @@
+ def _stock_visibility_apply(collection, unavailable, available, stamp):
+     """Bulk state transitions on indexed metadata; do not download every product on each sweep."""
+     field = 'hidden' if collection.name == 'ext_products' else 'is_hidden'
+-    changed = 0
++    changed = _stock_visibility_history(collection, unavailable, stamp)
+     changed += collection.update_many({'$and': [unavailable, {'stock_oos_since': {'$exists': False}}]},
+         {'$set': {'stock_oos_since': stamp}}).modified_count
+     changed += collection.update_many({'$and': [unavailable, {
+@@ -9187,6 +9301,7 @@
+                                                 cgpt if cached_seats > 0 else never, stamp)
+             changed += _stock_visibility_apply(db.cgpt_products, {} if cached_seats <= 0 else never,
+                                                 {} if cached_seats > 0 else never, stamp)
++        _STOCK_VISIBILITY_STATE.update(last_success=time.time(), retry_at=0)
+         return changed
+ 
+ 
+@@ -9205,15 +9320,16 @@
+             aliases.update(_visibility_aliases(pid))
+             if pid.isdigit(): aliases.add(int(pid))
+         query = {'$or': [{'id': {'$in': list(aliases)}}, {'_id': {'$in': [ObjectId(x) for x in aliases if isinstance(x, str) and ObjectId.is_valid(x)]}}]}
+-        for product in db.products.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1, 'stock_visibility_override': 1}):
+-            if any(k in product for k in ('stock_oos_since', 'stock_auto_hidden', 'stock_visibility_override')):
+-                _stock_visibility_observe(db.products, product, True)
++        for product in db.products.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1,
++                'stock_visibility_override': 1, 'stock_last_available_at': 1}):
++            _stock_visibility_observe(db.products, product, True)
+     elif collection.name == 'ext_products' and method in ('update_one', 'find_one_and_update', 'update_many') and len(args) >= 2:
+         update = args[1]
+         value = (update.get('$set') or {}).get('stock') if isinstance(update, dict) else None
+         if isinstance(value, (int, float)) and value > 0 and (getattr(result, 'matched_count', 0) or isinstance(result, dict)):
+             query = {'_id': result['_id']} if isinstance(result, dict) else args[0]
+-            for product in collection.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1, 'stock_visibility_override': 1}):
++            for product in collection.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1,
++                    'stock_visibility_override': 1, 'stock_last_available_at': 1}):
+                 _stock_visibility_observe(collection, product, True)
+ 
+ 
+@@ -9260,6 +9376,7 @@
+         
+         u = get_user_data_full(uid)
+         is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID) if u else False
++        is_admin = False  # Hidden inventory belongs to the admin edit screens, not the customer store.
+         
+         emoji = cat.get('emoji', '📁')
+         public_items = _wa_build_catalog(False)['products'] if not is_admin else []
+@@ -10669,6 +10786,8 @@
+ # ============================================================
+ def _shop_flat_view(call, uid, l, is_admin, page=0):
+     """عرض كل المنتجات (عادية + API) بصفحات — مع العدد واللون والترتيب."""
++    _stock_visibility_ensure()
++    is_admin = False
+     PER = 15
+     # نجمع المنتجات العادية
+     reg_prods = []
+@@ -11054,6 +11173,8 @@
+ 
+ def _shop_items(uid, is_admin=False):
+     """كل المنتجات اللي يقدر يشوفها العميل (عادية + ChatGPT + متاجر API) بالاسم والسعر والمخزون — بدون الوصف."""
++    _stock_visibility_ensure()
++    is_admin = False
+     l = get_lang(uid)
+     prods = [p for p in _get_all_products_cached() if is_admin or _customer_product_visible(p)]
+     ids = []
+@@ -11296,6 +11417,7 @@
+ 
+ @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
+ def shop_list_ui(call):
++    _stock_visibility_ensure()
+     bot.answer_callback_query(call.id)
+     uid = call.from_user.id
+     if is_user_banned(uid): return
+@@ -11303,6 +11425,7 @@
+     
+     u = get_user_data_full(uid)
+     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
++    is_admin = False  # Hidden inventory belongs to the admin edit screens, not the customer store.
+     l = get_lang(uid)
+ 
+     # وضع العرض لكل مستخدم: folders (مجلدات) أو flat (كل المنتجات بصفحات)
+@@ -32033,7 +32156,8 @@
+                                 logger.debug('Stock visibility metadata will retry during the next sweep')
+                             touched = {key for op, values in update.items() if op.startswith('$') and isinstance(values, dict) for key in values}
+                             metadata_only = bool(touched) and touched <= {
+-                                'stock_oos_since', 'stock_auto_hidden', 'stock_auto_hidden_at', 'stock_visibility_override'}
++                                'stock_oos_since', 'stock_auto_hidden', 'stock_auto_hidden_at', 'stock_visibility_override',
++                                'stock_history_version', 'stock_last_available_at', 'stock_oos_source'}
+                             changed = getattr(res, 'modified_count', 1) or getattr(res, 'upserted_id', None)
+                             if not metadata_only and changed:
+                                 _catalog_changed()
+@@ -32102,6 +32226,8 @@
+ 
+ 
+ def _wa_build_catalog(include_hidden=False):
++    if not include_hidden:
++        _stock_visibility_ensure()
+     key = 'admin' if include_hidden else 'user'
+     hit = _WA_CAT_CACHE.get(key)
+     if hit and hit['exp'] > time.time():
+@@ -40560,6 +40686,7 @@
+ # ============================================================
+ def run_bot():
+     # All functions, imports and database initialization are now complete.
++    _stock_visibility_ensure()
+     _API_READY.set()
+     logger.info('✅ Reseller API ready — ext-purchase-v3')
+     # 🛍 Mini App: زر القائمة في تيليجرام يفتح الواجهة
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -13,12 +13,10 @@
+ (function () {
+   var mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') ||
+     (navigator.maxTouchPoints > 0 && matchMedia('(max-width: 820px)').matches);
+-  var memory = Number(navigator.deviceMemory) || 0, cores = Number(navigator.hardwareConcurrency) || 0;
+-  var lite = (mobile && ((memory > 0 && memory <= 4) || (cores > 0 && cores <= 4))) ||
+-    !!(navigator.connection && navigator.connection.saveData);
+-  window.__LARA_PERF__ = { mobile: mobile, lite: lite, mediaLimit: lite ? 3 : Infinity,
+-    batch: lite ? 12 : mobile ? 24 : 48, chunk: lite ? 12 : 24 };
+-  document.documentElement.dataset.perf = lite ? 'lite' : mobile ? 'mobile' : 'full';
++  // Restore the original animated storefront on every device; no automatic still-image mode.
++  window.__LARA_PERF__ = { mobile: mobile, lite: false, mediaLimit: Infinity,
++    batch: Infinity, chunk: 24, motion: 'original' };
++  document.documentElement.dataset.perf = 'full';
+ })();
+ </script>
+ <script id="lara-tg-early">
+@@ -34,7 +32,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-37.1',queue=[],recent=new Map();
++ const build='lara-38.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -1704,7 +1702,7 @@
+ const API = (META_API || (/^https?:/.test(location.origin) ? location.origin : '')).replace(/\/+$/, '');
+ if (window.__LARA_ERROR_REPORTER__) window.__LARA_ERROR_REPORTER__.connect(API,INIT,DEMO,tg);
+ const EMO = 'emoji/';
+-const UiPerf = window.__LARA_PERF__ || { mobile: false, lite: false, mediaLimit: Infinity, batch: 48, chunk: 24 };
++const UiPerf = window.__LARA_PERF__ || { mobile: false, lite: false, mediaLimit: Infinity, batch: Infinity, chunk: 24, motion: 'original' };
+ const LIBS = {
+   lottie: 'https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js',
+   pako: 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako_inflate.min.js',
+@@ -1979,7 +1977,7 @@
+ }
+ 
+ /* ───────────────────────── animated emoji ───────────────────────── */
+-function ae(name, cls) { return `<img class="ae ${cls || ''}" data-ae="${esc(name)}" src="${EMO}poster/${esc(name)}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
++function ae(name, cls) { return `<img class="ae ${cls || ''}" data-ae="${esc(name)}" src="${EMO}${esc(name)}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
+ const EMAP = { '⚡': 'bolt', '✔': 'check', '✅': 'check', '☑': 'check', '🚫': 'cross', '❌': 'cross', '✖': 'cross', '⛔': 'cross', '🔥': 'fire', '⭐': 'star', '🌟': 'star', '💎': 'gem', '🔑': 'key', '🗝': 'key', '🔒': 'lock', '🔐': 'lock', '✨': 'sparkles', '🚀': 'rocket', '⏳': 'hourglass', '⌛': 'hourglass', '👑': 'crown', '💰': 'moneybag', '💸': 'moneywings', '🛍': 'store', '🛒': 'cart', '👛': 'purse', '👤': 'profile', '🎉': 'party', '🪙': 'coin', '💬': 'speech', '📢': 'megaphone', '👥': 'busts', '🔍': 'search', '🔎': 'search', '📝': 'memo', '🪪': 'idcard' };
+ function emKey(ch) { return EMAP[String(ch || '').replace(/[\uFE0F\u200D]/g, '').trim()] || null; }
+ /* can this custom emoji actually be loaded here? (live bot: yes; preview: only if the export file carried it) */
+@@ -1995,13 +1993,10 @@
+   playing: new Set(), data: new WeakMap(), mountedImages: new WeakMap(), fallback: new WeakMap(), queue: [], queued: new WeakSet(), active: 0, frame: null, idle: null };
+ const mediaMotion = matchMedia('(prefers-reduced-motion: reduce)');
+ function mediaCovered() { const overlay = $('#page-loading'); return document.hidden || !!(overlay && !overlay.hidden); }
+-function mediaMayPlay(el) { return !mediaMotion.matches && !mediaCovered() && el.isConnected && CE.visible.has(el) && CE.playing.has(el); }
++function mediaMayPlay(el) { return !mediaMotion.matches && !document.hidden && el.isConnected; }
+ function pauseMedia(el) {
+   const anim = CE.anims.get(el); if (anim) anim.pause();
+   const video = el.querySelector && el.querySelector('video'); if (video) video.pause();
+-  if (el.dataset.ae) { const src = EMO + 'poster/' + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
+-  const d = CE.data.get(el), im = CE.mountedImages.get(el);
+-  if (d && d.poster && im && im.getAttribute('src') !== d.poster) im.src = d.poster;
+ }
+ function disposeMedia(el) {
+   pauseMedia(el);
+@@ -2011,7 +2006,7 @@
+   CE.nodes.delete(el); CE.visible.delete(el); CE.playing.delete(el); CE.data.delete(el); CE.mountedImages.delete(el); CE.fallback.delete(el);
+ }
+ function suspendOffscreenEmoji(el) {
+-  if (!UiPerf.mobile && !UiPerf.lite || !el.dataset.ce) return;
++  if (!UiPerf.lite || !el.dataset.ce) return;
+   const anim = CE.anims.get(el), video = el.querySelector('video');
+   if (!anim && !video) return;
+   if (anim) { anim.destroy(); CE.anims.delete(el); }
+@@ -2029,26 +2024,18 @@
+ }
+ function applyMediaPlayback() {
+   CE.frame = null; pruneMedia();
+-  if (!CE.io) for (const el of CE.nodes) {
+-    const box = el.getBoundingClientRect();
+-    if (box.width && box.height && box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth) CE.visible.add(el);
+-    else { CE.visible.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
+-  }
+-  const topSheet = Sheets[Sheets.length - 1];
+-  const candidates = [...CE.visible].filter(el => el.isConnected && (!topSheet || topSheet.el.contains(el)));
+-  candidates.sort((a, b) => mediaPriority(b) - mediaPriority(a));
+-  const next = new Set(mediaMotion.matches || mediaCovered() ? [] : candidates.slice(0, UiPerf.mediaLimit));
+-  for (const el of CE.playing) if (!next.has(el)) pauseMedia(el);
+-  CE.playing = next;
+-  for (const el of candidates) {
+-    if (el.dataset.ce) queueEmoji(el);
+-    if (!next.has(el)) { pauseMedia(el); continue; }
+-    if (el.dataset.ae) { const src = EMO + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
+-    const anim = CE.anims.get(el); if (anim) anim.play();
+-    const video = el.querySelector('video'); if (video && video.paused) video.play().catch(() => {});
+-    const d = CE.data.get(el), im = CE.mountedImages.get(el); if (d && im && im.getAttribute('src') !== d.url) im.src = d.url;
+-  }
+-  drainEmojiQueue();
++  // Play every visible emoji, including product cards while a sheet is open.
++  // Keep the original offscreen/background pause without replacing animations with posters.
++  CE.playing = new Set();
++  for (const el of CE.nodes) {
++    const play = mediaMayPlay(el) && (!CE.io || CE.visible.has(el));
++    const anim = CE.anims.get(el), video = el.querySelector('video');
++    if (play) {
++      CE.playing.add(el);
++      if (anim) anim.play();
++      if (video) video.play().catch(() => {});
++    } else pauseMedia(el);
++  }
+ }
+ function syncMediaPlayback() { if (CE.frame == null) CE.frame = requestAnimationFrame(applyMediaPlayback); }
+ function queueEmoji(el) {
+@@ -2227,43 +2214,27 @@
+   const id = el.dataset.ce;
+   if (!id || el.dataset.ceDone) return;
+   el.dataset.ceDone = '1';
++  CE.nodes.add(el);
+   try {
+     const d = await ceFetch(id);
+     if (!el.isConnected) return;
+-    if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
+     CE.data.set(el, d);
+     if (d.kind === 'lottie') {
+       await loadLottie();
+       if (!el.isConnected) return;
+-      if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
+       el.innerHTML = '';
+-      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: false, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
++      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: !matchMedia('(prefers-reduced-motion: reduce)').matches, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
+       CE.anims.set(el, anim);
+-      if (UiPerf.lite) anim.setSubframe(false);
+-      anim.addEventListener('DOMLoaded', () => {
+-        if (!el.isConnected) { disposeMedia(el); return; }
+-        if (mediaMayPlay(el)) anim.play();
+-        else anim.goToAndStop(Math.max(0, Math.floor(anim.totalFrames * .25)), true);
+-      });
+-      if (mediaMayPlay(el)) anim.play();
+       ecLearn(id, el, d);
+     } else if (d.kind === 'video') {
+       const v = document.createElement('video');
+-      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = false; v.preload = 'auto'; v.playsInline = true; v.setAttribute('playsinline', '');
++      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', '');
+       v.onerror = () => {};
+-      v.addEventListener('loadeddata', () => {
+-        if (!el.isConnected) { v.pause(); v.removeAttribute('src'); v.load(); return; }
+-        if (!CE.visible.has(el) || mediaCovered()) { v.pause(); v.removeAttribute('src'); v.load(); delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
+-        el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d);
+-        if (mediaMayPlay(el)) v.play().catch(() => {}); else v.pause();
+-      }, { once: true });
++      v.addEventListener('loadeddata', () => { if (!el.isConnected) { v.pause(); v.removeAttribute('src'); v.load(); return; } el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d); }, { once: true });
++      v.play().catch(() => {});
+     } else {
+       const im = new Image(); im.alt = ''; im.decoding = 'async';
+-      im.onload = () => { if (el.isConnected && !CE.mountedImages.has(el)) {
+-        el.innerHTML = ''; el.appendChild(im); CE.mountedImages.set(el, im); emojiPoster(id, im, d);
+-        if (!mediaMayPlay(el) && d.poster) im.src = d.poster;
+-        ecLearn(id, el, d);
+-      } };
++      im.onload = () => { if (el.isConnected) { el.innerHTML = ''; el.appendChild(im); ecLearn(id, el, d); } };
+       im.src = d.url;
+     }
+   } catch (e) { if (el.dataset.tile && el.isConnected) el.innerHTML = el.dataset.tile; }
+@@ -2275,19 +2246,13 @@
+     CE.io = new IntersectionObserver(entries => {
+       for (const en of entries) {
+         const el = en.target;
+-        if (!el.isConnected) { disposeMedia(el); continue; }
+-        if (en.isIntersecting) CE.visible.add(el);
+-        else { CE.visible.delete(el); CE.playing.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
++        if (!el.isConnected) { CE.io.unobserve(el); continue; }
++        if (en.isIntersecting) { CE.visible.add(el); ceMount(el); const a = CE.anims.get(el); if (a) a.play(); const v = el.querySelector('video'); if (v) v.play().catch(() => {}); }
++        else { CE.visible.delete(el); const a = CE.anims.get(el); if (a) a.pause(); const v = el.querySelector('video'); if (v) v.pause(); }
+       }
+-      syncMediaPlayback();
+-    }, { rootMargin: '0px', threshold: .01 });
+-  }
+-  root.querySelectorAll('[data-ce],img[data-ae]').forEach(el => {
+-    if (CE.nodes.has(el)) return;
+-    CE.nodes.add(el);
+-    if (el.dataset.ce) CE.fallback.set(el, el.innerHTML);
+-    if (CE.io) CE.io.observe(el); else { CE.visible.add(el); syncMediaPlayback(); }
+-  });
++    }, { rootMargin: '120px' });
++  }
++  root.querySelectorAll('[data-ce]').forEach(el => { CE.nodes.add(el); if (CE.io) CE.io.observe(el); else ceMount(el); });
+   root.querySelectorAll('img.photo').forEach(im => { im.onerror = () => { const f = im.dataset.fb; if (f) im.outerHTML = f; else im.remove(); }; });
+ }
+ 
+--- a/verification/test_round34_alerts.py
++++ b/verification/test_round34_alerts.py
+@@ -175,4 +175,4 @@
+     boot = html[html.index('id="lara-error-bootstrap"'):html.index('__LARA_ERROR_REPORTER__=')]
+     assert 'chrome|moz|safari-web|safari|ms-browser' in boot and 'webkit-masked-url' in boot
+     assert 'if(fromExtension(locationText,extra.stack))return;' in boot
+-    assert "const build='lara-37.1'" in html
++    assert "const build='lara-38.1'" in html
+--- a/verification/test_client_diagnostics_browser.cjs
++++ b/verification/test_client_diagnostics_browser.cjs
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-37.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-38.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-37.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-38.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- a/verification/test_extension_errors_browser.cjs
++++ b/verification/test_extension_errors_browser.cjs
+@@ -35,7 +35,7 @@
+   await page.evaluate(base=>window.dispatchEvent(new ErrorEvent('error',{message:'Store render failed',filename:base+'/__ref_test__/',lineno:12,colno:3,error:new Error('Store render failed')})),BASE);
+   await page.waitForTimeout(800);
+   const own=reports.find(r=>r.message==='Store render failed');
+-  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-37.1',JSON.stringify(reports));
+-  console.log('PASS the store\'s own error is still reported with its location and build lara-37.1');
++  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-38.1',JSON.stringify(reports));
++  console.log('PASS the store\'s own error is still reported with its location and build lara-38.1');
+  }finally{await browser.close();}
+ })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});
+--- a/verification/test_mobile_performance_browser.cjs
++++ b/verification/test_mobile_performance_browser.cjs
+@@ -1,7 +1,7 @@
+ /* Mobile rendering regression: signed loopback API, fake products, no external integrations. */
+ const {spawn}=require('child_process'),fs=require('fs'),zlib=require('zlib'),assert=require('assert/strict');
+ const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
+-const BASE='http://127.0.0.1:8793',optimized=process.env.LARA_TEST_EXPECT_OPTIMIZED!=='0';
++const BASE='http://127.0.0.1:8793',optimized=process.env.LARA_TEST_EXPECT_OPTIMIZED==='1';
+ const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{
+  env:{...process.env,LARA_TEST_PORT:'8793'},stdio:['ignore','pipe','pipe']});
+ const ready=new Promise((resolve,reject)=>{
+@@ -68,6 +68,7 @@
+   const first=await page.evaluate(start=>({ms:performance.now()-start,cards:document.querySelectorAll('#grid .card').length,
+    low:document.documentElement.dataset.perf||'',longTasks:window.__perf.long.filter(e=>e.at>=start).map(e=>e.duration)}),renderStart);
+   if(optimized){assert(first.cards<=24,JSON.stringify(first));assert.equal(first.low,'lite');assert.equal(loading.mask,'none');}
++  else {assert.equal(first.cards,600);assert.equal(first.low,'full');assert.notEqual(loading.mask,'none');}
+   console.log('PASS 600-product fixture; first render:',JSON.stringify({ms:Math.round(first.ms),cards:first.cards,mode:first.low}));
+   if(process.env.LARA_TEST_SHOTS)await page.screenshot({path:process.env.LARA_TEST_SHOTS+'/products.png'});
+   await page.locator('#q').fill('Netflix');
+--- a/verification/test_round37_visibility.py
++++ b/verification/test_round37_visibility.py
+@@ -131,10 +131,19 @@
+ 
+ def test_sweep_reads_only_grouped_stock_ids_not_product_bodies_or_provider_http(mod, monkeypatch):
+     product(mod, stock=0)
+-    monkeypatch.setattr(mod.db.products, 'find', Mock(side_effect=AssertionError('full product download')))
+-    monkeypatch.setattr(mod.db.ext_products, 'find', Mock(side_effect=AssertionError('external product download')))
++    reads = []
++    def metadata_only(original):
++        def checked(query=None, projection=None, *args, **kwargs):
++            assert projection and all(value == 1 for value in projection.values())
++            assert not {'desc', 'desc_ar', 'desc_en', 'raw', 'name', 'code_line'} & projection.keys()
++            reads.append(projection)
++            return original(query, projection, *args, **kwargs)
++        return checked
++    monkeypatch.setattr(mod.db.products, 'find', metadata_only(mod.db.products.find))
++    monkeypatch.setattr(mod.db.ext_products, 'find', metadata_only(mod.db.ext_products.find))
+     monkeypatch.setattr(mod, '_cgpt_display_seats', Mock(side_effect=AssertionError('provider refresh')))
+     mod._stock_visibility_tick()
++    assert reads  # Legacy history is seeded from projected metadata, never product bodies.
+ 
+ 
+ def test_empty_all_hidden_deleted_and_duplicate_alias_folders_have_exact_public_counts(mod, server):
+--- a/verification/test_integration.py
++++ b/verification/test_integration.py
+@@ -41,6 +41,7 @@
+     mod._FSUB_CHANNEL_CACHE.update(expires=0, rows=[])
+     mod._REF_SCAN_HEALTH['retry_at'] = 0
+     mod._REF_SCAN_WAKE.clear()
++    mod._STOCK_VISIBILITY_STATE.update(last_success=0, retry_at=0)
+     mod._PRODUCTS_CACHE=None
+     mod._invalidate_products_cache()
+     mod._VIP_CFG['v']=None
+--- /dev/null
++++ b/verification/test_round38_visibility.py
+@@ -0,0 +1,147 @@
++"""Historical outages and identical owner/customer storefront visibility; no live integrations."""
++import datetime as dt
++import time
++from unittest.mock import Mock
++
++import pytest
++from bson import ObjectId
++from harness import MESSAGES, reply
++from test_integration import mod, isolate, server, request, product
++from test_round37_visibility import folder, visibility_state
++from test_products_menu import callback, dispatch, buttons
++
++
++@pytest.fixture(autouse=True)
++def state(mod, isolate, visibility_state, monkeypatch):
++    mod._STOCK_VISIBILITY_STATE.update(last_success=0, retry_at=0)
++    monkeypatch.setitem(mod._VC_ORIG, 'edit_message_text',
++        lambda text, chat_id, message_id, **kw: reply(chat_id, text, **kw))
++
++
++def oid(stamp):
++    return ObjectId.from_datetime(dt.datetime.fromtimestamp(stamp, dt.timezone.utc))
++
++
++@pytest.mark.parametrize('field', ['_supplier_empty_since', '_missing_since'])
++@pytest.mark.parametrize('unit', ['seconds', 'milliseconds', 'iso', 'datetime'])
++def test_legacy_supplier_outage_hides_immediately_without_waiting_three_more_days(mod, field, unit):
++    now = int(time.time()); old = now - 4 * 86400
++    value = {'seconds': old, 'milliseconds': old * 1000,
++             'iso': dt.datetime.fromtimestamp(old, dt.timezone.utc).isoformat(),
++             'datetime': dt.datetime.fromtimestamp(old, dt.timezone.utc)}[unit]
++    p = {'name': 'Old supplier product', 'stock': 0, field: value,
++         'stock_oos_since': now - 10}  # A short v37 timer must not conceal the older record.
++    mod.db.ext_products.insert_one(p)
++    mod._stock_visibility_ensure()
++    saved = mod.db.ext_products.find_one({'_id': p['_id']})
++    assert saved['hidden'] and saved['stock_auto_hidden']
++    assert saved['stock_oos_since'] == old and saved['stock_oos_source'] == 'supplier_history'
++
++
++@pytest.mark.parametrize('days', [2, 4])
++def test_local_sold_inventory_and_last_completed_sale_seed_the_real_outage(mod, days):
++    now = int(time.time()); sold = now - days * 86400
++    p = product(mod, stock=0)
++    mod.db.product_stock.insert_one({'_id': oid(now - 7 * 86400), 'product_id': 101,
++                                    'is_sold': True, 'sale_order_id': 'LOCAL-HISTORY'})
++    mod.db.orders.insert_one({'_id': oid(sold), 'product_id': '101', 'user_id': 1001,
++                             'date': dt.datetime.fromtimestamp(sold, dt.timezone.utc), 'order_id': 'LOCAL-HISTORY'})
++    before = mod.db.users.find_one({'user_id': 1001})
++    mod._stock_visibility_ensure()
++    saved = mod.db.products.find_one({'_id': p['_id']})
++    assert saved['stock_oos_since'] == sold
++    assert saved['stock_oos_source'] == 'completed_sales'
++    assert bool(saved.get('is_hidden')) == (days >= 3)
++    assert mod.db.users.find_one({'user_id': 1001}) == before
++
++
++def test_old_creation_time_alone_never_proves_three_days_without_stock(mod):
++    now = int(time.time())
++    p = product(mod, stock=0, _id=oid(now - 10 * 86400), created_at=now - 10 * 86400)
++    mod._stock_visibility_ensure()
++    saved = mod.db.products.find_one({'_id': p['_id']})
++    assert not saved['is_hidden'] and saved['stock_oos_since'] >= now
++    assert saved['stock_oos_source'] == 'observed'
++
++
++def test_newer_inventory_without_matching_completed_sale_does_not_inherit_an_old_sale(mod):
++    now = int(time.time()); p = product(mod, stock=0)
++    mod.db.product_stock.insert_one({'_id': oid(now - 86400), 'product_id': '101', 'is_sold': True})
++    mod.db.orders.insert_one({'_id': oid(now - 7 * 86400), 'product_id': '101', 'user_id': 1001})
++    mod._stock_visibility_ensure()
++    saved = mod.db.products.find_one({'_id': p['_id']})
++    assert not saved['is_hidden'] and saved['stock_oos_source'] == 'observed'
++
++
++def test_in_progress_reservation_cannot_be_backdated_using_an_old_purchase(mod):
++    now = int(time.time()); p = product(mod, stock=0)
++    mod.db.product_stock.insert_one({'_id': oid(now - 7 * 86400), 'product_id': '101',
++                                    'is_sold': True, 'reservation_id': 'IN-PROGRESS'})
++    mod.db.orders.insert_one({'_id': oid(now - 4 * 86400), 'product_id': '101', 'user_id': 1001})
++    mod._stock_visibility_ensure()
++    assert not mod.db.products.find_one({'_id': p['_id']})['is_hidden']
++
++
++def test_restock_invalidates_older_supplier_outage_evidence(mod):
++    now = int(time.time())
++    p = {'stock': 0, '_supplier_empty_since': now - 8 * 86400, 'stock_oos_since': now - 8 * 86400}
++    mod.db.ext_products.insert_one(p)
++    mod.db.ext_products.update_one({'_id': p['_id']}, {'$set': {'stock': 3}})
++    mod.db.ext_products.update_one({'_id': p['_id']}, {'$set': {'stock': 0}})
++    mod._stock_visibility_ensure()
++    saved = mod.db.ext_products.find_one({'_id': p['_id']})
++    assert not saved.get('hidden') and saved['stock_oos_since'] >= now
++
++
++@pytest.mark.parametrize('mode', ['folders', 'flat'])
++@pytest.mark.parametrize('uid', [1001, 9001])
++def test_owner_and_customer_both_see_only_public_products_and_nonempty_folders(mod, uid, mode):
++    visible = product(mod)
++    expired = product(mod, '102', stock=0, stock_oos_since=int(time.time()) - 4 * 86400)
++    live = folder(mod, [visible['id']]); gone = folder(mod, [expired['id']]); empty = folder(mod)
++    mod.db.users.update_one({'user_id': uid}, {'$set': {'shop_display_mode': mode}})
++    dispatch(mod, 'open_shop', uid)
++    keys = [b['callback_data'] for row in buttons(MESSAGES[-1]) for b in row if b.get('callback_data')]
++    assert 'cat_' + str(empty['_id']) not in keys and 'cat_' + str(gone['_id']) not in keys
++    assert not any('102' in key for key in keys)
++    assert ('cat_' + str(live['_id']) in keys) if mode == 'folders' else any('101' in key for key in keys)
++    assert all('102' not in row['cb'] for row in mod._shop_items(uid, is_admin=True))
++    # Hidden items and empty folders remain available in the actual management screens.
++    snapshot = mod._wa_build_catalog(True)
++    assert {'101', '102'} <= {p['id'] for p in snapshot['products']}
++    assert len(snapshot['catalogs']) == 3
++
++
++def test_direct_owner_folder_link_uses_same_visibility_and_exact_count(mod):
++    a = product(mod); b = product(mod, '102', is_hidden=True)
++    cat = folder(mod, [a['id'], b['id']])
++    assert mod.catalog_view_helper(9001, 9001, str(cat['_id']), 'en')
++    keys = [b['callback_data'] for row in buttons(MESSAGES[-1]) for b in row if b.get('callback_data')]
++    assert sum(key.startswith('vi_p_') for key in keys) == 1
++    assert not any('102' in key for key in keys)
++
++
++def test_first_site_bootstrap_catches_legacy_empty_folder_before_background_worker(mod, server):
++    old = int(time.time()) - 4 * 86400
++    cat = folder(mod)
++    mod.db.ext_products.insert_one({'name': 'Old', 'stock': 0, 'catalog_id': str(cat['_id']), '_missing_since': old})
++    status, data, _ = request(server, '/webapp/bootstrap', uid=9001)
++    assert status == 200 and not data['products'] and not data['catalogs']
++
++
++def test_on_open_catchup_is_throttled_and_never_calls_supplier(mod, monkeypatch):
++    product(mod, stock=0)
++    supplier = Mock(side_effect=AssertionError('No supplier requests in visibility sweep'))
++    monkeypatch.setattr(mod, '_cgpt_display_seats', supplier)
++    spy = Mock(wraps=mod._stock_visibility_tick); monkeypatch.setattr(mod, '_stock_visibility_tick', spy)
++    mod._stock_visibility_ensure(); mod._stock_visibility_ensure(); mod._stock_visibility_ensure()
++    assert spy.call_count == 1
++    supplier.assert_not_called()
++
++
++def test_repeated_outage_history_reads_do_not_rewrite_unchanged_metadata(mod):
++    p = {'stock': 0, '_missing_since': int(time.time()) - 4 * 86400}; mod.db.ext_products.insert_one(p)
++    mod._stock_visibility_tick()
++    snapshot = mod.db.ext_products.find_one({'_id': p['_id']})
++    assert mod._stock_visibility_tick() == 0
++    assert mod.db.ext_products.find_one({'_id': p['_id']}) == snapshot
+--- /dev/null
++++ b/verification/test_round38_motion_browser.cjs
+@@ -0,0 +1,84 @@
++/* Original motion on weak/strong devices: real animated assets and advancing Lottie frames, loopback only. */
++const {spawn}=require('child_process'),fs=require('fs'),zlib=require('zlib'),crypto=require('crypto'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const BASE='http://127.0.0.1:8795';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:'8795'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL CART SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++const animation=zlib.gzipSync(Buffer.from(JSON.stringify({v:'5.7.4',fr:30,ip:0,op:120,w:96,h:96,nm:'Motion test',ddd:0,assets:[],layers:[{
++ ddd:0,ind:1,ty:4,nm:'ellipse',sr:1,ks:{o:{a:0,k:100},r:{a:1,k:[{t:0,s:[0],e:[360]},{t:120,s:[360]}]},p:{a:0,k:[48,48,0]},a:{a:0,k:[0,0,0]},s:{a:0,k:[100,100,100]}},
++ shapes:[{ty:'el',p:{a:0,k:[0,0]},s:{a:0,k:[64,32]}},{ty:'fl',c:{a:0,k:[0.1,0.5,1,1]},o:{a:0,k:100},r:1}],ip:0,op:120,st:0,bm:0}]})));
++const digest=buffer=>crypto.createHash('sha256').update(buffer).digest('hex');
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking',
++   '--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ const results=[];
++ try{
++  for(const profile of [
++   {name:'weak Android',memory:2,cores:2,height:1500,mobile:true},
++   {name:'data saver Android',memory:2,cores:2,height:740,mobile:true,saveData:true},
++   {name:'strong Android',memory:8,cores:8,height:844,mobile:true},
++   {name:'iOS without hardware hints',memory:0,cores:0,height:844,mobile:true,ios:true},
++   {name:'no IntersectionObserver',memory:2,cores:2,height:740,mobile:true,noObserver:true}
++  ]){
++   const context=await browser.newContext({viewport:{width:390,height:profile.height},isMobile:profile.mobile,hasTouch:true,
++    reducedMotion:'no-preference',userAgent:profile.ios?'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 Version/16.0 Mobile/15E148 Safari/604.1':'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36'});
++   const page=await context.newPage(),errors=[],posters=[];
++   page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.url().includes('/emoji/poster/'))posters.push(r.url());});
++   await page.addInitScript(p=>{
++    Object.defineProperty(navigator,'deviceMemory',{get:()=>p.memory});Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>p.cores});
++    Object.defineProperty(navigator,'connection',{get:()=>({saveData:!!p.saveData})});
++    if(p.noObserver)delete window.IntersectionObserver;
++   },profile);
++   await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++   await page.route('**/webapp/ce/*',r=>r.fulfill({status:200,contentType:'application/x-tgsticker',body:animation}));
++   let release;const gate=new Promise(resolve=>release=resolve);
++   await page.route('**/webapp/bootstrap',async route=>{
++    const response=await route.fetch(),data=await response.json(),sample=data.products[0];
++    data.products=Array.from({length:24},(_,i)=>({...sample,id:i===0?'101':String(10000+i),
++     name_en:'Motion '+String(i).padStart(3,'0'),name_ar:'Motion '+i,ae:i%2?'fire':null,
++     emoji_id:i%2?null:String(910000+i),cats:['motion'],stock:10,in_stock:true}));
++    data.catalogs=[{id:'motion',name_en:'Motion',name_ar:'Motion'}];
++    await gate;await route.fulfill({response,json:data});
++   });
++   await page.goto(BASE+'/__cart_test__/',{waitUntil:'domcontentloaded'});
++   await page.locator('#page-loading').waitFor({state:'visible'});
++   const loader=await page.evaluate(()=>({mask:getComputedStyle(document.querySelector('.lm-rib')).mask,
++    draw:getComputedStyle(document.querySelector('.lm-draw')).animationName,
++    lite:window.__LARA_PERF__.lite,unlimited:window.__LARA_PERF__.mediaLimit===Infinity}));
++   assert.notEqual(loader.mask,'none');assert.notEqual(loader.draw,'none');assert.equal(loader.lite,false);assert(loader.unlimited);
++   release();await page.locator('#grid .card').first().waitFor();await page.locator('#page-loading').waitFor({state:'hidden'});
++   assert.equal(await page.locator('#grid .card').count(),24,'Initial product list is restored in full');
++   await page.waitForFunction(()=>window.lottie&&window.lottie.getRegisteredAnimations().some(a=>!a.isPaused&&a.currentFrame>1));
++   await page.waitForTimeout(500);
++   const playing=await page.evaluate(()=>window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).length);
++   if(profile.height===1500)assert(playing>3,`Animations unexpectedly capped: ${playing}`);
++   const before=await page.evaluate(()=>window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).map(a=>a.currentFrame));
++   await page.waitForTimeout(250);
++   const after=await page.evaluate(()=>window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).map(a=>a.currentFrame));
++   assert(after.some((value,i)=>value!==before[i]),'Custom emoji frames must actually advance');
++   const native=page.locator('#grid img[data-ae="fire"]').first();
++   await native.waitFor();assert((await native.getAttribute('src')).endsWith('emoji/fire.webp'));
++   await native.evaluate(el=>{for(let node=el;node&&node!==document.body;node=node.parentElement){node.style.animation='none';node.style.transition='none';node.style.transform='none';}});
++   const first=await native.screenshot({animations:'allow'});await page.waitForTimeout(400);
++   const second=await native.screenshot({animations:'allow'});
++   assert.notEqual(digest(first),digest(second),'The native WebP emoji must animate, rather than showing a still poster');
++   assert.equal(posters.length,0,'The restored store never substitutes still emoji posters');
++   await page.locator('#q').fill('Motion 000');await page.waitForFunction(()=>document.querySelectorAll('#grid .card').length===1);
++   await page.locator('#q').fill('');await page.waitForFunction(()=>document.querySelectorAll('#grid .card').length===24);
++   await page.locator('#grid .card[data-v="101"]').click();await page.locator('.psheet:not(.closing)').waitFor();
++   await page.locator('.psheet:not(.closing) [data-act="sheet-close"]').click();
++   assert.deepEqual(errors,[]);
++   results.push({profile:profile.name,passed:true,playing,loader,native_webp_frames_changed:true,poster_requests:posters.length});
++   console.log('PASS original loader, all product animations, advancing Lottie/native WebP frames:',profile.name);
++   await context.close();
++  }
++  if(process.env.LARA_TEST_MOTION_RESULT)fs.writeFileSync(process.env.LARA_TEST_MOTION_RESULT,JSON.stringify(results,null,2));
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

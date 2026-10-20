@@ -1,10 +1,10 @@
 {
-  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33) + mobile product rendering/media lifecycle/loading budget (36) + inventory visibility/folders/notification locales/Bybit resilience (37)",
-  "verified_at": "2026-10-20T20:28:00.914625+00:00",
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33) + mobile product rendering/media lifecycle/loading budget (36) + inventory visibility/folders/notification locales/Bybit resilience (37) + original storefront motion/historical inventory/owner visibility (38)",
+  "verified_at": "2026-10-20T21:03:09.929782+00:00",
   "python": "3.12.14",
   "tests": {
-    "total": 760,
-    "passed": 760,
+    "total": 782,
+    "passed": 782,
     "failed": 0,
     "skipped": 0,
     "by_module": {
@@ -26,6 +26,7 @@
       "verification.test_round37_bybit": 17,
       "verification.test_round37_notice_language": 44,
       "verification.test_round37_visibility": 28,
+      "verification.test_round38_visibility": 22,
       "verification.test_runtime_recovery": 42,
       "verification.test_support": 31,
       "verification.test_user_inspection": 40
@@ -554,5 +555,70 @@
       "ru",
       "zh"
     ]
+  },
+  "round38_validation": {
+    "update": 38,
+    "frontend_build": "lara-38.1",
+    "verified_at": "2026-10-20T21:03:09.929782+00:00",
+    "tests": {
+      "total": 782,
+      "passed": 782,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_round38_visibility": 22,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "preservation": {
+      "original_entries": 212,
+      "python_before": 1362,
+      "python_after": 1365,
+      "frontend_before": 332,
+      "frontend_after": 332,
+      "missing_definitions": 0,
+      "unchanged_financial_functions": [
+        "_ref_money",
+        "ref_unit_value",
+        "_ref_resume_financial",
+        "award_purchase_referral_reward",
+        "_ref_repair_user",
+        "credit_user"
+      ]
+    },
+    "python_compile": "passed",
+    "javascript_syntax": "passed",
+    "new_lint_findings": 0,
+    "additional_supplier_http_from_stock_visibility": 0,
+    "live_integrations_used": false,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "historical_outage_sources": [
+      "supplier_empty_since",
+      "supplier_missing_since",
+      "completed_local_sales"
+    ],
+    "owner_customer_visibility_identical": true,
+    "all_animated_assets_preserved": true
   }
 }

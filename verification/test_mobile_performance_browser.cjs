@@ -1,7 +1,7 @@
 /* Mobile rendering regression: signed loopback API, fake products, no external integrations. */
 const {spawn}=require('child_process'),fs=require('fs'),zlib=require('zlib'),assert=require('assert/strict');
 const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
-const BASE='http://127.0.0.1:8793',optimized=process.env.LARA_TEST_EXPECT_OPTIMIZED!=='0';
+const BASE='http://127.0.0.1:8793',optimized=process.env.LARA_TEST_EXPECT_OPTIMIZED==='1';
 const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{
  env:{...process.env,LARA_TEST_PORT:'8793'},stdio:['ignore','pipe','pipe']});
 const ready=new Promise((resolve,reject)=>{
@@ -68,6 +68,7 @@ const animation=zlib.gzipSync(Buffer.from(JSON.stringify({v:'5.7.4',fr:30,ip:0,o
   const first=await page.evaluate(start=>({ms:performance.now()-start,cards:document.querySelectorAll('#grid .card').length,
    low:document.documentElement.dataset.perf||'',longTasks:window.__perf.long.filter(e=>e.at>=start).map(e=>e.duration)}),renderStart);
   if(optimized){assert(first.cards<=24,JSON.stringify(first));assert.equal(first.low,'lite');assert.equal(loading.mask,'none');}
+  else {assert.equal(first.cards,600);assert.equal(first.low,'full');assert.notEqual(loading.mask,'none');}
   console.log('PASS 600-product fixture; first render:',JSON.stringify({ms:Math.round(first.ms),cards:first.cards,mode:first.low}));
   if(process.env.LARA_TEST_SHOTS)await page.screenshot({path:process.env.LARA_TEST_SHOTS+'/products.png'});
   await page.locator('#q').fill('Netflix');

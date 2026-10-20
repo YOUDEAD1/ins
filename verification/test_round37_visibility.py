@@ -131,10 +131,19 @@ def test_inventory_db_failure_aborts_before_any_hide_or_reset(mod, monkeypatch):
 
 def test_sweep_reads_only_grouped_stock_ids_not_product_bodies_or_provider_http(mod, monkeypatch):
     product(mod, stock=0)
-    monkeypatch.setattr(mod.db.products, 'find', Mock(side_effect=AssertionError('full product download')))
-    monkeypatch.setattr(mod.db.ext_products, 'find', Mock(side_effect=AssertionError('external product download')))
+    reads = []
+    def metadata_only(original):
+        def checked(query=None, projection=None, *args, **kwargs):
+            assert projection and all(value == 1 for value in projection.values())
+            assert not {'desc', 'desc_ar', 'desc_en', 'raw', 'name', 'code_line'} & projection.keys()
+            reads.append(projection)
+            return original(query, projection, *args, **kwargs)
+        return checked
+    monkeypatch.setattr(mod.db.products, 'find', metadata_only(mod.db.products.find))
+    monkeypatch.setattr(mod.db.ext_products, 'find', metadata_only(mod.db.ext_products.find))
     monkeypatch.setattr(mod, '_cgpt_display_seats', Mock(side_effect=AssertionError('provider refresh')))
     mod._stock_visibility_tick()
+    assert reads  # Legacy history is seeded from projected metadata, never product bodies.
 
 
 def test_empty_all_hidden_deleted_and_duplicate_alias_folders_have_exact_public_counts(mod, server):

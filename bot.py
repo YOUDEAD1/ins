@@ -9026,6 +9026,118 @@ _FOLDER_INDEX = {'expires': 0, 'aliases': {}, 'hidden': {}}
 _FOLDER_INDEX_LOCK = threading.RLock()
 _STOCK_VISIBILITY_LOCK = threading.RLock()
 _STOCK_HIDE_SECONDS = 3 * 86400
+_STOCK_VISIBILITY_STATE = {'last_success': 0.0, 'retry_at': 0.0}
+
+
+def _stock_timestamp(value, now):
+    """Normalize recorded event times only; product creation dates are never outage evidence."""
+    try:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, ObjectId):
+            number = value.generation_time.timestamp()
+        elif isinstance(value, _dt_mod.datetime):
+            number = (value if value.tzinfo else value.replace(tzinfo=_dt_mod.timezone.utc)).timestamp()
+        elif isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            value = str(value).strip()
+            if re.fullmatch(r'\d+(?:\.\d+)?', value):
+                number = float(value)
+            else:
+                date = _dt_mod.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                number = (date if date.tzinfo else date.replace(tzinfo=_dt_mod.timezone.utc)).timestamp()
+        if number > 100_000_000_000:
+            number /= 1000  # Some supplier records store milliseconds.
+        return min(int(now), int(number)) if number == number and 0 < number <= now + 1 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _stock_visibility_history(collection, unavailable, stamp):
+    """Seed old outages once from supplier evidence or completed local sales, without inventory secrets."""
+    fields = {'id': 1, 'stock_oos_since': 1, 'stock_oos_source': 1, 'stock_last_available_at': 1,
+              '_supplier_empty_since': 1, '_missing_since': 1}
+    candidates = list(collection.find({'$and': [unavailable, {'$or': [
+        {'stock_history_version': {'$ne': 38}}, {'stock_oos_since': {'$exists': False}}]}]}, fields))
+    if not candidates:
+        return 0
+    inventory, sales = {}, {}
+    if collection.name == 'products':
+        refs = set()
+        for p in candidates:
+            raw = p.get('id') if p.get('id') is not None else p['_id']
+            refs.add(raw)
+            for alias in _visibility_aliases(raw):
+                refs.add(alias)
+                if alias.isdigit(): refs.add(int(alias))
+        for row in db.product_stock.aggregate([{'$match': {'product_id': {'$in': list(refs)}}},
+                {'$group': {'_id': '$product_id', 'count': {'$sum': 1}, 'last_id': {'$max': '$_id'},
+                    'unsold': {'$sum': {'$cond': [{'$eq': ['$is_sold', False]}, 1, 0]}},
+                    'reserved': {'$sum': {'$cond': [{'$ne': [{'$ifNull': ['$reservation_id', None]}, None]}, 1, 0]}}}}]):
+            key = _wa_norm_id(row['_id'])
+            bucket = inventory.setdefault(key, {'count': 0, 'unsold': 0, 'reserved': 0, 'last_added': 0})
+            for field in ('count', 'unsold', 'reserved'):
+                bucket[field] += int(row.get(field, 0))
+            added = _stock_timestamp(row['last_id'], stamp) if isinstance(row.get('last_id'), ObjectId) else None
+            bucket['last_added'] = max(bucket['last_added'], added or 0)
+        eligible = [raw for raw in refs if (inventory.get(_wa_norm_id(raw)) or {}).get('count') and
+                    not inventory[_wa_norm_id(raw)]['unsold'] and not inventory[_wa_norm_id(raw)]['reserved']]
+        if eligible:
+            for row in db.orders.aggregate([{'$match': {'product_id': {'$in': eligible},
+                    'status': {'$nin': ['failed', 'refunded', 'cancelled', 'canceled']}}}, {'$group': {
+                    '_id': '$product_id', 'last_id': {'$max': '$_id'}, 'date': {'$max': '$date'},
+                    'created_at': {'$max': '$created_at'}, 'purchased_at': {'$max': '$purchased_at'}}}]):
+                times = [_stock_timestamp(row.get(key), stamp) for key in ('date', 'created_at', 'purchased_at')]
+                if isinstance(row.get('last_id'), ObjectId):
+                    times.append(_stock_timestamp(row['last_id'], stamp))
+                sales[_wa_norm_id(row['_id'])] = max(sales.get(_wa_norm_id(row['_id']), 0), *(x or 0 for x in times))
+    changed = 0
+    for p in candidates:
+        previous = _stock_timestamp(p.get('stock_oos_since'), stamp)
+        last_available = _stock_timestamp(p.get('stock_last_available_at'), stamp) or 0
+        if previous and previous < last_available:
+            previous = None
+        evidence, source = [], 'observed'
+        if collection.name == 'ext_products':
+            evidence = [_stock_timestamp(p.get(key), stamp) for key in ('_supplier_empty_since', '_missing_since')]
+            source = 'supplier_history'
+        elif collection.name == 'products':
+            raw = p.get('id') if p.get('id') is not None else p['_id']
+            state, sold = inventory.get(_wa_norm_id(raw), {}), sales.get(_wa_norm_id(raw), 0)
+            if (state.get('count') and not state.get('unsold') and not state.get('reserved') and
+                    state.get('last_added') and sold >= state['last_added']):
+                evidence, source = [sold], 'completed_sales'
+        evidence = [value for value in evidence if value and value >= last_available]
+        since = min([previous or stamp] + evidence)
+        since = max(since, last_available)
+        changes = {'stock_history_version': 38, 'stock_oos_since': since}
+        if evidence and min(evidence) <= (previous or stamp):
+            changes['stock_oos_source'] = source
+        elif not previous:
+            changes['stock_oos_source'] = 'observed'
+        # Restock arriving during this read wins; it cannot inherit a stale outage.
+        query = {'$and': [unavailable, {'_id': p['_id'], 'stock_oos_since': p.get('stock_oos_since'),
+                    'stock_last_available_at': p.get('stock_last_available_at')}]}
+        changed += collection.update_one(query, {'$set': changes}).modified_count
+    return changed
+
+
+def _stock_visibility_ensure():
+    """Catch up before showing a store, once per five minutes; never call a supplier here."""
+    now = time.time()
+    if now - _STOCK_VISIBILITY_STATE['last_success'] < 300 or _STOCK_VISIBILITY_STATE['retry_at'] > now:
+        return
+    if not _STOCK_VISIBILITY_LOCK.acquire(blocking=False):
+        return
+    try:
+        if now - _STOCK_VISIBILITY_STATE['last_success'] >= 300:
+            _stock_visibility_tick()
+    except Exception:
+        _STOCK_VISIBILITY_STATE['retry_at'] = now + 60
+        logger.warning('Stock visibility catch-up deferred; existing visibility is preserved')
+    finally:
+        _STOCK_VISIBILITY_LOCK.release()
 
 
 def _visibility_aliases(value):
@@ -9100,6 +9212,8 @@ def _stock_visibility_observe(collection, document, available, now=None):
     changes, remove = {}, {}
     since = document.get('stock_oos_since')
     if available:
+        if document.get('stock_last_available_at') != now:
+            changes['stock_last_available_at'] = now
         if since is not None:
             query['stock_oos_since'] = since; remove['stock_oos_since'] = ''
         if document.get('stock_auto_hidden'):
@@ -9140,7 +9254,7 @@ def _set_product_visibility(collection, document, hidden):
 def _stock_visibility_apply(collection, unavailable, available, stamp):
     """Bulk state transitions on indexed metadata; do not download every product on each sweep."""
     field = 'hidden' if collection.name == 'ext_products' else 'is_hidden'
-    changed = 0
+    changed = _stock_visibility_history(collection, unavailable, stamp)
     changed += collection.update_many({'$and': [unavailable, {'stock_oos_since': {'$exists': False}}]},
         {'$set': {'stock_oos_since': stamp}}).modified_count
     changed += collection.update_many({'$and': [unavailable, {
@@ -9187,6 +9301,7 @@ def _stock_visibility_tick(now=None):
                                                 cgpt if cached_seats > 0 else never, stamp)
             changed += _stock_visibility_apply(db.cgpt_products, {} if cached_seats <= 0 else never,
                                                 {} if cached_seats > 0 else never, stamp)
+        _STOCK_VISIBILITY_STATE.update(last_success=time.time(), retry_at=0)
         return changed
 
 
@@ -9205,15 +9320,16 @@ def _stock_visibility_on_write(collection, method, args, result):
             aliases.update(_visibility_aliases(pid))
             if pid.isdigit(): aliases.add(int(pid))
         query = {'$or': [{'id': {'$in': list(aliases)}}, {'_id': {'$in': [ObjectId(x) for x in aliases if isinstance(x, str) and ObjectId.is_valid(x)]}}]}
-        for product in db.products.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1, 'stock_visibility_override': 1}):
-            if any(k in product for k in ('stock_oos_since', 'stock_auto_hidden', 'stock_visibility_override')):
-                _stock_visibility_observe(db.products, product, True)
+        for product in db.products.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1,
+                'stock_visibility_override': 1, 'stock_last_available_at': 1}):
+            _stock_visibility_observe(db.products, product, True)
     elif collection.name == 'ext_products' and method in ('update_one', 'find_one_and_update', 'update_many') and len(args) >= 2:
         update = args[1]
         value = (update.get('$set') or {}).get('stock') if isinstance(update, dict) else None
         if isinstance(value, (int, float)) and value > 0 and (getattr(result, 'matched_count', 0) or isinstance(result, dict)):
             query = {'_id': result['_id']} if isinstance(result, dict) else args[0]
-            for product in collection.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1, 'stock_visibility_override': 1}):
+            for product in collection.find(query, {'stock_oos_since': 1, 'stock_auto_hidden': 1,
+                    'stock_visibility_override': 1, 'stock_last_available_at': 1}):
                 _stock_visibility_observe(collection, product, True)
 
 
@@ -9260,6 +9376,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         
         u = get_user_data_full(uid)
         is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID) if u else False
+        is_admin = False  # Hidden inventory belongs to the admin edit screens, not the customer store.
         
         emoji = cat.get('emoji', '📁')
         public_items = _wa_build_catalog(False)['products'] if not is_admin else []
@@ -10669,6 +10786,8 @@ def referral_list_page(call):
 # ============================================================
 def _shop_flat_view(call, uid, l, is_admin, page=0):
     """عرض كل المنتجات (عادية + API) بصفحات — مع العدد واللون والترتيب."""
+    _stock_visibility_ensure()
+    is_admin = False
     PER = 15
     # نجمع المنتجات العادية
     reg_prods = []
@@ -11054,6 +11173,8 @@ def _shop_tools_row(markup, uid):
 
 def _shop_items(uid, is_admin=False):
     """كل المنتجات اللي يقدر يشوفها العميل (عادية + ChatGPT + متاجر API) بالاسم والسعر والمخزون — بدون الوصف."""
+    _stock_visibility_ensure()
+    is_admin = False
     l = get_lang(uid)
     prods = [p for p in _get_all_products_cached() if is_admin or _customer_product_visible(p)]
     ids = []
@@ -11296,6 +11417,7 @@ def shop_avail_cb(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
 def shop_list_ui(call):
+    _stock_visibility_ensure()
     bot.answer_callback_query(call.id)
     uid = call.from_user.id
     if is_user_banned(uid): return
@@ -11303,6 +11425,7 @@ def shop_list_ui(call):
     
     u = get_user_data_full(uid)
     is_admin = (u.get('is_admin') == 1 or uid == OWNER_ID)
+    is_admin = False  # Hidden inventory belongs to the admin edit screens, not the customer store.
     l = get_lang(uid)
 
     # وضع العرض لكل مستخدم: folders (مجلدات) أو flat (كل المنتجات بصفحات)
@@ -32033,7 +32156,8 @@ def _install_catalog_write_hook():
                                 logger.debug('Stock visibility metadata will retry during the next sweep')
                             touched = {key for op, values in update.items() if op.startswith('$') and isinstance(values, dict) for key in values}
                             metadata_only = bool(touched) and touched <= {
-                                'stock_oos_since', 'stock_auto_hidden', 'stock_auto_hidden_at', 'stock_visibility_override'}
+                                'stock_oos_since', 'stock_auto_hidden', 'stock_auto_hidden_at', 'stock_visibility_override',
+                                'stock_history_version', 'stock_last_available_at', 'stock_oos_source'}
                             changed = getattr(res, 'modified_count', 1) or getattr(res, 'upserted_id', None)
                             if not metadata_only and changed:
                                 _catalog_changed()
@@ -32102,6 +32226,8 @@ def _wa_img_path(key, doc):
 
 
 def _wa_build_catalog(include_hidden=False):
+    if not include_hidden:
+        _stock_visibility_ensure()
     key = 'admin' if include_hidden else 'user'
     hit = _WA_CAT_CACHE.get(key)
     if hit and hit['exp'] > time.time():
@@ -40560,6 +40686,7 @@ def _up_vc_back(session):
 # ============================================================
 def run_bot():
     # All functions, imports and database initialization are now complete.
+    _stock_visibility_ensure()
     _API_READY.set()
     logger.info('✅ Reseller API ready — ext-purchase-v3')
     # 🛍 Mini App: زر القائمة في تيليجرام يفتح الواجهة

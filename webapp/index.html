@@ -13,12 +13,10 @@
 (function () {
   var mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') ||
     (navigator.maxTouchPoints > 0 && matchMedia('(max-width: 820px)').matches);
-  var memory = Number(navigator.deviceMemory) || 0, cores = Number(navigator.hardwareConcurrency) || 0;
-  var lite = (mobile && ((memory > 0 && memory <= 4) || (cores > 0 && cores <= 4))) ||
-    !!(navigator.connection && navigator.connection.saveData);
-  window.__LARA_PERF__ = { mobile: mobile, lite: lite, mediaLimit: lite ? 3 : Infinity,
-    batch: lite ? 12 : mobile ? 24 : 48, chunk: lite ? 12 : 24 };
-  document.documentElement.dataset.perf = lite ? 'lite' : mobile ? 'mobile' : 'full';
+  // Restore the original animated storefront on every device; no automatic still-image mode.
+  window.__LARA_PERF__ = { mobile: mobile, lite: false, mediaLimit: Infinity,
+    batch: Infinity, chunk: 24, motion: 'original' };
+  document.documentElement.dataset.perf = 'full';
 })();
 </script>
 <script id="lara-tg-early">
@@ -34,7 +32,7 @@
 /* Bounded diagnostics are installed before external scripts; never collect form values. */
 (function(){
  'use strict';
- const build='lara-37.1',queue=[],recent=new Map();
+ const build='lara-38.1',queue=[],recent=new Map();
  let connection=null,lastAction='',windowAt=0,windowCount=0;
  function safe(value,limit){
   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
@@ -1704,7 +1702,7 @@ const META_API = (document.querySelector('meta[name="lara-api"]') || {}).content
 const API = (META_API || (/^https?:/.test(location.origin) ? location.origin : '')).replace(/\/+$/, '');
 if (window.__LARA_ERROR_REPORTER__) window.__LARA_ERROR_REPORTER__.connect(API,INIT,DEMO,tg);
 const EMO = 'emoji/';
-const UiPerf = window.__LARA_PERF__ || { mobile: false, lite: false, mediaLimit: Infinity, batch: 48, chunk: 24 };
+const UiPerf = window.__LARA_PERF__ || { mobile: false, lite: false, mediaLimit: Infinity, batch: Infinity, chunk: 24, motion: 'original' };
 const LIBS = {
   lottie: 'https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js',
   pako: 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako_inflate.min.js',
@@ -1979,7 +1977,7 @@ function errText(r) {
 }
 
 /* ───────────────────────── animated emoji ───────────────────────── */
-function ae(name, cls) { return `<img class="ae ${cls || ''}" data-ae="${esc(name)}" src="${EMO}poster/${esc(name)}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
+function ae(name, cls) { return `<img class="ae ${cls || ''}" data-ae="${esc(name)}" src="${EMO}${esc(name)}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
 const EMAP = { '⚡': 'bolt', '✔': 'check', '✅': 'check', '☑': 'check', '🚫': 'cross', '❌': 'cross', '✖': 'cross', '⛔': 'cross', '🔥': 'fire', '⭐': 'star', '🌟': 'star', '💎': 'gem', '🔑': 'key', '🗝': 'key', '🔒': 'lock', '🔐': 'lock', '✨': 'sparkles', '🚀': 'rocket', '⏳': 'hourglass', '⌛': 'hourglass', '👑': 'crown', '💰': 'moneybag', '💸': 'moneywings', '🛍': 'store', '🛒': 'cart', '👛': 'purse', '👤': 'profile', '🎉': 'party', '🪙': 'coin', '💬': 'speech', '📢': 'megaphone', '👥': 'busts', '🔍': 'search', '🔎': 'search', '📝': 'memo', '🪪': 'idcard' };
 function emKey(ch) { return EMAP[String(ch || '').replace(/[\uFE0F\u200D]/g, '').trim()] || null; }
 /* can this custom emoji actually be loaded here? (live bot: yes; preview: only if the export file carried it) */
@@ -1995,13 +1993,10 @@ const CE = { cache: new Map(), io: null, anims: new WeakMap(), nodes: new Set(),
   playing: new Set(), data: new WeakMap(), mountedImages: new WeakMap(), fallback: new WeakMap(), queue: [], queued: new WeakSet(), active: 0, frame: null, idle: null };
 const mediaMotion = matchMedia('(prefers-reduced-motion: reduce)');
 function mediaCovered() { const overlay = $('#page-loading'); return document.hidden || !!(overlay && !overlay.hidden); }
-function mediaMayPlay(el) { return !mediaMotion.matches && !mediaCovered() && el.isConnected && CE.visible.has(el) && CE.playing.has(el); }
+function mediaMayPlay(el) { return !mediaMotion.matches && !document.hidden && el.isConnected; }
 function pauseMedia(el) {
   const anim = CE.anims.get(el); if (anim) anim.pause();
   const video = el.querySelector && el.querySelector('video'); if (video) video.pause();
-  if (el.dataset.ae) { const src = EMO + 'poster/' + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
-  const d = CE.data.get(el), im = CE.mountedImages.get(el);
-  if (d && d.poster && im && im.getAttribute('src') !== d.poster) im.src = d.poster;
 }
 function disposeMedia(el) {
   pauseMedia(el);
@@ -2011,7 +2006,7 @@ function disposeMedia(el) {
   CE.nodes.delete(el); CE.visible.delete(el); CE.playing.delete(el); CE.data.delete(el); CE.mountedImages.delete(el); CE.fallback.delete(el);
 }
 function suspendOffscreenEmoji(el) {
-  if (!UiPerf.mobile && !UiPerf.lite || !el.dataset.ce) return;
+  if (!UiPerf.lite || !el.dataset.ce) return;
   const anim = CE.anims.get(el), video = el.querySelector('video');
   if (!anim && !video) return;
   if (anim) { anim.destroy(); CE.anims.delete(el); }
@@ -2029,26 +2024,18 @@ function mediaPriority(el) {
 }
 function applyMediaPlayback() {
   CE.frame = null; pruneMedia();
-  if (!CE.io) for (const el of CE.nodes) {
-    const box = el.getBoundingClientRect();
-    if (box.width && box.height && box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth) CE.visible.add(el);
-    else { CE.visible.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
+  // Play every visible emoji, including product cards while a sheet is open.
+  // Keep the original offscreen/background pause without replacing animations with posters.
+  CE.playing = new Set();
+  for (const el of CE.nodes) {
+    const play = mediaMayPlay(el) && (!CE.io || CE.visible.has(el));
+    const anim = CE.anims.get(el), video = el.querySelector('video');
+    if (play) {
+      CE.playing.add(el);
+      if (anim) anim.play();
+      if (video) video.play().catch(() => {});
+    } else pauseMedia(el);
   }
-  const topSheet = Sheets[Sheets.length - 1];
-  const candidates = [...CE.visible].filter(el => el.isConnected && (!topSheet || topSheet.el.contains(el)));
-  candidates.sort((a, b) => mediaPriority(b) - mediaPriority(a));
-  const next = new Set(mediaMotion.matches || mediaCovered() ? [] : candidates.slice(0, UiPerf.mediaLimit));
-  for (const el of CE.playing) if (!next.has(el)) pauseMedia(el);
-  CE.playing = next;
-  for (const el of candidates) {
-    if (el.dataset.ce) queueEmoji(el);
-    if (!next.has(el)) { pauseMedia(el); continue; }
-    if (el.dataset.ae) { const src = EMO + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
-    const anim = CE.anims.get(el); if (anim) anim.play();
-    const video = el.querySelector('video'); if (video && video.paused) video.play().catch(() => {});
-    const d = CE.data.get(el), im = CE.mountedImages.get(el); if (d && im && im.getAttribute('src') !== d.url) im.src = d.url;
-  }
-  drainEmojiQueue();
 }
 function syncMediaPlayback() { if (CE.frame == null) CE.frame = requestAnimationFrame(applyMediaPlayback); }
 function queueEmoji(el) {
@@ -2227,43 +2214,27 @@ async function ceMount(el) {
   const id = el.dataset.ce;
   if (!id || el.dataset.ceDone) return;
   el.dataset.ceDone = '1';
+  CE.nodes.add(el);
   try {
     const d = await ceFetch(id);
     if (!el.isConnected) return;
-    if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
     CE.data.set(el, d);
     if (d.kind === 'lottie') {
       await loadLottie();
       if (!el.isConnected) return;
-      if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
       el.innerHTML = '';
-      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: false, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
+      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: !matchMedia('(prefers-reduced-motion: reduce)').matches, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
       CE.anims.set(el, anim);
-      if (UiPerf.lite) anim.setSubframe(false);
-      anim.addEventListener('DOMLoaded', () => {
-        if (!el.isConnected) { disposeMedia(el); return; }
-        if (mediaMayPlay(el)) anim.play();
-        else anim.goToAndStop(Math.max(0, Math.floor(anim.totalFrames * .25)), true);
-      });
-      if (mediaMayPlay(el)) anim.play();
       ecLearn(id, el, d);
     } else if (d.kind === 'video') {
       const v = document.createElement('video');
-      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = false; v.preload = 'auto'; v.playsInline = true; v.setAttribute('playsinline', '');
+      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', '');
       v.onerror = () => {};
-      v.addEventListener('loadeddata', () => {
-        if (!el.isConnected) { v.pause(); v.removeAttribute('src'); v.load(); return; }
-        if (!CE.visible.has(el) || mediaCovered()) { v.pause(); v.removeAttribute('src'); v.load(); delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
-        el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d);
-        if (mediaMayPlay(el)) v.play().catch(() => {}); else v.pause();
-      }, { once: true });
+      v.addEventListener('loadeddata', () => { if (!el.isConnected) { v.pause(); v.removeAttribute('src'); v.load(); return; } el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d); }, { once: true });
+      v.play().catch(() => {});
     } else {
       const im = new Image(); im.alt = ''; im.decoding = 'async';
-      im.onload = () => { if (el.isConnected && !CE.mountedImages.has(el)) {
-        el.innerHTML = ''; el.appendChild(im); CE.mountedImages.set(el, im); emojiPoster(id, im, d);
-        if (!mediaMayPlay(el) && d.poster) im.src = d.poster;
-        ecLearn(id, el, d);
-      } };
+      im.onload = () => { if (el.isConnected) { el.innerHTML = ''; el.appendChild(im); ecLearn(id, el, d); } };
       im.src = d.url;
     }
   } catch (e) { if (el.dataset.tile && el.isConnected) el.innerHTML = el.dataset.tile; }
@@ -2275,19 +2246,13 @@ function hydrate(root) {
     CE.io = new IntersectionObserver(entries => {
       for (const en of entries) {
         const el = en.target;
-        if (!el.isConnected) { disposeMedia(el); continue; }
-        if (en.isIntersecting) CE.visible.add(el);
-        else { CE.visible.delete(el); CE.playing.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
+        if (!el.isConnected) { CE.io.unobserve(el); continue; }
+        if (en.isIntersecting) { CE.visible.add(el); ceMount(el); const a = CE.anims.get(el); if (a) a.play(); const v = el.querySelector('video'); if (v) v.play().catch(() => {}); }
+        else { CE.visible.delete(el); const a = CE.anims.get(el); if (a) a.pause(); const v = el.querySelector('video'); if (v) v.pause(); }
       }
-      syncMediaPlayback();
-    }, { rootMargin: '0px', threshold: .01 });
+    }, { rootMargin: '120px' });
   }
-  root.querySelectorAll('[data-ce],img[data-ae]').forEach(el => {
-    if (CE.nodes.has(el)) return;
-    CE.nodes.add(el);
-    if (el.dataset.ce) CE.fallback.set(el, el.innerHTML);
-    if (CE.io) CE.io.observe(el); else { CE.visible.add(el); syncMediaPlayback(); }
-  });
+  root.querySelectorAll('[data-ce]').forEach(el => { CE.nodes.add(el); if (CE.io) CE.io.observe(el); else ceMount(el); });
   root.querySelectorAll('img.photo').forEach(im => { im.onerror = () => { const f = im.dataset.fb; if (f) im.outerHTML = f; else im.remove(); }; });
 }
 

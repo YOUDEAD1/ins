@@ -175,4 +175,4 @@ def test_site_reporter_skips_extension_scripts():
     boot = html[html.index('id="lara-error-bootstrap"'):html.index('__LARA_ERROR_REPORTER__=')]
     assert 'chrome|moz|safari-web|safari|ms-browser' in boot and 'webkit-masked-url' in boot
     assert 'if(fromExtension(locationText,extra.stack))return;' in boot
-    assert "const build='lara-37.1'" in html
+    assert "const build='lara-38.1'" in html

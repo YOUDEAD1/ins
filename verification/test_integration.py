@@ -41,6 +41,7 @@ def isolate(mod,monkeypatch):
     mod._FSUB_CHANNEL_CACHE.update(expires=0, rows=[])
     mod._REF_SCAN_HEALTH['retry_at'] = 0
     mod._REF_SCAN_WAKE.clear()
+    mod._STOCK_VISIBILITY_STATE.update(last_success=0, retry_at=0)
     mod._PRODUCTS_CACHE=None
     mod._invalidate_products_cache()
     mod._VIP_CFG['v']=None
