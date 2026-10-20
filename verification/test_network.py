@@ -263,17 +263,16 @@ def test_payment_database_read_failure_keeps_fast_recovery_interval(mod,monkeypa
 
 @pytest.mark.parametrize('left_checks',[0,2])
 def test_healthy_referrals_only_write_a_reset_when_it_changes(mod,monkeypatch,left_checks):
-    class StopCycle(BaseException):pass
-    mod.db.settings.insert_one({'key':'ref_left_fix_v1','value':True})
-    mod.db.referrals_v2.insert_one({'invited_id':1001,'referrer_id':1002,'status':'active','left_checks':left_checks})
+    mod.db.referrals_v2.insert_one({'invited_id':1001,'referrer_id':1002,'status':'active',
+        'dv':'ok','dv_at':1,'left_checks':left_checks})
     monkeypatch.setattr(mod,'check_forced_sub',lambda *a,**k:True)
-    def sleep(seconds):
-        if seconds==60:raise StopCycle()
-    monkeypatch.setattr(mod.time,'sleep',sleep)
     update=Mock(wraps=mod.db.referrals_v2.update_one);monkeypatch.setattr(mod.db.referrals_v2,'update_one',update)
-    with pytest.raises(StopCycle):mod.background_referral_checker_v2()
-    assert update.call_count==int(left_checks!=0)
+    assert mod._ref_checker_tick()==1
+    resets=[c for c in update.call_args_list if 'left_checks' in c.args[1].get('$set',{})]
+    assert len(resets)==int(left_checks!=0)
     assert mod.db.referrals_v2.find_one({'invited_id':1001})['left_checks']==0
+    assert mod._ref_checker_tick()==0
+
 
 def test_outbound_http_measurement_records_sizes_without_tokens_or_payloads(mod,monkeypatch):
     transport=Mock(return_value=response(200,{}, {'Content-Length':'321'}))
@@ -285,7 +284,8 @@ def test_outbound_http_measurement_records_sizes_without_tokens_or_payloads(mod,
     returned=mod.requests.adapters.HTTPAdapter().send(prepared)
     assert returned.status_code==200
     report=mod._NET_METER.snapshot();encoded=json.dumps(report)
-    assert not any(v in encoded for v in ('FAKE-TOKEN','FAKE-PASSWORD','FAKE-SECRET','FAKE-CUSTOMER-CODE','sendMessage'))
+    assert not any(v in encoded for v in ('FAKE-TOKEN','FAKE-PASSWORD','FAKE-SECRET','FAKE-CUSTOMER-CODE'))
+    assert 'api.telegram.org/sendMessage' in encoded
     row=report['rows'][0];assert row['requests']==1 and row['received']==321 and row['sent']>0
 
 def test_mongo_listener_records_command_sizes_without_documents(mod):

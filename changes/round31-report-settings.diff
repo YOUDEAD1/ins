@@ -1,0 +1,461 @@
+--- a/bot.py
++++ b/bot.py
+@@ -5906,7 +5906,8 @@
+         '_id': '$type', 'count': {'$sum': 1}, 'cash_amount': {'$sum': '$amount'},
+         'debt_delta': {'$sum': '$debt_delta'}}}]))
+     recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1,
+-        'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'date': 1, 'note': 1,
++        'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'old_balance': 1,
++        'balance_source': 1, 'date': 1, 'note': 1, 'by_admin': 1,
+         'ref_event': 1}).sort('date', -1).limit(250))
+     for log in recent:
+         if 'note' in log:
+@@ -5915,9 +5916,40 @@
+         {'$group': {'_id': '$reason', 'count': {'$sum': 1}, 'nominal_amount': {'$sum': '$amount'}}}]))
+     statuses = list(db.referrals_v2.aggregate([{'$match': {'referrer_id': uid}},
+         {'$group': {'_id': '$status', 'count': {'$sum': 1}}}]))
+-    return {'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals,
++    tables = {}
++    sources = [('orders', {'user_id': uid}), ('ext_orders', {'user_id': uid}),
++        ('api_orders', {'api_user_id': uid}), ('used_transactions', {'user_id': uid}),
++        ('purchase_rewards', {'referrer_id': uid}), ('referral_milestones', {'referrer_id': uid}),
++        ('ref_money_events', {'user_id': uid})]
++    money_fields = ('amount', 'price', 'total_price', 'paid_amount', 'reward', 'balance_credited', 'debt_settled')
++    safe_fields = {key: 1 for key in ('_id', 'user_id', 'api_user_id', 'referrer_id', 'buyer_id',
++        'order_id', 'product_id', 'type', 'status', 'via', 'quantity', 'qty', 'date', 'created_at',
++        'timestamp', 'paid_at', 'batch_no', 'threshold', 'active_count', 'kind', 'applied_at',
++        'receipt.balance_before', 'receipt.balance_after', 'receipt.balance_delta',
++        'receipt.debt_before', 'receipt.debt_after', 'receipt.debt_delta', *money_fields)}
++    for name, match in sources:
++        group = {'_id': None, 'count': {'$sum': 1}}
++        group.update({'recorded_' + key: {'$sum': '$' + key} for key in money_fields})
++        summary = list(db[name].aggregate([{'$match': match}, {'$group': group}]))
++        tables[name] = {'summary': {k: v for k, v in (summary[0] if summary else {'count': 0}).items() if k != '_id'},
++            'recent': list(db[name].find(match, safe_fields).sort('_id', -1).limit(150)), 'recent_limit': 150}
++    last = next((row for row in recent if isinstance(row.get('new_balance'), (int, float))), None)
++    current_balance = round(float(user.get('balance') or 0), 4)
++    assessment = {'current_balance': current_balance, 'requires_review': current_balance < 0,
++        'latest_balance_log_value': round(float(last['new_balance']), 4) if last else None,
++        'latest_balance_log_date': last.get('date') if last else None,
++        'change_since_latest_balance_log': round(current_balance - float(last['new_balance']), 4) if last else None,
++        'latest_log_snapshot_independently_verified': bool(last and last.get('balance_source') == 'atomic_wallet_update'),
++        'caution': 'Legacy new_balance snapshots may have come from a stale user cache. '
++                   'The change since the latest balance log may include purchases, deposits and rewards kept in other tables. '
++                   'Separate table totals are not combined because a single movement may appear in more than one table.'}
++    referral_settings = list(db.settings.find({'key': {'$in': ['referral_threshold', 'referral_reward',
++        'referral_purchase_reward', 'referral_min_purchase', 'ref_batches_v2', 'ref_dv_since',
++        'referrals_v2_initialized_v6']}}, {'_id': 0, 'key': 1, 'value': 1, 'init_time': 1, 'at': 1}))
++    return {'report_version': 2, 'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals,
+         'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons,
+-        'referrals_by_status': statuses,
++        'referrals_by_status': statuses, 'assessment': assessment, 'financial_tables': tables,
++        'referral_settings': referral_settings,
+         'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}),
+         'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. '
+                        'No credit, deduction, reclassification or debt forgiveness was performed.'}
+@@ -27606,14 +27638,18 @@
+         val = float(message.text.strip())
+         if not _vip_amount_sane(val):
+             raise ValueError("المبلغ غير منطقي (لازم رقم بين -50,000 و 50,000 وغير صفر)")
+-        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
+-        u = get_user_data_full(target_uid)
+-        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
++        u = db.users.find_one_and_update({'user_id': target_uid}, {'$inc': {'balance': val}}, return_document=True)
++        if not u:
++            raise ValueError('المستخدم غير موجود')
++        _invalidate_user_cache(target_uid)
++        new_bal = round(float(u.get('balance', 0)), 4)
+         import datetime as _dt
+         _bl = db.balance_logs.insert_one({
+             'user_id': target_uid,
+             'type': 'compensation',
+             'amount': val,
++            'old_balance': round(float(u.get('balance', 0)) - val, 4),
++            'balance_source': 'atomic_wallet_update',
+             'note': '',
+             'new_balance': new_bal,
+             'by_admin': message.from_user.id,
+@@ -27671,14 +27707,18 @@
+         return
+     try:
+         note = message.text.strip()
+-        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
+-        u = get_user_data_full(target_uid)
+-        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
++        u = db.users.find_one_and_update({'user_id': target_uid}, {'$inc': {'balance': val}}, return_document=True)
++        if not u:
++            raise ValueError('المستخدم غير موجود')
++        _invalidate_user_cache(target_uid)
++        new_bal = round(float(u.get('balance', 0)), 4)
+         import datetime as _dt
+         _bl = db.balance_logs.insert_one({
+             'user_id': target_uid,
+             'type': 'manual',
+             'amount': val,
++            'old_balance': round(float(u.get('balance', 0)) - val, 4),
++            'balance_source': 'atomic_wallet_update',
+             'note': note,
+             'new_balance': new_bal,
+             'by_admin': message.from_user.id,
+--- a/referral_report.py
++++ b/referral_report.py
+@@ -4,6 +4,83 @@
+ import os
+ from pathlib import Path
+ import re
++import sys
++
++
++def _connection_values(values, source):
++    uri = str(values.get('MONGO_URI') or '').strip()
++    if not uri:
++        return None
++    if not uri.startswith(('mongodb://', 'mongodb+srv://')):
++        raise ValueError('MONGO_URI must start with mongodb:// or mongodb+srv://; its value is hidden.')
++    return {'uri': uri, 'database': str(values.get('MONGO_DB_NAME') or '').strip() or 'shop_db',
++            'source': source}
++
++
++def _read_connection_file(path):
++    from dotenv import dotenv_values
++    path = Path(os.path.expandvars(str(path).strip().strip('"').strip("'"))).expanduser()
++    if not path.is_file():
++        raise ValueError('The selected settings file does not exist or is not a file.')
++    try:
++        values = dotenv_values(path, encoding='utf-8-sig')
++    except (OSError, UnicodeError):
++        raise ValueError('The selected settings file could not be read as UTF-8.') from None
++    return _connection_values(values, path.name)
++
++
++def _choose_connection_file():
++    if os.name == 'nt':
++        window = None
++        try:
++            import tkinter as tk
++            from tkinter import filedialog
++            window = tk.Tk(); window.withdraw()
++            window.attributes('-topmost', True)
++            chosen = filedialog.askopenfilename(parent=window,
++                title='LARA STOCK - Choose the settings file used by your bot',
++                initialdir=str(Path(__file__).resolve().parent),
++                filetypes=[('Environment files', '.env .env.txt *.env *.txt'), ('All files', '*.*')])
++            return chosen or None
++        except Exception:
++            pass
++        finally:
++            if window is not None:
++                try:
++                    window.destroy()
++                except Exception:
++                    pass
++    return input('Path to the bot settings file (.env or .env.txt), or Enter to cancel: ').strip() or None
++
++
++def resolve_connection(env_file=None, *, allow_prompt=False):
++    # Explicit selection is authoritative; never mix its database with another file.
++    if env_file:
++        result = _read_connection_file(env_file)
++        if not result:
++            raise ValueError('The selected file has an empty or missing MONGO_URI. Select the filled settings file used by your bot.')
++        return result
++    result = _connection_values(os.environ, 'process environment')
++    if result:
++        return result
++    folder = Path(__file__).resolve().parent
++    seen = set()
++    for parent in (folder, Path.cwd(), folder.parent):
++        for name in ('.env', '.env.txt'):
++            candidate = parent / name
++            if candidate in seen:
++                continue
++            seen.add(candidate)
++            if candidate.is_file():
++                result = _read_connection_file(candidate)
++                if result:
++                    return result
++    if allow_prompt:
++        print('No filled database settings were found. Choose the SAME settings file used by the bot.')
++        selected = _choose_connection_file()
++        if selected:
++            return resolve_connection(selected)
++    raise ValueError('MONGO_URI was not found. Put the filled .env beside this tool, select it in the file window, or use --env "path-to-file".')
+ 
+ 
+ def build_report(db, target):
+@@ -20,32 +97,52 @@
+         return {'state': 'not_found' if not users else 'ambiguous_username', 'read_only': True, 'matching_user_ids': [u['user_id'] for u in users]}
+     user, uid = (users[0], int(users[0]['user_id']))
+     totals = list(db.balance_logs.aggregate([{'$match': {'user_id': uid}}, {'$group': {'_id': '$type', 'count': {'$sum': 1}, 'cash_amount': {'$sum': '$amount'}, 'debt_delta': {'$sum': '$debt_delta'}}}]))
+-    recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1, 'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'date': 1, 'note': 1, 'ref_event': 1}).sort('date', -1).limit(250))
++    recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1, 'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'old_balance': 1, 'balance_source': 1, 'date': 1, 'note': 1, 'by_admin': 1, 'ref_event': 1}).sort('date', -1).limit(250))
+     for log in recent:
+         if 'note' in log:
+             log['note'] = str(log['note'])[:400]
+     reasons = list(db.ref_clawbacks.aggregate([{'$match': {'referrer_id': uid, 'kind': 'clawback'}}, {'$group': {'_id': '$reason', 'count': {'$sum': 1}, 'nominal_amount': {'$sum': '$amount'}}}]))
+     statuses = list(db.referrals_v2.aggregate([{'$match': {'referrer_id': uid}}, {'$group': {'_id': '$status', 'count': {'$sum': 1}}}]))
+-    return {'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals, 'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons, 'referrals_by_status': statuses, 'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}), 'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. No credit, deduction, reclassification or debt forgiveness was performed.'}
++    tables = {}
++    sources = [('orders', {'user_id': uid}), ('ext_orders', {'user_id': uid}), ('api_orders', {'api_user_id': uid}), ('used_transactions', {'user_id': uid}), ('purchase_rewards', {'referrer_id': uid}), ('referral_milestones', {'referrer_id': uid}), ('ref_money_events', {'user_id': uid})]
++    money_fields = ('amount', 'price', 'total_price', 'paid_amount', 'reward', 'balance_credited', 'debt_settled')
++    safe_fields = {key: 1 for key in ('_id', 'user_id', 'api_user_id', 'referrer_id', 'buyer_id', 'order_id', 'product_id', 'type', 'status', 'via', 'quantity', 'qty', 'date', 'created_at', 'timestamp', 'paid_at', 'batch_no', 'threshold', 'active_count', 'kind', 'applied_at', 'receipt.balance_before', 'receipt.balance_after', 'receipt.balance_delta', 'receipt.debt_before', 'receipt.debt_after', 'receipt.debt_delta', *money_fields)}
++    for name, match in sources:
++        group = {'_id': None, 'count': {'$sum': 1}}
++        group.update({'recorded_' + key: {'$sum': '$' + key} for key in money_fields})
++        summary = list(db[name].aggregate([{'$match': match}, {'$group': group}]))
++        tables[name] = {'summary': {k: v for k, v in (summary[0] if summary else {'count': 0}).items() if k != '_id'}, 'recent': list(db[name].find(match, safe_fields).sort('_id', -1).limit(150)), 'recent_limit': 150}
++    last = next((row for row in recent if isinstance(row.get('new_balance'), (int, float))), None)
++    current_balance = round(float(user.get('balance') or 0), 4)
++    assessment = {'current_balance': current_balance, 'requires_review': current_balance < 0, 'latest_balance_log_value': round(float(last['new_balance']), 4) if last else None, 'latest_balance_log_date': last.get('date') if last else None, 'change_since_latest_balance_log': round(current_balance - float(last['new_balance']), 4) if last else None, 'latest_log_snapshot_independently_verified': bool(last and last.get('balance_source') == 'atomic_wallet_update'), 'caution': 'Legacy new_balance snapshots may have come from a stale user cache. The change since the latest balance log may include purchases, deposits and rewards kept in other tables. Separate table totals are not combined because a single movement may appear in more than one table.'}
++    referral_settings = list(db.settings.find({'key': {'$in': ['referral_threshold', 'referral_reward', 'referral_purchase_reward', 'referral_min_purchase', 'ref_batches_v2', 'ref_dv_since', 'referrals_v2_initialized_v6']}}, {'_id': 0, 'key': 1, 'value': 1, 'init_time': 1, 'at': 1}))
++    return {'report_version': 2, 'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals, 'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons, 'referrals_by_status': statuses, 'assessment': assessment, 'financial_tables': tables, 'referral_settings': referral_settings, 'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}), 'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. No credit, deduction, reclassification or debt forgiveness was performed.'}
+ 
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Read-only referral balance diagnosis')
+     parser.add_argument('target', nargs='?', help='Telegram numeric ID or @username')
++    parser.add_argument('--env', '--env-file', dest='env_file', help='Path to the filled bot settings file')
++    parser.add_argument('--no-input', action='store_true', help='Do not open a file selector or prompt for input')
+     args = parser.parse_args(argv)
+-    target = args.target or input('Telegram @username or numeric ID: ').strip()
+-    from dotenv import load_dotenv
+     from pymongo import MongoClient
+-    load_dotenv(Path(__file__).with_name('.env'))
+-    uri = os.getenv('MONGO_URI', '')
+-    if not uri:
+-        print('MONGO_URI is missing. Use the same .env as your running bot.')
++    try:
++        config = resolve_connection(args.env_file, allow_prompt=not args.no_input and sys.stdin.isatty())
++    except ValueError as exc:
++        print(str(exc))
+         return 2
++    print('Settings source:', config['source'], '| Database:', config['database'])
++    target = args.target
++    if not target:
++        if args.no_input:
++            print('Provide a Telegram @username or numeric ID.')
++            return 2
++        target = input('Telegram @username or numeric ID: ').strip()
+     client = None
+     try:
+-        client = MongoClient(uri, serverSelectionTimeoutMS=7000, connectTimeoutMS=5000,
++        client = MongoClient(config['uri'], serverSelectionTimeoutMS=7000, connectTimeoutMS=5000,
+                              socketTimeoutMS=7000, appname='LARA-readonly-referral-report')
+-        report = build_report(client[os.getenv('MONGO_DB_NAME') or 'shop_db'], target)
++        report = build_report(client[config['database']], target)
+         if report['state'] != 'found':
+             print(json.dumps(report, ensure_ascii=False))
+             return 3
+--- a/REFERRAL-CHECK.cmd
++++ b/REFERRAL-CHECK.cmd
+@@ -3,6 +3,21 @@
+ cd /d "%~dp0"
+ title LARA STOCK - Read-only referral report
+ echo This tool only reads the database. It does not start the bot or change balances.
++echo If settings are missing, choose the filled .env file used by your bot.
++echo You may drag that settings file onto this launcher to select it directly.
++if "%~1"=="" goto auto_settings
++if exist ".venv\Scripts\python.exe" (
++  ".venv\Scripts\python.exe" referral_report.py --env "%~1"
++  goto finished
++)
++where py >nul 2>&1
++if errorlevel 1 goto system_python_file
++py -3 referral_report.py --env "%~1"
++goto finished
++:system_python_file
++python referral_report.py --env "%~1"
++goto finished
++:auto_settings
+ if exist ".venv\Scripts\python.exe" (
+   ".venv\Scripts\python.exe" referral_report.py
+   goto finished
+--- a/verification/test_referral_policy.py
++++ b/verification/test_referral_policy.py
+@@ -177,3 +177,24 @@
+     connect = Mock(); monkeypatch.setattr(pymongo, 'MongoClient', connect)
+     assert report_module.main(['1001']) == 2
+     connect.assert_not_called()
++
++
++def test_extended_report_marks_the_actual_negative_balance_gap_without_guessing_a_refund(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -56.70000000000004}})
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'compensation', 'amount': 1,
++        'new_balance': 3.4, 'date': dt.datetime(2026, 9, 30), 'by_admin': 9001})
++    mod.db.orders.insert_one({'user_id': 1001, 'price': 8, 'code_delivered': 'PRIVATE-ACCOUNT-PASSWORD'})
++    mod.db.orders.insert_one({'user_id': 1002, 'price': 200, 'code_delivered': 'OTHER-USER-PRIVATE'})
++    mod.db.purchase_rewards.insert_one({'referrer_id': 1001, 'amount': .1, 'buyer_id': 1002})
++    mod.db.settings.insert_one({'key': 'private_cookie', 'value': 'NEVER-EXPOSE'})
++    snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++    result = mod._ref_balance_diagnosis('1001')
++    assert result['report_version'] == 2 and result['assessment']['change_since_latest_balance_log'] == -60.1
++    assert result['assessment']['requires_review'] and result['recent_changes'][0]['by_admin'] == 9001
++    assert result['financial_tables']['orders']['summary']['count'] == 1
++    assert result['financial_tables']['orders']['summary']['recorded_price'] == 8
++    assert result['financial_tables']['purchase_rewards']['summary']['recorded_amount'] == .1
++    assert 'refund_amount' not in result
++    raw = json.dumps(result, default=str)
++    assert all(secret not in raw for secret in ('PRIVATE-ACCOUNT-PASSWORD','OTHER-USER-PRIVATE','NEVER-EXPOSE'))
++    assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
+--- /dev/null
++++ b/verification/test_report_config.py
+@@ -0,0 +1,159 @@
++"""Resolve actual bot settings without exposing credentials or mutating configuration."""
++import builtins
++import importlib.util
++import json
++import os
++from pathlib import Path
++from unittest.mock import Mock
++
++import pytest
++from harness import APP
++from test_integration import mod, isolate
++
++
++@pytest.fixture
++def report(mod, monkeypatch, tmp_path):
++    spec = importlib.util.spec_from_file_location('local_report_config', APP / 'referral_report.py')
++    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
++    folder = tmp_path / 'app'; folder.mkdir()
++    monkeypatch.setattr(m, '__file__', str(folder / 'referral_report.py'))
++    monkeypatch.chdir(folder)
++    monkeypatch.delenv('MONGO_URI', raising=False)
++    monkeypatch.delenv('MONGO_DB_NAME', raising=False)
++    return m
++
++
++def settings(path, db='same_bot_database', uri='mongodb://fake.test/db?appName=TEST_PRIVATE_VALUE'):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(f'MONGO_URI="{uri}"\nMONGO_DB_NAME="{db}"\n', encoding='utf-8')
++    return path
++
++
++def test_process_settings_remain_authoritative_without_explicit_file(report, monkeypatch):
++    settings(Path('.env'), db='file_database')
++    monkeypatch.setenv('MONGO_URI', 'mongodb://process.test/db')
++    monkeypatch.setenv('MONGO_DB_NAME', 'process_database')
++    result = report.resolve_connection()
++    assert result['source'] == 'process environment' and result['database'] == 'process_database'
++    assert result['uri'] == 'mongodb://process.test/db'
++
++
++def test_empty_process_uri_does_not_shadow_a_filled_file(report, monkeypatch):
++    settings(Path('.env'))
++    monkeypatch.setenv('MONGO_URI', '')
++    result = report.resolve_connection()
++    assert result['source'] == '.env' and result['database'] == 'same_bot_database'
++
++
++def test_windows_env_txt_is_found_when_env_is_a_blank_template(report):
++    Path('.env').write_text('MONGO_URI=""\nMONGO_DB_NAME="shop_db"\n')
++    settings(Path('.env.txt'), db='real_bot_db')
++    assert report.resolve_connection()['database'] == 'real_bot_db'
++
++
++def test_utf8_bom_quotes_and_spaces_in_path_are_supported(report, tmp_path):
++    p = tmp_path / 'settings with spaces.env'
++    p.write_text('\ufeffMONGO_URI="mongodb://fake.test/db"\nMONGO_DB_NAME="custom db"\n', encoding='utf-8')
++    result = report.resolve_connection('"' + str(p) + '"')
++    assert result['uri'] == 'mongodb://fake.test/db' and result['database'] == 'custom db'
++
++
++def test_explicit_file_keeps_its_database_and_does_not_use_process_database(report, monkeypatch, tmp_path):
++    p = settings(tmp_path / 'selected.env', db='selected_database')
++    monkeypatch.setenv('MONGO_URI', 'mongodb://unrelated.test/db')
++    monkeypatch.setenv('MONGO_DB_NAME', 'unrelated_database')
++    result = report.resolve_connection(p)
++    assert result['database'] == 'selected_database' and 'fake.test' in result['uri']
++
++
++def test_explicit_empty_file_does_not_silently_fall_back_to_another_database(report, monkeypatch, tmp_path):
++    p = tmp_path / 'empty.env'; p.write_text('MONGO_URI=""\n')
++    monkeypatch.setenv('MONGO_URI', 'mongodb://unrelated.test/db')
++    with pytest.raises(ValueError, match='empty or missing'):
++        report.resolve_connection(p)
++
++
++def test_missing_explicit_file_is_reported_without_using_other_settings(report, monkeypatch):
++    monkeypatch.setenv('MONGO_URI', 'mongodb://unrelated.test/db')
++    with pytest.raises(ValueError, match='does not exist'):
++        report.resolve_connection('missing.env')
++
++
++def test_parent_bot_settings_are_found_without_recursive_device_search(report):
++    settings(Path('../.env'), db='parent_bot_database')
++    assert report.resolve_connection()['database'] == 'parent_bot_database'
++
++
++def test_working_directory_settings_are_supported(report, monkeypatch, tmp_path):
++    folder = tmp_path / 'working'; folder.mkdir(); settings(folder / '.env')
++    monkeypatch.chdir(folder)
++    assert report.resolve_connection()['source'] == '.env'
++
++
++def test_missing_configuration_offers_the_settings_selector(report, monkeypatch, tmp_path):
++    selected = settings(tmp_path / 'chosen-settings.env')
++    choose = Mock(return_value=str(selected)); monkeypatch.setattr(report, '_choose_connection_file', choose)
++    assert report.resolve_connection(allow_prompt=True)['source'] == selected.name
++    choose.assert_called_once()
++
++
++def test_cancelled_selector_does_not_connect_or_create_settings(report, monkeypatch):
++    monkeypatch.setattr(report, '_choose_connection_file', lambda: None)
++    before = set(Path.cwd().iterdir())
++    with pytest.raises(ValueError, match='was not found'):
++        report.resolve_connection(allow_prompt=True)
++    assert set(Path.cwd().iterdir()) == before
++
++
++def test_configuration_values_are_never_changed_or_printed(report, monkeypatch, tmp_path, capsys):
++    p = settings(tmp_path / 'selected.env')
++    original = p.read_bytes(); environment = dict(os.environ)
++    result = report.resolve_connection(p)
++    assert 'TEST_PRIVATE_VALUE' in result['uri']
++    assert p.read_bytes() == original and dict(os.environ) == environment
++    assert 'TEST_PRIVATE_VALUE' not in capsys.readouterr().out
++
++
++def test_bad_uri_error_does_not_expose_its_value(report):
++    with pytest.raises(ValueError) as error:
++        report._connection_values({'MONGO_URI': 'https://fake.test/TEST_PRIVATE_VALUE'}, 'selected.env')
++    assert 'TEST_PRIVATE_VALUE' not in str(error.value)
++
++
++def test_missing_settings_are_handled_before_asking_for_the_username(report, monkeypatch):
++    import pymongo
++    connect = Mock(); prompt = Mock(side_effect=AssertionError('No target prompt should occur'))
++    monkeypatch.setattr(pymongo, 'MongoClient', connect); monkeypatch.setattr(builtins, 'input', prompt)
++    assert report.main(['--no-input']) == 2
++    connect.assert_not_called(); prompt.assert_not_called()
++
++
++def test_selected_settings_produce_the_report_with_readonly_calls_only(report, mod, monkeypatch, tmp_path, capsys):
++    import pymongo
++    p = settings(tmp_path / 'bot settings.env', db=mod.db.name)
++    connect = Mock(return_value=mod.db.client); monkeypatch.setattr(pymongo, 'MongoClient', connect)
++    snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++    assert report.main(['1001', '--env', str(p), '--no-input']) == 0
++    assert connect.call_args.args[0].startswith('mongodb://fake.test/')
++    saved = json.loads(Path('referral-report-1001.json').read_text())
++    assert saved['read_only'] and saved['account']['balance'] == 100
++    assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++    assert 'TEST_PRIVATE_VALUE' not in capsys.readouterr().out
++
++
++@pytest.mark.parametrize('kind,delta', [('compensation', -30.), ('manual', .001)])
++def test_admin_balance_log_uses_the_atomic_wallet_result_instead_of_a_stale_snapshot(mod, monkeypatch, kind, delta):
++    from test_referral_policy import message
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 10.}})
++    assert mod.get_user_data_full(1001)['balance'] == 10
++    monkeypatch.setattr(mod, 'show_user_admin_profile', lambda *a, **k: None)
++    monkeypatch.setattr(mod, 'vip_after_admin_balance', lambda *a, **k: None)
++    monkeypatch.setattr(mod, 'notify_balance_gift', lambda *a, **k: None)
++    if kind == 'compensation':
++        mod.ad_gift_comp_exec(message(mod, uid=9001, text=str(delta)), 1001)
++    else:
++        mod.ad_gift_note_exec(message(mod, uid=9001, text='Test manual adjustment'), 1001, delta)
++    row = mod.db.balance_logs.find_one({'user_id': 1001, 'type': kind})
++    assert row['new_balance'] == 10 + delta and row['old_balance'] == 10
++    assert row['balance_source'] == 'atomic_wallet_update' and row['by_admin'] == 9001
++    assert mod.get_user_data_full(1001)['balance'] == 10 + delta

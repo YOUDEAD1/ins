@@ -8,6 +8,67 @@
 <!-- لو استضفت الواجهة على دومين غير سيرفر البوت، اكتب رابط السيرفر هنا (مثال: https://my-bot.onrender.com) -->
 <meta name="lara-api" content="">
 <meta name="theme-color" content="#080b12">
+<script id="lara-error-bootstrap">
+/* Bounded diagnostics are installed before external scripts; never collect form values. */
+(function(){
+ 'use strict';
+ const build='lara-30.1',queue=[],recent=new Map();
+ let connection=null,lastAction='',windowAt=0,windowCount=0;
+ function safe(value,limit){
+  return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+   .replace(/\b\d{5,15}:[A-Za-z0-9_-]{20,}\b/g,'[hidden token]')
+   .replace(/\b(authorization|cookie|password|passwd|secret|token|api[_-]?key|initdata)\s*[:=]\s*[^\n]+/gi,'$1=[hidden]')
+   .slice(0,limit);
+ }
+ function send(item){
+  if(!connection){if(queue.length<12)queue.push(item);return;}
+  if(connection.demo||!connection.init)return;
+  const now=Date.now(),key=item.operation+'|'+item.message+'|'+item.location;
+  if(recent.has(key)&&now-recent.get(key)<10000)return;
+  if(now-windowAt>=60000){windowAt=now;windowCount=0;}
+  if(windowCount>=12)return;
+  if(recent.size>=24)recent.delete(recent.keys().next().value);
+  recent.set(key,now);windowCount++;
+  const body=Object.assign({},item,{build,platform:connection.platform,sdk_version:connection.version,
+   last_action:lastAction,user_agent:safe(navigator.userAgent,250)});
+  try{
+   fetch(connection.api+'/webapp/client/error',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':connection.init},body:JSON.stringify(body)}).catch(()=>{});
+  }catch(e){} // Reporting failures never report themselves.
+ }
+ function report(message,locationText,operation,extra){
+  extra=extra||{};
+  const item={message:safe(message||'Browser error',1200),location:safe(locationText,240),
+   operation:safe(operation||'runtime',100),stack:safe(extra.stack,2500),masked:extra.masked===true};
+  send(item);
+ }
+ document.addEventListener('click',event=>{
+  const target=event.target&&event.target.closest?event.target.closest('[data-act]'):null;
+  if(target&&/^[a-z][a-z0-9-]{0,70}$/i.test(target.dataset.act||''))lastAction=target.dataset.act;
+ },true);
+ window.addEventListener('error',event=>{
+  if(event.target&&event.target!==window&&event.target.tagName==='SCRIPT'){
+   report('Failed to load JavaScript resource',event.target.src||'script resource','script-load');return;
+  }
+  if(!event.error&&!event.message)return;
+  const masked=/^script error\.?$/i.test(String(event.message||'').trim())&&!event.filename&&!event.lineno&&!event.error;
+  const where=event.filename?safe(event.filename,200)+':'+(event.lineno||0)+':'+(event.colno||0):
+   (masked?'Browser did not expose the failing script':'Browser location unavailable');
+  report(event.message||'Browser error',where,masked?'runtime-masked':'runtime',{
+   stack:event.error&&event.error.stack,masked});
+ },true);
+ window.addEventListener('unhandledrejection',event=>{
+  const reason=event.reason;
+  report(reason&&typeof reason.message==='string'?reason.message:
+   (typeof reason==='string'?reason:'Unhandled promise rejection'),
+   'Unhandled promise rejection','promise',{stack:reason&&reason.stack});
+ });
+ window.__LARA_ERROR_REPORTER__={report,connect(api,init,demo,tg){
+  connection={api,init,demo:!!demo,platform:safe(tg&&tg.platform,60),version:safe(tg&&tg.version,30)};
+  const pending=queue.splice(0);pending.forEach(send);
+ }};
+})();
+
+</script>
 <!--TG-SDK--><script src="https://telegram.org/js/telegram-web-app.js"></script><!--/TG-SDK-->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -67,6 +128,27 @@ img{max-width:100%}
 .mono{font-family:var(--f-mono)}
 .muted{color:var(--fg-2)}
 .faint{color:var(--fg-3)}
+
+/* Lightweight page loading motion: no GIFs, polling or extra network requests. */
+.page-loading{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;
+  background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  opacity:1;transition:opacity .22s ease}
+.page-loading.leaving{opacity:0;pointer-events:none}
+.load-card{width:min(100%,300px);padding:34px 26px 26px;text-align:center;border-radius:30px;
+  border:1px solid var(--line-2);background:var(--surface);box-shadow:0 20px 70px var(--glow)}
+.load-art{position:relative;display:grid;place-items:center;width:108px;height:108px;margin:0 auto 22px}
+.load-orbit{position:absolute;inset:0;border:1px solid var(--line-2);border-radius:50%}
+.load-orbit::before{content:"";position:absolute;inset:-2px;border:2px solid transparent;border-top-color:var(--accent-2);
+  border-inline-end-color:var(--accent);border-radius:50%;animation:loadOrbit 1.5s linear infinite}
+.load-diamond{width:62px;height:62px;filter:drop-shadow(0 5px 12px var(--glow));animation:loadFloat 1.9s ease-in-out infinite}
+.load-brand{font:700 14px/1.5 var(--f-display);letter-spacing:.06em;color:var(--fg)}
+.load-label{margin:8px 0 20px;color:var(--fg-2);font-size:13px}
+.load-track{height:4px;overflow:hidden;border-radius:8px;background:var(--accent-soft)}
+.load-track i{display:block;width:38%;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));animation:loadTrack 1.3s ease-in-out infinite}
+@keyframes loadOrbit{to{transform:rotate(360deg)}}
+@keyframes loadFloat{50%{transform:translateY(-5px) scale(1.04)}}
+@keyframes loadTrack{from{transform:translateX(-110%)}to{transform:translateX(370%)}}
+@media(prefers-reduced-motion:reduce){.load-orbit::before,.load-diamond,.load-track i{animation:none}.page-loading{transition:none}.load-track i{width:100%;opacity:.65}}
 
 /* ── header ── */
 .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;align-items:center;gap:10px;
@@ -1377,9 +1459,34 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 @media(max-width:360px){.cart-sheet .sh-body{padding-inline:15px}.cart-sheet .sh-foot{padding-inline:15px}.cart-steps li+li:before{width:12px;margin-inline:7px}.cart-item{gap:11px}.cart-thumb{width:52px;height:60px}.cart-footer b{font-size:18px}.cart-footer-buttons>.btn.primary{min-width:120px;font-size:11px}.cart-footer-buttons{gap:4px}.cart-footer-buttons>.btn.ghost{font-size:10px;padding-inline:6px}}
 @media(prefers-reduced-motion:reduce){.cart-teaser,.cart-item{animation:none}}
 
+
+/* User inspection: clear product and purchase hierarchy. */
+.up-profile{background:linear-gradient(135deg,var(--surface),var(--bg-2));padding:18px}
+.up-tabs{display:flex;gap:5px;background:var(--surface);border:1px solid var(--line);padding:5px;border-radius:15px;margin:18px 0 14px;overflow:auto}
+.up-tabs button{flex:1;white-space:nowrap;border:0;background:transparent;color:var(--fg-2);padding:11px 10px;border-radius:10px;font:inherit;font-size:12px;font-weight:650;cursor:pointer}
+.up-tabs button.on{background:var(--blue,#3d8bff);color:white;box-shadow:0 3px 12px #3d8bff33}
+.up-metrics>button{border:0;background:transparent;color:inherit;cursor:pointer;font:inherit;display:flex;flex-direction:column;gap:4px;align-items:center;border-radius:10px;padding:5px}
+.up-metrics>button:hover{background:#3d8bff15}.up-metrics>button b{font-size:16px}.up-metrics>button span{color:var(--fg-2);font-size:10px}
+.up-overview,.up-subscription{border:1px solid var(--line);background:var(--surface);border-radius:18px;padding:20px}
+.up-overview small{color:var(--fg-2);display:block}.up-overview b{font-size:22px;display:block;margin-top:6px}.up-overview p{line-height:1.7;color:var(--fg-2);font-size:13px}
+.up-overview-meta{border-top:1px solid var(--line);margin-top:18px;padding-top:14px;display:flex;flex-wrap:wrap;gap:9px;font-size:11px;color:var(--fg-2)}
+.up-section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:14px 0}.up-section-head small{display:block;font-size:11px;color:var(--fg-2);margin-top:5px}
+.up-product-list{display:grid;gap:9px}.up-product,.up-record{display:flex;align-items:center;gap:12px;width:100%;padding:15px;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--fg);text-align:start;font:inherit;cursor:pointer}
+.up-product:hover,.up-record:hover{border-color:#3d8bff70;background:var(--bg-2)}.up-product .meta,.up-record .meta{flex:1;min-width:0}.up-product .meta b,.up-record .meta b{display:block;overflow-wrap:anywhere;font-size:13px;line-height:1.5}.up-product small,.up-record small{display:block;color:var(--fg-2);font-size:11px;margin-top:5px;line-height:1.4}
+.up-product-icon,.up-record-dot{display:grid;place-items:center;width:40px;height:40px;flex-shrink:0;border-radius:12px;background:#3d8bff15;color:#3d8bff}.up-product-icon svg{width:20px;height:20px}
+.up-product-end{display:flex;align-items:center;gap:8px;font-size:13px;flex-shrink:0}.up-product-end svg{width:15px;height:15px;color:var(--fg-2)}.up-pager{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:16px 0;font-size:12px;color:var(--fg-2)}
+.up-receipt-head{text-align:center;padding:20px 10px;background:linear-gradient(160deg,#3d8bff14,transparent);border-radius:18px;margin-bottom:16px}.up-receipt-head h2{font-size:19px;margin:8px 0}.up-receipt-head>b{font-size:28px;display:block;margin:12px 0}.up-receipt-head>small{color:var(--fg-2)}
+.up-subscription{margin:14px 0}.up-subscription>.summary{margin-top:10px}.up-note{border-inline-start:3px solid #3d8bff;background:#3d8bff0b;padding:12px 14px;border-radius:9px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.up-codes .code span{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;min-width:0}.up-content .api-muted{line-height:1.7}
+@media(max-width:480px){.up-product,.up-record{padding:12px;gap:8px}.up-product-end{font-size:12px;gap:3px}.up-record .meta b{font-size:11px}.up-profile{padding:13px}.up-tabs button{padding:10px 7px;font-size:11px}}
+
 </style>
 </head>
 <body>
+<div class="page-loading" id="page-loading" role="status" aria-live="polite" aria-label="Loading">
+  <div class="load-card"><div class="load-art" aria-hidden="true"><span class="load-orbit"></span>
+    <svg class="load-diamond" viewBox="0 0 64 64" width="62" height="62"><path d="M13 12h38l10 16-29 32L3 28z" fill="var(--accent)"/><path d="m13 12 9 16 10-16 10 16 9-16M3 28h58M22 28l10 32 10-32" fill="none" stroke="var(--accent-2)" stroke-width="2.5" stroke-linejoin="round"/><path d="m13 12 9 16H3z" fill="white" opacity=".3"/><path d="m32 12 10 16H22z" fill="white" opacity=".45"/></svg>
+  </div><div class="load-brand">LARA STOCK</div><p class="load-label">Loading…</p><div class="load-track" aria-hidden="true"><i></i></div></div>
+</div>
 <header class="top" id="top" hidden></header>
 <main id="view" aria-live="polite"></main>
 <nav class="dock" id="dock" hidden></nav>
@@ -1404,6 +1511,7 @@ const DEEP = (() => {
 })();
 const META_API = (document.querySelector('meta[name="lara-api"]') || {}).content || '';
 const API = (META_API || (/^https?:/.test(location.origin) ? location.origin : '')).replace(/\/+$/, '');
+if (window.__LARA_ERROR_REPORTER__) window.__LARA_ERROR_REPORTER__.connect(API,INIT,DEMO,tg);
 const EMO = 'emoji/';
 const LIBS = {
   lottie: 'https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js',
@@ -1418,7 +1526,7 @@ const store = {
 
 /* ───────────────────────── i18n ───────────────────────── */
 const I = {
-en:{cartAdd:'Add to bag',cartTitle:"Your bag",cartReady:"Your picks, ready to go",cartItems:"{n} items in your bag",cartResume:"A checkout is saved. Check its result before starting another.",cartAlready:"This plan is already in your bag.",cartLimit:"Your bag can hold up to 20 different items.",cartAdded:"Added to your bag",cartSteps:"Checkout steps",cartBagStep:"Your bag",cartReviewStep:"Review",cartDoneStep:"Complete",cartLess:"Decrease quantity",cartMore:"Increase quantity",cartRemove:"Remove item",cartSummary:"Order summary",cartSubtotal:"Subtotal",cartDiscounts:"Your discounts",cartMissing:"Balance to add",cartReviewNote:"Items are purchased one by one from your balance. If an item needs attention, the rest stop and you see what was charged.",cartQuoteNote:"Final prices, bulk discounts and VIP savings are checked again at review.",cartSaved:"You save {p} on this order",cartEmpty:"Make room for something good.",cartEmptyBody:"Your bag is waiting for your next favorite. Explore the store and add what you like.",cartLast:"View your last checkout",cartReviewEyebrow:"ONE LAST LOOK",cartEyebrow:"PICKED BY YOU",cartReviewTitle:"Everything look right?",cartHeading:"Good choices. All together.",cartReviewSub:"Review the items, quantities and invitation emails before you pay.",cartProducts:"YOUR ITEMS",cartContinue:"Keep shopping",cartFix:"Some items need attention. Update your bag before continuing.",cartPay:"Confirm & pay · {p}",cartReviewButton:"Review order",cartEdit:"Edit bag",cartSuccess:"All yours.",cartWorking:"Your order is in motion.",cartVerifying:"One item is being verified.",cartPartial:"Here is your order update.",cartSuccessSub:"Your items are listed below. Your purchases are also saved in My orders.",cartWorkingSub:"We are checking your saved checkout. Please wait for the result.",cartUncertainSub:"One result needs checking. Contact support with this checkout reference before buying again.",cartPartialSub:"Completed items are listed below. The remaining items were not purchased.",cartWaiting:"Waiting for its turn",cartNotPurchased:"Not purchased",cartPaid:"Amount paid",cartReference:"CHECKOUT REFERENCE",cartCheck:"Check result",cartRemaining:"Back to remaining items",e_cart_changed:"Stock or availability changed. Review your bag again.",e_cart_disabled:"The shopping bag is temporarily unavailable. Direct buying is still available.",e_price_changed:"A price changed. Review the updated total before paying.",e_purchase_uncertain:"This purchase needs checking. Open My orders or contact support before trying again.",e_quote_expired:"Your price review expired. Review your order again.",e_bad_cart:"Add between 1 and 20 valid items to your bag.",api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
+en:{e_verification_required:"Complete verification inside the store, then try again.",e_verification_unavailable:"Membership could not be checked. Please try again shortly.",cartAdd:'Add to bag',cartTitle:"Your bag",cartReady:"Your picks, ready to go",cartItems:"{n} items in your bag",cartResume:"A checkout is saved. Check its result before starting another.",cartAlready:"This plan is already in your bag.",cartLimit:"Your bag can hold up to 20 different items.",cartAdded:"Added to your bag",cartSteps:"Checkout steps",cartBagStep:"Your bag",cartReviewStep:"Review",cartDoneStep:"Complete",cartLess:"Decrease quantity",cartMore:"Increase quantity",cartRemove:"Remove item",cartSummary:"Order summary",cartSubtotal:"Subtotal",cartDiscounts:"Your discounts",cartMissing:"Balance to add",cartReviewNote:"Items are purchased one by one from your balance. If an item needs attention, the rest stop and you see what was charged.",cartQuoteNote:"Final prices, bulk discounts and VIP savings are checked again at review.",cartSaved:"You save {p} on this order",cartEmpty:"Make room for something good.",cartEmptyBody:"Your bag is waiting for your next favorite. Explore the store and add what you like.",cartLast:"View your last checkout",cartReviewEyebrow:"ONE LAST LOOK",cartEyebrow:"PICKED BY YOU",cartReviewTitle:"Everything look right?",cartHeading:"Good choices. All together.",cartReviewSub:"Review the items, quantities and invitation emails before you pay.",cartProducts:"YOUR ITEMS",cartContinue:"Keep shopping",cartFix:"Some items need attention. Update your bag before continuing.",cartPay:"Confirm & pay · {p}",cartReviewButton:"Review order",cartEdit:"Edit bag",cartSuccess:"All yours.",cartWorking:"Your order is in motion.",cartVerifying:"One item is being verified.",cartPartial:"Here is your order update.",cartSuccessSub:"Your items are listed below. Your purchases are also saved in My orders.",cartWorkingSub:"We are checking your saved checkout. Please wait for the result.",cartUncertainSub:"One result needs checking. Contact support with this checkout reference before buying again.",cartPartialSub:"Completed items are listed below. The remaining items were not purchased.",cartWaiting:"Waiting for its turn",cartNotPurchased:"Not purchased",cartPaid:"Amount paid",cartReference:"CHECKOUT REFERENCE",cartCheck:"Check result",cartRemaining:"Back to remaining items",e_cart_changed:"Stock or availability changed. Review your bag again.",e_cart_disabled:"The shopping bag is temporarily unavailable. Direct buying is still available.",e_price_changed:"A price changed. Review the updated total before paying.",e_purchase_uncertain:"This purchase needs checking. Open My orders or contact support before trying again.",e_quote_expired:"Your price review expired. Review your order again.",e_bad_cart:"Add between 1 and 20 valid items to your bag.",api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
 outOfStock:'Out of stock',stockN:'{n} in stock',onlyLeft:'Only {n} left',unlimited:'Unlimited',seats:'{n} seats',instant:'Instant delivery',manual:'Manual delivery',invite:'Invite by email',from:'from',buyFor:'Buy · {p}',confirmFor:'Tap to confirm · {p}',processing:'Processing…',
 about:'About',tiers:'Bulk discount',tierRow:'{n}+ pcs',perPc:'/pc',duration:'Choose a plan',email:'ChatGPT account email',emailHint:'The invite is sent to this email. It must be registered on chatgpt.com.',qty:'Quantity',unit:'Unit price',total:'Total',yourBal:'Your balance',after:'After purchase',needMore:'You need {p} more',addFunds:'Add funds',days:'{n} days',hiddenTag:'Hidden',
 okTitle:'Purchase complete',okCodes:'Your codes',dlTxt:'Download TXT',dlAll:"Download all purchases",cgSubs:"ChatGPT subscriptions",cgSubsSub:"{n} active · next one ends in {d} days",cgLeft:"{d} days {h} h left",cgEnds:"Ends {d}",cgRenew:"Renew / add time",cgPick:"Pick a plan to add to this email",cgAddQ:"Add {l} (+{n} days) to {e} for {p}?",cgAdded:"Added {n} days — now {t} days left",cgNone:"No active ChatGPT subscriptions.",toChat:'📩 To chat',txtSent:'Sent the file to your bot chat',txtCancel:'Download cancelled',pvTxt:'Preview: in your bot this downloads a TXT file with the codes',copyAll:'Copy all',copied:'Copied',sentChat:'A copy was also sent to your chat with the bot.',manualTitle:'Order placed',manualBody:'This product is delivered manually. Your order number is {ref}. Support will contact you.',gptTitle:'Invite sent',gptBody:'Open {email} and accept the invite to activate your seat.',expires:'Expires {d}',verTitle:'Order being verified',verBody:"Don't repeat the purchase. You'll get the result in the bot chat.",done:'Done',myOrders:'My orders',
@@ -1433,7 +1541,7 @@ joinT:'Join our channels',joinB:'Subscribe to keep using the store.',join:'Join'
 banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
 activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
 e_insufficient_balance:'Not enough balance. You need {p} more.',e_out_of_stock:'This product is out of stock.',e_not_enough_stock:'Only {n} available.',e_deposit_pending:'Finish or cancel your pending payment first.',e_busy:'Another purchase is in progress. Wait a moment.',e_renewal_pending:'Renewal is being verified. Do not pay again; contact support.',e_must_join:'Join the required channels first.',e_banned:'Your account is blocked.',e_bad_email:'Enter a valid email address.',e_bad_duration:'Choose a plan first.',e_invite_failed:"The invite couldn't be sent. Your balance was refunded.",e_supplier_failed:'The supplier rejected the order. Your balance was refunded.',e_purchase_failed:"The purchase didn't go through. Check your balance and try again.",e_rate_limited:'Too many requests. Try again in a minute.',e_auth:'Session expired. Reopen the store.',e_method_unavailable:"This payment method isn't available.",e_amount_range:'Enter an amount between {min} and {max}.',e_busy_amount:'No unique amount is free right now. Try another amount.',e_price_unavailable:"Couldn't get the coin price. Try again shortly.",e_invoice_failed:"Couldn't create the Stars invoice.",e_server_error:'Something went wrong. Try again.',e_network:'No connection. Check your internet and try again.',e_not_found:'This product is no longer available.',e_bad_qty:'Enter a valid quantity.',e_bot_only:'This is managed from the bot only.',vfT:"Activate your account",vfB:"Two quick steps that keep the store safe from fake accounts.",vfS1:"Channels & groups",vfS2:"Human check",vfS3:"Ready",vfJoinT:"Join our channels and groups",vfJoinB:"{n} of {t} left. Join them, then tap “Check”.",vfJoinAll:"All set here. Tap “Check” to continue.",vfKindC:"Channel",vfKindG:"Group",vfJoined:"Joined",vfJoin:"Join",vfOpened:"Opened",vfCheck:"Check",vfChecking:"Checking…",vfLeft:"{n} still not joined",vfHumT:"Show us you’re human",vfHumB:"Tap the emoji that matches.",vfTap:"Tap",vfW1:"Checking your device",vfW2:"Confirming the Telegram app",vfW3:"Activating your account",vfDoneT:"You’re all set",vfDoneB:"Your account is active. Enjoy the store.",vfEnter:"Enter the store",vfOpenP:"Open the product",vfOpening:"Opening {p} for you…",deepGone:"This product isn't available right now.",vfPriv:"No personal data is collected, only an encrypted device code.",vfFail:"Couldn't check right now. Try again.",vfNoLink:"Ask support",pvVerify:"Preview the referral activation screen",poSub:"Your codes and order history",dvT:"One last step",dvB:"Tap the matching emoji to verify your device. It keeps the store safe from fake accounts — no personal data is collected.",dvTap:"Tap {e}",dvWrong:"Not that one — try again",dvWork:"Checking your device…",dvOkT:"Verified",dvOkB:"You can use the store now.",dvEnter:"Enter the store",dvFail:"Couldn't verify right now. Try again.",e_no_account:'Start the bot first, then reopen the store.',e_deposit_failed:"Couldn't create the payment. Try again or pick another method.",e_deposit_exists:"You already have a payment in progress. Finish or cancel it first.",e_unavailable:"This isn't available right now. Try again shortly.",e_bad_request:"Something in the request was wrong. Refresh and try again.",e_too_large:"That's too much text at once. Send it in smaller parts.",e_bad_json:"Something in the request was wrong. Refresh and try again.",e_expired:"This link expired. Try again.",e_forbidden:"You don't have permission for this.",e_no_key:"Generate an API key first.",e_no_webhook:"Set a webhook URL first.",e_bad_url:"Enter a valid http(s) URL.",e_private_url:"Use a public internet address (not localhost or a private network).",e_empty:"Nothing was entered.",e_bad_amount:"Enter a valid amount.",e_bad_price:"Enter a valid price.",e_bad_vip:"Invalid VIP setting.",e_cannot_ban:"This account can't be banned.",e_bad_section:"This section isn't available.",e_open_failed:"Couldn't open this section. Try again.",h_all:'All',h_deposit:'Deposits',h_purchase:'Purchases',h_adjust:'Adjustments',opsN:'{n} operations',details:'Details',f_type:'Type',f_method:'Method',f_network:'Network',f_sent:'Amount sent',f_requested:'Requested',f_status:'Status',completed:'Completed',f_date:'Date',f_ref:'Reference',f_tx:'Transaction ID',f_product:'Product',f_note:'Note',f_after:'Balance after',adj_compensation:'Compensation',adj_manual:'Manual top-up',adj_gift:'Gift',adj_adjustment:'Balance adjustment',adj_ref_reward:'Referral reward',adj_ref_clawback:'Referral deducted (left)',adj_ref_refund:'Referral back',adj_deduct:'Deduction',refunded:'Refunded',g_tg:'Telegram',g_ex:'Exchanges',g_cr:'Crypto wallets',change:'Change',lastUsed:'Last used',mInstant:'Instant',mAuto:'Credited automatically',minFrom:'from {min}',newBal:'New balance',uniqueNote:"You'll get a unique amount with extra decimals. Send exactly that amount.",prev:'Previous',next:'Next',codesN:'{n} codes'},
-ar:{cartAdd:'أضف إلى السلة',cartTitle:"سلة مشترياتك",cartReady:"اختياراتك جاهزة للشراء",cartItems:"{n} قطعة في سلتك",cartResume:"توجد محاولة شراء محفوظة. تحقق من نتيجتها قبل بدء محاولة أخرى.",cartAlready:"هذه الباقة موجودة في سلتك.",cartLimit:"تستوعب السلة 20 منتجًا مختلفًا كحد أقصى.",cartAdded:"تمت الإضافة إلى سلتك",cartSteps:"مراحل إتمام الطلب",cartBagStep:"السلة",cartReviewStep:"المراجعة",cartDoneStep:"الإتمام",cartLess:"تقليل الكمية",cartMore:"زيادة الكمية",cartRemove:"إزالة المنتج",cartSummary:"ملخص الطلب",cartSubtotal:"قيمة المنتجات",cartDiscounts:"خصوماتك",cartMissing:"الرصيد المطلوب إضافته",cartReviewNote:"نشتري المنتجات بالتتابع من رصيدك. إذا تعثر منتج نتوقف، وتظهر نتيجة كل منتج والمبلغ المدفوع.",cartQuoteNote:"نتحقق من الأسعار وخصومات الكمية وVIP مجددًا عند مراجعة الطلب.",cartSaved:"توفّر {p} في هذا الطلب",cartEmpty:"سلتك تنتظر اختياراتك.",cartEmptyBody:"اكتشف المنتجات وأضف ما يعجبك. اجمع اختياراتك هنا وراجعها براحتك.",cartLast:"عرض آخر محاولة شراء",cartReviewEyebrow:"قبل التأكيد",cartEyebrow:"على ذوقك",cartReviewTitle:"كل شيء مثل ما تحب؟",cartHeading:"اختياراتك الحلوة، في مكان واحد.",cartReviewSub:"راجع المنتجات والكميات وإيميلات الدعوات قبل الدفع.",cartProducts:"منتجاتك",cartContinue:"متابعة التسوق",cartFix:"بعض المنتجات تحتاج مراجعة. حدّث سلتك قبل المتابعة.",cartPay:"تأكيد ودفع · {p}",cartReviewButton:"مراجعة الطلب",cartEdit:"تعديل السلة",cartSuccess:"صارت لك.",cartWorking:"نعمل على طلبك.",cartVerifying:"أحد المنتجات قيد التحقق.",cartPartial:"هذا آخر تحديث لطلبك.",cartSuccessSub:"تفاصيل منتجاتك بالأسفل، ومشترياتك محفوظة أيضًا في «طلباتي».",cartWorkingSub:"نتحقق من نتيجة الشراء المحفوظة. انتظر حتى تظهر النتيجة.",cartUncertainSub:"نتيجة أحد المنتجات تحتاج تحققًا. تواصل مع الدعم بمرجع السلة قبل إعادة الشراء.",cartPartialSub:"المنتجات المكتملة موضحة بالأسفل. بقية المنتجات لم تُشترَ.",cartWaiting:"بانتظار دوره",cartNotPurchased:"لم يتم الشراء",cartPaid:"المبلغ المدفوع",cartReference:"مرجع عملية السلة",cartCheck:"التحقق من النتيجة",cartRemaining:"الرجوع للمنتجات المتبقية",e_cart_changed:"تغير المخزون أو التوفر. راجع السلة مرة أخرى.",e_cart_disabled:"السلة متوقفة مؤقتًا. يمكنك الشراء المباشر.",e_price_changed:"تغير أحد الأسعار. راجع الإجمالي المحدّث قبل الدفع.",e_purchase_uncertain:"نتيجة الشراء تحتاج تحققًا. افتح طلباتي أو تواصل مع الدعم قبل تكرار الشراء.",e_quote_expired:"انتهت صلاحية مراجعة السعر. راجع الطلب مجددًا.",e_bad_cart:"أضف من منتج واحد إلى 20 منتجًا صحيحًا للسلة.",api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
+ar:{e_verification_required:"أكمل التحقق داخل المتجر ثم أعد المحاولة.",e_verification_unavailable:"تعذر فحص الاشتراك الآن. حاول بعد قليل.",cartAdd:'أضف إلى السلة',cartTitle:"سلة مشترياتك",cartReady:"اختياراتك جاهزة للشراء",cartItems:"{n} قطعة في سلتك",cartResume:"توجد محاولة شراء محفوظة. تحقق من نتيجتها قبل بدء محاولة أخرى.",cartAlready:"هذه الباقة موجودة في سلتك.",cartLimit:"تستوعب السلة 20 منتجًا مختلفًا كحد أقصى.",cartAdded:"تمت الإضافة إلى سلتك",cartSteps:"مراحل إتمام الطلب",cartBagStep:"السلة",cartReviewStep:"المراجعة",cartDoneStep:"الإتمام",cartLess:"تقليل الكمية",cartMore:"زيادة الكمية",cartRemove:"إزالة المنتج",cartSummary:"ملخص الطلب",cartSubtotal:"قيمة المنتجات",cartDiscounts:"خصوماتك",cartMissing:"الرصيد المطلوب إضافته",cartReviewNote:"نشتري المنتجات بالتتابع من رصيدك. إذا تعثر منتج نتوقف، وتظهر نتيجة كل منتج والمبلغ المدفوع.",cartQuoteNote:"نتحقق من الأسعار وخصومات الكمية وVIP مجددًا عند مراجعة الطلب.",cartSaved:"توفّر {p} في هذا الطلب",cartEmpty:"سلتك تنتظر اختياراتك.",cartEmptyBody:"اكتشف المنتجات وأضف ما يعجبك. اجمع اختياراتك هنا وراجعها براحتك.",cartLast:"عرض آخر محاولة شراء",cartReviewEyebrow:"قبل التأكيد",cartEyebrow:"على ذوقك",cartReviewTitle:"كل شيء مثل ما تحب؟",cartHeading:"اختياراتك الحلوة، في مكان واحد.",cartReviewSub:"راجع المنتجات والكميات وإيميلات الدعوات قبل الدفع.",cartProducts:"منتجاتك",cartContinue:"متابعة التسوق",cartFix:"بعض المنتجات تحتاج مراجعة. حدّث سلتك قبل المتابعة.",cartPay:"تأكيد ودفع · {p}",cartReviewButton:"مراجعة الطلب",cartEdit:"تعديل السلة",cartSuccess:"صارت لك.",cartWorking:"نعمل على طلبك.",cartVerifying:"أحد المنتجات قيد التحقق.",cartPartial:"هذا آخر تحديث لطلبك.",cartSuccessSub:"تفاصيل منتجاتك بالأسفل، ومشترياتك محفوظة أيضًا في «طلباتي».",cartWorkingSub:"نتحقق من نتيجة الشراء المحفوظة. انتظر حتى تظهر النتيجة.",cartUncertainSub:"نتيجة أحد المنتجات تحتاج تحققًا. تواصل مع الدعم بمرجع السلة قبل إعادة الشراء.",cartPartialSub:"المنتجات المكتملة موضحة بالأسفل. بقية المنتجات لم تُشترَ.",cartWaiting:"بانتظار دوره",cartNotPurchased:"لم يتم الشراء",cartPaid:"المبلغ المدفوع",cartReference:"مرجع عملية السلة",cartCheck:"التحقق من النتيجة",cartRemaining:"الرجوع للمنتجات المتبقية",e_cart_changed:"تغير المخزون أو التوفر. راجع السلة مرة أخرى.",e_cart_disabled:"السلة متوقفة مؤقتًا. يمكنك الشراء المباشر.",e_price_changed:"تغير أحد الأسعار. راجع الإجمالي المحدّث قبل الدفع.",e_purchase_uncertain:"نتيجة الشراء تحتاج تحققًا. افتح طلباتي أو تواصل مع الدعم قبل تكرار الشراء.",e_quote_expired:"انتهت صلاحية مراجعة السعر. راجع الطلب مجددًا.",e_bad_cart:"أضف من منتج واحد إلى 20 منتجًا صحيحًا للسلة.",api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
 outOfStock:'غير متوفر',stockN:'{n} متوفر',onlyLeft:'باقي {n} فقط',unlimited:'غير محدود',seats:'{n} مقعد',instant:'تسليم فوري',manual:'تسليم يدوي',invite:'دعوة على الإيميل',from:'يبدأ من',buyFor:'شراء · {p}',confirmFor:'اضغط للتأكيد · {p}',processing:'جاري التنفيذ…',
 about:'عن المنتج',tiers:'خصم الكمية',tierRow:'{n}+ قطعة',perPc:'/قطعة',duration:'اختر المدة',email:'إيميل حساب ChatGPT',emailHint:'تُرسل الدعوة لهذا الإيميل، ويجب أن يكون مسجلاً على chatgpt.com.',qty:'الكمية',unit:'سعر القطعة',total:'الإجمالي',yourBal:'رصيدك',after:'بعد الشراء',needMore:'ينقصك {p}',addFunds:'شحن الرصيد',days:'{n} يوم',hiddenTag:'مخفي',
 okTitle:'تم الشراء بنجاح',okCodes:'أكوادك',dlTxt:'تحميل TXT',dlAll:"تحميل كل المشتريات",cgSubs:"اشتراكات ChatGPT",cgSubsSub:"{n} نشط · أقربها ينتهي بعد {d} يوم",cgLeft:"باقي {d} يوم و {h} ساعة",cgEnds:"ينتهي {d}",cgRenew:"تجديد / إضافة مدة",cgPick:"اختر الباقة اللي تنضاف لهذا الإيميل",cgAddQ:"إضافة {l} (+{n} يوم) إلى {e} بسعر {p}؟",cgAdded:"تمت إضافة {n} يوم — الحين باقي {t} يوم",cgNone:"ما عندك اشتراكات ChatGPT نشطة.",toChat:'📩 للمحادثة',txtSent:'أرسلت لك الملف في محادثة البوت',txtCancel:'انلغى التحميل',pvTxt:'معاينة: في بوتك يتحمّل ملف TXT فيه الأكواد',copyAll:'نسخ الكل',copied:'تم النسخ',sentChat:'وصلتك نسخة أيضاً في محادثة البوت.',manualTitle:'تم تسجيل طلبك',manualBody:'هذا المنتج يُسلَّم يدوياً. رقم طلبك {ref}، وسيتواصل معك الدعم.',gptTitle:'تم إرسال الدعوة',gptBody:'افتح {email} واقبل الدعوة لتفعيل مقعدك.',expires:'ينتهي {d}',verTitle:'طلبك قيد التحقق',verBody:'لا تكرر الشراء، ستصلك النتيجة في محادثة البوت.',done:'تم',myOrders:'طلباتي',
@@ -1569,9 +1677,46 @@ const S = {
 };
 
 /* ───────────────────────── api ───────────────────────── */
+const PageLoad = { next: 0, pending: new Map(), hideTimer: null };
+function pageLoadVisible(path) {
+  if (path === 'bootstrap') return S.screen === 'loading';
+  if (S.screen !== 'app') return false;
+  return (path === 'orders' && S.tab === 'orders') || (path === 'history' && S.tab === 'balance') ||
+    ((path === 'referrals' || path === 'cgpt/subs') && S.tab === 'profile') ||
+    (path === 'api/state' && S.tab === 'api');
+}
+function syncPageLoading() {
+  const el = document.getElementById('page-loading');
+  if (!el) return;
+  const visible = S.screen === 'loading' || [...PageLoad.pending.values()].some(pageLoadVisible);
+  clearTimeout(PageLoad.hideTimer);
+  document.getElementById('view')?.setAttribute('aria-busy', String(visible));
+  if (visible) {
+    el.hidden = false; el.classList.remove('leaving');
+    el.setAttribute('aria-label', t('loading'));
+    el.querySelector('.load-label').textContent = t('loading');
+    el.querySelector('.load-brand').textContent = S.store?.name || 'LARA STOCK';
+  } else if (!el.hidden) {
+    el.classList.add('leaving');
+    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; }, 220);
+  }
+}
+function pageLoadBegin(path) {
+  const fresh = path === 'bootstrap' || (path === 'orders' && !S.orders) ||
+    (path === 'history' && !S.hist.data) || (path === 'referrals' && !S.refs) ||
+    (path === 'cgpt/subs' && S.cgpt?.loading) || (path === 'api/state' && !S.api);
+  if (!fresh || !pageLoadVisible(path)) return null;
+  const token = ++PageLoad.next;
+  PageLoad.pending.set(token, path); syncPageLoading(); return token;
+}
+function pageLoadEnd(token) {
+  if (token == null) return;
+  PageLoad.pending.delete(token); syncPageLoading();
+}
 async function api(path, body) {
   if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
-  const controller = (path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const loadingToken = pageLoadBegin(path);
+  const controller = (loadingToken != null || path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
   try {
     const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
@@ -1581,10 +1726,11 @@ async function api(path, body) {
     data._s = res.status;
     if (data.error === 'auth') { S.screen = 'auth'; renderAll(); }
     if (data && data.vip) S.vip = data.vip;
+    if (typeof data.ref_debt === 'number' && S.user) { S.user.ref_debt = data.ref_debt; if (S.refs) S.refs.ref_debt = data.ref_debt; }
     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
     return data;
   } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
-  finally { if (timer) clearTimeout(timer); }
+  finally { if (timer) clearTimeout(timer); pageLoadEnd(loadingToken); }
 }
 function errText(r) {
   const e = (r && r.error) || 'server_error';
@@ -1593,7 +1739,7 @@ function errText(r) {
 }
 
 /* ───────────────────────── animated emoji ───────────────────────── */
-function ae(name, cls) { return `<img class="ae ${cls || ''}" src="${EMO}${name}.webp" alt="" draggable="false" decoding="async">`; }
+function ae(name, cls) { return `<img class="ae ${cls || ''}" src="${EMO}${name}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
 const EMAP = { '⚡': 'bolt', '✔': 'check', '✅': 'check', '☑': 'check', '🚫': 'cross', '❌': 'cross', '✖': 'cross', '⛔': 'cross', '🔥': 'fire', '⭐': 'star', '🌟': 'star', '💎': 'gem', '🔑': 'key', '🗝': 'key', '🔒': 'lock', '🔐': 'lock', '✨': 'sparkles', '🚀': 'rocket', '⏳': 'hourglass', '⌛': 'hourglass', '👑': 'crown', '💰': 'moneybag', '💸': 'moneywings', '🛍': 'store', '🛒': 'cart', '👛': 'purse', '👤': 'profile', '🎉': 'party', '🪙': 'coin', '💬': 'speech', '📢': 'megaphone', '👥': 'busts', '🔍': 'search', '🔎': 'search', '📝': 'memo', '🪪': 'idcard' };
 function emKey(ch) { return EMAP[String(ch || '').replace(/[\uFE0F\u200D]/g, '').trim()] || null; }
 /* can this custom emoji actually be loaded here? (live bot: yes; preview: only if the export file carried it) */
@@ -2048,6 +2194,7 @@ function renderView() {
     if (S.tab === 'profile' && !S.refs) loadRefs();
     if (S.tab === 'profile' && !S.cgpt && !DEMO) loadCgpt();
   }
+  syncPageLoading();
 }
 function vLoading() {
   return `<div class="hello"><div style="width:60%"><div class="skel" style="height:14px;width:40%;border-radius:8px"></div><div class="skel" style="height:24px;margin-top:8px;border-radius:8px"></div></div></div>
@@ -2687,15 +2834,9 @@ async function cartAction(sh,st,act,el) {
 }
 
 /* Frontend runtime errors are authenticated and rate-limited server-side. */
-let clientErrorAt=0;
-function reportClientError(message,locationText,operation) {
-  if(DEMO||!INIT||Date.now()-clientErrorAt<5000)return;
-  clientErrorAt=Date.now();
-  fetch(API+'/webapp/client/error',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':INIT},
-    body:JSON.stringify({message:String(message||'Browser error').slice(0,1200),location:String(locationText||'').split('?')[0].slice(0,200),operation:operation||'runtime'})}).catch(()=>{});
+function reportClientError(message,locationText,operation,details) {
+  if(window.__LARA_ERROR_REPORTER__) window.__LARA_ERROR_REPORTER__.report(message,locationText,operation,details);
 }
-window.addEventListener('error',e=>{if(e.error||e.message)reportClientError(e.message,(e.filename||'')+':'+(e.lineno||0),'runtime');});
-window.addEventListener('unhandledrejection',e=>reportClientError(e.reason instanceof Error?e.reason.message:'Unhandled promise rejection','browser','promise'));
 async function cartDemo(path, body) {
   Demo.carts=Demo.carts||{};
   if(path==='cart/quote'){
@@ -3142,6 +3283,7 @@ function openCgpt() {
 async function loadRefs() { const r = await api('referrals'); if (r.ok) { S.refs = r; if (S.tab === 'profile') renderView(); } }
 function vProfile() {
   const u = S.user || {}, r = S.refs;
+  const refDebt = +(r?.ref_debt ?? u.ref_debt ?? 0);
   const initials = ((u.first_name || '?')[0] + ((u.last_name || '')[0] || '')).toUpperCase();
   const lang = LANGS.find(l => l[0] === LANG);
   const inv = r ? `<div class="invite">
@@ -3158,6 +3300,7 @@ function vProfile() {
       <button class="idchip" data-act="copy" data-v="${esc(u.id)}">ID ${esc(u.id)} ${ic.copy}</button>
       ${DEMO ? `<button class="linked-chip pvm" data-act="pv-how">${ic.info}${esc(t('notLinked'))}</button>` : S.store.bot ? `<span class="linked-chip"><i class="live-dot"></i>${esc(t('linked'))} <bdi dir="ltr">@${esc(S.store.bot)}</bdi></span>` : ''}</div>
     <div class="stats3"><div class="stat"><span>${esc(t('balance'))}</span><b class="num">${usd(u.balance)}</b></div><div class="stat"><span>${esc(t('purchases'))}</span><b class="num">${u.purchases || 0}</b></div><div class="stat"><span>${esc(t('deposited'))}</span><b class="num">${usd(u.deposited || 0)}</b></div></div>
+    ${refDebt > 0 ? `<div class="hint" role="note">${esc(LANG === 'ar' ? 'مستحق استرجاع إحالات: ' : 'Pending referral reversal: ')}<b dir="ltr">${usd(refDebt)}</b>. ${esc(LANG === 'ar' ? 'يُسوّى من مكافآت الإحالات القادمة. الرصيد أعلاه هو المتاح للشراء.' : 'Settled from future referral rewards. The balance above is available for purchases.')}</div>` : ''}
     <button class="p-ord" data-act="tab" data-v="orders"><span class="po-ic">${slot('orders', 'cart')}</span>
       <span class="meta"><b>${esc(t('myOrders'))}</b><small>${esc(t('poSub'))}</small></span>
       ${u.purchases ? `<span class="po-n num">${u.purchases}</span>` : ''}${ic.chev}</button>
@@ -3944,50 +4087,162 @@ async function openAdmOrderById(id) {
   if (r.ok) openAdmOrder(r.order); else toast(errText(r), 'bad');
 }
 
-function admUserHtml(r) {
-  const u = r.user, v = r.vip || {};
-  const row = (a, b, c, cls) => `<div class="adm-row static"><span class="meta"><b dir="auto">${a}</b><small>${b}</small></span><span class="amt num ${cls || ''}">${c}</span></div>`;
-  const joined = u.joined ? adt('joined', { d: fmtDate(u.joined) }) : '';
-  return `<div class="adm-user u0">
-      <div class="adm-uh"><span class="adm-av lg">${esc(String(u.name || '?')[0].toUpperCase())}</span><span class="grow"><b dir="auto">${esc(u.name)}${u.is_owner ? `<span class="adm-badge ok">${esc(adt('owner'))}</span>` : u.is_admin ? `<span class="adm-badge ok">${esc(adt('admin'))}</span>` : ''}${u.banned ? `<span class="adm-badge bad">${esc(adt('banned'))}</span>` : ''}</b>
-        <small dir="ltr">${u.username ? '@' + esc(u.username) + ' · ' : ''}${u.id}</small>${joined ? `<small>${esc(joined)}</small>` : ''}</span><button class="copy" data-act="copy" data-v="${u.id}" aria-label="copy">${ic.copy}</button></div>
-      <div class="adm-mini"><div><b class="num">${usd(u.balance)}</b><span>${esc(adt('balance'))}</span></div><div><b class="num">${u.orders}</b><span>${esc(adt('ordersN'))}</span></div><div><b class="num">${usdShort(u.spent)}</b><span>${esc(adt('spent'))}</span></div><div><b class="num">${usdShort(u.deposits)}</b><span>${esc(adt('deposits'))}</span></div></div>
-      <div class="adm-vipl">👑 <b>${v.level ? 'VIP ' + v.level : esc(t('vipNone') || '—')}</b>${v.override != null ? ` · ${esc(adt('vipPinned'))}` : ''} · ${esc(adt('vipNet', { n: usd((v.cents || 0) / 100).replace(/[⁦⁩]/g, '') }))}${v.next ? ` · ${esc(adt('vipNext', { p: usd((v.remaining || 0) / 100).replace(/[⁦⁩]/g, ''), n: v.next }))}` : ''}</div>
-      <div class="adm-acts">
-        <button class="btn primary sm" data-act="admu-bal">💰 ${esc(adt('editBal'))}</button>
-        <button class="btn sm ${u.banned ? 'ghost' : 'danger-text'}" data-act="admu-ban" data-v="${u.banned ? 0 : 1}">${u.banned ? '✅ ' + esc(adt('unban')) : '🚫 ' + esc(adt('ban'))}</button>
-        ${u.tme ? `<button class="btn ghost sm" data-act="adm-msg" data-v="${esc(u.tme)}">💬 ${esc(adt('message'))}</button>` : ''}
-        <button class="btn ghost sm" data-act="adm-open" data-v="ad_vipu_${u.id}" data-l="VIP">👑 VIP ↗</button>
-        <button class="btn ghost sm" data-act="adm-open" data-v="ad_u_det_${u.id}" data-l="${esc(adt('openUser'))}">${esc(adt('inBot'))} ↗</button>
-      </div>
-    </div>
-    <div class="lbl">${esc(adt('recent'))}</div>
-    <div class="api-card adm-list">${(r.orders || []).length ? r.orders.map(o => `<button class="adm-row" data-act="adm-order" data-v="${esc(o.order_id)}"><span class="meta"><b dir="auto">${esc(admName(o))}</b><small><span class="mono" dir="ltr">${esc(o.order_id)}</span> · ${esc(fmtDate(o.ts))}</small></span><span class="amt num">${usd(o.total)}</span></button>`).join('') : `<p class="api-muted">${esc(adt('empty'))}</p>`}</div>
-    <div class="lbl">${esc(adt('lastDeps'))}</div>
-    <div class="api-card adm-list">${(r.deposits || []).length ? r.deposits.map(d => row(esc(d.method), `<span class="mono" dir="ltr">${esc(String(d.tx || '').slice(0, 28))}</span> · ${esc(fmtDate(d.ts))}`, usdS(d.amount < 0 ? '−' : '+', Math.abs(d.amount)), d.amount < 0 ? 'neg' : 'pos')).join('') : `<p class="api-muted">${esc(adt('empty'))}</p>`}</div>
-    ${(r.logs || []).length ? `<div class="lbl">${esc(adt('logs'))}</div><div class="api-card adm-list">${r.logs.map(l => row(esc(l.note || l.type || ''), esc(fmtDate(l.ts)), usdS(l.amount < 0 ? '−' : '+', Math.abs(l.amount)), l.amount < 0 ? 'neg' : 'pos')).join('')}</div>` : ''}
-    ${DEMO ? pvNote() : ''}`;
+Object.assign(ADM_I18N.ar, {
+  upOverview:'المعلومات', upPurchases:'المشتريات', upDeposits:'الإيداعات', upChanges:'التعديلات',
+  upIntro:'ملف المستخدم', upHint:'اختر منتجًا لعرض عمليات شرائه وتفاصيل الحسابات أو الاشتراكات.',
+  upProductCount:'{n} منتج', upOrderCount:'{n} عملية شراء', upPurchased:'المنتجات المشتراة',
+  upAllSources:'الموقع · البوت · API', upNoOrders:'لا توجد مشتريات مسجلة لهذا المستخدم.',
+  upRecords:'سجلات المنتج', upDetail:'تفاصيل الشراء', upDelivery:'الحسابات وبيانات التسليم',
+  upBackProducts:'منتجات المستخدم', upBackRecords:'سجلات المنتج', upDownload:'تحميل التفاصيل كاملة',
+  upSavedSub:'الاشتراك المحفوظ', upSubNote:'الحالة حسب سجلات البوت. إرسال الدعوة لا يثبت قبولها.',
+  upOriginalExpiry:'الانتهاء المسجل وقت الشراء', upCurrentExpiry:'الانتهاء الحالي',
+  upLeft:'المتبقي: {d} يوم و{h} ساعة', upInvited:'تاريخ الدعوة', upAccount:'الحساب',
+  upNoDelivery:'لا توجد بيانات تسليم محفوظة لهذا الطلب حتى الآن.', upUnknownPrice:'السعر التاريخي غير محفوظ.',
+  upRenewal:'تجديد اشتراك', upSavedOnly:'لا يتوفر سجل اشتراك حالي مطابق؛ المعروض هو سجل الشراء.',
+  upLegacy:'غير مسجل في السجل القديم', upRefresh:'تحديث المشتريات', upPaid:'المبلغ المسجل',
+  upEmptyChanges:'لا توجد تعديلات مالية مسجلة.', upEmptyDeposits:'لا توجد إيداعات مسجلة.',
+  upLocalStates:{active:'نشط حسب السجل',expired:'انتهت المدة',pending:'قيد الانتظار',kicked:'أُزيل',revoked:'أُلغيت الدعوة',removed:'أُزيل',unknown:'غير معروف'}
+});
+Object.assign(ADM_I18N.en, {
+  upOverview:'Overview',upPurchases:'Purchases',upDeposits:'Deposits',upChanges:'Adjustments',
+  upIntro:'User inspection',upHint:'Choose a product, then a purchase to view delivered accounts or subscription details.',
+  upProductCount:'{n} products',upOrderCount:'{n} purchases',upPurchased:'Purchased products',
+  upAllSources:'Website · Bot · API',upNoOrders:'No purchase records for this user.',
+  upRecords:'Product records',upDetail:'Purchase details',upDelivery:'Accounts & delivery details',
+  upBackProducts:'User products',upBackRecords:'Product records',upDownload:'Download full details',
+  upSavedSub:'Saved subscription',upSubNote:'Status comes from the bot records. Sending an invitation does not confirm acceptance.',
+  upOriginalExpiry:'Expiry recorded at purchase',upCurrentExpiry:'Current expiry',
+  upLeft:'Remaining: {d} days, {h} hours',upInvited:'Invitation date',upAccount:'Account',
+  upNoDelivery:'No delivery details have been saved for this purchase yet.',upUnknownPrice:'Historical price was not saved.',
+  upRenewal:'Subscription renewal',upSavedOnly:'No matching current subscription record; this is the purchase receipt.',
+  upLegacy:'Not recorded in this older receipt',upRefresh:'Refresh purchases',upPaid:'Recorded amount',
+  upEmptyChanges:'No balance adjustments.',upEmptyDeposits:'No deposits recorded.',
+  upLocalStates:{active:'Active in saved record',expired:'Expired',pending:'Pending',kicked:'Removed',revoked:'Invitation revoked',removed:'Removed',unknown:'Unknown'}
+});
+
+function upTitle(product) { return product.name_en || product.name || '—'; }
+function upVia(via) { return via === 'legacy' ? adt('upLegacy') : admVia(via); }
+function upPager(data, act) {
+  if (!data || data.pages <= 1) return '';
+  return `<div class="up-pager">${data.page > 1 ? `<button class="btn ghost sm" data-act="${act}" data-v="${data.page-1}">${esc(t('prev'))}</button>` : '<span></span>'}<span class="num">${data.page} / ${data.pages}</span>${data.page < data.pages ? `<button class="btn ghost sm" data-act="${act}" data-v="${data.page+1}">${esc(t('next'))}</button>` : '<span></span>'}</div>`;
 }
-async function openAdmUser(uid) {
-  let R = null;
-  const sh = openSheet({ title: adt('users'), body: `<div class="skel" style="height:200px;border-radius:18px"></div><div class="skel" style="height:160px;border-radius:18px;margin-top:12px"></div>`,
-    onAction: async (act, el) => {
-      if (act === 'admu-bal') { if (R) openAdmBalance(R, res => { R = res; draw(); }); return true; }
-      if (act === 'admu-ban') {
-        const ban = el.dataset.v === '1';
-        if (!(await confirmSheet(ban ? adt('ban') : adt('unban'), ban ? adt('banQ') : adt('unbanQ'), ban ? adt('ban') : adt('unban'), ban))) return true;
-        const r = await api('admin/user/ban', { uid, ban });
-        if (r.ok) { R = r; draw(); hap('ok'); toast(adt('saved'), 'ok'); } else toast(r.error === 'cannot_ban' ? adt('cannotBan') : errText(r), 'bad');
+function upProductsHtml(data, busy) {
+  if (busy || !data) return '<div class="skel" style="height:180px;border-radius:18px"></div>';
+  const items=data.products || [];
+  return `<div class="up-section-head"><div><b>${esc(adt('upPurchased'))}</b><small>${esc(adt('upAllSources'))}</small></div><button class="copy" data-act="up-refresh" aria-label="${esc(adt('upRefresh'))}">↻</button></div>
+    <p class="api-muted">${esc(adt('upHint'))}</p>
+    <div class="up-product-list">${items.length ? items.map(p=>`<button class="up-product" data-act="up-product" data-v="${esc(p.key)}"><span class="up-product-icon">${ic.box || '📦'}</span><span class="meta"><b dir="auto">${esc(upTitle(p))}</b><small>${esc(adt('upOrderCount',{n:p.orders}))} · ×${p.qty}</small></span><span class="up-product-end"><b class="num">${usd(p.total)}</b>${ic.chev}</span></button>`).join('') : `<div class="empty"><h3>${esc(adt('upNoOrders'))}</h3></div>`}</div>${upPager(data,'up-products-page')}`;
+}
+function upRecordsHtml(data) {
+  return `<button class="sub-back" data-act="up-back">${ic.chevL}${esc(adt('upBackProducts'))}</button><div class="up-section-head"><div><b dir="auto">${esc(upTitle(data.product))}</b><small>${esc(adt('upOrderCount',{n:data.summary.orders}))}</small></div><b class="num">${usd(data.summary.spent)}</b></div>
+    <div class="up-product-list">${data.records.map(r=>`<button class="up-record" data-act="up-record" data-v="${esc(r.key)}"><span class="up-record-dot ${ADM_STC[r.status]||'st-info'}">${r.renewal ? '↻' : '↗'}</span><span class="meta"><b class="mono" dir="ltr">${esc(r.ref)}</b><small>${esc(fmtDate(r.ts))} · ${esc(upVia(r.via))}</small><small>${r.email ? esc(r.email)+' · ' : ''}${esc(admSt(r.status))}</small></span><span class="up-product-end"><b class="num">${r.price_known ? usd(r.total) : '—'}</b><small>×${r.qty}</small>${ic.chev}</span></button>`).join('')}</div>${upPager(data,'up-records-page')}`;
+}
+function upDetailHtml(d) {
+  const kv=(label,value)=>value==null||value===''?'':`<div class="kv"><span>${esc(label)}</span><b dir="auto">${esc(value)}</b></div>`;
+  const codes=d.codes||[],states=adt('upLocalStates');
+  return `<button class="sub-back" data-act="up-back">${ic.chevL}${esc(adt('upBackRecords'))}</button><div class="up-receipt-head"><small>${esc(adt(d.renewal?'upRenewal':'upDetail'))}</small><h2 dir="auto">${esc(upTitle(d.product))}</h2><b class="num">${d.price_known ? usd(d.total) : '—'}</b><span class="status ${ADM_STC[d.status]||'st-info'}">${esc(admSt(d.status))}</span></div>
+    <div class="summary">${kv(adt('orderId'),d.ref)}${kv(adt('date'),fmtDate(d.ts))}${kv(adt('qty'),d.qty)}${kv(adt('via'),upVia(d.via))}${kv(adt('email'),d.email)}${kv(adt('upOriginalExpiry'),d.expires)}${kv(adt('supplier'),d.supplier_order)}</div>
+    ${!d.price_known ? `<p class="api-muted">${esc(adt('upUnknownPrice'))}</p>` : ''}
+    ${(d.subscriptions||[]).map(sub=>`<section class="up-subscription"><div class="up-section-head"><b>${esc(adt('upSavedSub'))}</b><span class="status ${sub.status==='active'?'st-ok':sub.status==='expired'?'st-warn':'st-info'}">${esc(states[sub.status]||sub.status)}</span></div><b dir="ltr">${esc(sub.email)}</b><div class="summary">${kv(adt('upAccount'),sub.account)}${kv(adt('upInvited'),sub.invited_at)}${kv(adt('upCurrentExpiry'),sub.expires)}</div><p>${esc(adt('upLeft',{d:Math.floor(sub.remaining_seconds/86400),h:Math.floor(sub.remaining_seconds%86400/3600)}))}</p></section>`).join('')}
+    ${d.kind==='chatgpt'||(d.subscriptions||[]).length ? `<p class="up-note">${esc((d.subscriptions||[]).length ? adt('upSubNote') : adt('upSavedOnly'))}</p>` : ''}
+    ${(d.notes||[]).length ? `<div class="up-note">${d.notes.map(n=>`<p dir="auto">${esc(n)}</p>`).join('')}</div>` : ''}
+    ${codes.length ? `<div class="lbl">${esc(adt('upDelivery'))} · <span class="num">${d.codes_total}</span></div><div class="codes adm-codes up-codes">${codes.map(c=>`<div class="code"><span dir="auto">${esc(c)}</span><button class="copy" data-act="copy" data-v="${esc(c)}" aria-label="${esc(t('copyAll'))}">${ic.copy}</button></div>`).join('')}</div>${upPager({page:d.code_page,pages:d.code_pages},'up-codes-page')}` : !d.email ? `<p class="api-muted">${esc(adt('upNoDelivery'))}</p>` : ''}
+    <button class="btn primary full" data-act="up-export">${ic.download||'↓'} ${esc(adt('upDownload'))}</button>`;
+}
+async function openAdmPurchaseDetail(uid,key) {
+  let data=null,loading=false;
+  const sh=openSheet({title:adt('upDetail'),body:'<div class="skel" style="height:230px"></div>',
+    onAction:async(act,el)=>{
+      if(act==='up-back'){closeSheet(sh);return true;}
+      if(act==='up-codes-page'){await load(+el.dataset.v);return true;}
+      if(act==='up-export'){
+        if(loading)return true;loading=true;el.disabled=true;
+        try {
+          const r=await api('admin/user/purchases/export',{uid,key});
+          if(!r.ok){toast(errText(r),'bad');return true;}
+          const url=URL.createObjectURL(new Blob([r.text],{type:'text/plain;charset=utf-8'}));
+          const a=document.createElement('a');a.href=url;a.download=r.filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),8000);
+        } finally {loading=false;if(el.isConnected)el.disabled=false;}
         return true;
       }
       return false;
-    } });
-  const draw = () => { sh.title(R.user.name).body(admUserHtml(R)); };
-  const r = await api('admin/user', { uid });
-  if (!sh.el.isConnected) return;
-  if (!r.ok) { sh.body(`<div class="empty">${ae('cross')}<h3>${esc(errText(r))}</h3></div>`); return; }
-  R = r; draw();
+    }});
+  async function load(page){
+    if(loading)return;loading=true;
+    const r=await api('admin/user/purchases/detail',{uid,key,page});loading=false;
+    if(!sh.el.isConnected)return;
+    if(!r.ok){sh.body(`<div class="empty">${esc(errText(r))}</div>`);return;}
+    data=r;sh.title(upTitle(r.product)).body(upDetailHtml(data));
+  }
+  await load(1);
 }
+async function openAdmPurchaseProduct(uid,key) {
+  let data=null,busy=false;
+  const sh=openSheet({title:adt('upRecords'),body:'<div class="skel" style="height:230px"></div>',
+    onAction:async(act,el)=>{
+      if(act==='up-back'){closeSheet(sh);return true;}
+      if(act==='up-records-page'){await load(+el.dataset.v);return true;}
+      if(act==='up-record'){openAdmPurchaseDetail(uid,el.dataset.v);return true;}
+      return false;
+    }});
+  async function load(page){
+    if(busy)return;busy=true;
+    const r=await api('admin/user/purchases/product',{uid,key,page});busy=false;
+    if(!sh.el.isConnected)return;
+    if(!r.ok){sh.body(`<div class="empty">${esc(errText(r))}</div>`);return;}
+    data=r;sh.title(upTitle(r.product)).body(upRecordsHtml(data));
+  }
+  await load(1);
+}
+
+function admUserHtml(r,tab,purchases,busy) {
+  const u=r.user,v=r.vip||{},summary=(r.purchases||{}).summary||{};
+  const row=(label,sub,value)=>`<div class="adm-row static"><span class="meta"><b dir="auto">${esc(label)}</b><small>${esc(sub)}</small></span><span class="amt num">${value}</span></div>`;
+  let content='';
+  if(tab==='purchases')content=upProductsHtml(purchases,busy);
+  else if(tab==='deposits')content=`<div class="api-card adm-list">${(r.deposits||[]).map(d=>row(d.method,`${d.tx||''} · ${fmtDate(d.ts)}`,usdS(d.amount<0?'−':'+',Math.abs(d.amount)))).join('')||`<p class="api-muted">${esc(adt('upEmptyDeposits'))}</p>`}</div>`;
+  else if(tab==='changes')content=`<div class="api-card adm-list">${(r.logs||[]).map(l=>row(l.note||l.type||'',fmtDate(l.ts),usdS(l.amount<0?'−':'+',Math.abs(l.amount)))).join('')||`<p class="api-muted">${esc(adt('upEmptyChanges'))}</p>`}</div>`;
+  else content=`<div class="up-overview"><div><small>${esc(adt('upPurchased'))}</small><b>${esc(adt('upProductCount',{n:summary.products||0}))}</b><p>${esc(adt('upHint'))}</p><button class="btn primary sm" data-act="up-tab" data-v="purchases">${esc(adt('upPurchases'))} ${ic.chev}</button></div><div class="up-overview-meta"><span>${esc(adt('upAllSources'))}</span>${u.joined?`<span>${esc(adt('joined',{d:fmtDate(u.joined)}))}</span>`:''}<span>${esc(t('language'))}: ${esc(u.lang||'—')}</span></div></div>`;
+  return `<div class="adm-user u0 up-profile"><div class="adm-uh"><span class="adm-av lg">${esc(String(u.name||'?')[0].toUpperCase())}</span><span class="grow"><small>${esc(adt('upIntro'))}</small><b dir="auto">${esc(u.name)}${u.is_owner?`<span class="adm-badge ok">${esc(adt('owner'))}</span>`:u.is_admin?`<span class="adm-badge ok">${esc(adt('admin'))}</span>`:''}${u.banned?`<span class="adm-badge bad">${esc(adt('banned'))}</span>`:''}</b><small dir="ltr">${u.username?'@'+esc(u.username)+' · ':''}${u.id}</small></span><button class="copy" data-act="copy" data-v="${u.id}" aria-label="copy">${ic.copy}</button></div>
+    <div class="adm-mini up-metrics"><div><b class="num">${usd(u.balance)}</b><span>${esc(adt('balance'))}</span></div><button data-act="up-tab" data-v="purchases"><b class="num">${u.orders}</b><span>${esc(adt('upPurchases'))}</span></button><div><b class="num">${usdShort(u.spent)}</b><span>${esc(adt('spent'))}</span></div><button data-act="up-tab" data-v="deposits"><b class="num">${usdShort(u.deposits)}</b><span>${esc(adt('upDeposits'))}</span></button></div>
+    <div class="adm-vipl">👑 <b>${v.level?'VIP '+v.level:esc(t('vipNone')||'—')}</b>${v.override!=null?' · '+esc(adt('vipPinned')):''} · ${esc(adt('vipNet',{n:usd((v.cents||0)/100).replace(/[⁦⁩]/g,'')}))}${v.next?' · '+esc(adt('vipNext',{p:usd((v.remaining||0)/100).replace(/[⁦⁩]/g,''),n:v.next})):''}</div>
+    <div class="adm-acts"><button class="btn primary sm" data-act="admu-bal">💰 ${esc(adt('editBal'))}</button><button class="btn sm ${u.banned?'ghost':'danger-text'}" data-act="admu-ban" data-v="${u.banned?0:1}">${u.banned?'✅ '+esc(adt('unban')):'🚫 '+esc(adt('ban'))}</button>${u.tme?`<button class="btn ghost sm" data-act="adm-msg" data-v="${esc(u.tme)}">💬 ${esc(adt('message'))}</button>`:''}<button class="btn ghost sm" data-act="adm-open" data-v="ad_vipu_${u.id}" data-l="VIP">👑 VIP ↗</button><button class="btn ghost sm" data-act="adm-open" data-v="ad_u_det_${u.id}" data-l="${esc(adt('openUser'))}">${esc(adt('inBot'))} ↗</button></div></div>
+    <div class="up-tabs" role="tablist">${[['overview','upOverview'],['purchases','upPurchases'],['deposits','upDeposits'],['changes','upChanges']].map(([key,label])=>`<button role="tab" aria-selected="${tab===key}" class="${tab===key?'on':''}" data-act="up-tab" data-v="${key}">${esc(adt(label))}</button>`).join('')}</div><section class="up-content">${content}</section>${DEMO?pvNote():''}`;
+}
+async function openAdmUser(uid) {
+  let R=null,tab='overview',purchases=null,busy=false;
+  const sh=openSheet({title:adt('users'),body:'<div class="skel" style="height:280px;border-radius:18px"></div>',
+    onBack:()=>{if(tab!=='overview'){tab='overview';draw();return true;}return false;},
+    onAction:async(act,el)=>{
+      if(act==='up-tab'){
+        if(!R||!['overview','purchases','deposits','changes'].includes(el.dataset.v))return true;
+        tab=el.dataset.v;draw();if(tab==='purchases'&&!purchases)await loadProducts(1);return true;
+      }
+      if(act==='up-products-page'||act==='up-refresh'){await loadProducts(act==='up-refresh'?(purchases?purchases.page:1):+el.dataset.v);return true;}
+      if(act==='up-product'){openAdmPurchaseProduct(uid,el.dataset.v);return true;}
+      if(act==='admu-bal'){if(R)openAdmBalance(R,res=>{R=res;purchases=res.purchases||purchases;draw();});return true;}
+      if(act==='admu-ban'){
+        const ban=el.dataset.v==='1';
+        if(!(await confirmSheet(ban?adt('ban'):adt('unban'),ban?adt('banQ'):adt('unbanQ'),ban?adt('ban'):adt('unban'),ban)))return true;
+        const r=await api('admin/user/ban',{uid,ban});
+        if(r.ok){R=r;purchases=r.purchases||purchases;draw();hap('ok');toast(adt('saved'),'ok');}else toast(r.error==='cannot_ban'?adt('cannotBan'):errText(r),'bad');
+        return true;
+      }
+      return false;
+    }});
+  function draw(){if(R&&sh.el.isConnected)sh.title(R.user.name).body(admUserHtml(R,tab,purchases,busy));}
+  async function loadProducts(page){
+    if(busy)return;busy=true;draw();
+    const r=await api('admin/user/purchases',{uid,page});busy=false;
+    if(!sh.el.isConnected)return;
+    if(r.ok)purchases=r;else toast(errText(r),'bad');draw();
+  }
+  const r=await api('admin/user',{uid});
+  if(!sh.el.isConnected)return;
+  if(!r.ok){sh.body(`<div class="empty"><h3>${esc(errText(r))}</h3></div>`);return;}
+  R=r;purchases=r.purchases||null;draw();
+}
+
 function openAdmBalance(R, after) {
   const u = R.user;
   let amt = '', note = '', mode = null;
@@ -4431,6 +4686,7 @@ function apNoticeHtml(m) {
   const body = tx ? `<div dir="auto">${rich(m.html)}</div>` : '';
   return `<div class="ap-nt ${tone}">${body}${doc}${other.length ? `<div class="ap-try">${other.map(b => b.k === 'cb' ? `<button data-act="ap-btn" data-m="${m.id}" data-v="${esc(b.v)}" dir="auto">${esc(b.t)}</button>` : b.k === 'url' ? `<button data-act="vc-url" data-v="${esc(b.v)}" dir="auto">${esc(b.t)} ↗</button>` : b.k === 'copy' ? `<button data-act="copy" data-v="${esc(b.v)}" dir="auto">${esc(b.t)}</button>` : '').join('')}</div>` : ''}${tries.length ? `<div class="ap-try">${tries.map(b => `<button data-act="vc-say" data-v="${esc(b.v)}" dir="ltr">${esc(b.t)}</button>`).join('')}</div>` : ''}</div>`;
 }
+const apScopeMsgs = v => ((v && v.msgs) || []).filter(m => !v.section_start || m.id >= v.section_start);
 const apHasPageBtns = m => (m.buttons || []).some(r => r.some(b => b.k !== 'text'));
 async function openPanel(cb, label, hue, opts) {
   const P = { V: null, busy: false, draft: '', ask: '', sigs: new Map(), fresh: new Set(), pageSig: '', thread: false, depth: 0,
@@ -4444,7 +4700,7 @@ async function openPanel(cb, label, hue, opts) {
   const comp = () => `<div class="ap-comp"><input id="apc" data-in="apc" dir="auto" enterkeyhint="send" autocomplete="off" placeholder="${esc(adt('apType'))}" value="${esc(P.draft)}"><button class="btn primary" data-act="ap-csend" aria-label="send">${icSend}</button></div>`;
   const render = (anim) => {
     const box = sh.el.querySelector('#ap'); if (!box) return;
-    const msgs = (P.V && P.V.msgs) || [], bots = msgs.filter(m => m.from === 'bot');
+    const msgs = (P.V && P.V.msgs) || [], bots = apScopeMsgs(P.V).filter(m => m.from === 'bot');
     const page = [...bots].reverse().find(apHasPageBtns) || null;
     const step = !!(P.V && P.V.step);
     const fresh = bots.filter(m => P.fresh.has(m.id) && (!page || m.id !== page.id));
@@ -4506,7 +4762,7 @@ async function openPanel(cb, label, hue, opts) {
       const now = new Map(); r.msgs.forEach(m => now.set(m.id, sig(m)));
       P.fresh = new Set(r.msgs.filter(m => m.from === 'bot' && before.get(m.id) !== now.get(m.id)).map(m => m.id));
       P.sigs = now; P.V = r;
-      const page = [...r.msgs].reverse().find(m => m.from === 'bot' && apHasPageBtns(m));
+      const page = [...apScopeMsgs(r)].reverse().find(m => m.from === 'bot' && apHasPageBtns(m));
       P.pageKey = (r.step ? 'step:' : '') + (page ? page.id + ':' + sig(page) : '');
       const ps = P.pageKey + [...P.fresh].join(',');
       const changed = ps !== P.pageSig; P.pageSig = ps;
@@ -4529,13 +4785,18 @@ async function openPanel(cb, label, hue, opts) {
   const sendText = async (v) => { v = String(v || '').trim(); if (!v || P.busy) return; hap('light'); await call({ action: 'send', text: v }); };
   const goBack = async () => {
     if (P.thread) { P.thread = false; render(true); return; }
+    if (P.V && P.V.member_navigation) {
+      const r = await call({ action: 'back' });
+      if (r && r.close_section) closeSheet(sh);
+      return;
+    }
     if (P.V && P.V.step) {
       await call({ action: 'cancel' });
-      const hasPage = ((P.V && P.V.msgs) || []).some(m => m.from === 'bot' && apHasPageBtns(m));
+      const hasPage = apScopeMsgs(P.V).some(m => m.from === 'bot' && apHasPageBtns(m));
       if (!hasPage) closeSheet(sh);
       return;
     }
-    const msgs = (P.V && P.V.msgs) || [];
+    const msgs = apScopeMsgs(P.V);
     const page = [...msgs].reverse().find(m => m.from === 'bot' && apHasPageBtns(m));
     const bt = page ? apButtons(page) : null;
     hap('light');
@@ -4645,6 +4906,7 @@ document.addEventListener('click', async e => {
   if (act === 'sheet-close') { const sh = Sheets.find(s => s.el.contains(el)); if (sh) closeSheet(sh); return; }
   if (act === 'pv-verify') { Demo.vf = { done: false }; Demo.joined = {}; DV.done = false; DV.busy = false; DV.tries = 0; DV.msg = ''; DV.target = ''; VF.opened = {}; VF.msg = ''; closeAllSheets(); boot(); return; }
   if (act === 'dv-pick') { dvPick(el, e); return; }
+  if (act === 'dv-retry') { dvNew(); renderView(); return; }
   if (act === 'vf-check') { vfCheck(); return; }
   if (act === 'vf-join') { VF.opened[el.dataset.id] = 1; if (DEMO) Demo.joined[el.dataset.id] = 1; else openLink(el.dataset.v); setTimeout(renderView, 300); return; }
   if (act === 'dv-enter') { dvEnter(); return; }
@@ -4728,17 +4990,30 @@ function refreshCatalog() {
 }
 async function refreshMe() {
   const r = await api('me');
-  if (r.ok) { S.pending = r.pending; S.locked = r.locked; if (r.banned) { S.screen = 'banned'; renderAll(); } updateHeader(); }
+  if (r.ok) { S.pending = r.pending; S.locked = r.locked; if (r.banned) { S.screen = 'banned'; renderAll(); } updateHeader(); if (S.screen === 'app' && S.tab === 'profile') renderView(); }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.screen === 'app') { refreshMe(); if (S.tab === 'store' && Date.now() - lastCat > 30000) refreshCatalog(); } });
 setInterval(() => { if (!document.hidden && S.screen === 'app' && S.tab === 'store' && Date.now() - lastCat > 60000) refreshCatalog(); }, 15000);
 
 
 /* ───────── تحقق جهاز الإحالات: اختبار إنسان + بصمة جهاز (رمز مشفّر بس) ───────── */
-const DV = { pool: ['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], target: '', opts: [], t0: 0, tries: 0, busy: false, done: false, msg: '' };
+const DV = { pool: ['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], target: '', opts: [], t0: 0, tries: 0, busy: false, done: false, msg: '', challenge: '', loading: false, request: 0 };
 function dvNew() {
   const p = [...DV.pool].sort(() => Math.random() - .5).slice(0, 4);
   DV.opts = p; DV.target = p[Math.floor(Math.random() * 4)]; DV.t0 = performance.now();
+  DV.challenge = '';
+  if (!DEMO) dvLoadChallenge();
+}
+async function dvLoadChallenge() {
+  const ticket = ++DV.request;
+  DV.loading = true;
+  const r = await api('verify/challenge');
+  if (ticket !== DV.request) return;
+  DV.loading = false;
+  if (r && r.ok && r.challenge && Array.isArray(r.options) && r.options.includes(r.target)) {
+    DV.challenge = r.challenge; DV.opts = r.options; DV.target = r.target; DV.t0 = performance.now(); DV.msg = '';
+  } else DV.msg = t('vfFail');
+  if (S.screen === 'verify') renderView();
 }
 function dvDid() {
   let d = null;
@@ -4801,9 +5076,10 @@ function vfHuman() {
     <ul class="vf-work">${[1, 2, 3].map(i => `<li class="${VF.work >= i ? 'done' : VF.work === i - 1 ? 'on' : ''}"><i>${VF.work >= i ? ic.check : ''}</i>${esc(t('vfW' + i))}</li>`).join('')}</ul></section>`;
   return `<section class="vf-card"><h3>${esc(t('vfHumT'))}</h3><p class="vf-sub">${esc(t('vfHumB'))}</p>
     <div class="vf-ask"><span>${esc(t('vfTap'))}</span><b class="vf-target" aria-label="${DV.target}">${DV.target}</b></div>
-    <div class="vf-grid" id="dvg">${DV.opts.map(o => `<button data-act="dv-pick" data-v="${o}" aria-label="${o}">${o}</button>`).join('')}</div>
+    <div class="vf-grid" id="dvg">${DV.opts.map(o => `<button data-act="dv-pick" data-v="${o}" aria-label="${o}" ${DV.loading || (!DEMO && !DV.challenge) ? 'disabled' : ''}>${o}</button>`).join('')}</div>
     <div class="vf-tries" aria-hidden="true">${[0, 1, 2].map(i => `<i class="${i < 3 - DV.tries ? 'on' : ''}"></i>`).join('')}</div>
-    <div class="vf-msg" role="status">${esc(DV.msg || '')}</div></section>`;
+    <div class="vf-msg" role="status">${DV.loading ? '<span class="spin"></span>' : esc(DV.msg || '')}</div>
+    ${!DEMO && !DV.loading && !DV.challenge ? `<button class="btn ghost full" data-act="dv-retry">${esc(LANG === 'ar' ? 'إعادة المحاولة' : 'Retry')}</button>` : ''}</section>`;
 }
 function vfDone() {
   const cols = ['var(--accent)', 'var(--ok)', 'var(--warn)', 'var(--accent-2)', 'var(--bad)'];
@@ -4844,10 +5120,11 @@ function dvEnter() {
   openDeep();
 }
 async function dvPick(el, e) {
-  if (DV.busy || DV.done) return;
+  if (DV.busy || DV.done || DV.loading || (!DEMO && !DV.challenge)) return;
   const ok = el.dataset.v === DV.target, ms = Math.round(performance.now() - DV.t0), trusted = !!(e && e.isTrusted);
   DV.tries++;
-  if (!ok && DV.tries < 3) {
+  if (!ok) {
+    if (DV.tries >= 3) DV.tries = 0;
     hap('error'); DV.msg = t('dvWrong'); dvNew(); renderView();
     const g = $('#dvg'); if (g) { g.classList.add('shake'); setTimeout(() => g.classList.remove('shake'), 400); }
     return;
@@ -4857,11 +5134,11 @@ async function dvPick(el, e) {
   tick(1); tick(2);
   const t0 = Date.now();
   const fp = await dvCollect();
-  const r = await api('verify', { fp, ch: { ok, ms, trusted, tries: DV.tries } });
+  const r = await api('verify', { fp, challenge: DV.challenge, ch: { ok, ms, trusted, tries: DV.tries, answer: el.dataset.v } });
   const wait = Math.max(0, 1700 - (Date.now() - t0));
   await new Promise(res => setTimeout(res, wait));
   if (r && r.state === 'join' && r.forced) {          // طلع من قناة/جروب: نرجعه للخطوة الأولى
-    DV.busy = false; DV.tries = 0; dvNew(); S.forced = r.forced;
+    DV.busy = false; DV.tries = 0; DV.challenge = ''; DV.target = ''; S.forced = r.forced;
     const left = (r.forced.channels || []).filter(c => c.joined !== true).length;
     VF.msg = t('vfLeft', { n: left || 1 }); hap('error'); renderView(); return;
   }

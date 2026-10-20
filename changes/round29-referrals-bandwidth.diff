@@ -1,0 +1,2917 @@
+--- a/bot.py
++++ b/bot.py
+@@ -16,6 +16,8 @@
+ import hashlib
+ import hmac
+ import base64
++from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
++from email.utils import formatdate as _http_date, parsedate_to_datetime as _http_parse_date
+ from bson.objectid import ObjectId
+ from http.server import BaseHTTPRequestHandler, HTTPServer
+ 
+@@ -812,6 +814,9 @@
+ 
+ _CGPT_DATA_LOCK = threading.RLock()
+ _CGPT_ACCOUNT_LOCKS = {}
++_CGPT_STOCK_CACHE = {}
++_CGPT_CAPACITY_CACHE = {}
++_CGPT_STOCK_LOCK = threading.RLock()
+ _CGPT_MEMBER_HEALTH = {}
+ _CGPT_MEMBER_HEALTH_LOCK = threading.RLock()
+ 
+@@ -819,6 +824,25 @@
+ def _cgpt_account_lock(account_id):
+     with _CGPT_DATA_LOCK:
+         return _CGPT_ACCOUNT_LOCKS.setdefault(str(account_id), threading.RLock())
++
++
++def _cgpt_data_fingerprint(data):
++    snapshot = dict(data or {})
++    snapshot['allowed_emails'] = sorted(set(snapshot.get('allowed_emails') or []))
++    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':'), default=str).encode()).hexdigest()
++
++
++def _cgpt_stock_key(account, access, session, manual=None):
++    return str(account) + ':' + hashlib.sha256(f'{access}|{session}|{manual}'.encode()).hexdigest()[:24]
++
++
++def _cgpt_stock_invalidate(capacity=False):
++    with _CGPT_STOCK_LOCK:
++        _CGPT_STOCK_CACHE.clear()
++        if capacity:
++            _CGPT_CAPACITY_CACHE.clear()
++    _CGPT_SEATS_CACHE['exp'] = 0
++    _CGPT_DISPLAY_SEATS['expires'] = 0
+ 
+ 
+ def _cgpt_member_health(manager):
+@@ -885,6 +909,7 @@
+             doc = db.cgpt_invites_data.find_one({'_id': getattr(self, '_account_key', 'main')})
+             if doc and doc.get('data'):
+                 self.invites_data = doc['data']
++                self._saved_data_digest = _cgpt_data_fingerprint(doc['data'])
+                 self.allowed_emails = set(self.invites_data.get('allowed_emails', []))
+                 if self.owner_email:
+                     self.allowed_emails.add(self.owner_email)
+@@ -961,7 +986,10 @@
+ 
+     def _save_data(self):
+         """حفظ بيانات الدعوات في MongoDB (لكل حساب على حدة)"""
+-        self.invites_data['allowed_emails'] = list(self.allowed_emails)
++        self.invites_data['allowed_emails'] = sorted(self.allowed_emails)
++        digest = _cgpt_data_fingerprint(self.invites_data)
++        if getattr(self, '_saved_data_digest', None) == digest:
++            return True
+         _key = getattr(self, '_account_key', 'main')
+         try:
+             db.cgpt_invites_data.update_one(
+@@ -969,6 +997,8 @@
+                 {'$set': {'data': self.invites_data}},
+                 upsert=True
+             )
++            self._saved_data_digest = digest
++            return True
+         except Exception as e:
+             logger.error(f"[CGPT] save_data DB err: {e}")
+ 
+@@ -1291,77 +1321,98 @@
+             report['http_status'] = r.status_code
+             if r.status_code == 200:
+                 data = r.json()
+-                users = data.get('items', [])
++                users = data.get('items') if isinstance(data, dict) else None
++                if not isinstance(users, list) or any(not isinstance(u, dict) for u in users):
++                    raise ValueError('Invalid ChatGPT member-list response')
++                if (data.get('has_more') or data.get('next') or data.get('next_cursor') or
++                        int(data.get('total', len(users)) or 0) > len(users)):
++                    raise ValueError('Incomplete ChatGPT member-list response')
+                 report['connected'] = True
+                 # المالك لا يُحسب كمقعd مُستهلَك (مقعده ليس للبيع)
+                 non_owner = [u for u in users
+                              if str(u.get('email', '')).lower() != str(self.owner_email or '').lower()]
+                 report['used_seats'] = len(non_owner)
+-                # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
+-                try:
+-                    acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
+-                    ar = cffi_requests.get(acc_url, headers=self._headers(),
+-                                           impersonate='chrome110', timeout=15)
+-                    if ar.status_code == 200:
+-                        acc = ar.json()
+-                        report['_raw_account'] = str(acc)[:500]  # للتشخيص
+-
+-                        # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
+-                        def _find_seats(obj, depth=0):
+-                            if depth > 5 or not isinstance(obj, dict):
++                capacity_key = _cgpt_stock_key(self.account_id, self.access_token, self.session_token)
++                with _CGPT_STOCK_LOCK:
++                    cached_capacity = _CGPT_CAPACITY_CACHE.get(capacity_key)
++                if (getattr(self, '_capacity_cache_allowed', False) and cached_capacity and
++                        cached_capacity['expires'] > time.time()):
++                    total_seats = cached_capacity['total']
++                    report['total_seats'] = total_seats
++                    if total_seats:
++                        report['available_seats'] = max(0, int(total_seats) - len(users))
++                else:
++                    # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
++                    try:
++                        acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
++                        ar = cffi_requests.get(acc_url, headers=self._headers(),
++                                               impersonate='chrome110', timeout=15)
++                        if ar.status_code == 200:
++                            acc = ar.json()
++                            report['_raw_account'] = str(acc)[:500]  # للتشخيص
++    
++                            # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
++                            def _find_seats(obj, depth=0):
++                                if depth > 5 or not isinstance(obj, dict):
++                                    return None
++                                # المفاتيح المحتملة لعدد المقاعد
++                                for k in ('max_member_count', 'max_seats', 'seats',
++                                          'seat_count', 'total_seats', 'member_limit',
++                                          'max_members', 'paid_seats', 'licenses',
++                                          'subscription_seats', 'num_seats'):
++                                    v = obj.get(k)
++                                    if isinstance(v, int) and v > 0:
++                                        return v
++                                # نغوص في المستويات
++                                for nested in ('account', 'plan', 'subscription',
++                                               'billing', 'workspace', 'limits'):
++                                    if isinstance(obj.get(nested), dict):
++                                        found = _find_seats(obj[nested], depth + 1)
++                                        if found:
++                                            return found
+                                 return None
+-                            # المفاتيح المحتملة لعدد المقاعد
+-                            for k in ('max_member_count', 'max_seats', 'seats',
+-                                      'seat_count', 'total_seats', 'member_limit',
+-                                      'max_members', 'paid_seats', 'licenses',
+-                                      'subscription_seats', 'num_seats'):
+-                                v = obj.get(k)
+-                                if isinstance(v, int) and v > 0:
+-                                    return v
+-                            # نغوص في المستويات
+-                            for nested in ('account', 'plan', 'subscription',
+-                                           'billing', 'workspace', 'limits'):
+-                                if isinstance(obj.get(nested), dict):
+-                                    found = _find_seats(obj[nested], depth + 1)
+-                                    if found:
+-                                        return found
+-                            return None
+-
+-                        total_seats = _find_seats(acc)
+-                        # نجرّب أيضاً من endpoint الفواتير/الاشتراك
+-                        if not total_seats:
+-                            try:
+-                                sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
+-                                sr = cffi_requests.get(sub_url, headers=self._headers(),
+-                                                       impersonate='chrome110', timeout=12)
+-                                if sr.status_code == 200:
+-                                    total_seats = _find_seats(sr.json())
+-                            except Exception:
+-                                pass
+-                        # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
+-                        if not total_seats:
+-                            try:
+-                                chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+-                                cr = cffi_requests.get(chk_url, headers=self._headers(),
+-                                                       impersonate='chrome110', timeout=12)
+-                                if cr.status_code == 200:
+-                                    chk = cr.json()
+-                                    report['_raw_check'] = str(chk)[:800]
+-                                    total_seats = _find_seats(chk)
+-                                    # نبحث في accounts داخل check
+-                                    if not total_seats and isinstance(chk.get('accounts'), dict):
+-                                        for _av in chk['accounts'].values():
+-                                            found = _find_seats(_av) if isinstance(_av, dict) else None
+-                                            if found:
+-                                                total_seats = found
+-                                                break
+-                            except Exception:
+-                                pass
+-                        report['total_seats'] = total_seats
+-                        if total_seats:
+-                            report['available_seats'] = max(0, int(total_seats) - len(users))
+-                except Exception as _se:
+-                    report['_seat_err'] = str(_se)[:100]
++    
++                            total_seats = _find_seats(acc)
++                            # نجرّب أيضاً من endpoint الفواتير/الاشتراك
++                            if not total_seats:
++                                try:
++                                    sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
++                                    sr = cffi_requests.get(sub_url, headers=self._headers(),
++                                                           impersonate='chrome110', timeout=12)
++                                    if sr.status_code == 200:
++                                        total_seats = _find_seats(sr.json())
++                                except Exception:
++                                    pass
++                            # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
++                            if not total_seats:
++                                try:
++                                    chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
++                                    cr = cffi_requests.get(chk_url, headers=self._headers(),
++                                                           impersonate='chrome110', timeout=12)
++                                    if cr.status_code == 200:
++                                        chk = cr.json()
++                                        report['_raw_check'] = str(chk)[:800]
++                                        total_seats = _find_seats(chk)
++                                        # نبحث في accounts داخل check
++                                        if not total_seats and isinstance(chk.get('accounts'), dict):
++                                            for _av in chk['accounts'].values():
++                                                found = _find_seats(_av) if isinstance(_av, dict) else None
++                                                if found:
++                                                    total_seats = found
++                                                    break
++                                except Exception:
++                                    pass
++                            report['total_seats'] = total_seats
++                            if total_seats:
++                                report['available_seats'] = max(0, int(total_seats) - len(users))
++                    except Exception as _se:
++                        report['_seat_err'] = str(_se)[:100]
++                    with _CGPT_STOCK_LOCK:
++                        if len(_CGPT_CAPACITY_CACHE) >= 128:
++                            _CGPT_CAPACITY_CACHE.pop(next(iter(_CGPT_CAPACITY_CACHE)), None)
++                        total_seats = report.get('total_seats')
++                        _CGPT_CAPACITY_CACHE[capacity_key] = {'total': total_seats,
++                            'expires': time.time() + (21600 if total_seats else 3600)}
+                 # قائمة الإيميلات
+                 report['user_emails'] = [u.get('email', '') for u in users][:20]
+             elif r.status_code == 401:
+@@ -1411,6 +1462,7 @@
+     if mgr.owner_email and mgr.owner_email not in mgr.invites_data.get('allowed_emails', []):
+         mgr.invites_data.setdefault('allowed_emails', []).append(mgr.owner_email)
+     mgr.allowed_emails = set(mgr.invites_data.get('allowed_emails', []))
++    mgr._saved_data_digest = _cgpt_data_fingerprint(mgr.invites_data)
+     return mgr
+ 
+ 
+@@ -1437,13 +1489,30 @@
+     return accounts
+ 
+ 
+-def _cgpt_account_seat_info(doc):
++def _cgpt_stock_guard(func):
++    @functools.wraps(func)
++    def guarded(doc, *args, **kwargs):
++        with _cgpt_account_lock(str(doc.get('_id'))):
++            return func(doc, *args, **kwargs)
++    return guarded
++
++
++@_cgpt_stock_guard
++def _cgpt_account_seat_info(doc, fresh=False):
+     """يفحص حساباً ويرجّع معلومات مقاعده."""
++    key = _cgpt_stock_key(str(doc.get('_id')), doc.get('data', {}).get('accessToken'), doc.get('data', {}).get('sessionToken'), doc.get('manual_seats'))
++    with _CGPT_STOCK_LOCK:
++        hit = _CGPT_STOCK_CACHE.get(key)
++        if not fresh and hit and hit['expires'] > time.time():
++            return dict(hit['info'])
+     mgr = _cgpt_build_manager_from_doc(doc)
+     try:
++        mgr._capacity_cache_allowed = True
+         rep = mgr.diagnose()
+     except Exception:
+         rep = {'connected': False, 'error': 'تعذر الاتصال بالحساب أثناء الفحص'}
++    finally:
++        mgr._capacity_cache_allowed = False
+     total = rep.get('total_seats')
+     used = rep.get('used_seats', 0)
+     avail = rep.get('available_seats')
+@@ -1452,7 +1521,7 @@
+     if not total and manual_seats:
+         total = int(manual_seats)
+         avail = max(0, total - used) if rep.get('connected') else None
+-    return {
++    info = {
+         'id': str(doc.get('_id')),
+         'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
+         'email': doc.get('data', {}).get('user', {}).get('email') or rep.get('owner_email') or '?',
+@@ -1464,6 +1533,11 @@
+         'error': rep.get('error'),
+         'mgr': mgr,
+     }
++    with _CGPT_STOCK_LOCK:
++        if len(_CGPT_STOCK_CACHE) >= 128:
++            _CGPT_STOCK_CACHE.pop(next(iter(_CGPT_STOCK_CACHE)), None)
++        _CGPT_STOCK_CACHE[key] = {'expires': time.time() + (600 if info['connected'] else 120), 'info': dict(info)}
++    return info
+ 
+ 
+ def _cgpt_process_pending_migrations():
+@@ -1491,7 +1565,7 @@
+             db.cgpt_pending_migration.update_one({'_id': pm['_id']},
+                 {'$set': {'status': 'migrated', 'to': target['email'],
+                           'migrated_at': int(time.time())}})
+-            _CGPT_SEATS_CACHE['exp'] = 0
++            _cgpt_stock_invalidate()
+             # رسالة للعميل
+             tg_uid = pm.get('telegram_uid')
+             if tg_uid:
+@@ -1620,7 +1694,7 @@
+ def _cgpt_refresh_display_seats():
+     try:
+         value = _cgpt_total_available_seats()
+-        _CGPT_DISPLAY_SEATS.update(value=value, expires=time.time() + 30)
++        _CGPT_DISPLAY_SEATS.update(value=value, expires=time.time() + 300)
+     except Exception:
+         # Keep the last known value and avoid spawning repeated failing checks.
+         _CGPT_DISPLAY_SEATS['expires'] = time.time() + 15
+@@ -1650,19 +1724,19 @@
+     now = time.time()
+     if _CGPT_SEATS_CACHE['exp'] > now:
+         return _CGPT_SEATS_CACHE['val']
+-    val = _cgpt_total_available_seats()
++    val = _cgpt_total_available_seats(fresh=True)
+     _CGPT_SEATS_CACHE['val'] = val
+     _CGPT_SEATS_CACHE['exp'] = now + 30
+     return val
+ 
+ 
+-def _cgpt_total_available_seats():
++def _cgpt_total_available_seats(fresh=False):
+     """يرجّع إجمالي المقاعd المتاحة عبر كل الحسابات (تُستخdم كمخزون).
+     دائماً يرجّع رقماً (لا غير محدود) — الحسابات بلا مقاعd مضبوطة تُعتبر 0."""
+     total = 0
+     for doc in _cgpt_all_accounts():
+         try:
+-            info = _cgpt_account_seat_info(doc)
++            info = _cgpt_account_seat_info(doc, fresh=fresh)
+             if not info.get('connected'):
+                 continue
+             avail = info.get('available_seats')
+@@ -1678,7 +1752,7 @@
+ def _cgpt_find_available_account():
+     """يجد أول حساب فيه مقعد فارغ (للتوزيع التلقائي)."""
+     for doc in _cgpt_all_accounts():
+-        info = _cgpt_account_seat_info(doc)
++        info = _cgpt_account_seat_info(doc, fresh=True)
+         if not info['connected']:
+             continue
+         avail = info.get('available_seats')
+@@ -2492,7 +2566,7 @@
+                 cg_emoji = cg.get('custom_emoji_id')
+                 full_name = f"{cg.get('name','ChatGPT')} — {dur.get('label','')}"
+                 try:
+-                    cg_seats = _cgpt_get_seats_cached()
++                    cg_seats = _cgpt_total_available_seats()
+                 except Exception:
+                     cg_seats = None
+                 return _json_resp(self, 200, {'success': True, 'product': {
+@@ -2880,7 +2954,7 @@
+                 _mgr._last_buyer_uid = f"api_{uid}"
+                 inv = _mgr.invite_user(buyer_email, cg_minutes)
+                 if inv.get('ok'):
+-                    _CGPT_SEATS_CACHE['exp'] = 0
++                    _cgpt_stock_invalidate()
+                     order_id = "CGAPI" + __import__('uuid').uuid4().hex
+                     try:
+                         db.api_orders.insert_one({
+@@ -3625,6 +3699,26 @@
+         return 'other'
+ 
+ 
++def _net_client_label(url):
++    host = _net_host(url)
++    try:
++        path = urllib.parse.urlsplit(str(url)).path
++        if host == 'api.telegram.org':
++            method = path.rsplit('/', 1)[-1]
++            known = {'getUpdates', 'getChatMember', 'getChat', 'getMe', 'getFile', 'sendMessage',
++                'sendDocument', 'sendPhoto', 'sendVideo', 'sendAnimation', 'editMessageText',
++                'editMessageReplyMarkup', 'answerCallbackQuery', 'copyMessage', 'deleteMessage',
++                'setChatMenuButton', 'getChatMenuButton', 'getCustomEmojiStickers'}
++            return host + '/' + (method if method in known else 'other')
++        if host == 'chatgpt.com':
++            route = 'members' if path.endswith('/users') else 'subscription' if path.endswith('/subscription') else \
++                    'subscription-check' if '/accounts/check/' in path else 'capacity' if re.search(r'/accounts/[^/]+/?$', path) else 'other'
++            return host + '/' + route
++    except Exception:
++        pass
++    return host
++
++
+ def _net_accepts_gzip(headers):
+     wildcard = False
+     for item in str(headers.get('Accept-Encoding', '')).split(','):
+@@ -3682,7 +3776,7 @@
+                 raise
+             finally:
+                 try:
+-                    _NET_METER.record('http_client', _net_host(request.url), sent=_net_request_size(request),
++                    _NET_METER.record('http_client', _net_client_label(request.url), sent=_net_request_size(request),
+                         received=_net_received_size(response) if response is not None else 0,
+                         errors=error or int(getattr(response, 'status_code', 0) >= 400))
+                 except Exception:
+@@ -3713,7 +3807,7 @@
+                     received = _net_received_size(response) if response is not None else 0
+                     if not received and response is not None and not kwargs.get('stream'):
+                         received = _net_payload_size(getattr(response, 'content', None))
+-                    _NET_METER.record('curl_client', _net_host(url), sent=request_size, received=received,
++                    _NET_METER.record('curl_client', _net_client_label(url), sent=request_size, received=received,
+                         errors=error or int(getattr(response, 'status_code', 0) >= 400))
+                 except Exception:
+                     pass
+@@ -3970,84 +4064,24 @@
+ REF_V2_INIT_KEY = 'referrals_v2_initialized_v6'
+ 
+ def initialize_referrals_v2():
+-    """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
+-    try:
+-        already_init = db.settings.find_one({'key': REF_V2_INIT_KEY})
+-        if already_init and already_init.get('value') == 'done':
+-            logger.info("✅ نظام الإحالات V2 مُهيأ مسبقاً.")
+-            return
+-
+-        logger.info("🔄 جاري تهيئة نظام الإحالات V2 (لأول مرة)...")
+-
+-        # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
+-        try:
+-            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4', 'referrals_v2_initialized_v5']}})
+-        except Exception:
+-            pass
+-
+-        # 1. مسح كامل لجدول الإحالات الجديد (لو موجود من تجارب سابقة)
+-        try:
+-            db.referrals_v2.delete_many({})
+-        except Exception:
+-            pass
+-
+-        # 2. مسح الحقول القديمة من جدول المستخدمين (referred_by القديم)
+-        try:
+-            db.users.update_many(
+-                {},
+-                {'$unset': {
+-                    'referred_by': "",
+-                    'ref_status': "",
+-                    'ref_earned': "",
+-                    'ref_v2_earned': ""
+-                }}
+-            )
+-        except Exception as e:
+-            logger.error(f"Error clearing old referral fields: {e}")
+-        
+-        # 2.5. مسح نص invite_txt المخصص القديم من custom_texts
+-        # عشان يستخدم النص الجديد من الكود (اللي يحتوي على 6 متغيرات بدل 2)
+-        try:
+-            db.custom_texts.delete_many({'key': 'invite_txt'})
+-            logger.info("✅ تم مسح النص القديم لرسالة الإحالات من custom_texts")
+-        except Exception as e:
+-            logger.error(f"Error clearing old invite_txt: {e}")
+-
+-        # 3. إنشاء فهارس (Indexes) لتسريع الاستعلامات
+-        try:
+-            db.referrals_v2.create_index('referrer_id')
+-            db.referrals_v2.create_index('invited_id', unique=True)
+-            db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
+-            db.referrals_archived.create_index('referrer_id')
+-            db.referrals_archived.create_index('invited_id')
+-        except Exception as e:
+-            logger.error(f"Error creating indexes: {e}")
+-
+-        # 🛡 4. حماية atomic ضد سرقة الحوالات (race conditions)
+-        # هذولي الـ indexes حرجين - يمنعون أي مستخدمين من استخدام نفس الـ hash بنفس اللحظة
+-        try:
+-            db.used_transactions.create_index('transaction_id', unique=True)
+-            logger.info("✅ تم إنشاء unique index على used_transactions")
+-        except Exception as e:
+-            # الـ index قد يكون موجود مسبقاً - هذا ok
+-            logger.debug(f"used_transactions index info: {e}")
+-        
+-        try:
+-            db.claimed_hashes.create_index('transaction_id', unique=True)
+-            logger.info("✅ تم إنشاء unique index على claimed_hashes")
+-        except Exception as e:
+-            logger.debug(f"claimed_hashes index info: {e}")
+-
+-        # 4. وضع علامة أن النظام تم تهيئته
+-        db.settings.update_one(
+-            {'key': REF_V2_INIT_KEY},
+-            {'$set': {'value': 'done', 'init_time': int(time.time())}},
+-            upsert=True
+-        )
+-
+-        logger.info("✅ تم تهيئة نظام الإحالات V2 بنجاح. (كل شي يبدأ من الصفر)")
+-    except Exception as e:
+-        logger.error(f"❌ فشل تهيئة نظام الإحالات V2: {e}")
++    """Initialize indexes without deleting customers, referrals, balances or texts."""
++    try:
++        db.referrals_v2.create_index('referrer_id')
++        db.referrals_v2.create_index('invited_id', unique=True)
++        db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
++        db.referrals_v2.create_index([('status', 1), ('sub_next_check_at', 1)])
++        db.referrals_archived.create_index('referrer_id')
++        db.referrals_archived.create_index('invited_id')
++        db.used_transactions.create_index('transaction_id', unique=True)
++        db.claimed_hashes.create_index('transaction_id', unique=True)
++        db.ref_verification_challenges.create_index('expires_at', expireAfterSeconds=0)
++        db.ref_money_events.create_index([('status', 1), ('created_at', 1)])
++        db.ref_money_events.create_index([('ledger_pending', 1), ('created_at', 1)])
++        db.ref_balance_reconciliations.create_index('user_id')
++        db.settings.update_one({'key': REF_V2_INIT_KEY}, {'$setOnInsert': {
++            'value': 'done', 'init_time': int(time.time()), 'preserves_existing_data': True}}, upsert=True)
++    except Exception:
++        logger.exception('Could not initialize referral indexes; existing data was preserved')
+ 
+ 
+ def normalize_tx_id(tx_id):
+@@ -4544,6 +4578,58 @@
+         return False
+ 
+ 
++def _ref_web_verified(rec):
++    if not rec or rec.get('dv') == 'rejected':
++        return False
++    if rec.get('web_verified_at') and rec.get('web_verified_version') == 2:
++        return rec.get('dv') in ('ok', 'ok_admin', 'flag')
++    # A prior website success is evidence; an administrator verdict alone is not.
++    if rec.get('dv') in ('ok', 'ok_admin', 'flag') and isinstance(rec.get('dv_at'), (int, float)) and rec['dv_at'] > 0:
++        failed_human = ('ما نجح في اختبار الإنسان', 'ضغطة مو حقيقية', 'ضغط أسرع من الإنسان')
++        return not any(any(token in str(reason) for token in failed_human) for reason in (rec.get('dv_reasons') or []))
++    return False
++
++
++def _ref_verified_query():
++    return {'dv': {'$in': ['ok', 'ok_admin', 'flag']}, '$or': [
++        {'web_verified_version': 2, 'web_verified_at': {'$gt': 0}},
++        {'dv_at': {'$gt': 0}, 'dv_reasons': {'$not': {'$elemMatch': {'$regex': 'ما نجح في اختبار الإنسان|ضغطة مو حقيقية|ضغط أسرع من الإنسان'}}}}]}
++
++
++def _ref_find(invited_id, restore=True):
++    invited_id = int(invited_id)
++    rec = db.referrals_v2.find_one({'invited_id': invited_id})
++    if rec or not restore:
++        return rec
++    old = db.referrals_archived.find_one({'invited_id': invited_id}, sort=[('archived_at', -1)])
++    if not old or not old.get('referrer_id'):
++        return None
++    restored = {k: v for k, v in old.items() if k not in ('_id', 'original_status') and v is not None}
++    restored.update(invited_id=invited_id, status='left', restored_at=int(time.time()))
++    try:
++        db.referrals_v2.update_one({'invited_id': invited_id}, {'$setOnInsert': restored}, upsert=True)
++    except Exception:
++        pass
++    return db.referrals_v2.find_one({'invited_id': invited_id})
++
++
++def _ref_lock_guard(func):
++    @functools.wraps(func)
++    def guarded(*args, **kwargs):
++        try:
++            if func.__name__ == 'mark_referral_status':
++                rec = _ref_find(args[0]) or {}
++                rid = int(rec.get('referrer_id') or 0)
++            else:
++                rid = int(args[0].data.replace('refwd_ok_', '').rsplit('_', 1)[0])
++        except (ValueError, TypeError, AttributeError, IndexError):
++            return func(*args, **kwargs)
++        with _get_referrer_lock(rid):
++            return func(*args, **kwargs)
++    return guarded
++
++
++@_ref_lock_guard
+ def mark_referral_status(invited_id, new_status):
+     """
+     يحدّث حالة المُدعَى وبعدها يحدّث رصيد المُحيل تلقائياً.
+@@ -4553,6 +4639,9 @@
+     """
+     try:
+         invited_id = int(invited_id)
++        if new_status == 'active':
++            if not _ref_web_verified(_ref_find(invited_id)) or check_forced_sub(invited_id) is not True:
++                return False
+         
+         # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
+         result = db.referrals_v2.find_one_and_update(
+@@ -4570,6 +4659,10 @@
+         )
+         
+         if result is None:
++            if new_status == 'active':
++                current = _ref_find(invited_id)
++                if current and current.get('cb_amount'):
++                    _ref_refund(current)
+             return
+         
+         old_status = result.get('status', 'pending')
+@@ -4603,7 +4696,7 @@
+ 
+ def _ms_fresh_q(referrer_id):
+     """الإحالات النشطة اللي ما دخلت أي دفعة للحين — هذي بس اللي تنحسب للدفعة الجاية."""
+-    return {'referrer_id': int(referrer_id), 'status': 'active', 'ms_batch': {'$exists': False}}
++    return dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active', ms_batch={'$exists': False})
+ 
+ 
+ def ref_progress(referrer_id):
+@@ -4618,7 +4711,7 @@
+ 
+ def _ms_members(referrer_id, batch_no, threshold):
+     """أعضاء دفعة: اللي انحسبوا لها من قبل (ms_batch) — ولو ناقصين نكمّل من الإحالات الجديدة (الأقدم أول)."""
+-    q = {'referrer_id': int(referrer_id), 'status': 'active'}
++    q = dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active')
+     mine = list(db.referrals_v2.find(dict(q, ms_batch=batch_no)).sort('_id', 1).limit(threshold))
+     fresh = []
+     if len(mine) < threshold:
+@@ -4644,7 +4737,8 @@
+     ids = [int(x) for x in (ms or {}).get('members') or []]
+     if not ids:
+         return 0
+-    return db.referrals_v2.count_documents({'invited_id': {'$in': ids}, 'status': 'active'})
++    return db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=int(ms['referrer_id']),
++                                               invited_id={'$in': ids}, status='active'))
+ 
+ 
+ def _ms_cls(r):
+@@ -4822,7 +4916,7 @@
+             if ms.get('members'):
+                 short = _ms_active_members(ms) < th
+             else:      # دفعة قديمة بدون أعضاء محفوظين
+-                short = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'}) < int(ms.get('active_count') or 0)
++                short = db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active')) < int(ms.get('active_count') or 0)
+             if short:
+                 db.referral_milestones.update_one({'_id': ms['_id'], 'status': 'pending'},
+                                                   {'$set': {'status': 'reopened', 'reopened_at': now}})
+@@ -4861,7 +4955,8 @@
+             rth, _rw = _ms_snap(reo)
+             if reo.get('members'):
+                 have = [int(r['invited_id']) for r in db.referrals_v2.find(
+-                    {'invited_id': {'$in': [int(x) for x in reo['members']]}, 'status': 'active'}, {'invited_id': 1})]
++                    dict(_ref_verified_query(), referrer_id=rid,
++                         invited_id={'$in': [int(x) for x in reo['members']]}, status='active'), {'invited_id': 1})]
+                 need = rth - len(have)
+                 add = [r['invited_id'] for r in db.referrals_v2.find(_ms_fresh_q(rid), {'invited_id': 1}).sort('_id', 1).limit(max(0, need))]
+                 if need > 0 and len(add) < need:
+@@ -4875,12 +4970,12 @@
+                                                 {'$unset': {'ms_batch': ''}})
+                 members = have + [int(x) for x in add]
+             else:
+-                if db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}) < int(reo.get('active_count') or 0):
++                if db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active')) < int(reo.get('active_count') or 0):
+                     return
+                 members = []
+             db.referral_milestones.update_one({'_id': reo['_id'], 'status': 'reopened'},
+                                               {'$set': {'status': 'pending', 'members': members, 'renotified_at': now,
+-                                                        'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})}})
++                                                        'active_count': db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active'))}})
+             txt, markup = _ms_summary_view(rid, reo['batch_no'])
+             _ms_send_admins(txt, markup)
+             return
+@@ -4896,7 +4991,7 @@
+                 db.referral_milestones.insert_one({
+                     'referrer_id': rid, 'batch_no': batch_no, 'status': 'pending', 'members': ids,
+                     'threshold': th, 'reward': float(get_referral_reward()),
+-                    'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}),
++                    'active_count': db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active')),
+                     'created_at': now})
+             except Exception as e:
+                 logger.warning(f"milestone save {rid}#{batch_no}: {e}")
+@@ -4969,101 +5064,208 @@
+     if b is None:
+         return None, None
+     if int(b) == 0:
+-        return _ref_legacy_unit(), 0
++        # A migration label is not proof that this referral was ever paid.
++        # Legacy rows without a recorded, attributable payment need review.
++        ms0 = db.referral_milestones.find_one({'referrer_id': int(rec.get('referrer_id') or 0),
++            'batch_no': 0, 'status': 'paid', 'members': int(rec.get('invited_id') or 0)})
++        if not ms0 or ms0.get('paid_amount') is None:
++            return None, 0
++        th, _reward = _ms_snap(ms0)
++        return round(float(ms0['paid_amount']) / max(1, th), 4), 0
+     ms = db.referral_milestones.find_one({'referrer_id': int(rec.get('referrer_id') or 0), 'batch_no': int(b)})
+-    if not ms or ms.get('status') != 'paid':
++    member_ids = {int(x) for x in (ms or {}).get('members', []) if str(x).isdigit()}
++    if not ms or ms.get('status') != 'paid' or (member_ids and int(rec.get('invited_id') or 0) not in member_ids):
+         return None, int(b)
+     th, rw = _ms_snap(ms)
+     amt = ms.get('paid_amount')
+-    amt = float(amt) if amt is not None else rw
++    if amt is None:
++        return None, int(b)
++    amt = float(amt)
+     return round(amt / max(1, th), 4), int(b)
+ 
+ 
+-def _ref_money(rid, delta, kind, note):
+-    """يحرّك رصيد المحيل + «أرباح الإحالات» + سجل تعديلات الرصيد (يشوفه العميل)."""
+-    u = db.users.find_one_and_update({'user_id': rid}, {'$inc': {'balance': delta}}, return_document=True)
+-    if not u:
+-        return None
+-    try:
+-        e = float(u.get('ref_v2_earned') or 0)
+-    except Exception:
+-        e = 0.0
+-    db.users.update_one({'user_id': rid}, {'$set': {'ref_v2_earned': round(max(0.0, e + delta), 4)}})
+-    try:
+-        db.balance_logs.insert_one({'user_id': rid, 'type': kind, 'amount': round(delta, 4), 'note': note,
+-                                    'date': datetime.datetime.utcnow(), 'new_balance': round(float(u.get('balance') or 0), 4)})
+-    except Exception:
+-        pass
+-    try:
+-        _invalidate_user_cache(rid)
+-    except Exception:
+-        pass
+-    return u
++def _ref_units(value):
++    value = 0 if value in (None, '') else value
++    number = Decimal(str(value))
++    if not number.is_finite():
++        raise ValueError('Invalid referral money value')
++    return int((number * 10000).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
++
++
++def _ref_money_finish(event, receipt):
++    rid, key = event['user_id'], event['_id']
++    db.ref_money_events.update_one({'_id': key}, {'$set': {
++        'status': 'applied', 'receipt': receipt, 'applied_at': int(time.time()), 'ledger_pending': True}})
++    db.balance_logs.update_one({'_id': 'ref:' + key}, {'$setOnInsert': {
++        'user_id': rid, 'type': event['kind'], 'amount': receipt['balance_delta'],
++        'nominal_amount': event['amount'], 'debt_delta': receipt['debt_delta'],
++        'ref_debt_after': receipt['debt_after'], 'ref_event': key, 'note': event['note'],
++        'date': datetime.datetime.fromtimestamp(event['created_at'], datetime.timezone.utc).replace(tzinfo=None),
++        'new_balance': receipt['balance_after']}}, upsert=True)
++    db.users.update_one({'user_id': rid}, {'$unset': {'_ref_ops.' + key: ''}})
++    db.ref_money_events.update_one({'_id': key}, {'$set': {'ledger_pending': False}})
++    _invalidate_user_cache(rid)
++    user = db.users.find_one({'user_id': rid})
++    if user:
++        user['_ref_receipt'] = receipt
++        user['_ref_event_id'] = key
++    return user
++
++
++def _ref_money(rid, delta, kind, note, event_key=None):
++    """Idempotent referral movement; liabilities never overdraw spendable balance."""
++    rid, nominal = int(rid), _ref_units(delta)
++    operation_key = str(event_key or secrets.token_hex(24))
++    key = hashlib.sha256(operation_key.encode()).hexdigest()[:32]
++    with _get_referrer_lock(rid):
++        event = db.ref_money_events.find_one_and_update({'_id': key}, {'$setOnInsert': {
++            'user_id': rid, 'amount': nominal / 10000, 'kind': kind, 'note': str(note)[:500],
++            'operation_key': operation_key,
++            'status': 'prepared', 'created_at': int(time.time())}}, upsert=True, return_document=True)
++        if event['user_id'] != rid or _ref_units(event['amount']) != nominal or event['kind'] != kind:
++            raise ValueError('Referral movement key was reused for another operation')
++        if event.get('status') == 'applied':
++            return _ref_money_finish(event, event['receipt'])
++        field = 'ref_v2_purchase_earned' if kind == 'ref_purchase' else 'ref_v2_earned'
++        for _attempt in range(12):
++            user = db.users.find_one({'user_id': rid})
++            if not user:
++                return None
++            saved = (user.get('_ref_ops') or {}).get(key)
++            if saved:
++                return _ref_money_finish(event, saved)
++            balance = _ref_units(user.get('balance'))
++            if balance < 0:
++                if _ref_repair_user(rid).get('corrected'):
++                    continue
++                raise ValueError('Negative balance requires ledger review before referral movement')
++            debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
++            if nominal < 0:
++                balance_delta = -min(balance, -nominal)
++                debt_delta = -nominal + balance_delta
++            else:
++                debt_delta = -min(debt, nominal)
++                balance_delta = nominal + debt_delta
++            earned_delta = max(0, earned + nominal) - earned
++            receipt = {'balance_before': balance / 10000, 'balance_delta': balance_delta / 10000,
++                'balance_after': (balance + balance_delta) / 10000, 'debt_before': debt / 10000,
++                'debt_delta': debt_delta / 10000, 'debt_after': (debt + debt_delta) / 10000,
++                'earned_field': field, 'earned_delta': earned_delta / 10000}
++            query = {'user_id': rid, '_ref_ops.' + key: {'$exists': False}}
++            for name in ('balance', 'ref_debt', field):
++                query[name] = user[name] if name in user else {'$exists': False}
++            changed = db.users.find_one_and_update(query, {'$set': {
++                'balance': (balance + balance_delta) / 10000, 'ref_debt': (debt + debt_delta) / 10000,
++                '_ref_ops.' + key: receipt, field: (earned + earned_delta) / 10000}}, return_document=True)
++            if changed:
++                return _ref_money_finish(event, receipt)
++        raise RuntimeError('Referral wallet changed repeatedly; movement remains queued for retry')
+ 
+ 
+ def _ref_clawback(rec, reason=None):
+-    """إحالة كانت محسوبة في دفعة انصرفت ثم طلعت (أو انرفضت) → نخصم قيمتها بسعر دفعتها. مرة وحدة بس."""
+-    try:
+-        unit, b = ref_unit_value(rec)
++    """Reverse only an attributable paid reward, once per departure cycle."""
++    try:
++        unit, batch = ref_unit_value(rec)
+         if not unit or unit <= 0:
+             return 0.0
+-        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
++        invited, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
+         if not rid:
+             return 0.0
+-        now = int(time.time())
+-        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': False}},
+-                                                {'$set': {'cb_amount': unit, 'cb_at': now}})
+-        if r is None:
+-            return 0.0                     # انخصمت قبل
+-        reason = reason or ('rejected' if rec.get('dv') == 'rejected' else 'left')
+-        bl = f"الدفعة #{b}" if b else "قبل نظام الدفعات"
+-        _ref_money(rid, -unit, 'ref_clawback', f"إحالة {'انرفضت' if reason == 'rejected' else 'طلعت من القناة'} ({inv}) · {bl}")
+-        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'batch_no': b, 'amount': unit,
+-                                     'kind': 'clawback', 'reason': reason, 'open': True, 'at': now})
+-        try:
+-            lang = get_lang(rid)
+-            if lang == 'en':
+-                t = (f"⚠️ <b>Referral deducted</b>\n\nSomeone you invited {'was rejected after review' if reason == 'rejected' else 'left the channel'}, "
+-                     f"so <b>${unit:.2f}</b> was deducted — the same value it had when it was counted for you.")
+-                if reason != 'rejected':
+-                    t += "\n💡 If they join again, it is refunded automatically."
+-            else:
+-                t = (f"⚠️ <b>خصم إحالة</b>\n\nواحد من الناس اللي دعيتهم {'انرفض بعد المراجعة' if reason == 'rejected' else 'طلع من القناة'}، "
+-                     f"فانخصم <b>${unit:.2f}</b> من رصيدك — نفس قيمته لما انحسب لك.")
+-                if reason != 'rejected':
+-                    t += "\n💡 لو رجع اشترك، يرجع لك المبلغ تلقائياً."
+-            bot.send_message(rid, t, parse_mode='HTML')
+-        except Exception:
+-            pass
+-        return unit
+-    except Exception as e:
+-        logger.warning(f"referral clawback {rec.get('invited_id')}: {e}")
++        with _get_referrer_lock(rid):
++            token = secrets.token_hex(16)
++            current = db.referrals_v2.find_one_and_update(
++                {'invited_id': invited, 'cb_amount': {'$exists': False}}, {'$set': {
++                    'cb_amount': unit, 'cb_at': int(time.time()), 'cb_token': token, 'cb_status': 'processing'}},
++                return_document=True)
++            if current is None:
++                current = db.referrals_v2.find_one({'invited_id': invited}) or {}
++                if current.get('cb_status') != 'processing' or not current.get('cb_token'):
++                    return 0.0
++            token, unit = current['cb_token'], float(current['cb_amount'])
++            reason = reason or ('rejected' if rec.get('dv') == 'rejected' else 'left')
++            note = f"إحالة {'انرفضت' if reason == 'rejected' else 'طلعت من القناة'} ({invited}) · الدفعة #{batch}"
++            user = _ref_money(rid, -unit, 'ref_clawback', note, event_key='clawback:' + token)
++            if not user:
++                return 0.0
++            receipt = user['_ref_receipt']
++            db.ref_clawbacks.update_one({'_id': 'cb:' + token}, {'$setOnInsert': {
++                'invited_id': invited, 'referrer_id': rid, 'batch_no': batch, 'amount': unit,
++                'kind': 'clawback', 'reason': reason, 'open': True, 'at': int(time.time()),
++                'withdrawn': -receipt['balance_delta'], 'deferred': receipt['debt_delta'],
++                'event_id': user['_ref_event_id']}}, upsert=True)
++            db.referrals_v2.update_one({'invited_id': invited, 'cb_token': token},
++                                       {'$set': {'cb_status': 'applied', 'cb_event_id': user['_ref_event_id']}})
++            try:
++                if get_lang(rid) == 'en':
++                    text = (f"⚠️ <b>Referral reward reversed</b>\n\nReward value: <b>${unit:.4f}</b>. "
++                            f"Balance deducted: <b>${-receipt['balance_delta']:.4f}</b>. "
++                            f"Pending against future referral rewards: <b>${receipt['debt_delta']:.4f}</b>."
++                            "\nIf the referral qualifies again, this reversal is refunded.")
++                else:
++                    text = (f"⚠️ <b>استرجاع مكافأة إحالة</b>\n\nقيمة المكافأة: <b>${unit:.4f}</b>. "
++                            f"المخصوم من الرصيد المتاح: <b>${-receipt['balance_delta']:.4f}</b>. "
++                            f"المتبقي للتسوية من مكافآت الإحالات القادمة: <b>${receipt['debt_delta']:.4f}</b>."
++                            "\nإذا عادت الإحالة واستوفت التحقق، يُعكس هذا الاسترجاع.")
++                bot.send_message(rid, text, parse_mode='HTML')
++            except Exception:
++                pass
++            return unit
++    except Exception:
++        logger.exception('Referral clawback deferred; its saved operation can be retried')
+         return 0.0
+ 
+ 
+ def _ref_refund(rec):
+-    """الإحالة اللي انخصمت رجعت نشطة → نرجّع نفس المبلغ اللي انخصم."""
+-    try:
+-        if not (rec or {}).get('cb_amount') or rec.get('dv') == 'rejected':
+-            return 0.0
+-        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
+-        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': True}},
+-                                                {'$unset': {'cb_amount': '', 'cb_at': ''}})
+-        if r is None or not r.get('cb_amount'):
+-            return 0.0
+-        amt = float(r['cb_amount'])
+-        _ref_money(rid, amt, 'ref_refund', f"رجعت إحالة ({inv})")
+-        db.ref_clawbacks.update_many({'invited_id': inv, 'kind': 'clawback', 'open': True}, {'$set': {'open': False, 'refunded_at': int(time.time())}})
+-        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'amount': amt, 'kind': 'refund', 'at': int(time.time())})
+-        try:
+-            bot.send_message(rid, (f"✅ <b>Referral back</b>\n\nThe person who left joined again — <b>${amt:.2f}</b> refunded."
+-                                   if get_lang(rid) == 'en' else
+-                                   f"✅ <b>رجعت لك إحالة</b>\n\nالشخص اللي طلع رجع اشترك، فرجّعنا لك <b>${amt:.2f}</b>."), parse_mode='HTML')
+-        except Exception:
+-            pass
+-        return amt
+-    except Exception as e:
+-        logger.warning(f"referral refund {rec.get('invited_id')}: {e}")
++    """Reverse the exact recorded clawback; a retry can never credit it twice."""
++    try:
++        invited, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
++        with _get_referrer_lock(rid):
++            current = db.referrals_v2.find_one({'invited_id': invited}) or {}
++            if not current.get('cb_amount') or not _ref_web_verified(current):
++                return 0.0
++            if current.get('cb_status') == 'processing':
++                _ref_clawback(current)
++                current = db.referrals_v2.find_one({'invited_id': invited}) or {}
++                if current.get('cb_status') != 'applied':
++                    return 0.0
++            amount = float(current['cb_amount'])
++            if not current.get('cb_token'):
++                proven_debit = db.balance_logs.find_one({'user_id': rid, 'type': 'ref_clawback',
++                    'amount': -amount, 'note': {'$regex': r'\(' + re.escape(str(invited)) + r'\)'}})
++                prior = db.ref_clawbacks.find_one({'invited_id': invited, 'kind': 'clawback',
++                    'open': True, 'amount': amount})
++                if not proven_debit or not prior:
++                    logger.warning('Legacy referral refund needs ledger review: invited=%s', invited)
++                    return 0.0
++            token = current.get('cb_token') or ('legacy-' + hashlib.sha256(
++                f"{invited}|{current.get('cb_at')}|{amount}".encode()).hexdigest()[:24])
++            db.referrals_v2.update_one({'invited_id': invited, 'cb_amount': amount},
++                {'$set': {'cb_refund_pending': True}})
++            user = _ref_money(rid, amount, 'ref_refund', f'رجعت إحالة ({invited})', event_key='refund:' + token)
++            if not user:
++                return 0.0
++            db.ref_clawbacks.update_many({'invited_id': invited, 'kind': 'clawback', 'open': True},
++                {'$set': {'open': False, 'refunded_at': int(time.time())}})
++            db.ref_clawbacks.update_one({'_id': 'rf:' + token}, {'$setOnInsert': {
++                'invited_id': invited, 'referrer_id': rid, 'amount': amount, 'kind': 'refund',
++                'at': int(time.time()), 'event_id': user['_ref_event_id'],
++                'credited': user['_ref_receipt']['balance_delta'],
++                'debt_cancelled': -user['_ref_receipt']['debt_delta']}}, upsert=True)
++            db.referrals_v2.update_one({'invited_id': invited, 'cb_amount': amount}, {'$unset': {
++                'cb_amount': '', 'cb_at': '', 'cb_token': '', 'cb_status': '', 'cb_event_id': '', 'cb_refund_pending': ''}})
++            try:
++                receipt = user['_ref_receipt']
++                text = (f"✅ <b>Referral restored</b>\n\nReversed ${amount:.4f}: "
++                        f"${receipt['balance_delta']:.4f} credited and ${-receipt['debt_delta']:.4f} liability cancelled."
++                        if get_lang(rid) == 'en' else
++                        f"✅ <b>رجعت لك إحالة</b>\n\nعُكس مبلغ ${amount:.4f}: "
++                        f"أُضيف ${receipt['balance_delta']:.4f} للرصيد وأُلغي ${-receipt['debt_delta']:.4f} من المستحق.")
++                bot.send_message(rid, text, parse_mode='HTML')
++            except Exception:
++                pass
++            return amount
++    except Exception:
++        logger.exception('Referral refund deferred; its saved operation can be retried')
+         return 0.0
+ 
+ 
+@@ -5082,7 +5284,7 @@
+     n = 0
+     try:
+         rids = [d['_id'] for d in db.referrals_v2.aggregate([
+-            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
++            {'$match': dict(_ref_verified_query(), status='active', ms_batch={'$exists': False})},
+             {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}])][:limit]
+     except Exception:
+         rids = []
+@@ -5100,7 +5302,7 @@
+     th = max(1, int(get_referral_threshold()))
+     try:
+         return sum(1 for _ in db.referrals_v2.aggregate([
+-            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
++            {'$match': dict(_ref_verified_query(), status='active', ms_batch={'$exists': False})},
+             {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}]))
+     except Exception:
+         return 0
+@@ -5241,6 +5443,7 @@
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_ok_"))
+ @admin_required
++@_ref_lock_guard
+ def ref_milestone_approve(call):
+     """✅ الأدمن يمنح مكافأة إنجاز الإحالات يدوياً."""
+     bot.answer_callback_query(call.id)
+@@ -5253,25 +5456,35 @@
+         return
+ 
+     milestone = db.referral_milestones.find_one({
+-        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
++        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}})
+     _any = _ms_doc(referrer_id, batch_no) or {}
+     _th, _rw = _ms_snap(_any)
+     if not milestone and _any.get('status') == 'reopened':
+         bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما تكمل {_th} إحالة.")
+         return
+     referrer = db.users.find_one({'user_id': referrer_id}) or {}
++    if milestone and not milestone.get('members'):
++        # Old aggregate totals cannot establish which referrals were paid. Pin only
++        # verified members of this batch or unassigned referrals, never a paid batch.
++        members = _ms_members(referrer_id, batch_no, _th)
++        if len(members) >= _th:
++            ids = [int(r['invited_id']) for r in members]
++            db.referral_milestones.update_one({'_id': milestone['_id']}, {'$set': {'members': ids}})
++            db.referrals_v2.update_many({'referrer_id': referrer_id, 'invited_id': {'$in': ids}},
++                                       {'$set': {'ms_batch': batch_no}})
++            milestone['members'] = ids
+     if milestone and milestone.get('members'):
+         _valid = _ms_active_members(milestone) >= _th
+-    else:     # دفعة قديمة بدون أعضاء محفوظين: نفس الفحص القديم
+-        _valid = db.referrals_v2.count_documents({'referrer_id': referrer_id, 'status': 'active'}) >= int((milestone or {}).get('active_count') or 0)
++    else:
++        _valid = False
+     if not milestone or not referrer or referrer.get('is_banned') == 1 or not _valid:
+         bot.send_message(call.message.chat.id, '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.')
+         return
+ 
+-    # 🛡 منع الصرف المزدوج: نعلّم الدفعة كـ paid ذرياً
++    # Save a resumable payment intent; mark paid only after the wallet receipt exists.
+     res = db.referral_milestones.find_one_and_update(
+-        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$ne': 'paid'}},
+-        {'$set': {'status': 'paid', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
++        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}},
++        {'$set': {'status': 'paying', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
+         return_document=False
+     )
+     if res is None:
+@@ -5279,22 +5492,13 @@
+         return
+ 
+     reward = _rw     # 💰 سعر الدفعة لحظة اكتمالها — تغيير الإعداد بعدها ما يأثر عليها
+-    db.users.update_one({'user_id': referrer_id}, {'$inc': {'balance': reward}})
+-    try:      # «أرباح الإحالات» في حسابه تزيد بنفس المبلغ اللي انصرف فعلاً
+-        _u = db.users.find_one({'user_id': referrer_id}, {'ref_v2_earned': 1}) or {}
+-        try:
+-            _old = float(_u.get('ref_v2_earned') or 0)
+-        except Exception:
+-            _old = 0.0
+-        db.users.update_one({'user_id': referrer_id}, {'$set': {'ref_v2_earned': round(_old + reward, 4)}})
+-        db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {'paid_amount': reward}})
+-        _nb = (db.users.find_one({'user_id': referrer_id}, {'balance': 1}) or {}).get('balance')
+-        db.balance_logs.insert_one({'user_id': referrer_id, 'type': 'ref_reward', 'amount': reward,
+-                                    'note': f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", 'date': datetime.datetime.utcnow(),
+-                                    'new_balance': round(float(_nb or 0), 4)})
+-        _invalidate_user_cache(referrer_id)
+-    except Exception:
+-        pass
++    credited = _ref_money(referrer_id, reward, 'ref_reward',
++        f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", event_key=f'milestone:{referrer_id}:{batch_no}')
++    if not credited:
++        bot.send_message(call.message.chat.id, '⏳ لم يكتمل الصرف؛ الطلب محفوظ لإعادة المحاولة دون تكرار المكافأة.')
++        return
++    db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {
++        'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
+     # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
+     try:
+         _mem = [int(x) for x in (milestone.get('members') or [])]
+@@ -5310,6 +5514,10 @@
+                f"مقابل إكمال {_th} إحالة ناجحة. شكراً لك!") if rl == 'ar' else \
+               (f"🎉 <b>Referral reward!</b>\n\n<b>${reward:.2f}</b> has been added to your balance "
+                f"for completing {_th} successful referrals. Thank you!")
++        receipt = credited['_ref_receipt']
++        if receipt['debt_delta'] < 0:
++            msg += (f"\nتمت تسوية ${-receipt['debt_delta']:.4f} من المستحقات؛ الصافي المضاف للرصيد ${receipt['balance_delta']:.4f}."
++                    if rl == 'ar' else f"\n${-receipt['debt_delta']:.4f} settled against liabilities; cash credited ${receipt['balance_delta']:.4f}.")
+         bot.send_message(referrer_id, msg, parse_mode="HTML")
+     except Exception:
+         pass
+@@ -5432,10 +5640,10 @@
+             return False  # الشراء أقل من الحد الأدنى - لا مكافأة
+         
+         # نشوف هل المشتري عنده مُحيل في النظام الجديد
+-        ref_record = db.referrals_v2.find_one({'invited_id': buyer_uid})
++        ref_record = _ref_find(buyer_uid)
+         if not ref_record:
+             return False  # المشتري ما له مُحيل
+-        if ref_record.get('dv') == 'rejected':
++        if ref_record.get('status') != 'active' or not _ref_web_verified(ref_record):
+             return False  # 🛡 الأدمن رفض هذي الإحالة (جهاز مكرر / وهمي)
+         
+         referrer_id = int(ref_record.get('referrer_id', 0))
+@@ -5448,16 +5656,8 @@
+             return False
+         
+         # 🛡 منح المكافأة atomic
+-        result = db.users.find_one_and_update(
+-            {'user_id': referrer_id},
+-            {
+-                '$inc': {
+-                    'balance': purchase_reward,
+-                    'ref_v2_purchase_earned': purchase_reward
+-                }
+-            },
+-            return_document=True
+-        )
++        result = _ref_money(referrer_id, purchase_reward, 'ref_purchase',
++                            f'مكافأة شراء إحالة ({buyer_uid})')
+         
+         if result is None:
+             return False
+@@ -5468,6 +5668,9 @@
+                 'referrer_id': referrer_id,
+                 'buyer_id': buyer_uid,
+                 'amount': purchase_reward,
++                'balance_credited': result['_ref_receipt']['balance_delta'],
++                'debt_settled': -result['_ref_receipt']['debt_delta'],
++                'ref_event': result['_ref_event_id'],
+                 'product': product_name,
+                 'purchase_amount': purchase_amount,
+                 'timestamp': int(time.time())
+@@ -5549,8 +5752,148 @@
+     """يرجع lock مخصص لكل referrer لتفادي race conditions"""
+     with _referrer_locks_master:
+         if referrer_id not in _referrer_locks:
+-            _referrer_locks[referrer_id] = threading.Lock()
++            _referrer_locks[referrer_id] = threading.RLock()
+         return _referrer_locks[referrer_id]
++
++
++def _ref_repair_plan(uid):
++    user = db.users.find_one({'user_id': int(uid)}, {'user_id': 1, 'balance': 1, 'ref_debt': 1}) or {}
++    balance = _ref_units(user.get('balance'))
++    if balance >= 0:
++        return {'user_id': int(uid), 'state': 'clean', 'corrected': False}
++    running, evidence = balance, []
++    for log in db.balance_logs.find({'user_id': int(uid)}).sort([('date', -1), ('_id', -1)]).limit(5000):
++        try:
++            after, amount = _ref_units(log.get('new_balance')), _ref_units(log.get('amount'))
++        except (ValueError, InvalidOperation, TypeError):
++            break
++        if after != running or log.get('type') not in ('ref_clawback', 'ref_refund') or not amount:
++            break
++        if (log['type'] == 'ref_clawback' and amount >= 0) or (log['type'] == 'ref_refund' and amount <= 0):
++            break
++        evidence.append(str(log['_id']))
++        running -= amount
++        if running >= 0:
++            return {'user_id': int(uid), 'state': 'proven_referral_overdraft', 'corrected': False,
++                'balance_before': balance / 10000, 'debt_before': max(0, _ref_units(user.get('ref_debt'))) / 10000,
++                'move_to_debt': -balance / 10000, 'evidence_count': len(evidence),
++                'evidence_hash': hashlib.sha256('|'.join(evidence).encode()).hexdigest(),
++                'last_log': evidence[0]}
++    return {'user_id': int(uid), 'state': 'needs_ledger_review', 'corrected': False,
++            'balance_before': balance / 10000, 'reason': 'The available ledger does not prove the entire negative balance came from referral reversals.'}
++
++
++def _ref_repair_audit(user):
++    receipt = user.get('_ref_repair29') or {}
++    if not receipt or receipt.get('audited'):
++        return
++    key = receipt['reference']
++    db.ref_balance_reconciliations.update_one({'_id': key}, {'$setOnInsert': {
++        **receipt, 'user_id': user['user_id'], 'status': 'applied'}}, upsert=True)
++    db.balance_logs.update_one({'_id': 'ref-repair:' + key}, {'$setOnInsert': {
++        'user_id': user['user_id'], 'type': 'ref_debt_reclass', 'amount': receipt['move_to_debt'],
++        'debt_delta': receipt['move_to_debt'], 'new_balance': 0.0,
++        'ref_debt_after': receipt['debt_after'], 'net_change': 0.0,
++        'date': datetime.datetime.fromtimestamp(receipt['at'], datetime.timezone.utc).replace(tzinfo=None),
++        'note': 'نقل سالب موثق من استرجاع الإحالات إلى مستحقات منفصلة؛ صافي الحساب لم يتغير.'}}, upsert=True)
++    db.users.update_one({'user_id': user['user_id'], '_ref_repair29.reference': key},
++                        {'$set': {'_ref_repair29.audited': True}})
++
++
++def _ref_repair_user(uid):
++    with _get_referrer_lock(int(uid)):
++        plan = _ref_repair_plan(uid)
++        if plan['state'] != 'proven_referral_overdraft':
++            return plan
++        user = db.users.find_one({'user_id': int(uid)}) or {}
++        if _ref_units(user.get('balance')) != _ref_units(plan['balance_before']):
++            return {'user_id': int(uid), 'state': 'changed_during_review', 'corrected': False}
++        key = hashlib.sha256(f"r29|{uid}|{plan['balance_before']}|{plan['last_log']}".encode()).hexdigest()[:32]
++        receipt = {**plan, 'reference': key, 'at': int(time.time()), 'audited': False,
++                   'balance_after': 0.0, 'debt_after': round(plan['debt_before'] + plan['move_to_debt'], 4),
++                   'net_before': round(plan['balance_before'] - plan['debt_before'], 4),
++                   'net_after': -round(plan['debt_before'] + plan['move_to_debt'], 4)}
++        query = {'user_id': int(uid), 'balance': user['balance'],
++                 'ref_debt': user['ref_debt'] if 'ref_debt' in user else {'$exists': False}}
++        try:
++            changed = db.users.find_one_and_update(query, {'$set': {
++                'balance': 0.0, 'ref_debt': receipt['debt_after'], '_ref_repair29': receipt}}, return_document=True)
++        except Exception:
++            changed = db.users.find_one({'user_id': int(uid), '_ref_repair29.reference': key})
++            if not changed:
++                raise
++        if not changed:
++            return {'user_id': int(uid), 'state': 'changed_during_review', 'corrected': False}
++        _ref_repair_audit(changed)
++        _invalidate_user_cache(int(uid))
++        return {**receipt, 'corrected': True, 'state': 'reclassified'}
++
++
++def _ref_repair_batch():
++    result = {'checked': 0, 'corrected': 0, 'review': 0, 'moved': 0.0, 'rows': []}
++    for user in db.users.find({'balance': {'$lt': 0}}, {'user_id': 1}):
++        result['checked'] += 1
++        try:
++            row = _ref_repair_user(user['user_id'])
++        except Exception:
++            logger.exception('Referral balance reconciliation could not finish')
++            row = {'user_id': user['user_id'], 'state': 'retry_needed', 'corrected': False}
++        result['corrected'] += int(row.get('corrected', False))
++        result['review'] += int(not row.get('corrected') and row.get('state') != 'clean')
++        result['moved'] += row.get('move_to_debt', 0) if row.get('corrected') else 0
++        result['rows'].append(row)
++    for user in db.users.find({'_ref_repair29.audited': False}, {'user_id': 1, '_ref_repair29': 1}):
++        _ref_repair_audit(user)
++    return result
++
++
++def _ref_audit_send(chat_id):
++    result = _ref_repair_batch()
++    prior = list(db.ref_balance_reconciliations.find({}, {'user_id': 1, 'move_to_debt': 1}))
++    text = ('🧾 <b>تسوية أرصدة الإحالات</b>\n\n'
++        f"فُحص الآن: {result['checked']}\nصُحح بتوثيق كامل: {result['corrected']}\n"
++        f"يحتاج مراجعة لعدم كفاية السجل: {result['review']}\n"
++        f"إجمالي الحسابات المسوّاة سابقًا وحاليًا: {len(prior)}\n\n"
++        'التسوية تنقل السالب المثبت إلى مستحقات منفصلة؛ لا تمنح مالًا ولا تمحو مستحقًا. '
++        'الرصيد المتاح والمستحق يظهران للمستخدم، والتفاصيل في التقرير.')
++    bot.send_message(chat_id, text, parse_mode='HTML')
++    payload = {'current_run': result, 'recorded_reconciliations': prior}
++    data = io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode())
++    data.name = 'referral-balance-reconciliation.json'
++    bot.send_document(chat_id, data, caption='تقرير التسوية؛ الحالات غير المثبتة تُترك للمراجعة.')
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_ref_balance_audit')
++@admin_required
++def _ref_audit_cb(call):
++    bot.answer_callback_query(call.id)
++    _ref_audit_send(call.message.chat.id)
++
++
++@bot.message_handler(commands=['refaudit'])
++def _ref_audit_cmd(message):
++    if _is_admin_check(message.from_user.id):
++        _ref_audit_send(message.chat.id)
++
++
++def _ref_resume_financial():
++    for event in db.ref_money_events.find({'$or': [{'status': 'prepared'}, {'ledger_pending': True}]}).limit(100):
++        if not event.get('operation_key'):
++            continue
++        try:
++            _ref_money(event['user_id'], event['amount'], event['kind'], event['note'], event_key=event.get('operation_key'))
++        except Exception:
++            logger.debug('Saved referral movement is waiting for retry')
++    for milestone in db.referral_milestones.find({'status': 'paying'}).limit(100):
++        operation = f"milestone:{milestone['referrer_id']}:{milestone['batch_no']}"
++        event = db.ref_money_events.find_one({'_id': hashlib.sha256(operation.encode()).hexdigest()[:32], 'status': 'applied'})
++        if event:
++            db.referral_milestones.update_one({'_id': milestone['_id'], 'status': 'paying'}, {'$set': {
++                'status': 'paid', 'paid_amount': event['amount'], 'money_event': event['_id']}})
++    for rec in db.referrals_v2.find({'cb_status': 'processing'}).limit(100):
++        _ref_clawback(rec)
++    for rec in db.referrals_v2.find({'cb_refund_pending': True}).limit(100):
++        _ref_refund(rec)
+ 
+ 
+ def get_ref_counts(referrer_id):
+@@ -5558,137 +5901,88 @@
+     try:
+         rid = int(referrer_id)
+         pending = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'pending'})
+-        active = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
+-        # left من الأرشيف فقط (المؤكد مغادرتهم)
+-        left = db.referrals_archived.count_documents({'referrer_id': rid})
++        active = db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active'))
++        all_active = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
++        pending += all_active - active
++        left = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'left'})
++        old = list(db.referrals_archived.aggregate([{'$match': {'referrer_id': rid}},
++            {'$group': {'_id': '$invited_id'}}, {'$lookup': {'from': 'referrals_v2',
++                'localField': '_id', 'foreignField': 'invited_id', 'as': 'live'}},
++            {'$match': {'live.0': {'$exists': False}}}, {'$count': 'n'}]))
++        left += old[0]['n'] if old else 0
+         total = pending + active + left
+         return pending, active, left, total
+     except Exception:
+         return 0, 0, 0, 0
+ 
+ 
++_REF_SCAN_WAKE = threading.Event()
++_REF_SCAN_HEALTH = {'retry_at': 0}
++
++
++def _ref_checker_tick(limit=100):
++    """Only due, website-verified referrals need periodic membership requests."""
++    now = int(time.time())
++    if _REF_SCAN_HEALTH['retry_at'] > now:
++        return 0
++    due = {'status': {'$in': ['pending', 'active', 'left']}, '$and': [_ref_verified_query(),
++        {'$or': [{'sub_next_check_at': {'$exists': False}}, {'sub_next_check_at': {'$lte': now}}]}]}
++    refs = list(db.referrals_v2.find(due).sort('sub_next_check_at', 1).limit(max(1, min(200, int(limit)))))
++    errors, checked = 0, 0
++    for rec in refs:
++        uid = int(rec['invited_id'])
++        subscribed = check_forced_sub(uid, use_cache=False)
++        checked += 1
++        changes = {'sub_checked_at': now}
++        if subscribed is None:
++            errors += 1
++            changes.update(sub_next_check_at=now + 120)
++            if rec.get('left_checks', 0):
++                changes['left_checks'] = 0
++        elif subscribed is True:
++            errors = 0
++            if rec.get('status') != 'active' or rec.get('cb_amount'):
++                mark_referral_status(uid, 'active')
++            changes['sub_next_check_at'] = now + 21600 + uid % 301
++            if rec.get('left_checks', 0):
++                changes['left_checks'] = 0
++        elif rec.get('status') == 'active':
++            checks = int(rec.get('left_checks') or 0) + 1
++            changes.update(left_checks=checks, sub_next_check_at=now + 60)
++            if checks >= 3:
++                mark_referral_status(uid, 'left')
++                saved = db.referrals_v2.find_one({'invited_id': uid}) or rec
++                archive_id = 'ref-left:' + str(uid) + ':' + str(saved.get('cb_token') or now)
++                archived = {k: v for k, v in saved.items() if k != '_id'}
++                archived.update(status='left', original_status='active', archived_at=now)
++                db.referrals_archived.update_one({'_id': archive_id}, {'$setOnInsert': archived}, upsert=True)
++                changes['sub_next_check_at'] = now + 21600 + uid % 301
++        else:
++            changes['sub_next_check_at'] = now + (300 if rec.get('status') == 'pending' else 21600 + uid % 301)
++        db.referrals_v2.update_one({'_id': rec['_id']}, {'$set': changes})
++        if errors >= 3:
++            _REF_SCAN_HEALTH['retry_at'] = now + 120
++            break
++    return checked
++
++
+ def background_referral_checker_v2():
+-    """
+-    فاحص خلفي ذكي - يتجنب Telegram Rate Limit
+-    
+-    🛡 الاستراتيجية:
+-    - يفحص pending و active فقط
+-    - لو شخص مو مشترك → يزيد عداد left_checks
+-    - لازم 3 فحوصات متتالية تأكد المغادرة
+-    - بعد التأكيد → ينقل للأرشيف (referrals_archived)
+-    - خطأ اتصال = يتجاهل ويصفّر العداد
+-    """
+-    
+-    # ═══ إصلاح لمرة واحدة: رجّع الإحالات اللي صارت 'left' بالغلط ═══
+-    try:
+-        fix_key = db.settings.find_one({'key': 'ref_left_fix_v1'})
+-        if not fix_key:
+-            wrong_left = db.referrals_v2.count_documents({'status': 'left'})
+-            if wrong_left > 0:
+-                db.referrals_v2.update_many(
+-                    {'status': 'left'},
+-                    {'$set': {'status': 'active', 'left_checks': 0}}
+-                )
+-                logger.info(f"🔧 Fixed {wrong_left} wrongly-marked 'left' referrals → reset to 'active' for re-verification")
+-            db.settings.insert_one({'key': 'ref_left_fix_v1', 'value': True})
+-    except Exception as e:
+-        logger.error(f"Error in referral fix: {e}")
+-    BATCH_SIZE = 10
+-    DELAY_BETWEEN_CHECKS = 0.15
+-    DELAY_BETWEEN_CYCLES = 60
+-    LEFT_CONFIRM_NEEDED = 3  # لازم 3 فحوصات متتالية تأكد إنه غادر
+-    
+-    # ⏳ انتظار 90 ثانية بعد تشغيل البوت عشان الاتصال يستقر
++    """Event wakeups plus bounded periodic verification; no unverified referrals are approved."""
++    try:
++        result = _ref_repair_batch()
++        logger.info('Referral balance reconciliation: checked=%s corrected=%s review=%s',
++                    result['checked'], result['corrected'], result['review'])
++    except Exception:
++        logger.exception('Referral balance reconciliation is waiting for retry')
+     time.sleep(90)
+-    logger.info("🔄 Background referral checker started.")
+-    
+     while True:
+         try:
+-            # نفحص pending و active فقط (left محفوظة في referrals_archived)
+-            cursor = db.referrals_v2.find({
+-                'status': {'$in': ['pending', 'active']}
+-            })
+-            
+-            batch_count = 0
+-            for r in cursor:
+-                inv_uid = r.get('invited_id')
+-                if not inv_uid:
+-                    continue
+-                
+-                current_status = r.get('status', 'pending')
+-                
+-                try:
+-                    is_subbed = check_forced_sub(int(inv_uid))
+-                except Exception:
+-                    time.sleep(DELAY_BETWEEN_CHECKS)
+-                    continue
+-                
+-                # None = خطأ اتصال — نحافظ على الحالة + نصفّر العداد
+-                if is_subbed is None:
+-                    if r.get('left_checks', 0) != 0:
+-                        db.referrals_v2.update_one(
+-                            {'invited_id': inv_uid},
+-                            {'$set': {'left_checks': 0}}
+-                        )
+-                    time.sleep(DELAY_BETWEEN_CHECKS)
+-                    continue
+-                
+-                if is_subbed:
+-                    # مشترك ✅
+-                    if current_status != 'active':
+-                        if not ref_dv_required(r):
+-                            mark_referral_status(inv_uid, 'active')
+-                        elif r.get('dv') is None:
+-                            _ref_dv_prompt(int(inv_uid))      # 🛡 نرسل له زر التحقق مرة وحدة
+-                    # نصفّر عداد المغادرة
+-                    if r.get('left_checks', 0) != 0:
+-                        db.referrals_v2.update_one(
+-                            {'invited_id': inv_uid},
+-                            {'$set': {'left_checks': 0}}
+-                        )
+-                else:
+-                    # مو مشترك — نزيد العداد
+-                    if current_status == 'active':
+-                        left_checks = r.get('left_checks', 0) + 1
+-                        if left_checks >= LEFT_CONFIRM_NEEDED:
+-                            # ✅ مؤكد غادر — ننقله للأرشيف
+-                            referrer_id = r.get('referrer_id')
+-                            _cb = _ref_clawback(r, 'left')          # 💸 بسعر دفعته
+-                            db.referrals_archived.insert_one({
+-                                'invited_id': inv_uid,
+-                                'referrer_id': referrer_id,
+-                                'status': 'left',
+-                                'original_status': current_status,
+-                                'ms_batch': r.get('ms_batch'),
+-                                'cb_amount': _cb or None,
+-                                'archived_at': int(time.time())
+-                            })
+-                            # نحذفه من الأساسي
+-                            db.referrals_v2.delete_one({'invited_id': inv_uid})
+-                            # نحدّث رصيد المُحيل
+-                            try:
+-                                _ms_reopen_check(referrer_id)
+-                                update_referrer_balance(referrer_id)
+-                            except Exception: pass
+-                            logger.info(f"📤 Referral {inv_uid} archived as LEFT (confirmed {LEFT_CONFIRM_NEEDED}x)")
+-                        else:
+-                            db.referrals_v2.update_one(
+-                                {'invited_id': inv_uid},
+-                                {'$set': {'left_checks': left_checks}}
+-                            )
+-                    # pending ما يصير left — يبقى pending
+-                
+-                time.sleep(DELAY_BETWEEN_CHECKS)
+-                
+-                batch_count += 1
+-                if batch_count >= BATCH_SIZE:
+-                    batch_count = 0
+-                    time.sleep(2)
+-        except Exception as e:
+-            logger.error(f"Background ref checker error: {e}")
+-        
+-        # دورة كاملة كل 30 ثانية (آمن وكافي)
+-        time.sleep(DELAY_BETWEEN_CYCLES)
++            _ref_resume_financial()
++            _ref_checker_tick()
++        except Exception:
++            logger.exception('Background referral verification cycle failed')
++        _REF_SCAN_WAKE.wait(timeout=60)
++        _REF_SCAN_WAKE.clear()
+ 
+ 
+ # 🆕 فاحص فوري للإحالات الجديدة عند الـ /start
+@@ -7722,6 +8016,48 @@
+ 
+ _FORCED_SUB_CACHE = {}          # {uid: (result, expiry_ts)}
+ _FORCED_SUB_CACHE_TTL = 300     # 5 دقائق — نتذكّر أن الشخص مشترك فلا نستعلم كل ضغطة
++_FSUB_CHANNEL_CACHE = {'expires': 0, 'rows': []}
++_FSUB_CHANNEL_LOCK = threading.RLock()
++
++
++def _fsub_channels():
++    with _FSUB_CHANNEL_LOCK:
++        if _FSUB_CHANNEL_CACHE['expires'] <= time.time():
++            rows = list(db.required_channels.find())
++            _FSUB_CHANNEL_CACHE.update(rows=rows, expires=time.time() + 120)
++        return _FSUB_CHANNEL_CACHE['rows']
++
++
++def _fsub_invalidate():
++    _FSUB_CHANNEL_CACHE['expires'] = 0
++    _FORCED_SUB_CACHE.clear()
++
++
++def _fsub_joined(member):
++    status = getattr(member, 'status', None)
++    if status in ('left', 'kicked'):
++        return False
++    if status == 'restricted':
++        return getattr(member, 'is_member', None)
++    return True if status in ('member', 'administrator', 'creator', 'owner') else None
++
++
++@bot.chat_member_handler(func=lambda update: True)
++def _ref_channel_membership_changed(update):
++    chat = update.chat
++    identities = {str(chat.id), '@' + str(getattr(chat, 'username', '') or '').lower()}
++    if not any(str(c.get('channel_id', '')).lower() in identities for c in _fsub_channels()):
++        return
++    uid = int(update.new_chat_member.user.id)
++    _FORCED_SUB_CACHE.pop(uid, None)
++    db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
++        'sub_next_check_at': int(time.time()), 'membership_event_at': int(time.time())}})
++    _REF_SCAN_WAKE.set()
++
++
++def _ref_allowed_updates():
++    return sorted(set(getattr(telebot.util, 'update_types', ['message', 'callback_query', 'pre_checkout_query'])) |
++                  {'chat_member', 'my_chat_member'})
+ 
+ 
+ def check_forced_sub(uid, use_cache=True):
+@@ -7734,23 +8070,27 @@
+     في كل ضغطة — التنقّل يصير فورياً. النتيجة False لا تُخزَّن (نعيد الفحص
+     فوراً حتى يشترك). التخزين يُمسح تلقائياً بعد المدة.
+     """
+-    if uid == OWNER_ID: return True
+-    user_db = get_user_data_full(uid)
+-    if user_db and user_db.get('is_admin') == 1: return True
+-    chans = list(db.required_channels.find())
+-    if not chans: return True
+-
+     # ⚡ cache: لو عندنا نتيجة "مشترك" حديثة، نرجّعها فوراً بلا استعلام
+     if use_cache:
+         cached = _FORCED_SUB_CACHE.get(uid)
+         if cached and cached[1] > time.time() and cached[0] is True:
+             return True
+ 
++    if uid == OWNER_ID: return True
++    user_db = get_user_data_full(uid)
++    if user_db and user_db.get('is_admin') == 1: return True
++    chans = _fsub_channels()
++    if not chans: return True
++
+     had_error = False
+     for c in chans:
+         try:
+             member = bot.get_chat_member(c['channel_id'], uid)
+-            if member.status in ['left', 'kicked']:
++            joined = _fsub_joined(member)
++            if joined is None:
++                had_error = True
++                continue
++            if not joined:
+                 # غير مشترك: نمسح أي cache قديم ونرجّع False فوراً
+                 _FORCED_SUB_CACHE.pop(uid, None)
+                 return False  # طلع من قناة واحدة = مو مشترك أكيد
+@@ -7795,6 +8135,7 @@
+             logger.debug(f"fsub meta {cid}: {e}")
+         try:
+             db.required_channels.update_one({'_id': c['_id']}, {'$set': upd})
++            _fsub_invalidate()
+         except Exception:
+             pass
+     if not link and uname:
+@@ -8759,7 +9100,7 @@
+     # ============================================================
+     # ✅ تحديث حالة الإحالة (لو هذا المستخدم مُدعى من شخص آخر)
+     # ============================================================
+-    ref_record = db.referrals_v2.find_one({'invited_id': uid})
++    ref_record = _ref_find(uid)
+     
+     if not check_forced_sub(uid):
+         if ref_record:
+@@ -9688,6 +10029,13 @@
+             f"⚡ <i>تحديثات لحظية</i>"
+         )
+     
++    debt = max(0.0, float(u.get('ref_debt') or 0))
++    final_text += ("\n\n🛡 Referrals count only after website verification." if l == 'en' else
++                   "\n\n🛡 لا تُحسب الإحالة إلا بعد إكمال التحقق داخل الموقع.")
++    if debt:
++        final_text += (f"\n🧾 Pending referral reversal: <b>${debt:.4f}</b>. Future referral rewards settle this first; spendable balance is shown separately."
++                       if l == 'en' else f"\n🧾 مستحق استرجاع إحالات: <b>${debt:.4f}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.")
++
+     # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
+     sent_successfully = False
+     
+@@ -11436,7 +11784,7 @@
+         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
+         _invalidate_user_cache(buyer_uid)
+         # نمسح الـ cache ليعيد الحساب
+-        _CGPT_SEATS_CACHE['exp'] = 0
++        _cgpt_stock_invalidate()
+         bot.send_message(buyer_uid,
+             (get_text(buyer_uid, 'cg_notice_15')))
+         return
+@@ -11445,7 +11793,7 @@
+     days = round(minutes / 1440, 1)
+ 
+     if result['ok']:
+-        _CGPT_SEATS_CACHE['exp'] = 0  # نمسح cache المقاعd (نقص مقعd)
++        _cgpt_stock_invalidate()  # نمسح cache المقاعd (نقص مقعd)
+         expires_iso = result['expires_at']
+         db.orders.insert_one({
+             'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
+@@ -18640,7 +18988,8 @@
+         f"   <b>${purchase_reward:.2f}</b>\n\n"
+         f"💵 الحد الأدنى لقيمة الشراء:\n"
+         f"   <b>${min_purchase:.2f}</b>\n\n"
+-        f"🛡 تحقق الجهاز قبل حساب الإحالة:\n"
++        f"🛡 التحقق داخل الموقع: <b>إجباري دائمًا</b>\n"
++        f"فحص الأجهزة الإضافي:\n"
+         f"   <b>{'مفعّل' if ref_dv_enabled() else 'موقوف'}</b>\n"
+         f"━━━━━━━━━━━━━━\n\n"
+         f"💡 <b>مثال على آلية العمل:</b>\n"
+@@ -18660,7 +19009,8 @@
+         _dv_n = db.referrals_v2.count_documents({'dv': 'flag'})
+     except Exception:
+         _dv_on, _dv_n = True, 0
+-    markup.add(InlineKeyboardButton(f"🛡 تحقق الجهاز للإحالات: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
++    markup.add(InlineKeyboardButton(f"🛡 فحص الأجهزة الإضافي: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
++    markup.add(InlineKeyboardButton('🧾 فحص وتسوية أرصدة الإحالات', callback_data='ad_ref_balance_audit'))
+     markup.add(InlineKeyboardButton(f"⚠️ إحالات مشكوك فيها ({_dv_n})", callback_data="refdv_list"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+     
+@@ -24170,7 +24520,7 @@
+         global _cgpt_manager_instance
+         with _cgpt_lock:
+             _cgpt_manager_instance = None
+-        _CGPT_SEATS_CACHE['exp'] = 0
++        _cgpt_stock_invalidate()
+         return {'updated': bool(matches), 'id': str(record_id), 'email': email, 'info': info, 'records': len(targets)}
+ 
+ 
+@@ -24704,7 +25054,7 @@
+     mgr.invites_data.setdefault('invites', {})[cached['email']] = info
+     mgr.allowed_emails.discard(cached['email'])
+     mgr._save_data()
+-    _CGPT_SEATS_CACHE['exp'] = 0
++    _cgpt_stock_invalidate()
+     uid = info.get('telegram_uid')
+     if str(uid).isdigit():
+         try:
+@@ -27430,6 +27780,7 @@
+     if link:
+         doc['invite_link'] = link
+     res = db.required_channels.insert_one(doc)
++    _fsub_invalidate()
+     doc['_id'] = res.inserted_id
+     m = _fsub_meta(doc, refresh=True)
+     kind = 'الجروب' if m['kind'] == 'group' else 'القناة'
+@@ -27447,6 +27798,7 @@
+     bot.answer_callback_query(call.id)
+     ch = call.data.replace("del_fsub_", "")
+     db.required_channels.delete_one({'channel_id': ch})
++    _fsub_invalidate()
+     bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
+     admin_fsub_list(call)
+ 
+@@ -31381,6 +31733,7 @@
+                       'username': identity.get('username') or u.get('username') or '',
+                       'photo_url': identity.get('photo_url') or '',
+                       'balance': round(_wa_fnum(u.get('balance')), 2),
++                      'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
+                       'lang': lang, 'is_admin': is_admin}, **_wa_user_stats(uid)),
+         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
+                   'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
+@@ -31415,6 +31768,7 @@
+     except Exception:
+         locked = False
+     return 200, {'ok': True, 'balance': round(_wa_fnum(u.get('balance')), 2), 'locked': bool(locked),
++                 'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
+                  'pending': _wa_pending_view(uid), 'banned': u.get('is_banned') == 1,
+                  'vip': _wa_vip_view(uid, u)}
+ 
+@@ -31422,9 +31776,9 @@
+ def _wa_forced_check(identity, body):
+     uid = identity['id']
+     try:
+-        ok = check_forced_sub(uid, use_cache=False) is not False
++        ok = check_forced_sub(uid, use_cache=False) is True
+     except Exception:
+-        ok = True
++        ok = False
+     return 200, {'ok': True, 'subscribed': ok, 'forced': None if ok else _wa_forced_info(uid)}
+ 
+ 
+@@ -32039,6 +32393,7 @@
+     return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
+                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
+                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
++                 'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
+                  'earned_buys': round(_wa_fnum(u.get('ref_v2_purchase_earned')), 2),
+                  'threshold': threshold, 'reward': reward, 'progress': in_batch,
+                  'purchase_reward': _wa_fnum(get_referral_purchase_reward()),
+@@ -33295,6 +33650,7 @@
+     ('panel', '🏠', 'لوحة الإدارة كاملة', 'Full admin panel', 'admin_panel_main'),
+ ]
+ _ADM_OPEN_OK = {s[4] for s in _ADM_SECTIONS} | {'toggle_amount_protection'}
++_ADM_OPEN_OK.add('ad_ref_balance_audit')
+ 
+ # ✏️ التخصيص (CMS) و📢 البرودكاست: داخل البوت فقط — الموقع ما يعرض أزرارها ولا يشغّلها
+ _WA_BOT_ONLY_RE = re.compile(r'^(?:ad_texts_main|ad_cms_\w*|edit_txt_\w*|rst_txt_\w*|edit_btn_\w*|btnstyle_\w*'
+@@ -33570,6 +33926,7 @@
+                      'note': _wa_plain(d.get('note'), 80), 'ts': _doc_ts(d)})
+     purchase_data = _up_products(target)
+     b.update(orders=purchase_data['summary']['orders'], spent=purchase_data['summary']['spent'])
++    b['ref_debt'] = round(_wa_fnum((get_user_data_full(target) or {}).get('ref_debt')), 4)
+     st = vip_state(target)
+     vip = {'level': st['raw_level'], 'cents': st['cents'], 'override': st['override'],
+            'remaining': st['remaining'], 'next': st['next']['level'] if st['next'] else None,
+@@ -34475,7 +34832,7 @@
+         if isinstance(data, str):
+             data = data.encode('utf-8')
+         gz = False
+-        if (mime.startswith('text/') or mime in ('application/javascript', 'application/json', 'image/svg+xml')) \
++        if not (extra or {}).get('Content-Encoding') and (mime.startswith('text/') or mime in ('application/javascript', 'application/json', 'image/svg+xml')) \
+                 and len(data) > 1024 and _net_accepts_gzip(handler.headers):
+             data, gz = _wa_gzip.compress(data, 6), True
+         handler.send_response(code)
+@@ -34486,7 +34843,8 @@
+         handler.send_header('X-Content-Type-Options', 'nosniff')
+         if gz:
+             handler.send_header('Content-Encoding', 'gzip')
+-            handler.send_header('Vary', 'Accept-Encoding')
++            if not (extra or {}).get('Vary'):
++                handler.send_header('Vary', 'Accept-Encoding')
+         for k, v in (extra or {}).items():
+             handler.send_header(k, v)
+         handler.end_headers()
+@@ -34740,7 +35098,10 @@
+         hit = _WA_STATIC_CACHE.get(path)
+         if not hit or hit[0] != mtime:
+             with open(path, 'rb') as f:
+-                hit = (mtime, f.read())
++                raw = f.read()
++            tag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
++            compressed = _wa_gzip.compress(raw, 6) if path.rsplit('.', 1)[-1].lower() in ('html', 'css', 'js', 'svg', 'json') and len(raw) > 1024 else None
++            hit = (mtime, raw, tag, compressed)
+             _WA_STATIC_CACHE[path] = hit
+         data = hit[1]
+     except Exception:
+@@ -34751,13 +35112,27 @@
+             'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'ico': 'image/x-icon',
+             'woff2': 'font/woff2'}.get(ext) or _wa_mimetypes.guess_type(path)[0] or 'application/octet-stream'
+     cache = 'no-cache' if ext == 'html' else 'public, max-age=604800'
+-    extra = None
++    extra = {'ETag': hit[2], 'Last-Modified': _http_date(mtime, usegmt=True)}
++    if ext in ('html', 'css', 'js', 'svg', 'json'):
++        extra['Vary'] = 'Accept-Encoding'
++    values = [v.strip() for v in str(handler.headers.get('If-None-Match', '')).split(',')]
++    unchanged = '*' in values or any(v.removeprefix('W/') == hit[2].removeprefix('W/') for v in values if v)
++    if not handler.headers.get('If-None-Match') and handler.headers.get('If-Modified-Since'):
++        try:
++            unchanged = int(_http_parse_date(handler.headers['If-Modified-Since']).timestamp()) >= int(mtime)
++        except (ValueError, TypeError, OverflowError):
++            pass
++    if unchanged:
++        return _wa_send(handler, 304, b'', mime, cache, extra)
++    if hit[3] and _net_accepts_gzip(handler.headers):
++        data = hit[3]
++        extra['Content-Encoding'] = 'gzip'
+     if ext == 'html':
+-        extra = {'Referrer-Policy': 'strict-origin-when-cross-origin',
++        extra.update({'Referrer-Policy': 'strict-origin-when-cross-origin',
+                  'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdn.jsdelivr.net; "
+                                              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; "
+                                              "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https:; "
+-                                             "object-src 'none'; base-uri 'self'; form-action 'none'")}
++                                             "object-src 'none'; base-uri 'self'; form-action 'none'")})
+     return _wa_send(handler, 200, data, mime, cache, extra)
+ 
+ 
+@@ -35532,27 +35907,16 @@
+ 
+ def ref_dv_required(rec):
+     """هل هذي الإحالة لازم تنجح في تحقق الجهاز قبل ما تنحسب؟"""
+-    if not rec or not ref_dv_enabled():
+-        return False
+-    dv = rec.get('dv')
+-    if dv in ('ok', 'ok_admin', 'flag'):
+-        return False            # ⚠️ المشكوك فيها تنحسب، والأدمن يراجعها لما تكتمل الدفعة
+-    if dv == 'rejected':
+-        return True
+-    # إحالة قديمة انحسبت قبل تشغيل التحقق ثم طلع ورجع: ما نطلب منه تحقق
+-    if rec.get('status') == 'left' and int(rec.get('created_at') or 0) < _ref_dv_since():
+-        return False
+-    return True
++    return bool(rec and not _ref_web_verified(rec))
+ 
+ 
+ def ref_dv_pending_for(uid):
+     """المستخدم مُحال ولازم يسوي التحقق الحين (يطلع له شاشة التحقق في الموقع)."""
+     try:
+-        rec = db.referrals_v2.find_one({'invited_id': int(uid)})
++        rec = _ref_find(uid)
+     except Exception:
+         return False
+-    return bool(rec and rec.get('status') in ('pending', 'left') and rec.get('dv') in (None, 'need')
+-                and ref_dv_required(rec))
++    return bool(rec and rec.get('dv') != 'rejected' and ref_dv_required(rec))
+ 
+ 
+ def _ref_dv_url():
+@@ -35568,7 +35932,7 @@
+     if not url:
+         if not _DV_MARK_SEEN.get('_nourl'):
+             _DV_MARK_SEEN['_nourl'] = 1
+-            logger.warning('🛡 تحقق الإحالات: ما لقيت رابط الموقع (WEBAPP_URL) — الإحالات تنحسب بدون تحقق.')
++            logger.warning('🛡 تحقق الإحالات: رابط الموقع غير مضبوط — تظل الإحالات معلّقة حتى التحقق.')
+         return False
+     lang = lang or get_lang(uid)
+     if lang == 'en':
+@@ -35722,11 +36086,21 @@
+         pass
+ 
+ 
++def _wa_ref_challenge(identity, body):
++    options = random.SystemRandom().sample(['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], 4)
++    challenge = secrets.token_hex(20)
++    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
++    target = random.SystemRandom().choice(options)
++    db.ref_verification_challenges.insert_one({'_id': challenge, 'user_id': int(identity['id']),
++        'target': target, 'used': False, 'issued_at': time.time(), 'expires_at': now + datetime.timedelta(minutes=5)})
++    return 200, {'ok': True, 'challenge': challenge, 'options': options, 'target': target}
++
++
+ def _wa_ref_verify(identity, body):
+     uid = int(identity['id'])
+     res = _dv_analyze(uid, body.get('fp'), body.get('ch'))
+-    rec = db.referrals_v2.find_one({'invited_id': uid})
+-    pending = bool(rec and rec.get('dv') in (None, 'need') and ref_dv_required(rec))
++    rec = _ref_find(uid)
++    pending = bool(rec and rec.get('dv') != 'rejected' and ref_dv_required(rec))
+     if pending:
+         # الخطوة ١: لازم يكون مشترك في القنوات والجروبات قبل فحص الجهاز
+         try:
+@@ -35736,18 +36110,33 @@
+         _subbed = check_forced_sub(uid, use_cache=False)
+         if _subbed is False:
+             return 200, {'ok': False, 'state': 'join', 'forced': _wa_forced_info(uid)}
++        if _subbed is not True:
++            return 503, {'ok': False, 'error': 'verification_unavailable'}
++        challenge = str(body.get('challenge') or '')
++        click = body.get('ch') if isinstance(body.get('ch'), dict) else {}
++        if (not re.fullmatch(r'[0-9a-f]{40}', challenge) or click.get('ok') is not True or
++                click.get('trusted') is not True or _dv_int(click.get('ms')) < 350):
++            return 400, {'ok': False, 'error': 'verification_required'}
++        claim = db.ref_verification_challenges.find_one_and_update({'_id': challenge, 'user_id': uid,
++            'used': False, 'target': str(click.get('answer') or ''), 'issued_at': {'$lte': time.time() - .35},
++            'expires_at': {'$gt': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)}},
++            {'$set': {'used': True}}, return_document=True)
++        if not claim:
++            return 400, {'ok': False, 'error': 'verification_required'}
+     others = _dv_relevant_others(uid, rec, res) if pending else []
+     _dv_record(uid, res)
+     if not pending:
+         return 200, {'ok': True, 'state': 'done'}
+     now = int(time.time())
+-    if res['reasons'] or others:
++    if ref_dv_enabled() and (res['reasons'] or others):
+         # ⚠️ مشكوك: تنحسب، بس تنعلّم — تطلع للأدمن في «قائمة الفحص» لما المحيل يكمل العتبة
+         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
+             'dv': 'flag', 'dv_at': now, 'dv_reasons': res['reasons'][:8], 'dv_others': others[:20],
+-            'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp')}})
++            'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp'),
++            'web_verified_at': now, 'web_verified_version': 2}})
+     else:
+-        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now}})
++        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now,
++            'dv_reasons': [], 'web_verified_at': now, 'web_verified_version': 2}})
+     try:
+         if _subbed:
+             mark_referral_status(uid, 'active')
+@@ -35772,8 +36161,10 @@
+ 
+ 
+ _WA_POST_ROUTES['/webapp/verify'] = _wa_ref_verify
++_WA_POST_ROUTES['/webapp/verify/challenge'] = _wa_ref_challenge
+ _WA_POST_ROUTES['/webapp/devmark'] = _wa_devmark
+ _WA_HEAVY['/webapp/verify'] = 10
++_WA_HEAVY['/webapp/verify/challenge'] = 10
+ _WA_HEAVY['/webapp/devmark'] = 10
+ 
+ 
+@@ -35785,6 +36176,9 @@
+     uid = int(uid)
+     who = html.escape(clean_name(admin_name or str(admin_id)))
+     if verdict == 'ok':
++        if not _ref_web_verified(rec):
++            _ref_dv_prompt(uid)
++            return '⏳ لا يمكن اعتماد الإحالة قبل أن يُكمل المدعو التحقق داخل الموقع.'
+         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': admin_id}})
+         try:
+             _FORCED_SUB_CACHE.pop(uid, None)
+@@ -38571,7 +38965,7 @@
+                 cg_emoji = cg.get('custom_emoji_id')
+                 # نحسب المقاعd المتاحة (المخزون)
+                 try:
+-                    cg_seats = _cgpt_get_seats_cached()
++                    cg_seats = _cgpt_total_available_seats()
+                 except Exception:
+                     cg_seats = None
+                 for dur in cg.get('durations', []):
+@@ -39377,7 +39771,7 @@
+     time.sleep(5)
+     while True:
+         try: bot.polling(non_stop=True, skip_pending=False,
+-                         timeout=60, long_polling_timeout=60)
++                         timeout=60, long_polling_timeout=60, allowed_updates=_ref_allowed_updates())
+         except Exception as e:
+             err = str(e)
+             logger.error(f"Polling Error Critical: {err}")
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -12,7 +12,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-28.1',queue=[],recent=new Map();
++ const build='lara-29.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -1500,7 +1500,7 @@
+ 
+ /* ───────────────────────── i18n ───────────────────────── */
+ const I = {
+-en:{cartAdd:'Add to bag',cartTitle:"Your bag",cartReady:"Your picks, ready to go",cartItems:"{n} items in your bag",cartResume:"A checkout is saved. Check its result before starting another.",cartAlready:"This plan is already in your bag.",cartLimit:"Your bag can hold up to 20 different items.",cartAdded:"Added to your bag",cartSteps:"Checkout steps",cartBagStep:"Your bag",cartReviewStep:"Review",cartDoneStep:"Complete",cartLess:"Decrease quantity",cartMore:"Increase quantity",cartRemove:"Remove item",cartSummary:"Order summary",cartSubtotal:"Subtotal",cartDiscounts:"Your discounts",cartMissing:"Balance to add",cartReviewNote:"Items are purchased one by one from your balance. If an item needs attention, the rest stop and you see what was charged.",cartQuoteNote:"Final prices, bulk discounts and VIP savings are checked again at review.",cartSaved:"You save {p} on this order",cartEmpty:"Make room for something good.",cartEmptyBody:"Your bag is waiting for your next favorite. Explore the store and add what you like.",cartLast:"View your last checkout",cartReviewEyebrow:"ONE LAST LOOK",cartEyebrow:"PICKED BY YOU",cartReviewTitle:"Everything look right?",cartHeading:"Good choices. All together.",cartReviewSub:"Review the items, quantities and invitation emails before you pay.",cartProducts:"YOUR ITEMS",cartContinue:"Keep shopping",cartFix:"Some items need attention. Update your bag before continuing.",cartPay:"Confirm & pay · {p}",cartReviewButton:"Review order",cartEdit:"Edit bag",cartSuccess:"All yours.",cartWorking:"Your order is in motion.",cartVerifying:"One item is being verified.",cartPartial:"Here is your order update.",cartSuccessSub:"Your items are listed below. Your purchases are also saved in My orders.",cartWorkingSub:"We are checking your saved checkout. Please wait for the result.",cartUncertainSub:"One result needs checking. Contact support with this checkout reference before buying again.",cartPartialSub:"Completed items are listed below. The remaining items were not purchased.",cartWaiting:"Waiting for its turn",cartNotPurchased:"Not purchased",cartPaid:"Amount paid",cartReference:"CHECKOUT REFERENCE",cartCheck:"Check result",cartRemaining:"Back to remaining items",e_cart_changed:"Stock or availability changed. Review your bag again.",e_cart_disabled:"The shopping bag is temporarily unavailable. Direct buying is still available.",e_price_changed:"A price changed. Review the updated total before paying.",e_purchase_uncertain:"This purchase needs checking. Open My orders or contact support before trying again.",e_quote_expired:"Your price review expired. Review your order again.",e_bad_cart:"Add between 1 and 20 valid items to your bag.",api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
++en:{e_verification_required:"Complete verification inside the store, then try again.",e_verification_unavailable:"Membership could not be checked. Please try again shortly.",cartAdd:'Add to bag',cartTitle:"Your bag",cartReady:"Your picks, ready to go",cartItems:"{n} items in your bag",cartResume:"A checkout is saved. Check its result before starting another.",cartAlready:"This plan is already in your bag.",cartLimit:"Your bag can hold up to 20 different items.",cartAdded:"Added to your bag",cartSteps:"Checkout steps",cartBagStep:"Your bag",cartReviewStep:"Review",cartDoneStep:"Complete",cartLess:"Decrease quantity",cartMore:"Increase quantity",cartRemove:"Remove item",cartSummary:"Order summary",cartSubtotal:"Subtotal",cartDiscounts:"Your discounts",cartMissing:"Balance to add",cartReviewNote:"Items are purchased one by one from your balance. If an item needs attention, the rest stop and you see what was charged.",cartQuoteNote:"Final prices, bulk discounts and VIP savings are checked again at review.",cartSaved:"You save {p} on this order",cartEmpty:"Make room for something good.",cartEmptyBody:"Your bag is waiting for your next favorite. Explore the store and add what you like.",cartLast:"View your last checkout",cartReviewEyebrow:"ONE LAST LOOK",cartEyebrow:"PICKED BY YOU",cartReviewTitle:"Everything look right?",cartHeading:"Good choices. All together.",cartReviewSub:"Review the items, quantities and invitation emails before you pay.",cartProducts:"YOUR ITEMS",cartContinue:"Keep shopping",cartFix:"Some items need attention. Update your bag before continuing.",cartPay:"Confirm & pay · {p}",cartReviewButton:"Review order",cartEdit:"Edit bag",cartSuccess:"All yours.",cartWorking:"Your order is in motion.",cartVerifying:"One item is being verified.",cartPartial:"Here is your order update.",cartSuccessSub:"Your items are listed below. Your purchases are also saved in My orders.",cartWorkingSub:"We are checking your saved checkout. Please wait for the result.",cartUncertainSub:"One result needs checking. Contact support with this checkout reference before buying again.",cartPartialSub:"Completed items are listed below. The remaining items were not purchased.",cartWaiting:"Waiting for its turn",cartNotPurchased:"Not purchased",cartPaid:"Amount paid",cartReference:"CHECKOUT REFERENCE",cartCheck:"Check result",cartRemaining:"Back to remaining items",e_cart_changed:"Stock or availability changed. Review your bag again.",e_cart_disabled:"The shopping bag is temporarily unavailable. Direct buying is still available.",e_price_changed:"A price changed. Review the updated total before paying.",e_purchase_uncertain:"This purchase needs checking. Open My orders or contact support before trying again.",e_quote_expired:"Your price review expired. Review your order again.",e_bad_cart:"Add between 1 and 20 valid items to your bag.",api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
+ outOfStock:'Out of stock',stockN:'{n} in stock',onlyLeft:'Only {n} left',unlimited:'Unlimited',seats:'{n} seats',instant:'Instant delivery',manual:'Manual delivery',invite:'Invite by email',from:'from',buyFor:'Buy · {p}',confirmFor:'Tap to confirm · {p}',processing:'Processing…',
+ about:'About',tiers:'Bulk discount',tierRow:'{n}+ pcs',perPc:'/pc',duration:'Choose a plan',email:'ChatGPT account email',emailHint:'The invite is sent to this email. It must be registered on chatgpt.com.',qty:'Quantity',unit:'Unit price',total:'Total',yourBal:'Your balance',after:'After purchase',needMore:'You need {p} more',addFunds:'Add funds',days:'{n} days',hiddenTag:'Hidden',
+ okTitle:'Purchase complete',okCodes:'Your codes',dlTxt:'Download TXT',dlAll:"Download all purchases",cgSubs:"ChatGPT subscriptions",cgSubsSub:"{n} active · next one ends in {d} days",cgLeft:"{d} days {h} h left",cgEnds:"Ends {d}",cgRenew:"Renew / add time",cgPick:"Pick a plan to add to this email",cgAddQ:"Add {l} (+{n} days) to {e} for {p}?",cgAdded:"Added {n} days — now {t} days left",cgNone:"No active ChatGPT subscriptions.",toChat:'📩 To chat',txtSent:'Sent the file to your bot chat',txtCancel:'Download cancelled',pvTxt:'Preview: in your bot this downloads a TXT file with the codes',copyAll:'Copy all',copied:'Copied',sentChat:'A copy was also sent to your chat with the bot.',manualTitle:'Order placed',manualBody:'This product is delivered manually. Your order number is {ref}. Support will contact you.',gptTitle:'Invite sent',gptBody:'Open {email} and accept the invite to activate your seat.',expires:'Expires {d}',verTitle:'Order being verified',verBody:"Don't repeat the purchase. You'll get the result in the bot chat.",done:'Done',myOrders:'My orders',
+@@ -1515,7 +1515,7 @@
+ banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
+ activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
+ e_insufficient_balance:'Not enough balance. You need {p} more.',e_out_of_stock:'This product is out of stock.',e_not_enough_stock:'Only {n} available.',e_deposit_pending:'Finish or cancel your pending payment first.',e_busy:'Another purchase is in progress. Wait a moment.',e_renewal_pending:'Renewal is being verified. Do not pay again; contact support.',e_must_join:'Join the required channels first.',e_banned:'Your account is blocked.',e_bad_email:'Enter a valid email address.',e_bad_duration:'Choose a plan first.',e_invite_failed:"The invite couldn't be sent. Your balance was refunded.",e_supplier_failed:'The supplier rejected the order. Your balance was refunded.',e_purchase_failed:"The purchase didn't go through. Check your balance and try again.",e_rate_limited:'Too many requests. Try again in a minute.',e_auth:'Session expired. Reopen the store.',e_method_unavailable:"This payment method isn't available.",e_amount_range:'Enter an amount between {min} and {max}.',e_busy_amount:'No unique amount is free right now. Try another amount.',e_price_unavailable:"Couldn't get the coin price. Try again shortly.",e_invoice_failed:"Couldn't create the Stars invoice.",e_server_error:'Something went wrong. Try again.',e_network:'No connection. Check your internet and try again.',e_not_found:'This product is no longer available.',e_bad_qty:'Enter a valid quantity.',e_bot_only:'This is managed from the bot only.',vfT:"Activate your account",vfB:"Two quick steps that keep the store safe from fake accounts.",vfS1:"Channels & groups",vfS2:"Human check",vfS3:"Ready",vfJoinT:"Join our channels and groups",vfJoinB:"{n} of {t} left. Join them, then tap “Check”.",vfJoinAll:"All set here. Tap “Check” to continue.",vfKindC:"Channel",vfKindG:"Group",vfJoined:"Joined",vfJoin:"Join",vfOpened:"Opened",vfCheck:"Check",vfChecking:"Checking…",vfLeft:"{n} still not joined",vfHumT:"Show us you’re human",vfHumB:"Tap the emoji that matches.",vfTap:"Tap",vfW1:"Checking your device",vfW2:"Confirming the Telegram app",vfW3:"Activating your account",vfDoneT:"You’re all set",vfDoneB:"Your account is active. Enjoy the store.",vfEnter:"Enter the store",vfOpenP:"Open the product",vfOpening:"Opening {p} for you…",deepGone:"This product isn't available right now.",vfPriv:"No personal data is collected, only an encrypted device code.",vfFail:"Couldn't check right now. Try again.",vfNoLink:"Ask support",pvVerify:"Preview the referral activation screen",poSub:"Your codes and order history",dvT:"One last step",dvB:"Tap the matching emoji to verify your device. It keeps the store safe from fake accounts — no personal data is collected.",dvTap:"Tap {e}",dvWrong:"Not that one — try again",dvWork:"Checking your device…",dvOkT:"Verified",dvOkB:"You can use the store now.",dvEnter:"Enter the store",dvFail:"Couldn't verify right now. Try again.",e_no_account:'Start the bot first, then reopen the store.',e_deposit_failed:"Couldn't create the payment. Try again or pick another method.",e_deposit_exists:"You already have a payment in progress. Finish or cancel it first.",e_unavailable:"This isn't available right now. Try again shortly.",e_bad_request:"Something in the request was wrong. Refresh and try again.",e_too_large:"That's too much text at once. Send it in smaller parts.",e_bad_json:"Something in the request was wrong. Refresh and try again.",e_expired:"This link expired. Try again.",e_forbidden:"You don't have permission for this.",e_no_key:"Generate an API key first.",e_no_webhook:"Set a webhook URL first.",e_bad_url:"Enter a valid http(s) URL.",e_private_url:"Use a public internet address (not localhost or a private network).",e_empty:"Nothing was entered.",e_bad_amount:"Enter a valid amount.",e_bad_price:"Enter a valid price.",e_bad_vip:"Invalid VIP setting.",e_cannot_ban:"This account can't be banned.",e_bad_section:"This section isn't available.",e_open_failed:"Couldn't open this section. Try again.",h_all:'All',h_deposit:'Deposits',h_purchase:'Purchases',h_adjust:'Adjustments',opsN:'{n} operations',details:'Details',f_type:'Type',f_method:'Method',f_network:'Network',f_sent:'Amount sent',f_requested:'Requested',f_status:'Status',completed:'Completed',f_date:'Date',f_ref:'Reference',f_tx:'Transaction ID',f_product:'Product',f_note:'Note',f_after:'Balance after',adj_compensation:'Compensation',adj_manual:'Manual top-up',adj_gift:'Gift',adj_adjustment:'Balance adjustment',adj_ref_reward:'Referral reward',adj_ref_clawback:'Referral deducted (left)',adj_ref_refund:'Referral back',adj_deduct:'Deduction',refunded:'Refunded',g_tg:'Telegram',g_ex:'Exchanges',g_cr:'Crypto wallets',change:'Change',lastUsed:'Last used',mInstant:'Instant',mAuto:'Credited automatically',minFrom:'from {min}',newBal:'New balance',uniqueNote:"You'll get a unique amount with extra decimals. Send exactly that amount.",prev:'Previous',next:'Next',codesN:'{n} codes'},
+-ar:{cartAdd:'أضف إلى السلة',cartTitle:"سلة مشترياتك",cartReady:"اختياراتك جاهزة للشراء",cartItems:"{n} قطعة في سلتك",cartResume:"توجد محاولة شراء محفوظة. تحقق من نتيجتها قبل بدء محاولة أخرى.",cartAlready:"هذه الباقة موجودة في سلتك.",cartLimit:"تستوعب السلة 20 منتجًا مختلفًا كحد أقصى.",cartAdded:"تمت الإضافة إلى سلتك",cartSteps:"مراحل إتمام الطلب",cartBagStep:"السلة",cartReviewStep:"المراجعة",cartDoneStep:"الإتمام",cartLess:"تقليل الكمية",cartMore:"زيادة الكمية",cartRemove:"إزالة المنتج",cartSummary:"ملخص الطلب",cartSubtotal:"قيمة المنتجات",cartDiscounts:"خصوماتك",cartMissing:"الرصيد المطلوب إضافته",cartReviewNote:"نشتري المنتجات بالتتابع من رصيدك. إذا تعثر منتج نتوقف، وتظهر نتيجة كل منتج والمبلغ المدفوع.",cartQuoteNote:"نتحقق من الأسعار وخصومات الكمية وVIP مجددًا عند مراجعة الطلب.",cartSaved:"توفّر {p} في هذا الطلب",cartEmpty:"سلتك تنتظر اختياراتك.",cartEmptyBody:"اكتشف المنتجات وأضف ما يعجبك. اجمع اختياراتك هنا وراجعها براحتك.",cartLast:"عرض آخر محاولة شراء",cartReviewEyebrow:"قبل التأكيد",cartEyebrow:"على ذوقك",cartReviewTitle:"كل شيء مثل ما تحب؟",cartHeading:"اختياراتك الحلوة، في مكان واحد.",cartReviewSub:"راجع المنتجات والكميات وإيميلات الدعوات قبل الدفع.",cartProducts:"منتجاتك",cartContinue:"متابعة التسوق",cartFix:"بعض المنتجات تحتاج مراجعة. حدّث سلتك قبل المتابعة.",cartPay:"تأكيد ودفع · {p}",cartReviewButton:"مراجعة الطلب",cartEdit:"تعديل السلة",cartSuccess:"صارت لك.",cartWorking:"نعمل على طلبك.",cartVerifying:"أحد المنتجات قيد التحقق.",cartPartial:"هذا آخر تحديث لطلبك.",cartSuccessSub:"تفاصيل منتجاتك بالأسفل، ومشترياتك محفوظة أيضًا في «طلباتي».",cartWorkingSub:"نتحقق من نتيجة الشراء المحفوظة. انتظر حتى تظهر النتيجة.",cartUncertainSub:"نتيجة أحد المنتجات تحتاج تحققًا. تواصل مع الدعم بمرجع السلة قبل إعادة الشراء.",cartPartialSub:"المنتجات المكتملة موضحة بالأسفل. بقية المنتجات لم تُشترَ.",cartWaiting:"بانتظار دوره",cartNotPurchased:"لم يتم الشراء",cartPaid:"المبلغ المدفوع",cartReference:"مرجع عملية السلة",cartCheck:"التحقق من النتيجة",cartRemaining:"الرجوع للمنتجات المتبقية",e_cart_changed:"تغير المخزون أو التوفر. راجع السلة مرة أخرى.",e_cart_disabled:"السلة متوقفة مؤقتًا. يمكنك الشراء المباشر.",e_price_changed:"تغير أحد الأسعار. راجع الإجمالي المحدّث قبل الدفع.",e_purchase_uncertain:"نتيجة الشراء تحتاج تحققًا. افتح طلباتي أو تواصل مع الدعم قبل تكرار الشراء.",e_quote_expired:"انتهت صلاحية مراجعة السعر. راجع الطلب مجددًا.",e_bad_cart:"أضف من منتج واحد إلى 20 منتجًا صحيحًا للسلة.",api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
++ar:{e_verification_required:"أكمل التحقق داخل المتجر ثم أعد المحاولة.",e_verification_unavailable:"تعذر فحص الاشتراك الآن. حاول بعد قليل.",cartAdd:'أضف إلى السلة',cartTitle:"سلة مشترياتك",cartReady:"اختياراتك جاهزة للشراء",cartItems:"{n} قطعة في سلتك",cartResume:"توجد محاولة شراء محفوظة. تحقق من نتيجتها قبل بدء محاولة أخرى.",cartAlready:"هذه الباقة موجودة في سلتك.",cartLimit:"تستوعب السلة 20 منتجًا مختلفًا كحد أقصى.",cartAdded:"تمت الإضافة إلى سلتك",cartSteps:"مراحل إتمام الطلب",cartBagStep:"السلة",cartReviewStep:"المراجعة",cartDoneStep:"الإتمام",cartLess:"تقليل الكمية",cartMore:"زيادة الكمية",cartRemove:"إزالة المنتج",cartSummary:"ملخص الطلب",cartSubtotal:"قيمة المنتجات",cartDiscounts:"خصوماتك",cartMissing:"الرصيد المطلوب إضافته",cartReviewNote:"نشتري المنتجات بالتتابع من رصيدك. إذا تعثر منتج نتوقف، وتظهر نتيجة كل منتج والمبلغ المدفوع.",cartQuoteNote:"نتحقق من الأسعار وخصومات الكمية وVIP مجددًا عند مراجعة الطلب.",cartSaved:"توفّر {p} في هذا الطلب",cartEmpty:"سلتك تنتظر اختياراتك.",cartEmptyBody:"اكتشف المنتجات وأضف ما يعجبك. اجمع اختياراتك هنا وراجعها براحتك.",cartLast:"عرض آخر محاولة شراء",cartReviewEyebrow:"قبل التأكيد",cartEyebrow:"على ذوقك",cartReviewTitle:"كل شيء مثل ما تحب؟",cartHeading:"اختياراتك الحلوة، في مكان واحد.",cartReviewSub:"راجع المنتجات والكميات وإيميلات الدعوات قبل الدفع.",cartProducts:"منتجاتك",cartContinue:"متابعة التسوق",cartFix:"بعض المنتجات تحتاج مراجعة. حدّث سلتك قبل المتابعة.",cartPay:"تأكيد ودفع · {p}",cartReviewButton:"مراجعة الطلب",cartEdit:"تعديل السلة",cartSuccess:"صارت لك.",cartWorking:"نعمل على طلبك.",cartVerifying:"أحد المنتجات قيد التحقق.",cartPartial:"هذا آخر تحديث لطلبك.",cartSuccessSub:"تفاصيل منتجاتك بالأسفل، ومشترياتك محفوظة أيضًا في «طلباتي».",cartWorkingSub:"نتحقق من نتيجة الشراء المحفوظة. انتظر حتى تظهر النتيجة.",cartUncertainSub:"نتيجة أحد المنتجات تحتاج تحققًا. تواصل مع الدعم بمرجع السلة قبل إعادة الشراء.",cartPartialSub:"المنتجات المكتملة موضحة بالأسفل. بقية المنتجات لم تُشترَ.",cartWaiting:"بانتظار دوره",cartNotPurchased:"لم يتم الشراء",cartPaid:"المبلغ المدفوع",cartReference:"مرجع عملية السلة",cartCheck:"التحقق من النتيجة",cartRemaining:"الرجوع للمنتجات المتبقية",e_cart_changed:"تغير المخزون أو التوفر. راجع السلة مرة أخرى.",e_cart_disabled:"السلة متوقفة مؤقتًا. يمكنك الشراء المباشر.",e_price_changed:"تغير أحد الأسعار. راجع الإجمالي المحدّث قبل الدفع.",e_purchase_uncertain:"نتيجة الشراء تحتاج تحققًا. افتح طلباتي أو تواصل مع الدعم قبل تكرار الشراء.",e_quote_expired:"انتهت صلاحية مراجعة السعر. راجع الطلب مجددًا.",e_bad_cart:"أضف من منتج واحد إلى 20 منتجًا صحيحًا للسلة.",api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
+ outOfStock:'غير متوفر',stockN:'{n} متوفر',onlyLeft:'باقي {n} فقط',unlimited:'غير محدود',seats:'{n} مقعد',instant:'تسليم فوري',manual:'تسليم يدوي',invite:'دعوة على الإيميل',from:'يبدأ من',buyFor:'شراء · {p}',confirmFor:'اضغط للتأكيد · {p}',processing:'جاري التنفيذ…',
+ about:'عن المنتج',tiers:'خصم الكمية',tierRow:'{n}+ قطعة',perPc:'/قطعة',duration:'اختر المدة',email:'إيميل حساب ChatGPT',emailHint:'تُرسل الدعوة لهذا الإيميل، ويجب أن يكون مسجلاً على chatgpt.com.',qty:'الكمية',unit:'سعر القطعة',total:'الإجمالي',yourBal:'رصيدك',after:'بعد الشراء',needMore:'ينقصك {p}',addFunds:'شحن الرصيد',days:'{n} يوم',hiddenTag:'مخفي',
+ okTitle:'تم الشراء بنجاح',okCodes:'أكوادك',dlTxt:'تحميل TXT',dlAll:"تحميل كل المشتريات",cgSubs:"اشتراكات ChatGPT",cgSubsSub:"{n} نشط · أقربها ينتهي بعد {d} يوم",cgLeft:"باقي {d} يوم و {h} ساعة",cgEnds:"ينتهي {d}",cgRenew:"تجديد / إضافة مدة",cgPick:"اختر الباقة اللي تنضاف لهذا الإيميل",cgAddQ:"إضافة {l} (+{n} يوم) إلى {e} بسعر {p}؟",cgAdded:"تمت إضافة {n} يوم — الحين باقي {t} يوم",cgNone:"ما عندك اشتراكات ChatGPT نشطة.",toChat:'📩 للمحادثة',txtSent:'أرسلت لك الملف في محادثة البوت',txtCancel:'انلغى التحميل',pvTxt:'معاينة: في بوتك يتحمّل ملف TXT فيه الأكواد',copyAll:'نسخ الكل',copied:'تم النسخ',sentChat:'وصلتك نسخة أيضاً في محادثة البوت.',manualTitle:'تم تسجيل طلبك',manualBody:'هذا المنتج يُسلَّم يدوياً. رقم طلبك {ref}، وسيتواصل معك الدعم.',gptTitle:'تم إرسال الدعوة',gptBody:'افتح {email} واقبل الدعوة لتفعيل مقعدك.',expires:'ينتهي {d}',verTitle:'طلبك قيد التحقق',verBody:'لا تكرر الشراء، ستصلك النتيجة في محادثة البوت.',done:'تم',myOrders:'طلباتي',
+@@ -1663,6 +1663,7 @@
+     data._s = res.status;
+     if (data.error === 'auth') { S.screen = 'auth'; renderAll(); }
+     if (data && data.vip) S.vip = data.vip;
++    if (typeof data.ref_debt === 'number' && S.user) { S.user.ref_debt = data.ref_debt; if (S.refs) S.refs.ref_debt = data.ref_debt; }
+     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
+     return data;
+   } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
+@@ -1675,7 +1676,7 @@
+ }
+ 
+ /* ───────────────────────── animated emoji ───────────────────────── */
+-function ae(name, cls) { return `<img class="ae ${cls || ''}" src="${EMO}${name}.webp" alt="" draggable="false" decoding="async">`; }
++function ae(name, cls) { return `<img class="ae ${cls || ''}" src="${EMO}${name}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
+ const EMAP = { '⚡': 'bolt', '✔': 'check', '✅': 'check', '☑': 'check', '🚫': 'cross', '❌': 'cross', '✖': 'cross', '⛔': 'cross', '🔥': 'fire', '⭐': 'star', '🌟': 'star', '💎': 'gem', '🔑': 'key', '🗝': 'key', '🔒': 'lock', '🔐': 'lock', '✨': 'sparkles', '🚀': 'rocket', '⏳': 'hourglass', '⌛': 'hourglass', '👑': 'crown', '💰': 'moneybag', '💸': 'moneywings', '🛍': 'store', '🛒': 'cart', '👛': 'purse', '👤': 'profile', '🎉': 'party', '🪙': 'coin', '💬': 'speech', '📢': 'megaphone', '👥': 'busts', '🔍': 'search', '🔎': 'search', '📝': 'memo', '🪪': 'idcard' };
+ function emKey(ch) { return EMAP[String(ch || '').replace(/[\uFE0F\u200D]/g, '').trim()] || null; }
+ /* can this custom emoji actually be loaded here? (live bot: yes; preview: only if the export file carried it) */
+@@ -3218,6 +3219,7 @@
+ async function loadRefs() { const r = await api('referrals'); if (r.ok) { S.refs = r; if (S.tab === 'profile') renderView(); } }
+ function vProfile() {
+   const u = S.user || {}, r = S.refs;
++  const refDebt = +(r?.ref_debt ?? u.ref_debt ?? 0);
+   const initials = ((u.first_name || '?')[0] + ((u.last_name || '')[0] || '')).toUpperCase();
+   const lang = LANGS.find(l => l[0] === LANG);
+   const inv = r ? `<div class="invite">
+@@ -3234,6 +3236,7 @@
+       <button class="idchip" data-act="copy" data-v="${esc(u.id)}">ID ${esc(u.id)} ${ic.copy}</button>
+       ${DEMO ? `<button class="linked-chip pvm" data-act="pv-how">${ic.info}${esc(t('notLinked'))}</button>` : S.store.bot ? `<span class="linked-chip"><i class="live-dot"></i>${esc(t('linked'))} <bdi dir="ltr">@${esc(S.store.bot)}</bdi></span>` : ''}</div>
+     <div class="stats3"><div class="stat"><span>${esc(t('balance'))}</span><b class="num">${usd(u.balance)}</b></div><div class="stat"><span>${esc(t('purchases'))}</span><b class="num">${u.purchases || 0}</b></div><div class="stat"><span>${esc(t('deposited'))}</span><b class="num">${usd(u.deposited || 0)}</b></div></div>
++    ${refDebt > 0 ? `<div class="hint" role="note">${esc(LANG === 'ar' ? 'مستحق استرجاع إحالات: ' : 'Pending referral reversal: ')}<b dir="ltr">${usd(refDebt)}</b>. ${esc(LANG === 'ar' ? 'يُسوّى من مكافآت الإحالات القادمة. الرصيد أعلاه هو المتاح للشراء.' : 'Settled from future referral rewards. The balance above is available for purchases.')}</div>` : ''}
+     <button class="p-ord" data-act="tab" data-v="orders"><span class="po-ic">${slot('orders', 'cart')}</span>
+       <span class="meta"><b>${esc(t('myOrders'))}</b><small>${esc(t('poSub'))}</small></span>
+       ${u.purchases ? `<span class="po-n num">${u.purchases}</span>` : ''}${ic.chev}</button>
+@@ -4839,6 +4842,7 @@
+   if (act === 'sheet-close') { const sh = Sheets.find(s => s.el.contains(el)); if (sh) closeSheet(sh); return; }
+   if (act === 'pv-verify') { Demo.vf = { done: false }; Demo.joined = {}; DV.done = false; DV.busy = false; DV.tries = 0; DV.msg = ''; DV.target = ''; VF.opened = {}; VF.msg = ''; closeAllSheets(); boot(); return; }
+   if (act === 'dv-pick') { dvPick(el, e); return; }
++  if (act === 'dv-retry') { dvNew(); renderView(); return; }
+   if (act === 'vf-check') { vfCheck(); return; }
+   if (act === 'vf-join') { VF.opened[el.dataset.id] = 1; if (DEMO) Demo.joined[el.dataset.id] = 1; else openLink(el.dataset.v); setTimeout(renderView, 300); return; }
+   if (act === 'dv-enter') { dvEnter(); return; }
+@@ -4922,17 +4926,30 @@
+ }
+ async function refreshMe() {
+   const r = await api('me');
+-  if (r.ok) { S.pending = r.pending; S.locked = r.locked; if (r.banned) { S.screen = 'banned'; renderAll(); } updateHeader(); }
++  if (r.ok) { S.pending = r.pending; S.locked = r.locked; if (r.banned) { S.screen = 'banned'; renderAll(); } updateHeader(); if (S.screen === 'app' && S.tab === 'profile') renderView(); }
+ }
+ document.addEventListener('visibilitychange', () => { if (!document.hidden && S.screen === 'app') { refreshMe(); if (S.tab === 'store' && Date.now() - lastCat > 30000) refreshCatalog(); } });
+ setInterval(() => { if (!document.hidden && S.screen === 'app' && S.tab === 'store' && Date.now() - lastCat > 60000) refreshCatalog(); }, 15000);
+ 
+ 
+ /* ───────── تحقق جهاز الإحالات: اختبار إنسان + بصمة جهاز (رمز مشفّر بس) ───────── */
+-const DV = { pool: ['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], target: '', opts: [], t0: 0, tries: 0, busy: false, done: false, msg: '' };
++const DV = { pool: ['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], target: '', opts: [], t0: 0, tries: 0, busy: false, done: false, msg: '', challenge: '', loading: false, request: 0 };
+ function dvNew() {
+   const p = [...DV.pool].sort(() => Math.random() - .5).slice(0, 4);
+   DV.opts = p; DV.target = p[Math.floor(Math.random() * 4)]; DV.t0 = performance.now();
++  DV.challenge = '';
++  if (!DEMO) dvLoadChallenge();
++}
++async function dvLoadChallenge() {
++  const ticket = ++DV.request;
++  DV.loading = true;
++  const r = await api('verify/challenge');
++  if (ticket !== DV.request) return;
++  DV.loading = false;
++  if (r && r.ok && r.challenge && Array.isArray(r.options) && r.options.includes(r.target)) {
++    DV.challenge = r.challenge; DV.opts = r.options; DV.target = r.target; DV.t0 = performance.now(); DV.msg = '';
++  } else DV.msg = t('vfFail');
++  if (S.screen === 'verify') renderView();
+ }
+ function dvDid() {
+   let d = null;
+@@ -4995,9 +5012,10 @@
+     <ul class="vf-work">${[1, 2, 3].map(i => `<li class="${VF.work >= i ? 'done' : VF.work === i - 1 ? 'on' : ''}"><i>${VF.work >= i ? ic.check : ''}</i>${esc(t('vfW' + i))}</li>`).join('')}</ul></section>`;
+   return `<section class="vf-card"><h3>${esc(t('vfHumT'))}</h3><p class="vf-sub">${esc(t('vfHumB'))}</p>
+     <div class="vf-ask"><span>${esc(t('vfTap'))}</span><b class="vf-target" aria-label="${DV.target}">${DV.target}</b></div>
+-    <div class="vf-grid" id="dvg">${DV.opts.map(o => `<button data-act="dv-pick" data-v="${o}" aria-label="${o}">${o}</button>`).join('')}</div>
++    <div class="vf-grid" id="dvg">${DV.opts.map(o => `<button data-act="dv-pick" data-v="${o}" aria-label="${o}" ${DV.loading || (!DEMO && !DV.challenge) ? 'disabled' : ''}>${o}</button>`).join('')}</div>
+     <div class="vf-tries" aria-hidden="true">${[0, 1, 2].map(i => `<i class="${i < 3 - DV.tries ? 'on' : ''}"></i>`).join('')}</div>
+-    <div class="vf-msg" role="status">${esc(DV.msg || '')}</div></section>`;
++    <div class="vf-msg" role="status">${DV.loading ? '<span class="spin"></span>' : esc(DV.msg || '')}</div>
++    ${!DEMO && !DV.loading && !DV.challenge ? `<button class="btn ghost full" data-act="dv-retry">${esc(LANG === 'ar' ? 'إعادة المحاولة' : 'Retry')}</button>` : ''}</section>`;
+ }
+ function vfDone() {
+   const cols = ['var(--accent)', 'var(--ok)', 'var(--warn)', 'var(--accent-2)', 'var(--bad)'];
+@@ -5038,10 +5056,11 @@
+   openDeep();
+ }
+ async function dvPick(el, e) {
+-  if (DV.busy || DV.done) return;
++  if (DV.busy || DV.done || DV.loading || (!DEMO && !DV.challenge)) return;
+   const ok = el.dataset.v === DV.target, ms = Math.round(performance.now() - DV.t0), trusted = !!(e && e.isTrusted);
+   DV.tries++;
+-  if (!ok && DV.tries < 3) {
++  if (!ok) {
++    if (DV.tries >= 3) DV.tries = 0;
+     hap('error'); DV.msg = t('dvWrong'); dvNew(); renderView();
+     const g = $('#dvg'); if (g) { g.classList.add('shake'); setTimeout(() => g.classList.remove('shake'), 400); }
+     return;
+@@ -5051,11 +5070,11 @@
+   tick(1); tick(2);
+   const t0 = Date.now();
+   const fp = await dvCollect();
+-  const r = await api('verify', { fp, ch: { ok, ms, trusted, tries: DV.tries } });
++  const r = await api('verify', { fp, challenge: DV.challenge, ch: { ok, ms, trusted, tries: DV.tries, answer: el.dataset.v } });
+   const wait = Math.max(0, 1700 - (Date.now() - t0));
+   await new Promise(res => setTimeout(res, wait));
+   if (r && r.state === 'join' && r.forced) {          // طلع من قناة/جروب: نرجعه للخطوة الأولى
+-    DV.busy = false; DV.tries = 0; dvNew(); S.forced = r.forced;
++    DV.busy = false; DV.tries = 0; DV.challenge = ''; DV.target = ''; S.forced = r.forced;
+     const left = (r.forced.channels || []).filter(c => c.joined !== true).length;
+     VF.msg = t('vfLeft', { n: left || 1 }); hap('error'); renderView(); return;
+   }
+--- a/verification/test_integration.py
++++ b/verification/test_integration.py
+@@ -36,6 +36,11 @@
+     for k,v in settings.items():mod.db.settings.insert_one({'key':k,'value':v})
+     for n in ['_USER_CACHE','_VIP_STATE_CACHE','_WA_CAT_CACHE','_WA_RATE','_WA_BUY_LOCKS','_cgpt_pending','_purchase_locks','_VC_SESS']:
+         getattr(mod,n).clear()
++    for n in ('_CGPT_STOCK_CACHE', '_CGPT_CAPACITY_CACHE', '_FORCED_SUB_CACHE'):
++        getattr(mod, n).clear()
++    mod._FSUB_CHANNEL_CACHE.update(expires=0, rows=[])
++    mod._REF_SCAN_HEALTH['retry_at'] = 0
++    mod._REF_SCAN_WAKE.clear()
+     mod._PRODUCTS_CACHE=None
+     mod._invalidate_products_cache()
+     mod._VIP_CFG['v']=None
+@@ -377,6 +382,13 @@
+           'wd': False, 'did': did, 'gl': 'Qualcomm|Adreno (TM) 740', 'cv': did}
+     fp.update(kw); return fp
+ 
++def _verified_ref_request(mod, server, uid, fp, ch):
++    status, challenge, _ = request(server, '/webapp/verify/challenge', uid=uid)
++    assert status == 200
++    mod.db.ref_verification_challenges.update_one({'_id': challenge['challenge']}, {'$inc': {'issued_at': -1}})
++    return request(server, '/webapp/verify', {'fp': fp, 'challenge': challenge['challenge'],
++        'ch': dict(ch, answer=challenge['target'])}, uid=uid)
++
+ def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
+     mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': '2'}}, upsert=True)
+     for uid in (2001, 2002):
+@@ -384,13 +396,13 @@
+         mod.register_new_referral(uid, 1001)
+         mod.db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'need'}})
+     ch = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
+-    s, d, _ = request(server, '/webapp/verify', {'fp': _ref_fp('a' * 32, wd=True), 'ch': ch}, uid=2001)
++    s, d, _ = _verified_ref_request(mod, server, 2001, _ref_fp('a' * 32, wd=True), ch)
+     assert s == 200 and d['state'] == 'done'
+     r = mod.db.referrals_v2.find_one({'invited_id': 2001})
+     assert r['dv'] == 'flag' and r['status'] == 'active'          # counted, marked
+     assert not [t for t in _admin_texts(mod) if 'مشكوك' in t]       # no message per referral
+     assert not [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
+-    s, d, _ = request(server, '/webapp/verify', {'fp': _ref_fp('b' * 32), 'ch': ch}, uid=2002)
++    s, d, _ = _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
+     ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
+     assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'rfl_1001_1_0' in json.dumps(ms[0][2].get('reply_markup').to_dict())
+ 
+@@ -440,7 +452,7 @@
+         for i in range(n):
+             inv = 3000 + mod.db.referrals_v2.count_documents({})
+             mod.db.users.insert_one({'user_id': inv, 'name': 'Inv', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
+-            mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1})
++            mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1, 'dv': 'ok', 'dv_at': 1})
+             mod.mark_referral_status(inv, 'active')
+     def approve(b):
+         mod.ref_milestone_approve(NS(id='c', data=f'refwd_ok_1001_{b}', from_user=NS(id=9001, first_name='Owner'),
+@@ -470,7 +482,7 @@
+     for i in range(2):
+         inv = 4000 + i
+         mod.db.users.insert_one({'user_id': inv, 'name': 'Inv', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
+-        mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1})
++        mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1, 'dv': 'ok', 'dv_at': 1})
+         mod.mark_referral_status(inv, 'active'); invs.append(inv)
+     mod.ref_milestone_approve(NS(id='c', data='refwd_ok_1001_1', from_user=NS(id=9001, first_name='Owner'),
+                                  message=NS(chat=NS(id=9001), message_id=1, text='', html_text='')))
+--- a/verification/test_network.py
++++ b/verification/test_network.py
+@@ -263,17 +263,16 @@
+ 
+ @pytest.mark.parametrize('left_checks',[0,2])
+ def test_healthy_referrals_only_write_a_reset_when_it_changes(mod,monkeypatch,left_checks):
+-    class StopCycle(BaseException):pass
+-    mod.db.settings.insert_one({'key':'ref_left_fix_v1','value':True})
+-    mod.db.referrals_v2.insert_one({'invited_id':1001,'referrer_id':1002,'status':'active','left_checks':left_checks})
++    mod.db.referrals_v2.insert_one({'invited_id':1001,'referrer_id':1002,'status':'active',
++        'dv':'ok','dv_at':1,'left_checks':left_checks})
+     monkeypatch.setattr(mod,'check_forced_sub',lambda *a,**k:True)
+-    def sleep(seconds):
+-        if seconds==60:raise StopCycle()
+-    monkeypatch.setattr(mod.time,'sleep',sleep)
+     update=Mock(wraps=mod.db.referrals_v2.update_one);monkeypatch.setattr(mod.db.referrals_v2,'update_one',update)
+-    with pytest.raises(StopCycle):mod.background_referral_checker_v2()
+-    assert update.call_count==int(left_checks!=0)
++    assert mod._ref_checker_tick()==1
++    resets=[c for c in update.call_args_list if 'left_checks' in c.args[1].get('$set',{})]
++    assert len(resets)==int(left_checks!=0)
+     assert mod.db.referrals_v2.find_one({'invited_id':1001})['left_checks']==0
++    assert mod._ref_checker_tick()==0
++
+ 
+ def test_outbound_http_measurement_records_sizes_without_tokens_or_payloads(mod,monkeypatch):
+     transport=Mock(return_value=response(200,{}, {'Content-Length':'321'}))
+@@ -285,7 +284,8 @@
+     returned=mod.requests.adapters.HTTPAdapter().send(prepared)
+     assert returned.status_code==200
+     report=mod._NET_METER.snapshot();encoded=json.dumps(report)
+-    assert not any(v in encoded for v in ('FAKE-TOKEN','FAKE-PASSWORD','FAKE-SECRET','FAKE-CUSTOMER-CODE','sendMessage'))
++    assert not any(v in encoded for v in ('FAKE-TOKEN','FAKE-PASSWORD','FAKE-SECRET','FAKE-CUSTOMER-CODE'))
++    assert 'api.telegram.org/sendMessage' in encoded
+     row=report['rows'][0];assert row['requests']==1 and row['received']==321 and row['sent']>0
+ 
+ def test_mongo_listener_records_command_sizes_without_documents(mod):
+--- a/verification/test_client_diagnostics_browser.cjs
++++ b/verification/test_client_diagnostics_browser.cjs
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-28.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-29.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-28.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-29.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- /dev/null
++++ b/verification/test_referral_integrity.py
+@@ -0,0 +1,349 @@
++"""Website-gated referrals and audited wallet reversals, with fake identities and memory DB."""
++import datetime as dt
++import hashlib
++import json
++import types
++from concurrent.futures import ThreadPoolExecutor
++from unittest.mock import Mock
++
++import pytest
++from harness import MESSAGES
++from test_integration import mod, isolate, server, request, _ref_fp, _verified_ref_request
++from test_error_monitor import empty_monitor
++
++
++def referral(mod, invited=5001, *, proof=True, status='active', paid=False, amount=1., batch=1):
++    if not mod.db.users.find_one({'user_id': invited}):
++        mod.db.users.insert_one({'user_id': invited, 'name': 'Test invitee', 'balance': 0., 'is_admin': 0,
++                                'is_banned': 0, 'lang': 'en', 'lang_chosen': True})
++    row = {'invited_id': invited, 'referrer_id': 1001, 'status': status, 'created_at': 1}
++    if proof:
++        row.update(dv='ok', dv_at=1, web_verified_at=1, web_verified_version=2)
++    if paid:
++        row['ms_batch'] = batch
++        mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': batch, 'status': 'paid',
++            'threshold': 1, 'reward': amount, 'paid_amount': amount, 'members': [invited]})
++        mod.db.users.update_one({'user_id': 1001}, {'$set': {'ref_v2_earned': amount}})
++    mod.db.referrals_v2.insert_one(row)
++    return mod.db.referrals_v2.find_one({'invited_id': invited})
++
++
++def challenge(mod, server, uid=5001):
++    status, body, _ = request(server, '/webapp/verify/challenge', uid=uid)
++    assert status == 200
++    mod.db.ref_verification_challenges.update_one({'_id': body['challenge']}, {'$inc': {'issued_at': -1}})
++    return body
++
++
++def verify_payload(issued, **changes):
++    payload = {'fp': _ref_fp('d' * 32), 'challenge': issued['challenge'],
++        'ch': {'ok': True, 'trusted': True, 'ms': 1000, 'answer': issued['target']}}
++    payload.update(changes)
++    return payload
++
++
++@pytest.mark.parametrize('state,dv', [('pending', None), ('left', None), ('active', None),
++                                     ('pending', 'ok_admin'), ('pending', 'flag')])
++@pytest.mark.parametrize('device_check', ['on', 'off'])
++def test_bot_cannot_activate_or_count_a_referral_without_website_proof(mod, monkeypatch, state, dv, device_check):
++    rec = referral(mod, proof=False, status=state)
++    mod.db.settings.update_one({'key': 'ref_dv'}, {'$set': {'value': device_check}}, upsert=True)
++    if dv:
++        mod.db.referrals_v2.update_one({'_id': rec['_id']}, {'$set': {'dv': dv}})
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: True)
++    mod.mark_referral_status(5001, 'active')
++    assert not mod._ref_web_verified(mod._ref_find(5001))
++    assert mod.ref_progress(1001)[0] == 0 and mod.get_ref_counts(1001)[1] == 0
++    assert not mod.award_purchase_referral_reward(5001, 'Test product', 10)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_admin_approval_and_a_missing_url_cannot_bypass_the_website(mod, monkeypatch):
++    referral(mod, proof=False, status='pending')
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: None)
++    note = mod._refdv_apply(5001, 'ok', 9001)
++    assert 'التحقق' in note and mod._ref_find(5001)['status'] == 'pending'
++    assert mod.ref_dv_required(mod._ref_find(5001))
++    assert mod.ref_progress(1001)[0] == 0
++
++
++def test_admin_cannot_pay_a_milestone_whose_members_never_verified(mod):
++    referral(mod, proof=False)
++    mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': 1, 'status': 'pending',
++        'threshold': 1, 'reward': 1., 'members': [5001]})
++    call = types.SimpleNamespace(id='test', data='refwd_ok_1001_1', from_user=types.SimpleNamespace(id=9001),
++        message=types.SimpleNamespace(chat=types.SimpleNamespace(id=9001)))
++    mod.ref_milestone_approve(call)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++    assert mod.db.referral_milestones.find_one({})['status'] == 'pending'
++
++
++def test_milestone_counts_require_website_proof_and_members_belonging_to_the_referrer(mod):
++    referral(mod, proof=False)
++    mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': 1}}, upsert=True)
++    assert mod.ref_ms_ready_count() == 0 and mod.ref_ms_scan() == 0
++    mod.db.referrals_v2.update_one({'invited_id': 5001}, {'$set': {'dv': 'ok', 'dv_at': 1}})
++    assert mod._ms_active_members({'referrer_id': 1002, 'members': [5001]}) == 0
++    assert mod._ms_active_members({'referrer_id': 1001, 'members': [5001]}) == 1
++
++
++def test_old_milestone_cannot_pay_again_using_members_of_an_already_paid_batch(mod):
++    referral(mod, paid=True)
++    mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': 2, 'status': 'pending',
++        'threshold': 1, 'reward': 1., 'active_count': 1})
++    call = types.SimpleNamespace(id='test', data='refwd_ok_1001_2', from_user=types.SimpleNamespace(id=9001),
++        message=types.SimpleNamespace(chat=types.SimpleNamespace(id=9001)))
++    mod.ref_milestone_approve(call)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++    assert mod.db.referral_milestones.find_one({'batch_no': 2})['status'] == 'pending'
++
++
++def test_old_milestone_pins_verified_unpaid_members_before_crediting(mod):
++    referral(mod)
++    mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': 1, 'status': 'pending',
++        'threshold': 1, 'reward': 1., 'active_count': 1})
++    call = types.SimpleNamespace(id='test', data='refwd_ok_1001_1', from_user=types.SimpleNamespace(id=9001),
++        message=types.SimpleNamespace(chat=types.SimpleNamespace(id=9001)))
++    mod.ref_milestone_approve(call)
++    assert mod.db.referral_milestones.find_one({'batch_no': 1})['members'] == [5001]
++    assert mod._ref_find(5001)['ms_batch'] == 1
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 101
++
++
++def test_signed_website_challenge_activates_once_and_records_server_proof(mod, server):
++    referral(mod, proof=False, status='pending')
++    c = challenge(mod, server)
++    status, body, _ = request(server, '/webapp/verify', verify_payload(c), uid=5001)
++    assert status == 200 and body['ok']
++    rec = mod._ref_find(5001)
++    assert rec['status'] == 'active' and rec['web_verified_version'] == 2 and rec['web_verified_at'] > 1
++    assert mod.db.ref_verification_challenges.find_one({'_id': c['challenge']})['used']
++    request(server, '/webapp/verify', verify_payload(c), uid=5001)
++    assert mod.ref_progress(1001)[0] == 1 and mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++@pytest.mark.parametrize('change', [
++    {'challenge': ''}, {'ch': {'ok': False}}, {'ch': {'ok': True, 'trusted': False, 'ms': 1000}},
++    {'ch': {'ok': True, 'trusted': True, 'ms': 10}},
++    {'ch': {'ok': True, 'trusted': True, 'ms': 1000, 'answer': 'wrong'}}])
++def test_failed_human_verification_cannot_become_a_counted_flag(mod, server, change):
++    referral(mod, proof=False, status='pending')
++    c = challenge(mod, server)
++    status, _, _ = request(server, '/webapp/verify', verify_payload(c, **change), uid=5001)
++    assert status == 400 and mod._ref_find(5001)['status'] == 'pending'
++    assert not mod._ref_web_verified(mod._ref_find(5001))
++
++
++def test_challenge_is_bound_to_signed_identity_and_expiry(mod, server):
++    referral(mod, proof=False, status='pending')
++    referral(mod, invited=5002, proof=False, status='pending')
++    c = challenge(mod, server, 5001)
++    assert request(server, '/webapp/verify', verify_payload(c), uid=5002)[0] == 400
++    mod.db.ref_verification_challenges.update_one({'_id': c['challenge']}, {'$set': {
++        'expires_at': dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(seconds=1)}})
++    assert request(server, '/webapp/verify', verify_payload(c), uid=5001)[0] == 400
++    assert mod.get_ref_counts(1001)[1] == 0
++    assert request(server, '/webapp/verify/challenge', auth=False)[0] == 401
++
++
++def test_membership_timeout_does_not_count_as_successful_website_verification(mod, server, monkeypatch):
++    referral(mod, proof=False, status='pending')
++    c = challenge(mod, server)
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: None)
++    assert request(server, '/webapp/verify', verify_payload(c), uid=5001)[0] == 503
++    assert not mod._ref_web_verified(mod._ref_find(5001))
++    monkeypatch.setattr(mod, '_wa_forced_info', lambda *a: None)
++    assert not mod._wa_forced_check({'id': 5001}, {})[1]['subscribed']
++
++
++def test_reversal_cannot_make_spendable_balance_negative_and_return_restores_exact_value(mod):
++    referral(mod, paid=True)
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': .25}})
++    mod.mark_referral_status(5001, 'left')
++    user = mod.db.users.find_one({'user_id': 1001})
++    assert user['balance'] == 0 and user['ref_debt'] == .75
++    assert user['ref_v2_earned'] == 0
++    mod.mark_referral_status(5001, 'left')
++    assert mod.db.users.find_one({'user_id': 1001})['ref_debt'] == .75
++    mod.mark_referral_status(5001, 'active')
++    user = mod.db.users.find_one({'user_id': 1001})
++    assert user['balance'] == .25 and user['ref_debt'] == 0 and user['ref_v2_earned'] == 1
++    assert mod.db.ref_money_events.count_documents({}) == 2
++
++
++def test_future_rewards_settle_recorded_liability_without_creating_cash(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 0., 'ref_debt': .75}})
++    first = mod._ref_money(1001, .5, 'ref_reward', 'First reward', event_key='reward-1')
++    assert first['balance'] == 0 and first['ref_debt'] == .25
++    second = mod._ref_money(1001, .5, 'ref_reward', 'Second reward', event_key='reward-2')
++    assert second['balance'] == .25 and second['ref_debt'] == 0 and second['ref_v2_earned'] == 1
++
++
++def test_replayed_reward_in_parallel_changes_wallet_and_ledger_once(mod):
++    def pay(_): return mod._ref_money(1001, .1, 'ref_reward', 'Test award', event_key='same-award')
++    with ThreadPoolExecutor(max_workers=6) as pool:
++        assert all(pool.map(pay, range(12)))
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100.1
++    assert mod.db.ref_money_events.count_documents({}) == mod.db.balance_logs.count_documents({}) == 1
++    assert not mod.db.users.find_one({'user_id': 1001}).get('_ref_ops')
++
++
++@pytest.mark.parametrize('committed', [False, True])
++def test_uncertain_wallet_write_is_resumed_without_double_credit(mod, monkeypatch, committed):
++    original = mod.db.users.find_one_and_update
++    def unavailable(query, update, *a, **k):
++        if any(key.startswith('_ref_ops.') for key in query):
++            if committed: original(query, update, *a, **k)
++            raise RuntimeError('Simulated connection lost')
++        return original(query, update, *a, **k)
++    monkeypatch.setattr(mod.db.users, 'find_one_and_update', unavailable)
++    with pytest.raises(RuntimeError):
++        mod._ref_money(1001, .5, 'ref_reward', 'Test', event_key='uncertain-award')
++    monkeypatch.setattr(mod.db.users, 'find_one_and_update', original)
++    mod._ref_resume_financial(); mod._ref_resume_financial()
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100.5
++    assert mod.db.ref_money_events.count_documents({}) == mod.db.balance_logs.count_documents({}) == 1
++
++
++def test_receipt_storage_failure_does_not_repeat_a_completed_wallet_credit(mod, monkeypatch):
++    original = mod.db.balance_logs.update_one
++    monkeypatch.setattr(mod.db.balance_logs, 'update_one', Mock(side_effect=RuntimeError('Receipt unavailable')))
++    with pytest.raises(RuntimeError):
++        mod._ref_money(1001, .2, 'ref_reward', 'Test', event_key='receipt-outage')
++    monkeypatch.setattr(mod.db.balance_logs, 'update_one', original)
++    assert mod.db.ref_money_events.find_one({})['ledger_pending']
++    mod._ref_resume_financial(); mod._ref_resume_financial()
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100.2
++    assert mod.db.balance_logs.count_documents({}) == 1
++    assert not mod.db.ref_money_events.find_one({})['ledger_pending']
++
++
++def test_interrupted_clawback_resumes_the_saved_cycle_without_repeating_it(mod, monkeypatch):
++    referral(mod, paid=True)
++    original = mod._ref_money
++    monkeypatch.setattr(mod, '_ref_money', Mock(side_effect=RuntimeError('Temporary wallet outage')))
++    mod.mark_referral_status(5001, 'left')
++    assert mod._ref_find(5001)['cb_status'] == 'processing'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++    monkeypatch.setattr(mod, '_ref_money', original)
++    mod._ref_resume_financial(); mod._ref_resume_financial()
++    assert mod._ref_find(5001)['cb_status'] == 'applied'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 99
++    assert mod.db.ref_money_events.count_documents({}) == mod.db.balance_logs.count_documents({}) == 1
++
++
++def test_milestone_credit_survives_a_failed_final_status_write_without_a_second_credit(mod, monkeypatch):
++    referral(mod)
++    mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': 1, 'status': 'pending',
++        'threshold': 1, 'reward': 1., 'members': [5001]})
++    original = mod.db.referral_milestones.update_one
++    def fail_paid(query, update, *a, **k):
++        if update.get('$set', {}).get('status') == 'paid':
++            raise RuntimeError('Final status unavailable')
++        return original(query, update, *a, **k)
++    monkeypatch.setattr(mod.db.referral_milestones, 'update_one', fail_paid)
++    call = types.SimpleNamespace(id='test', data='refwd_ok_1001_1', from_user=types.SimpleNamespace(id=9001),
++        message=types.SimpleNamespace(chat=types.SimpleNamespace(id=9001)))
++    with pytest.raises(RuntimeError):
++        mod.ref_milestone_approve(call)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 101
++    assert mod.db.referral_milestones.find_one({})['status'] == 'paying'
++    monkeypatch.setattr(mod.db.referral_milestones, 'update_one', original)
++    mod._ref_resume_financial(); mod._ref_resume_financial()
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 101
++    assert mod.db.referral_milestones.find_one({})['status'] == 'paid'
++    assert mod.db.ref_money_events.count_documents({}) == 1
++
++
++def test_concurrent_deposit_is_not_overwritten_by_reward_compare_and_set(mod, monkeypatch):
++    original = mod.db.users.find_one_and_update
++    injected = []
++    def deposit(query, update, *a, **k):
++        if not injected and any(key.startswith('_ref_ops.') for key in query):
++            injected.append(True)
++            mod.db.users.update_one({'user_id': 1001}, {'$inc': {'balance': 5}})
++        return original(query, update, *a, **k)
++    monkeypatch.setattr(mod.db.users, 'find_one_and_update', deposit)
++    mod._ref_money(1001, 1, 'ref_reward', 'Test', event_key='alongside-deposit')
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 106
++
++
++def test_inferred_legacy_batch_and_unconfirmed_payment_are_not_charged_back(mod):
++    rec = referral(mod, paid=True)
++    mod.db.referral_milestones.update_one({}, {'$unset': {'paid_amount': ''}})
++    assert mod._ref_clawback(rec) == 0
++    mod.db.referrals_v2.update_one({'invited_id': 5001}, {'$set': {'ms_batch': 0}})
++    assert mod._ref_clawback(mod._ref_find(5001)) == 0
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_documented_negative_referral_balance_is_reclassified_with_identical_net_position(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4, 'ref_debt': .2}})
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -.5,
++        'new_balance': -.4, 'date': dt.datetime.now(), 'note': 'إحالة غادرت (5001)'})
++    row = mod._ref_repair_user(1001)
++    assert row['corrected'] and row['net_before'] == row['net_after'] == -.6
++    user = mod.db.users.find_one({'user_id': 1001})
++    assert user['balance'] == 0 and user['ref_debt'] == .6
++    assert not mod._ref_repair_user(1001)['corrected']
++    assert mod.db.ref_balance_reconciliations.count_documents({}) == 1
++    assert mod.db.balance_logs.find_one({'type': 'ref_debt_reclass'})['net_change'] == 0
++
++
++@pytest.mark.parametrize('kind,after', [('deduct', -2.), ('ref_clawback', -1.5)])
++def test_unproven_negative_balance_is_reported_for_review_and_never_fabricated(mod, kind, after):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -2.}})
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': kind, 'amount': -3.,
++        'new_balance': after, 'date': dt.datetime.now()})
++    report = mod._ref_repair_batch()
++    assert report['review'] == 1 and report['corrected'] == 0
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -2
++    assert not mod.db.ref_balance_reconciliations.count_documents({})
++
++
++def test_initialization_never_erases_existing_referrals_money_or_custom_text(mod):
++    referral(mod, proof=False, status='pending')
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'ref_v2_earned': 7.}})
++    mod.db.custom_texts.insert_one({'key': 'invite_txt', 'lang': 'en', 'value': 'Keep this text'})
++    mod.db.settings.delete_many({'key': mod.REF_V2_INIT_KEY})
++    mod.initialize_referrals_v2()
++    assert mod.db.referrals_v2.count_documents({}) == 1
++    assert mod.db.users.find_one({'user_id': 1001})['ref_v2_earned'] == 7
++    assert mod.db.custom_texts.find_one({'key': 'invite_txt'})['value'] == 'Keep this text'
++
++
++def test_an_archived_referral_can_verify_and_recover_its_proven_original_deduction(mod, server):
++    referral(mod, proof=False, status='pending')
++    mod.db.referrals_v2.delete_one({'invited_id': 5001})
++    mod.db.referrals_archived.insert_one({'invited_id': 5001, 'referrer_id': 1001, 'status': 'left',
++        'cb_amount': .4, 'cb_at': 100, 'ms_batch': 0, 'archived_at': 100})
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 99.6}})
++    mod.db.ref_clawbacks.insert_one({'invited_id': 5001, 'referrer_id': 1001, 'kind': 'clawback', 'amount': .4, 'open': True})
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -.4,
++        'new_balance': 99.6, 'date': dt.datetime.now(), 'note': 'إحالة غادرت (5001)'})
++    assert mod.ref_dv_pending_for(5001)
++    c = challenge(mod, server)
++    assert request(server, '/webapp/verify', verify_payload(c), uid=5001)[0] == 200
++    assert mod._ref_find(5001)['status'] == 'active'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++    assert mod.get_ref_counts(1001) == (0, 1, 0, 1)
++
++
++def test_already_active_referral_with_a_stale_charge_is_refunded_only_once(mod):
++    referral(mod, paid=True)
++    mod.mark_referral_status(5001, 'left')
++    mod.db.referrals_v2.update_one({'invited_id': 5001}, {'$set': {'status': 'active'}})
++    mod.mark_referral_status(5001, 'active'); mod.mark_referral_status(5001, 'active')
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++    assert mod.db.ref_money_events.count_documents({'kind': 'ref_refund'}) == 1
++
++
++def test_reconciliation_and_liability_details_are_private_and_visible_to_their_owner(mod, server):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'ref_debt': .75}})
++    status, result, _ = request(server, '/webapp/me')
++    assert status == 200 and result['ref_debt'] == .75
++    status, result, _ = request(server, '/webapp/referrals')
++    assert status == 200 and result['ref_debt'] == .75
++    assert request(server, '/webapp/me', uid=1002)[1]['ref_debt'] == 0
++    mod._ref_audit_cmd(types.SimpleNamespace(from_user=types.SimpleNamespace(id=1001), chat=types.SimpleNamespace(id=1001)))
++    assert not MESSAGES
+--- /dev/null
++++ b/verification/test_referral_bandwidth.py
+@@ -0,0 +1,206 @@
++"""Concrete request/body reductions; fake services, real loopback HTTP only."""
++import ast
++import datetime as dt
++import gzip
++import json
++import types
++from concurrent.futures import ThreadPoolExecutor
++from unittest.mock import Mock
++
++import pytest
++from bson import BSON
++from harness import APP
++from test_integration import mod, isolate, server, request
++from test_reliability import manager
++from test_referral_integrity import referral
++
++
++def metric(name, value):
++    path = APP.parent / 'round29-network-benchmarks.json'
++    data = json.loads(path.read_text()) if path.exists() else {}
++    data[name] = value
++    path.write_text(json.dumps(data, indent=2))
++
++
++def baseline(mod, name):
++    source = (APP / 'verification/round29_network_baseline.py').read_text()
++    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == name)
++    scope = dict(mod.__dict__)
++    exec(compile(ast.Module(body=[node], type_ignores=[]), '<offline-baseline>', 'exec'), scope)
++    return scope[name]
++
++
++def account():
++    return {'_id': 'benchmark-account', 'data': {'accessToken': 'FAKE-ACCESS', 'sessionToken': 'FAKE-SESSION',
++        'account': {'id': 'benchmark-account'}, 'user': {'email': 'owner@example.test'}}}
++
++
++def provider(monkeypatch, mod, seats=5):
++    members = [[{'id': 'owner', 'email': 'owner@example.test'}, {'id': 'member', 'email': 'member@example.test'}]]
++    def get(url, **kwargs):
++        if url.endswith('/users'):
++            body = {'items': members[0]}
++        elif '/accounts/check/' in url:
++            body = {'accounts': {}}
++        else:
++            body = {'max_seats': seats} if seats else {}
++        return types.SimpleNamespace(status_code=200, json=lambda: body, text='', headers={})
++    http = Mock(side_effect=get)
++    monkeypatch.setattr(mod.cffi_requests, 'get', http)
++    return http, members
++
++
++def test_repeated_inventory_reads_reduce_remote_requests_and_purchase_validation_stays_fresh(mod, monkeypatch):
++    http, members = provider(monkeypatch, mod)
++    old = baseline(mod, '_cgpt_account_seat_info')
++    for _ in range(20):
++        assert old(account())['available_seats'] == 3
++    before = http.call_count
++    http.reset_mock()
++    mod._cgpt_stock_invalidate(capacity=True)
++    for _ in range(20):
++        assert mod._cgpt_account_seat_info(account())['available_seats'] == 3
++    after = http.call_count
++    assert before == 40 and after == 2
++    members[0] = members[0][:1]
++    assert mod._cgpt_account_seat_info(account(), fresh=True)['available_seats'] == 4
++    assert http.call_count == after + 1
++    metric('twenty_inventory_reads', {'requests_before': before, 'requests_after': after,
++        'fresh_purchase_reads_current_members': True})
++
++
++def test_simultaneous_stock_readers_share_one_cold_refresh(mod, monkeypatch):
++    http, _ = provider(monkeypatch, mod)
++    with ThreadPoolExecutor(max_workers=8) as pool:
++        results = list(pool.map(lambda _: mod._cgpt_account_seat_info(account()), range(16)))
++    assert all(r['available_seats'] == 3 for r in results) and http.call_count == 2
++
++
++def test_unknown_seat_capacity_is_not_probed_on_four_endpoints_every_time(mod, monkeypatch):
++    http, _ = provider(monkeypatch, mod, seats=None)
++    for _ in range(10):
++        assert mod._cgpt_account_seat_info(account(), fresh=True)['total_seats'] is None
++    assert http.call_count == 13
++
++
++def test_explicit_admin_diagnosis_can_refresh_capacity_metadata(mod, monkeypatch):
++    http, _ = provider(monkeypatch, mod)
++    mod._cgpt_account_seat_info(account())
++    m = mod._cgpt_build_manager_from_doc(account())
++    assert m.diagnose()['total_seats'] == 5 and http.call_count == 4
++
++
++def test_unchanged_invites_no_longer_rewrite_the_whole_document(mod, monkeypatch):
++    m = manager(mod)
++    original = mod.db.cgpt_invites_data.update_one
++    writes = Mock(wraps=original)
++    monkeypatch.setattr(mod.db.cgpt_invites_data, 'update_one', writes)
++    old = baseline(mod, '_save_data')
++    for _ in range(20): old(m)
++    before = writes.call_count
++    bytes_before = sum(len(BSON.encode(c.args[1])) for c in writes.call_args_list)
++    writes.reset_mock()
++    for _ in range(20): m._save_data()
++    assert before == 20 and writes.call_count == 0
++    m.invites_data['invites']['new@example.test'] = {'status': 'active', 'expires_at': '2027-01-01T00:00:00'}
++    m._save_data()
++    assert writes.call_count == 1
++    assert mod.db.cgpt_invites_data.find_one({'_id': 'test-account'})['data']['invites']['new@example.test']
++    metric('twenty_unchanged_invite_saves', {'writes_before': before, 'writes_after': 0,
++        'update_payload_bytes_before': bytes_before, 'update_payload_bytes_after': 0})
++
++
++def test_quiet_cleanup_does_not_save_but_real_expiry_is_persisted(mod, monkeypatch):
++    m = manager(mod)
++    monkeypatch.setattr(m, '_get_org_users', lambda: [{'id': 'paid', 'email': 'paid@example.test'}])
++    writes = Mock(wraps=mod.db.cgpt_invites_data.update_one)
++    monkeypatch.setattr(mod.db.cgpt_invites_data, 'update_one', writes)
++    m.check_and_cleanup()
++    assert writes.call_count == 0
++    # Replace the payload: Mongo dot notation cannot address email keys with dots.
++    data = mod.db.cgpt_invites_data.find_one({'_id': 'test-account'})['data']
++    data['invites']['paid@example.test']['expires_at'] = '2020-01-01T00:00:00'
++    mod.db.cgpt_invites_data.update_one({'_id': 'test-account'}, {'$set': {'data': data}})
++    writes.reset_mock()
++    monkeypatch.setattr(m, '_remove_user', lambda *a: True)
++    m.check_and_cleanup()
++    assert writes.call_count == 1
++    assert mod.db.cgpt_invites_data.find_one({'_id': 'test-account'})['data']['invites']['paid@example.test']['status'] == 'expired'
++
++
++def test_unverified_referrals_generate_no_background_membership_requests(mod, monkeypatch):
++    mod.db.referrals_v2.insert_many([{'invited_id': 6000 + i, 'referrer_id': 1001,
++        'status': 'active' if i % 2 else 'pending', 'dv': 'need'} for i in range(2000)])
++    check = Mock(return_value=True); monkeypatch.setattr(mod, 'check_forced_sub', check)
++    assert mod._ref_checker_tick() == 0 and check.call_count == 0
++    metric('two_thousand_unverified_referrals', {'background_membership_checks_before': 2000,
++        'background_membership_checks_after': check.call_count})
++
++
++def test_only_due_verified_referrals_are_checked_in_bounded_batches(mod, monkeypatch):
++    mod.db.referrals_v2.insert_many([{'invited_id': 7000 + i, 'referrer_id': 1001,
++        'status': 'active', 'dv': 'ok', 'dv_at': 1} for i in range(120)])
++    check = Mock(return_value=True); monkeypatch.setattr(mod, 'check_forced_sub', check)
++    assert [mod._ref_checker_tick(50) for _ in range(4)] == [50, 50, 20, 0]
++    for _ in range(6): assert mod._ref_checker_tick(50) == 0
++    assert check.call_count == 120
++    metric('ten_healthy_membership_cycles', {'checks_before': 1200, 'checks_after': check.call_count})
++
++
++def test_leave_needs_three_real_confirmations_and_rejoin_keeps_history_without_double_count(mod, monkeypatch):
++    referral(mod, paid=True)
++    clock = [1800000000.]; monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: False)
++    for n in range(3):
++        assert mod._ref_checker_tick() == 1
++        if n < 2: assert mod._ref_find(5001)['status'] == 'active'
++        clock[0] += 61
++    assert mod._ref_find(5001)['status'] == 'left' and mod.db.referrals_archived.count_documents({}) == 1
++    assert mod.get_ref_counts(1001) == (0, 0, 1, 1)
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: True)
++    mod.db.referrals_v2.update_one({'invited_id': 5001}, {'$set': {'sub_next_check_at': 0}})
++    assert mod._ref_checker_tick() == 1
++    assert mod.get_ref_counts(1001) == (0, 1, 0, 1)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_telegram_membership_events_wake_only_the_relevant_referral(mod):
++    referral(mod)
++    mod.db.required_channels.insert_one({'channel_id': '@test_channel'})
++    event = types.SimpleNamespace(chat=types.SimpleNamespace(id=-1001, username='test_channel'),
++        new_chat_member=types.SimpleNamespace(user=types.SimpleNamespace(id=5001)))
++    mod._ref_channel_membership_changed(event)
++    assert mod._REF_SCAN_WAKE.is_set()
++    assert mod._ref_find(5001)['membership_event_at']
++    assert 'chat_member' in mod._ref_allowed_updates() and 'message' in mod._ref_allowed_updates()
++
++
++def test_static_emoji_revalidation_sends_no_second_image_body(mod, server):
++    asset = max((APP / 'webapp/emoji').glob('*.webp'), key=lambda p: p.stat().st_size)
++    path = '/app/' + asset.relative_to(APP / 'webapp').as_posix()
++    status, raw, headers = request(server, path, method='GET', auth=False)
++    assert status == 200 and raw == asset.read_bytes()
++    for _ in range(9):
++        status, body, _ = request(server, path, method='GET', auth=False, headers={'If-None-Match': headers['ETag']})
++        assert status == 304 and body == b''
++    metric('ten_emoji_revalidations', {'response_body_bytes_before': len(raw) * 10,
++        'response_body_bytes_after': len(raw), 'conditional_status': 304})
++
++
++def test_static_gzip_is_not_encoded_twice_and_a_changed_file_gets_a_new_etag(mod, server, monkeypatch, tmp_path):
++    import os
++    data = ('console.log("local proof");\n' * 100).encode()
++    path = tmp_path / 'proof.js'; path.write_bytes(data)
++    monkeypatch.setattr(mod, 'WEBAPP_DIR', str(tmp_path))
++    status, body, headers = request(server, '/app/proof.js', method='GET', auth=False, headers={'Accept-Encoding': 'gzip'})
++    assert status == 200 and headers['Content-Encoding'] == 'gzip' and gzip.decompress(body) == data
++    first = headers['ETag']; changed = data + b'// updated\n'; path.write_bytes(changed)
++    os.utime(path, (1800000001, 1800000001))
++    status, body, headers = request(server, '/app/proof.js', method='GET', auth=False, headers={'If-None-Match': first})
++    assert status == 200 and body == changed and headers['ETag'] != first
++
++
++def test_network_labels_distinguish_expensive_methods_without_identifiers(mod):
++    assert mod._net_client_label('https://api.telegram.org/bot123:PRIVATE_TOKEN/getChatMember?user_id=SECRET') == 'api.telegram.org/getChatMember'
++    assert mod._net_client_label('https://chatgpt.com/backend-api/accounts/PRIVATE_ACCOUNT/users') == 'chatgpt.com/members'
++    assert 'PRIVATE' not in mod._net_client_label('https://api.telegram.org/file/bot123:PRIVATE_TOKEN/PRIVATE_FILENAME')
+--- /dev/null
++++ b/verification/round29_network_baseline.py
+@@ -0,0 +1,42 @@
++"""Retained pre-update functions for offline before/after network measurements."""
++
++def _cgpt_account_seat_info(doc):
++    """يفحص حساباً ويرجّع معلومات مقاعده."""
++    mgr = _cgpt_build_manager_from_doc(doc)
++    try:
++        rep = mgr.diagnose()
++    except Exception:
++        rep = {'connected': False, 'error': 'تعذر الاتصال بالحساب أثناء الفحص'}
++    total = rep.get('total_seats')
++    used = rep.get('used_seats', 0)
++    avail = rep.get('available_seats')
++    # لو الكشف التلقائي فشل، نستخدم القيمة اليدوية المحفوظة (لو موجودة)
++    manual_seats = doc.get('manual_seats')
++    if not total and manual_seats:
++        total = int(manual_seats)
++        avail = max(0, total - used) if rep.get('connected') else None
++    return {
++        'id': str(doc.get('_id')),
++        'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
++        'email': doc.get('data', {}).get('user', {}).get('email') or rep.get('owner_email') or '?',
++        'connected': rep.get('connected', False),
++        'used_seats': used,
++        'total_seats': total,
++        'available_seats': avail,
++        'manual': bool(manual_seats and not rep.get('total_seats')),
++        'error': rep.get('error'),
++        'mgr': mgr,
++    }
++
++def _save_data(self):
++        """حفظ بيانات الدعوات في MongoDB (لكل حساب على حدة)"""
++        self.invites_data['allowed_emails'] = list(self.allowed_emails)
++        _key = getattr(self, '_account_key', 'main')
++        try:
++            db.cgpt_invites_data.update_one(
++                {'_id': _key},
++                {'$set': {'data': self.invites_data}},
++                upsert=True
++            )
++        except Exception as e:
++            logger.error(f"[CGPT] save_data DB err: {e}")
+--- /dev/null
++++ b/verification/serve_referral_test.py
+@@ -0,0 +1,70 @@
++"""Signed referral UI fixture: fake identities, memory DB and loopback sockets only."""
++import json
++import os
++import re
++import socket
++import urllib.parse
++from http.server import ThreadingHTTPServer
++
++from harness import load, APP, TOKEN, offline
++from test_integration import signed
++
++m = load()
++assert m.bot.token == TOKEN and m.MONGO_URI == 'mongodb://localhost/test'
++m.requests.sessions.Session.request = offline
++m.telebot.apihelper._make_request = offline
++m.cffi_requests.get = offline
++m.cffi_requests.post = offline
++m.cffi_requests.delete = offline
++connect, connect_ex = socket.socket.connect, socket.socket.connect_ex
++
++
++def local_only(sock, address):
++    if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
++        raise RuntimeError('External sockets disabled in local referral fixture')
++    return connect(sock, address)
++
++
++def local_only_ex(sock, address):
++    if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
++        raise RuntimeError('External sockets disabled in local referral fixture')
++    return connect_ex(sock, address)
++
++
++socket.socket.connect = local_only
++socket.socket.connect_ex = local_only_ex
++for uid, debt in [(1001, .75), (5001, 0)]:
++    m.db.users.insert_one({'user_id': uid, 'name': 'Referral Test', 'balance': 0., 'ref_debt': debt,
++        'lang': 'en', 'lang_chosen': True, 'is_admin': 0, 'is_banned': 0})
++m.db.referrals_v2.insert_one({'referrer_id': 1001, 'invited_id': 5001, 'status': 'pending', 'created_at': 1})
++
++
++class Handler(m.APIHandler):
++    def do_POST(self):
++        if self.path == '/__ref_test__/settle':
++            m._ref_money(1001, .75, 'ref_reward', 'Fake test reward', event_key='browser-test-debt-settlement')
++            return m._wa_send(self, 200, json.dumps({'ok': True}), 'application/json')
++        return super().do_POST()
++
++    def do_GET(self):
++        parsed = urllib.parse.urlparse(self.path)
++        if parsed.path == '/__ref_test__/':
++            uid = int(urllib.parse.parse_qs(parsed.query).get('uid', ['5001'])[0])
++            assert uid in (1001, 5001)
++            script = '<script>window.Telegram={WebApp:{colorScheme:"light",platform:"web",version:"8.0",initData:' + json.dumps(signed(uid)) + ',initDataUnsafe:{user:{id:' + str(uid) + ',language_code:"en"}},ready(){},expand(){},onEvent(){},offEvent(){},setHeaderColor(){},setBackgroundColor(){},enableClosingConfirmation(){},isVersionAtLeast(){return false;},BackButton:{show(){},hide(){},onClick(){},offClick(){}},HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}}}};</script>'
++            content = (APP / 'webapp/index.html').read_text().replace('<head>', '<head><base href="/app/">' + script, 1)
++            content = re.sub(r'<!--TG-SDK-->.*?<!--/TG-SDK-->', '', content, flags=re.S)
++            return m._wa_send(self, 200, content, 'text/html; charset=utf-8')
++        if parsed.path == '/__ref_test__/state':
++            rec = m._ref_find(5001)
++            owner = m.db.users.find_one({'user_id': 1001})
++            return m._wa_send(self, 200, json.dumps({'status': rec['status'],
++                'verified': m._ref_web_verified(rec), 'proof_version': rec.get('web_verified_version'),
++                'used_challenges': m.db.ref_verification_challenges.count_documents({'used': True}),
++                'balance': owner['balance'], 'debt': owner['ref_debt'],
++                'money_events': m.db.ref_money_events.count_documents({})}), 'application/json')
++        return super().do_GET()
++
++
++print('LOCAL REFERRAL SERVER', flush=True)
++ThreadingHTTPServer(('127.0.0.1', int(os.getenv('LARA_TEST_PORT', '8785'))), Handler).serve_forever()
+--- /dev/null
++++ b/verification/test_referral_browser.cjs
+@@ -0,0 +1,66 @@
++/* Real Chromium, signed fake users, memory DB; all external requests blocked. */
++const {spawn}=require('child_process'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const BASE='http://127.0.0.1:8785';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_referral_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:'8785'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL REFERRAL SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking',
++   '--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const page=await browser.newPage({viewport:{width:390,height:844}}),errors=[],verifies=[];
++  page.on('pageerror',e=>errors.push(e.message));
++  page.on('request',r=>{if(r.url().endsWith('/webapp/verify'))verifies.push(r.postDataJSON());});
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  await page.goto(BASE+'/__ref_test__/',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="dv-pick"]:not([disabled])').first().waitFor();
++  let state=await(await page.request.get(BASE+'/__ref_test__/state')).json();
++  assert.equal(state.status,'pending');assert.equal(state.verified,false);
++  let target=await page.locator('.vf-target').getAttribute('aria-label');
++  const wrong=await page.locator('[data-act="dv-pick"]').evaluateAll((buttons,t)=>buttons.find(b=>b.dataset.v!==t).dataset.v,target);
++  await page.locator('[data-act="dv-pick"]').filter({hasText:wrong}).click();
++  await page.locator('[data-act="dv-pick"]:not([disabled])').first().waitFor();
++  assert.equal(verifies.length,0);
++  state=await(await page.request.get(BASE+'/__ref_test__/state')).json();
++  assert.equal(state.status,'pending');assert.equal(state.used_challenges,0);
++  target=await page.locator('.vf-target').getAttribute('aria-label');
++  await page.waitForTimeout(500);
++  await page.locator('[data-act="dv-pick"]').filter({hasText:target}).click();
++  await page.locator('[data-act="dv-enter"]').waitFor();
++  assert.equal(verifies.length,1);assert.equal(verifies[0].ch.trusted,true);
++  assert.match(verifies[0].challenge,/^[0-9a-f]{40}$/);
++  state=await(await page.request.get(BASE+'/__ref_test__/state')).json();
++  assert.equal(state.status,'active');assert.equal(state.verified,true);
++  assert.equal(state.proof_version,2);assert.equal(state.used_challenges,1);
++  await page.locator('[data-act="dv-enter"]').click();
++  await page.locator('[data-act="tab"][data-v="store"]').first().waitFor();
++  console.log('PASS wrong answer never counted; trusted website click uses server nonce and activates referral once');
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  await page.getByRole('note').filter({hasText:'Pending referral reversal'}).waitFor();
++  assert((await page.getByRole('note').innerText()).includes('$0.75'));
++  assert((await page.locator('.stats3 .stat').first().innerText()).includes('$0.00'));
++  await page.locator('[data-act="lang"][data-v="ar"]').first().click();
++  await page.getByRole('note').filter({hasText:'مستحق استرجاع إحالات'}).waitFor();
++  assert.equal(await page.locator('html').getAttribute('dir'),'rtl');
++  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
++  await page.setViewportSize({width:1360,height:960});
++  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
++  state=await(await page.request.get(BASE+'/__ref_test__/state')).json();
++  assert.equal(state.balance,0);assert.equal(state.debt,.75);assert.equal(state.money_events,0);
++  await page.request.post(BASE+'/__ref_test__/settle');
++  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
++  await page.waitForFunction(()=>!document.querySelector('[role="note"]'));
++  state=await(await page.request.get(BASE+'/__ref_test__/state')).json();
++  assert.equal(state.balance,0);assert.equal(state.debt,0);assert.equal(state.money_events,1);
++  assert.deepEqual(errors,[]);
++  console.log('PASS English/Arabic mobile/desktop balances; verification never changes money; settled liability clears without reload');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

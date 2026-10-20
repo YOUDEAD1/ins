@@ -1,0 +1,745 @@
+--- a/bot.py
++++ b/bot.py
+@@ -4552,6 +4552,7 @@
+             db.referrals_v2.insert_one({
+                 'invited_id': invited_id,
+                 'referrer_id': referrer_id,
++                'ref_policy_version': 30,
+                 'status': 'pending',
+                 'created_at': int(time.time()),
+                 'updated_at': int(time.time())
+@@ -4590,10 +4591,21 @@
+     return False
+ 
+ 
++def _ref_policy_requires_web(rec):
++    """Only referrals created by the new policy require the new website step."""
++    return bool(rec and rec.get('ref_policy_version') == 30)
++
++
++def _ref_countable(rec):
++    return bool(rec and rec.get('dv') != 'rejected' and
++                (not _ref_policy_requires_web(rec) or _ref_web_verified(rec)))
++
++
+ def _ref_verified_query():
+-    return {'dv': {'$in': ['ok', 'ok_admin', 'flag']}, '$or': [
++    proof = {'dv': {'$in': ['ok', 'ok_admin', 'flag']}, '$or': [
+         {'web_verified_version': 2, 'web_verified_at': {'$gt': 0}},
+         {'dv_at': {'$gt': 0}, 'dv_reasons': {'$not': {'$elemMatch': {'$regex': 'ما نجح في اختبار الإنسان|ضغطة مو حقيقية|ضغط أسرع من الإنسان'}}}}]}
++    return {'$or': [{'ref_policy_version': {'$ne': 30}, 'dv': {'$ne': 'rejected'}}, proof]}
+ 
+ 
+ def _ref_find(invited_id, restore=True):
+@@ -4640,7 +4652,7 @@
+     try:
+         invited_id = int(invited_id)
+         if new_status == 'active':
+-            if not _ref_web_verified(_ref_find(invited_id)) or check_forced_sub(invited_id) is not True:
++            if not _ref_countable(_ref_find(invited_id)) or check_forced_sub(invited_id) is not True:
+                 return False
+         
+         # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
+@@ -5136,8 +5148,6 @@
+                 return _ref_money_finish(event, saved)
+             balance = _ref_units(user.get('balance'))
+             if balance < 0:
+-                if _ref_repair_user(rid).get('corrected'):
+-                    continue
+                 raise ValueError('Negative balance requires ledger review before referral movement')
+             debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
+             if nominal < 0:
+@@ -5221,7 +5231,7 @@
+         invited, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
+         with _get_referrer_lock(rid):
+             current = db.referrals_v2.find_one({'invited_id': invited}) or {}
+-            if not current.get('cb_amount') or not _ref_web_verified(current):
++            if not current.get('cb_amount') or not _ref_countable(current):
+                 return 0.0
+             if current.get('cb_status') == 'processing':
+                 _ref_clawback(current)
+@@ -5643,7 +5653,7 @@
+         ref_record = _ref_find(buyer_uid)
+         if not ref_record:
+             return False  # المشتري ما له مُحيل
+-        if ref_record.get('status') != 'active' or not _ref_web_verified(ref_record):
++        if ref_record.get('status') != 'active' or not _ref_countable(ref_record):
+             return False  # 🛡 الأدمن رفض هذي الإحالة (جهاز مكرر / وهمي)
+         
+         referrer_id = int(ref_record.get('referrer_id', 0))
+@@ -5851,11 +5861,12 @@
+     result = _ref_repair_batch()
+     prior = list(db.ref_balance_reconciliations.find({}, {'user_id': 1, 'move_to_debt': 1}))
+     text = ('🧾 <b>تسوية أرصدة الإحالات</b>\n\n'
+-        f"فُحص الآن: {result['checked']}\nصُحح بتوثيق كامل: {result['corrected']}\n"
++        f"فُحص الآن: {result['checked']}\nأُعيد تصنيف السالب مع حفظ الصافي: {result['corrected']}\n"
+         f"يحتاج مراجعة لعدم كفاية السجل: {result['review']}\n"
+         f"إجمالي الحسابات المسوّاة سابقًا وحاليًا: {len(prior)}\n\n"
+         'التسوية تنقل السالب المثبت إلى مستحقات منفصلة؛ لا تمنح مالًا ولا تمحو مستحقًا. '
+-        'الرصيد المتاح والمستحق يظهران للمستخدم، والتفاصيل في التقرير.')
++        'الرصيد المتاح والمستحق يظهران للمستخدم، والتفاصيل في التقرير. '
++        'هذه ليست إثباتًا أن الخصم الأصلي صحيح. لمعرفة حركة حساب: /refwhy ثم الآيدي أو اليوزر.')
+     bot.send_message(chat_id, text, parse_mode='HTML')
+     payload = {'current_run': result, 'recorded_reconciliations': prior}
+     data = io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode())
+@@ -5874,6 +5885,77 @@
+ def _ref_audit_cmd(message):
+     if _is_admin_check(message.from_user.id):
+         _ref_audit_send(message.chat.id)
++
++
++def _ref_balance_diagnosis(target):
++    """Read-only, bounded account report. A stored reason is not membership proof."""
++    target = str(target or '').strip().lstrip('@')
++    if target.isdigit():
++        query = {'user_id': int(target)}
++    elif re.fullmatch(r'[A-Za-z0-9_]{3,32}', target):
++        query = {'username': {'$regex': '^@?' + re.escape(target) + '$', '$options': 'i'}}
++    else:
++        return {'state': 'invalid_target', 'read_only': True}
++    users = list(db.users.find(query, {'_id': 0, 'user_id': 1, 'username': 1, 'balance': 1,
++        'ref_debt': 1, 'ref_v2_earned': 1, 'ref_v2_purchase_earned': 1}).limit(3))
++    if len(users) != 1:
++        return {'state': 'not_found' if not users else 'ambiguous_username', 'read_only': True,
++                'matching_user_ids': [u['user_id'] for u in users]}
++    user, uid = users[0], int(users[0]['user_id'])
++    totals = list(db.balance_logs.aggregate([{'$match': {'user_id': uid}}, {'$group': {
++        '_id': '$type', 'count': {'$sum': 1}, 'cash_amount': {'$sum': '$amount'},
++        'debt_delta': {'$sum': '$debt_delta'}}}]))
++    recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1,
++        'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'date': 1, 'note': 1,
++        'ref_event': 1}).sort('date', -1).limit(250))
++    for log in recent:
++        if 'note' in log:
++            log['note'] = str(log['note'])[:400]
++    reasons = list(db.ref_clawbacks.aggregate([{'$match': {'referrer_id': uid, 'kind': 'clawback'}},
++        {'$group': {'_id': '$reason', 'count': {'$sum': 1}, 'nominal_amount': {'$sum': '$amount'}}}]))
++    statuses = list(db.referrals_v2.aggregate([{'$match': {'referrer_id': uid}},
++        {'$group': {'_id': '$status', 'count': {'$sum': 1}}}]))
++    return {'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals,
++        'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons,
++        'referrals_by_status': statuses,
++        'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}),
++        'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. '
++                       'No credit, deduction, reclassification or debt forgiveness was performed.'}
++
++
++@bot.message_handler(commands=['refwhy'])
++def _ref_why_cmd(message):
++    if not _is_admin_check(message.from_user.id):
++        return
++    parts = str(message.text or '').split(maxsplit=1)
++    if len(parts) < 2:
++        bot.send_message(message.chat.id, '🔎 أرسل /refwhy ثم آيدي المستخدم أو @username. الفحص للقراءة فقط.')
++        return
++    report = _ref_balance_diagnosis(parts[1])
++    if report['state'] != 'found':
++        text = {'not_found': 'لم يوجد حساب بهذا اليوزر؛ قد يكون قد تغيّر. استخدم الآيدي الرقمي.',
++                'ambiguous_username': 'اليوزر موجود في أكثر من سجل قديم؛ استخدم الآيدي الرقمي.',
++                'invalid_target': 'اكتب آيدي Telegram رقميًا أو يوزر صحيحًا.'}[report['state']]
++        bot.send_message(message.chat.id, text)
++        return
++    user = report['account']
++    lines = ['🔎 <b>سبب رصيد المستخدم — فحص فقط</b>', f"🆔 <code>{user['user_id']}</code>",
++        f"الرصيد الحالي: <b>${float(user.get('balance') or 0):.4f}</b>",
++        f"مستحقات إحالات منفصلة: ${float(user.get('ref_debt') or 0):.4f}",
++        f"الإحالات القديمة: {report['legacy_referrals']}", '', '<b>إجمالي حركات السجل بحسب النوع:</b>']
++    for row in report['ledger_totals'][:20]:
++        lines.append(f"• {html.escape(str(row['_id']))}: {row['count']} حركة؛ صافي الرصيد ${float(row.get('cash_amount') or 0):.4f}")
++    lines.extend(['', '<b>الأسباب التي سجلها البوت للخصومات:</b>'])
++    labels = {'left': 'مغادرة مسجلة', 'rejected': 'رفض مسجل'}
++    for row in report['stored_clawback_reasons'][:10]:
++        label = labels.get(row['_id'], str(row['_id'] or 'غير محفوظ'))
++        lines.append(f"• {html.escape(label)}: {row['count']}؛ المبلغ الاسمي ${float(row.get('nominal_amount') or 0):.4f}")
++    lines.extend(['', '⚠️ وصف «مغادرة» في السجل لا يثبت وحده مغادرة فعلية؛ النسخ السابقة كانت قد تعامل فشل الاتصال كمغادرة.',
++                  'لم يتغير الرصيد. ملف التقرير يحفظ آخر 250 حركة لتحديد الخصومات التي تحتاج عكسًا مثبتًا.'])
++    bot.send_message(message.chat.id, '\n'.join(lines)[:3900], parse_mode='HTML')
++    data = io.BytesIO(json.dumps(report, ensure_ascii=False, indent=2, default=str).encode())
++    data.name = f"referral-balance-{user['user_id']}.json"
++    bot.send_document(message.chat.id, data, caption='تقرير قراءة فقط؛ لا يتضمن بيانات اتصال قاعدة البيانات.')
+ 
+ 
+ def _ref_resume_financial():
+@@ -5967,13 +6049,12 @@
+ 
+ 
+ def background_referral_checker_v2():
+-    """Event wakeups plus bounded periodic verification; no unverified referrals are approved."""
+-    try:
+-        result = _ref_repair_batch()
+-        logger.info('Referral balance reconciliation: checked=%s corrected=%s review=%s',
+-                    result['checked'], result['corrected'], result['review'])
++    """Existing referrals keep their policy; new referrals require website verification."""
++    try:
++        logger.info('Negative balances available for administrator ledger review: %s',
++                    db.users.count_documents({'balance': {'$lt': 0}}))
+     except Exception:
+-        logger.exception('Referral balance reconciliation is waiting for retry')
++        logger.exception('Could not read referral balance review count')
+     time.sleep(90)
+     while True:
+         try:
+@@ -9102,7 +9183,17 @@
+     # ============================================================
+     ref_record = _ref_find(uid)
+     
+-    if not check_forced_sub(uid):
++    subscription_state = check_forced_sub(uid)
++    if subscription_state is not True:
++        if subscription_state is None:
++            markup = InlineKeyboardMarkup()
++            markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
++            bot.send_message(chat_id,
++                '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'
++                if lang == 'en' else
++                '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
++                reply_markup=markup)
++            return
+         if ref_record:
+             current = ref_record.get('status', 'pending')
+             if current == 'active':
+@@ -35907,7 +35998,7 @@
+ 
+ def ref_dv_required(rec):
+     """هل هذي الإحالة لازم تنجح في تحقق الجهاز قبل ما تنحسب؟"""
+-    return bool(rec and not _ref_web_verified(rec))
++    return bool(_ref_policy_requires_web(rec) and not _ref_web_verified(rec))
+ 
+ 
+ def ref_dv_pending_for(uid):
+@@ -36176,7 +36267,7 @@
+     uid = int(uid)
+     who = html.escape(clean_name(admin_name or str(admin_id)))
+     if verdict == 'ok':
+-        if not _ref_web_verified(rec):
++        if ref_dv_required(rec):
+             _ref_dv_prompt(uid)
+             return '⏳ لا يمكن اعتماد الإحالة قبل أن يُكمل المدعو التحقق داخل الموقع.'
+         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': admin_id}})
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -12,7 +12,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-29.1',queue=[],recent=new Map();
++ const build='lara-30.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -128,6 +128,27 @@
+ .mono{font-family:var(--f-mono)}
+ .muted{color:var(--fg-2)}
+ .faint{color:var(--fg-3)}
++
++/* Lightweight page loading motion: no GIFs, polling or extra network requests. */
++.page-loading{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;
++  background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
++  opacity:1;transition:opacity .22s ease}
++.page-loading.leaving{opacity:0;pointer-events:none}
++.load-card{width:min(100%,300px);padding:34px 26px 26px;text-align:center;border-radius:30px;
++  border:1px solid var(--line-2);background:var(--surface);box-shadow:0 20px 70px var(--glow)}
++.load-art{position:relative;display:grid;place-items:center;width:108px;height:108px;margin:0 auto 22px}
++.load-orbit{position:absolute;inset:0;border:1px solid var(--line-2);border-radius:50%}
++.load-orbit::before{content:"";position:absolute;inset:-2px;border:2px solid transparent;border-top-color:var(--accent-2);
++  border-inline-end-color:var(--accent);border-radius:50%;animation:loadOrbit 1.5s linear infinite}
++.load-diamond{width:62px;height:62px;filter:drop-shadow(0 5px 12px var(--glow));animation:loadFloat 1.9s ease-in-out infinite}
++.load-brand{font:700 14px/1.5 var(--f-display);letter-spacing:.06em;color:var(--fg)}
++.load-label{margin:8px 0 20px;color:var(--fg-2);font-size:13px}
++.load-track{height:4px;overflow:hidden;border-radius:8px;background:var(--accent-soft)}
++.load-track i{display:block;width:38%;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));animation:loadTrack 1.3s ease-in-out infinite}
++@keyframes loadOrbit{to{transform:rotate(360deg)}}
++@keyframes loadFloat{50%{transform:translateY(-5px) scale(1.04)}}
++@keyframes loadTrack{from{transform:translateX(-110%)}to{transform:translateX(370%)}}
++@media(prefers-reduced-motion:reduce){.load-orbit::before,.load-diamond,.load-track i{animation:none}.page-loading{transition:none}.load-track i{width:100%;opacity:.65}}
+ 
+ /* ── header ── */
+ .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;align-items:center;gap:10px;
+@@ -1461,6 +1482,11 @@
+ </style>
+ </head>
+ <body>
++<div class="page-loading" id="page-loading" role="status" aria-live="polite" aria-label="Loading">
++  <div class="load-card"><div class="load-art" aria-hidden="true"><span class="load-orbit"></span>
++    <svg class="load-diamond" viewBox="0 0 64 64" width="62" height="62"><path d="M13 12h38l10 16-29 32L3 28z" fill="var(--accent)"/><path d="m13 12 9 16 10-16 10 16 9-16M3 28h58M22 28l10 32 10-32" fill="none" stroke="var(--accent-2)" stroke-width="2.5" stroke-linejoin="round"/><path d="m13 12 9 16H3z" fill="white" opacity=".3"/><path d="m32 12 10 16H22z" fill="white" opacity=".45"/></svg>
++  </div><div class="load-brand">LARA STOCK</div><p class="load-label">Loading…</p><div class="load-track" aria-hidden="true"><i></i></div></div>
++</div>
+ <header class="top" id="top" hidden></header>
+ <main id="view" aria-live="polite"></main>
+ <nav class="dock" id="dock" hidden></nav>
+@@ -1651,9 +1677,46 @@
+ };
+ 
+ /* ───────────────────────── api ───────────────────────── */
++const PageLoad = { next: 0, pending: new Map(), hideTimer: null };
++function pageLoadVisible(path) {
++  if (path === 'bootstrap') return S.screen === 'loading';
++  if (S.screen !== 'app') return false;
++  return (path === 'orders' && S.tab === 'orders') || (path === 'history' && S.tab === 'balance') ||
++    ((path === 'referrals' || path === 'cgpt/subs') && S.tab === 'profile') ||
++    (path === 'api/state' && S.tab === 'api');
++}
++function syncPageLoading() {
++  const el = document.getElementById('page-loading');
++  if (!el) return;
++  const visible = S.screen === 'loading' || [...PageLoad.pending.values()].some(pageLoadVisible);
++  clearTimeout(PageLoad.hideTimer);
++  document.getElementById('view')?.setAttribute('aria-busy', String(visible));
++  if (visible) {
++    el.hidden = false; el.classList.remove('leaving');
++    el.setAttribute('aria-label', t('loading'));
++    el.querySelector('.load-label').textContent = t('loading');
++    el.querySelector('.load-brand').textContent = S.store?.name || 'LARA STOCK';
++  } else if (!el.hidden) {
++    el.classList.add('leaving');
++    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; }, 220);
++  }
++}
++function pageLoadBegin(path) {
++  const fresh = path === 'bootstrap' || (path === 'orders' && !S.orders) ||
++    (path === 'history' && !S.hist.data) || (path === 'referrals' && !S.refs) ||
++    (path === 'cgpt/subs' && S.cgpt?.loading) || (path === 'api/state' && !S.api);
++  if (!fresh || !pageLoadVisible(path)) return null;
++  const token = ++PageLoad.next;
++  PageLoad.pending.set(token, path); syncPageLoading(); return token;
++}
++function pageLoadEnd(token) {
++  if (token == null) return;
++  PageLoad.pending.delete(token); syncPageLoading();
++}
+ async function api(path, body) {
+   if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
+-  const controller = (path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
++  const loadingToken = pageLoadBegin(path);
++  const controller = (loadingToken != null || path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
+   const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
+   try {
+     const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
+@@ -1667,7 +1730,7 @@
+     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
+     return data;
+   } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
+-  finally { if (timer) clearTimeout(timer); }
++  finally { if (timer) clearTimeout(timer); pageLoadEnd(loadingToken); }
+ }
+ function errText(r) {
+   const e = (r && r.error) || 'server_error';
+@@ -2131,6 +2194,7 @@
+     if (S.tab === 'profile' && !S.refs) loadRefs();
+     if (S.tab === 'profile' && !S.cgpt && !DEMO) loadCgpt();
+   }
++  syncPageLoading();
+ }
+ function vLoading() {
+   return `<div class="hello"><div style="width:60%"><div class="skel" style="height:14px;width:40%;border-radius:8px"></div><div class="skel" style="height:24px;margin-top:8px;border-radius:8px"></div></div></div>
+--- a/verification/test_referral_integrity.py
++++ b/verification/test_referral_integrity.py
+@@ -16,7 +16,8 @@
+     if not mod.db.users.find_one({'user_id': invited}):
+         mod.db.users.insert_one({'user_id': invited, 'name': 'Test invitee', 'balance': 0., 'is_admin': 0,
+                                 'is_banned': 0, 'lang': 'en', 'lang_chosen': True})
+-    row = {'invited_id': invited, 'referrer_id': 1001, 'status': status, 'created_at': 1}
++    row = {'invited_id': invited, 'referrer_id': 1001, 'status': status, 'created_at': 1,
++           'ref_policy_version': 30}
+     if proof:
+         row.update(dv='ok', dv_at=1, web_verified_at=1, web_verified_version=2)
+     if paid:
+@@ -316,7 +317,7 @@
+     referral(mod, proof=False, status='pending')
+     mod.db.referrals_v2.delete_one({'invited_id': 5001})
+     mod.db.referrals_archived.insert_one({'invited_id': 5001, 'referrer_id': 1001, 'status': 'left',
+-        'cb_amount': .4, 'cb_at': 100, 'ms_batch': 0, 'archived_at': 100})
++        'cb_amount': .4, 'cb_at': 100, 'ms_batch': 0, 'archived_at': 100, 'ref_policy_version': 30})
+     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 99.6}})
+     mod.db.ref_clawbacks.insert_one({'invited_id': 5001, 'referrer_id': 1001, 'kind': 'clawback', 'amount': .4, 'open': True})
+     mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -.4,
+--- a/verification/test_referral_bandwidth.py
++++ b/verification/test_referral_bandwidth.py
+@@ -130,7 +130,7 @@
+ 
+ def test_unverified_referrals_generate_no_background_membership_requests(mod, monkeypatch):
+     mod.db.referrals_v2.insert_many([{'invited_id': 6000 + i, 'referrer_id': 1001,
+-        'status': 'active' if i % 2 else 'pending', 'dv': 'need'} for i in range(2000)])
++        'status': 'active' if i % 2 else 'pending', 'dv': 'need', 'ref_policy_version': 30} for i in range(2000)])
+     check = Mock(return_value=True); monkeypatch.setattr(mod, 'check_forced_sub', check)
+     assert mod._ref_checker_tick() == 0 and check.call_count == 0
+     metric('two_thousand_unverified_referrals', {'background_membership_checks_before': 2000,
+--- a/verification/serve_referral_test.py
++++ b/verification/serve_referral_test.py
+@@ -36,7 +36,8 @@
+ for uid, debt in [(1001, .75), (5001, 0)]:
+     m.db.users.insert_one({'user_id': uid, 'name': 'Referral Test', 'balance': 0., 'ref_debt': debt,
+         'lang': 'en', 'lang_chosen': True, 'is_admin': 0, 'is_banned': 0})
+-m.db.referrals_v2.insert_one({'referrer_id': 1001, 'invited_id': 5001, 'status': 'pending', 'created_at': 1})
++m.db.referrals_v2.insert_one({'referrer_id': 1001, 'invited_id': 5001, 'status': 'pending',
++                            'created_at': 1, 'ref_policy_version': 30})
+ 
+ 
+ class Handler(m.APIHandler):
+--- a/verification/test_client_diagnostics_browser.cjs
++++ b/verification/test_client_diagnostics_browser.cjs
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-29.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-30.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-29.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-30.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- /dev/null
++++ b/referral_report.py
+@@ -0,0 +1,69 @@
++"""Read-only referral report. Does not import or start bot.py."""
++import argparse
++import json
++import os
++from pathlib import Path
++import re
++
++
++def build_report(db, target):
++    """Read-only, bounded account report. A stored reason is not membership proof."""
++    target = str(target or '').strip().lstrip('@')
++    if target.isdigit():
++        query = {'user_id': int(target)}
++    elif re.fullmatch('[A-Za-z0-9_]{3,32}', target):
++        query = {'username': {'$regex': '^@?' + re.escape(target) + '$', '$options': 'i'}}
++    else:
++        return {'state': 'invalid_target', 'read_only': True}
++    users = list(db.users.find(query, {'_id': 0, 'user_id': 1, 'username': 1, 'balance': 1, 'ref_debt': 1, 'ref_v2_earned': 1, 'ref_v2_purchase_earned': 1}).limit(3))
++    if len(users) != 1:
++        return {'state': 'not_found' if not users else 'ambiguous_username', 'read_only': True, 'matching_user_ids': [u['user_id'] for u in users]}
++    user, uid = (users[0], int(users[0]['user_id']))
++    totals = list(db.balance_logs.aggregate([{'$match': {'user_id': uid}}, {'$group': {'_id': '$type', 'count': {'$sum': 1}, 'cash_amount': {'$sum': '$amount'}, 'debt_delta': {'$sum': '$debt_delta'}}}]))
++    recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1, 'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'date': 1, 'note': 1, 'ref_event': 1}).sort('date', -1).limit(250))
++    for log in recent:
++        if 'note' in log:
++            log['note'] = str(log['note'])[:400]
++    reasons = list(db.ref_clawbacks.aggregate([{'$match': {'referrer_id': uid, 'kind': 'clawback'}}, {'$group': {'_id': '$reason', 'count': {'$sum': 1}, 'nominal_amount': {'$sum': '$amount'}}}]))
++    statuses = list(db.referrals_v2.aggregate([{'$match': {'referrer_id': uid}}, {'$group': {'_id': '$status', 'count': {'$sum': 1}}}]))
++    return {'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals, 'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons, 'referrals_by_status': statuses, 'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}), 'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. No credit, deduction, reclassification or debt forgiveness was performed.'}
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description='Read-only referral balance diagnosis')
++    parser.add_argument('target', nargs='?', help='Telegram numeric ID or @username')
++    args = parser.parse_args(argv)
++    target = args.target or input('Telegram @username or numeric ID: ').strip()
++    from dotenv import load_dotenv
++    from pymongo import MongoClient
++    load_dotenv(Path(__file__).with_name('.env'))
++    uri = os.getenv('MONGO_URI', '')
++    if not uri:
++        print('MONGO_URI is missing. Use the same .env as your running bot.')
++        return 2
++    client = None
++    try:
++        client = MongoClient(uri, serverSelectionTimeoutMS=7000, connectTimeoutMS=5000,
++                             socketTimeoutMS=7000, appname='LARA-readonly-referral-report')
++        report = build_report(client[os.getenv('MONGO_DB_NAME') or 'shop_db'], target)
++        if report['state'] != 'found':
++            print(json.dumps(report, ensure_ascii=False))
++            return 3
++        user = report['account']
++        path = Path.cwd() / ('referral-report-' + str(int(user['user_id'])) + '.json')
++        path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
++        print('READ ONLY: no database data or balance was changed.')
++        print('User ID:', user['user_id'], 'Balance:', user.get('balance', 0))
++        print('Report:', path.name)
++        return 0
++    except Exception as exc:
++        print('Database report unavailable (' + type(exc).__name__ + ').')
++        print('Connection details and credentials are intentionally omitted.')
++        return 4
++    finally:
++        if client is not None:
++            client.close()
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
+--- /dev/null
++++ b/REFERRAL-CHECK.cmd
+@@ -0,0 +1,18 @@
++@echo off
++setlocal
++cd /d "%~dp0"
++title LARA STOCK - Read-only referral report
++echo This tool only reads the database. It does not start the bot or change balances.
++if exist ".venv\Scripts\python.exe" (
++  ".venv\Scripts\python.exe" referral_report.py
++  goto finished
++)
++where py >nul 2>&1
++if errorlevel 1 goto system_python
++py -3 referral_report.py
++goto finished
++:system_python
++python referral_report.py
++:finished
++echo.
++pause
+--- /dev/null
++++ b/verification/test_referral_policy.py
+@@ -0,0 +1,179 @@
++"""Prospective website policy and read-only historical balance diagnosis."""
++import datetime as dt
++import importlib.util
++import json
++from unittest.mock import Mock
++
++import pytest
++from harness import MESSAGES
++from test_integration import mod, isolate, server, request
++from test_referral_integrity import referral
++
++
++def legacy(mod, **kwargs):
++    rec = referral(mod, **kwargs)
++    mod.db.referrals_v2.update_one({'_id': rec['_id']}, {'$unset': {'ref_policy_version': ''}})
++    return mod._ref_find(rec['invited_id'])
++
++
++def message(mod, uid=5001, text='/start'):
++    return mod.types.Message.de_json({'message_id': 5, 'date': 1,
++        'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'},
++        'chat': {'id': uid, 'type': 'private'}, 'text': text})
++
++
++def test_registration_marks_only_new_referrals_with_the_new_requirement(mod):
++    old = legacy(mod, proof=False)
++    assert mod.register_new_referral(6001, 1001)
++    new = mod._ref_find(6001)
++    assert new['ref_policy_version'] == 30 and mod.ref_dv_required(new)
++    assert not mod.ref_dv_required(old) and 'ref_policy_version' not in mod._ref_find(5001)
++
++
++@pytest.mark.parametrize('balance', [10., 20., -50.])
++def test_one_thousand_existing_referrals_are_not_demoted_repriced_or_changed_by_the_new_gate(mod, balance):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': balance, 'ref_v2_earned': 60}})
++    rows = [{'referrer_id': 1001, 'invited_id': 6000 + i, 'status': 'active', 'created_at': 1,
++             'ms_batch': 0} for i in range(1000)]
++    mod.db.referrals_v2.insert_many(rows)
++    assert mod.get_ref_counts(1001) == (0, 1000, 0, 1000)
++    assert mod.ref_progress(1001)[0] == 0
++    assert not any(mod.ref_dv_pending_for(6000 + i) for i in range(1000))
++    user = mod.db.users.find_one({'user_id': 1001})
++    assert user['balance'] == balance and user['ref_v2_earned'] == 60 and not user.get('ref_debt')
++    assert mod.db.referrals_v2.count_documents({'status': 'active'}) == 1000
++    assert not mod.db.balance_logs.count_documents({})
++
++
++def test_existing_referral_opens_the_site_without_the_new_gate(mod, server):
++    legacy(mod, proof=False)
++    status, data, _ = request(server, '/webapp/bootstrap', uid=5001)
++    assert status == 200 and not data['verify']
++    assert not mod.ref_dv_gate(5001, 5001, mod._ref_find(5001), 'en')
++    assert mod.ref_progress(1001)[0] == 1
++
++
++def test_existing_pending_and_rejected_records_are_not_mass_activated(mod):
++    legacy(mod, proof=False, status='pending')
++    legacy(mod, invited=5002, proof=False, status='active')
++    mod.db.referrals_v2.update_one({'invited_id': 5002}, {'$set': {'dv': 'rejected'}})
++    assert mod.get_ref_counts(1001) == (2, 0, 0, 2)
++    assert mod._ref_find(5001)['status'] == 'pending'
++    assert not mod._ref_countable(mod._ref_find(5002))
++
++
++def test_old_archive_keeps_its_original_policy_on_restore(mod):
++    legacy(mod, proof=False)
++    old = mod._ref_find(5001)
++    mod.db.referrals_v2.delete_one({'_id': old['_id']})
++    mod.db.referrals_archived.insert_one({k: v for k, v in old.items() if k != '_id'})
++    assert not mod.ref_dv_required(mod._ref_find(5001))
++    assert 'ref_policy_version' not in mod._ref_find(5001)
++
++
++@pytest.mark.parametrize('new', [False, True])
++def test_start_membership_timeout_never_marks_a_referral_left_or_changes_its_referrers_money(mod, monkeypatch, new):
++    (referral if new else legacy)(mod, paid=True)
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 10}})
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: None)
++    mod.start_handler(message(mod))
++    assert mod._ref_find(5001)['status'] == 'active'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 10
++    assert not mod.db.users.find_one({'user_id': 1001}).get('ref_debt')
++    assert not mod.db.ref_money_events.count_documents({}) and not mod.db.ref_clawbacks.count_documents({})
++    assert any('Unable to verify' in text for _, text, _ in MESSAGES)
++
++
++def test_background_startup_only_reports_existing_negative_balances_without_reclassifying(mod, monkeypatch):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -50}})
++    repair = Mock(); monkeypatch.setattr(mod, '_ref_repair_batch', repair)
++    monkeypatch.setattr(mod.time, 'sleep', lambda *a: None)
++    monkeypatch.setattr(mod, '_ref_resume_financial', lambda: None)
++    monkeypatch.setattr(mod, '_ref_checker_tick', lambda: 0)
++    class StopLoop(Exception):
++        pass
++    monkeypatch.setattr(mod._REF_SCAN_WAKE, 'wait', Mock(side_effect=StopLoop))
++    with pytest.raises(StopLoop):
++        mod.background_referral_checker_v2()
++    repair.assert_not_called()
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -50
++    assert not mod.db.ref_balance_reconciliations.count_documents({})
++
++
++def test_a_negative_balance_requires_review_before_a_new_automatic_referral_movement(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -50}})
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -60,
++        'new_balance': -50, 'date': dt.datetime.now()})
++    with pytest.raises(ValueError, match='ledger review'):
++        mod._ref_money(1001, 1, 'ref_reward', 'Saved reward', event_key='await-review')
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -50
++    assert mod.db.ref_money_events.find_one({})['status'] == 'prepared'
++    assert not mod.db.ref_balance_reconciliations.count_documents({})
++
++
++def test_balance_diagnosis_accepts_username_and_id_without_writing_or_exposing_private_fields(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {
++        'username': 'Nazawalai_helmandi', 'balance': -50, 'private_cookie': 'NEVER-EXPOSE'}})
++    legacy(mod, proof=False)
++    mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -60,
++        'new_balance': -50, 'date': dt.datetime.now(), 'note': 'Stored left reason'})
++    mod.db.ref_clawbacks.insert_one({'referrer_id': 1001, 'kind': 'clawback', 'reason': 'left', 'amount': 60})
++    snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++    report = mod._ref_balance_diagnosis('@NAZAWALAI_HELMANDI')
++    assert report['read_only'] and report['account']['balance'] == -50
++    assert report['legacy_referrals'] == 1 and report['ledger_totals'][0]['cash_amount'] == -60
++    assert report['stored_clawback_reasons'][0]['_id'] == 'left'
++    assert mod._ref_balance_diagnosis('1001')['account'] == report['account']
++    assert 'NEVER-EXPOSE' not in json.dumps(report, default=str)
++    assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++
++
++@pytest.mark.parametrize('target,state', [('@unknown_user', 'not_found'), ('bad<script>', 'invalid_target')])
++def test_diagnosis_does_not_guess_a_missing_or_invalid_account(mod, target, state):
++    assert mod._ref_balance_diagnosis(target)['state'] == state
++
++
++def test_duplicate_stale_usernames_need_a_numeric_id(mod):
++    mod.db.users.update_many({'user_id': {'$in': [1001, 1002]}}, {'$set': {'username': 'same_user'}})
++    assert mod._ref_balance_diagnosis('@same_user')['state'] == 'ambiguous_username'
++
++
++def test_only_admin_can_request_the_readonly_diagnosis(mod, monkeypatch):
++    spy = Mock(wraps=mod._ref_balance_diagnosis); monkeypatch.setattr(mod, '_ref_balance_diagnosis', spy)
++    mod._ref_why_cmd(message(mod, uid=1001, text='/refwhy 1002'))
++    spy.assert_not_called(); assert not MESSAGES
++    mod._ref_why_cmd(message(mod, uid=9001, text='/refwhy 1001'))
++    spy.assert_called_once_with('1001')
++    assert any('فحص فقط' in text for _, text, _ in MESSAGES)
++
++
++def test_standalone_report_matches_bot_readonly_report_and_never_starts_the_bot(mod, monkeypatch, tmp_path):
++    import dotenv
++    import pymongo
++    from harness import APP
++    spec = importlib.util.spec_from_file_location('local_referral_report', APP / 'referral_report.py')
++    report_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(report_module)
++    monkeypatch.setattr(dotenv, 'load_dotenv', lambda *a, **k: None)
++    monkeypatch.setenv('MONGO_URI', 'mongodb://localhost/unused-test')
++    monkeypatch.setenv('MONGO_DB_NAME', mod.db.name)
++    monkeypatch.setattr(pymongo, 'MongoClient', lambda *a, **k: mod.db.client)
++    monkeypatch.chdir(tmp_path)
++    snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++    assert report_module.build_report(mod.db, '1001') == mod._ref_balance_diagnosis('1001')
++    assert report_module.main(['1001']) == 0
++    saved = json.loads((tmp_path / 'referral-report-1001.json').read_text())
++    assert saved['read_only'] and saved['account']['balance'] == 100
++    assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
++
++
++def test_standalone_report_without_configuration_does_not_connect(mod, monkeypatch):
++    import dotenv
++    import pymongo
++    from harness import APP
++    spec = importlib.util.spec_from_file_location('local_referral_report_no_config', APP / 'referral_report.py')
++    report_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(report_module)
++    monkeypatch.setattr(dotenv, 'load_dotenv', lambda *a, **k: None)
++    monkeypatch.delenv('MONGO_URI', raising=False)
++    connect = Mock(); monkeypatch.setattr(pymongo, 'MongoClient', connect)
++    assert report_module.main(['1001']) == 2
++    connect.assert_not_called()
+--- /dev/null
++++ b/verification/test_page_loading_browser.cjs
+@@ -0,0 +1,69 @@
++/* Real page-loading transitions; fake signed identities, loopback services only. */
++const {spawn}=require('child_process'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const BASE='http://127.0.0.1:8786';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_referral_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:'8786'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL REFERRAL SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++function gate(){let release;const wait=new Promise(r=>release=r);return {wait,release};}
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking',
++   '--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const page=await browser.newPage({viewport:{width:390,height:844},locale:'ar-MA'}),errors=[],calls=[];
++  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.url().includes('/webapp/'))calls.push(r.url());});
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  const boot=gate();
++  await page.route('**/webapp/bootstrap',async r=>{const response=await r.fetch();await boot.wait;await r.fulfill({response});});
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  const loader=page.locator('#page-loading');
++  await loader.waitFor({state:'visible'});
++  assert.equal(await page.locator('#view').getAttribute('aria-busy'),'true');
++  assert.equal(await loader.locator('.load-diamond').evaluate(e=>getComputedStyle(e).animationName),'loadFloat');
++  assert((await loader.innerText()).includes('جاري التحميل'));
++  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
++  if(process.env.LARA_TEST_LOADING_SCREENSHOT)await page.screenshot({path:process.env.LARA_TEST_LOADING_SCREENSHOT});
++  boot.release();await loader.waitFor({state:'hidden'});
++  assert.equal(calls.filter(x=>x.endsWith('/bootstrap')).length,1);
++  console.log('PASS first paint has blue animated loading card; Arabic label, mobile layout, one bootstrap request');
++  const refs=gate(),subs=gate();
++  await page.route('**/webapp/referrals',async r=>{const response=await r.fetch();await refs.wait;await r.fulfill({response});});
++  await page.route('**/webapp/cgpt/subs',async r=>{const response=await r.fetch();await subs.wait;await r.fulfill({response});});
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  await loader.waitFor({state:'visible'});
++  refs.release();await page.waitForResponse(r=>r.url().endsWith('/referrals'));
++  assert(await loader.isVisible());
++  subs.release();await loader.waitFor({state:'hidden'});
++  await page.locator('[data-act="lang"][data-v="ar"]').first().click();
++  const count=calls.length;
++  await page.locator('[data-act="tab"][data-v="store"]').first().click();
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  assert(await loader.isHidden());
++  assert.equal(calls.length,count);
++  console.log('PASS profile waits for concurrent reads; cached navigation adds no requests or artificial loading delay');
++  const orders=gate();
++  await page.route('**/webapp/orders',async r=>{const response=await r.fetch();await orders.wait;await r.fulfill({response});});
++  await page.locator('[data-act="tab"][data-v="orders"]').click();await loader.waitFor({state:'visible'});
++  await page.evaluate(()=>document.querySelector('[data-act="tab"][data-v="store"]').click());
++  await loader.waitFor({state:'hidden'});orders.release();
++  await page.waitForResponse(r=>r.url().endsWith('/orders'));
++  assert(await loader.isHidden());
++  const fail=async r=>r.fulfill({status:503,contentType:'application/json',body:'{"ok":false,"error":"server_error"}'});
++  await page.route('**/webapp/bootstrap',fail);
++  await page.reload({waitUntil:'domcontentloaded'});await page.locator('[data-act="retry"]').waitFor();
++  await loader.waitFor({state:'hidden'});
++  await page.unroute('**/webapp/bootstrap',fail);
++  await page.locator('[data-act="retry"]').click();await page.locator('[data-act="tab"][data-v="store"]').first().waitFor();
++  await loader.waitFor({state:'hidden'});
++  await page.emulateMedia({reducedMotion:'reduce'});
++  assert.equal(await loader.locator('.load-diamond').evaluate(e=>getComputedStyle(e).animationName),'none');
++  assert.deepEqual(errors,[]);
++  console.log('PASS leaving a slow page, errors and retry never leave overlay stuck; reduced motion respected; zero JS exceptions');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

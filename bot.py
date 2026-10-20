@@ -16,6 +16,8 @@ import urllib.parse
 import hashlib
 import hmac
 import base64
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from email.utils import formatdate as _http_date, parsedate_to_datetime as _http_parse_date
 from bson.objectid import ObjectId
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -812,11 +814,92 @@ def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, i
 
 _CGPT_DATA_LOCK = threading.RLock()
 _CGPT_ACCOUNT_LOCKS = {}
+_CGPT_STOCK_CACHE = {}
+_CGPT_CAPACITY_CACHE = {}
+_CGPT_STOCK_LOCK = threading.RLock()
+_CGPT_MEMBER_HEALTH = {}
+_CGPT_MEMBER_HEALTH_LOCK = threading.RLock()
 
 
 def _cgpt_account_lock(account_id):
     with _CGPT_DATA_LOCK:
         return _CGPT_ACCOUNT_LOCKS.setdefault(str(account_id), threading.RLock())
+
+
+def _cgpt_data_fingerprint(data):
+    snapshot = dict(data or {})
+    snapshot['allowed_emails'] = sorted(set(snapshot.get('allowed_emails') or []))
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':'), default=str).encode()).hexdigest()
+
+
+def _cgpt_stock_key(account, access, session, manual=None):
+    return str(account) + ':' + hashlib.sha256(f'{access}|{session}|{manual}'.encode()).hexdigest()[:24]
+
+
+def _cgpt_stock_invalidate(capacity=False):
+    with _CGPT_STOCK_LOCK:
+        _CGPT_STOCK_CACHE.clear()
+        if capacity:
+            _CGPT_CAPACITY_CACHE.clear()
+    _CGPT_SEATS_CACHE['exp'] = 0
+    _CGPT_DISPLAY_SEATS['expires'] = 0
+
+
+def _cgpt_member_health(manager):
+    """Keep outage backoff across the temporary managers built by the daemon."""
+    key = str(getattr(manager, '_account_key', None) or manager.account_id or 'main')
+    credentials = hashlib.sha256((str(manager.access_token or '') + '\0' +
+                                 str(manager.session_token or '')).encode()).hexdigest()
+    with _CGPT_MEMBER_HEALTH_LOCK:
+        state = _CGPT_MEMBER_HEALTH.get(key)
+        if not state or state.get('credentials') != credentials:
+            if len(_CGPT_MEMBER_HEALTH) >= 256:
+                _CGPT_MEMBER_HEALTH.pop(next(iter(_CGPT_MEMBER_HEALTH)), None)
+            state = {'credentials': credentials, 'failures': 0, 'retry_at': 0, 'references': []}
+            _CGPT_MEMBER_HEALTH[key] = state
+        return state
+
+
+def _cgpt_member_ready(manager):
+    state = _cgpt_member_health(manager)
+    if state.get('retry_at', 0) > time.time():
+        manager._last_fetch_failed = True
+        manager._last_fetch_status = state.get('status', 'connection')
+        return False
+    return True
+
+
+def _cgpt_member_defer(manager, status, exc=None, retry_after=0):
+    """A failed read is never an empty member list and never proves expired cookies."""
+    state = _cgpt_member_health(manager)
+    with _CGPT_MEMBER_HEALTH_LOCK:
+        state['failures'] = min(10, state.get('failures', 0) + 1)
+        delay = 3600 if status in (401, 403) else min(900, 60 * 2 ** (state['failures'] - 1))
+        try:
+            delay = max(delay, min(3600, max(0, int(retry_after))))
+        except (TypeError, ValueError):
+            pass
+        state.update(status=status, retry_at=time.time() + delay)
+    manager._last_fetch_failed = True
+    manager._last_fetch_status = status
+    with _error_scope(source='background', operation='cgpt:members:' +
+                      str(getattr(manager, '_account_key', None) or manager.account_id or 'main')):
+        reference = _error_capture('ChatGPT member lookup unavailable; cleanup deferred safely',
+            exc=exc, level='WARNING', location='ChatGPTSeatManager._get_org_users',
+            browser_trace='Read status: ' + str(status) + '; retry after ' + str(delay) + ' seconds.')
+    if reference and reference not in state['references']:
+        state['references'] = (state['references'] + [reference])[-8:]
+
+
+def _cgpt_member_recovered(manager):
+    state = _cgpt_member_health(manager)
+    references = list(state.get('references', []))
+    with _CGPT_MEMBER_HEALTH_LOCK:
+        state.update(failures=0, retry_at=0, status=200, references=[])
+    manager._last_fetch_failed = False
+    manager._last_fetch_status = 200
+    for reference in references:
+        _error_resolve_automatic(reference, 'ChatGPT member lookup recovered')
 
 
 def _cgpt_manager_guard(func):
@@ -826,6 +909,7 @@ def _cgpt_manager_guard(func):
             doc = db.cgpt_invites_data.find_one({'_id': getattr(self, '_account_key', 'main')})
             if doc and doc.get('data'):
                 self.invites_data = doc['data']
+                self._saved_data_digest = _cgpt_data_fingerprint(doc['data'])
                 self.allowed_emails = set(self.invites_data.get('allowed_emails', []))
                 if self.owner_email:
                     self.allowed_emails.add(self.owner_email)
@@ -902,7 +986,10 @@ class ChatGPTSeatManager:
 
     def _save_data(self):
         """حفظ بيانات الدعوات في MongoDB (لكل حساب على حدة)"""
-        self.invites_data['allowed_emails'] = list(self.allowed_emails)
+        self.invites_data['allowed_emails'] = sorted(self.allowed_emails)
+        digest = _cgpt_data_fingerprint(self.invites_data)
+        if getattr(self, '_saved_data_digest', None) == digest:
+            return True
         _key = getattr(self, '_account_key', 'main')
         try:
             db.cgpt_invites_data.update_one(
@@ -910,6 +997,8 @@ class ChatGPTSeatManager:
                 {'$set': {'data': self.invites_data}},
                 upsert=True
             )
+            self._saved_data_digest = digest
+            return True
         except Exception as e:
             logger.error(f"[CGPT] save_data DB err: {e}")
 
@@ -959,20 +1048,31 @@ class ChatGPTSeatManager:
     def _get_org_users(self):
         if not CFFI_AVAILABLE or not self._loaded:
             self._last_fetch_failed = True
+            self._last_fetch_status = 401
             return []
-        try:
-            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
-            r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
-            if r.status_code == 200:
-                self._last_fetch_failed = False
-                return r.json().get('items', [])
-            # فشل (401 مثلاً = كوكيز منتهية)
+        with _cgpt_account_lock(getattr(self, '_account_key', None) or self.account_id or 'main'):
+            if not _cgpt_member_ready(self):
+                return []
             self._last_fetch_failed = True
-            self._last_fetch_status = r.status_code
-            logger.warning(f"[CGPT] get_org_users {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            self._last_fetch_failed = True
-            logger.error(f"[CGPT] get_org_users error: {e}")
+            self._last_fetch_status = None
+            try:
+                url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+                r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=(5, 20))
+                if r.status_code == 200:
+                    data = r.json()
+                    users = data.get('items') if isinstance(data, dict) else None
+                    if not isinstance(users, list) or any(not isinstance(u, dict) for u in users):
+                        raise ValueError('Invalid ChatGPT member-list response')
+                    if (data.get('has_more') or data.get('next') or data.get('next_cursor') or
+                            int(data.get('total', len(users)) or 0) > len(users)):
+                        raise ValueError('Incomplete ChatGPT member-list response; cleanup deferred')
+                    _cgpt_member_recovered(self)
+                    return users
+                _cgpt_member_defer(self, r.status_code,
+                                  retry_after=getattr(r, 'headers', {}).get('Retry-After', 0))
+            except Exception as e:
+                kind = 'timeout' if getattr(e, 'code', None) == 28 or 'timeout' in type(e).__name__.lower() else 'connection'
+                _cgpt_member_defer(self, kind, exc=e)
         return []
 
     @_cgpt_manager_guard
@@ -1105,7 +1205,7 @@ class ChatGPTSeatManager:
         """Remove expired access and unexpected members without punishing other customers."""
         current_users = self._get_org_users()
         if getattr(self, '_last_fetch_failed', False):
-            logger.warning('[CGPT] fetch failed; skipping cleanup for %s', self.owner_email)
+            logger.debug('[CGPT] member read unavailable; cleanup deferred')
             return
         owner = str(self.owner_email or '').strip().lower()
         members = {str(u.get('email') or '').strip().lower(): u for u in current_users}
@@ -1221,77 +1321,98 @@ class ChatGPTSeatManager:
             report['http_status'] = r.status_code
             if r.status_code == 200:
                 data = r.json()
-                users = data.get('items', [])
+                users = data.get('items') if isinstance(data, dict) else None
+                if not isinstance(users, list) or any(not isinstance(u, dict) for u in users):
+                    raise ValueError('Invalid ChatGPT member-list response')
+                if (data.get('has_more') or data.get('next') or data.get('next_cursor') or
+                        int(data.get('total', len(users)) or 0) > len(users)):
+                    raise ValueError('Incomplete ChatGPT member-list response')
                 report['connected'] = True
                 # المالك لا يُحسب كمقعd مُستهلَك (مقعده ليس للبيع)
                 non_owner = [u for u in users
                              if str(u.get('email', '')).lower() != str(self.owner_email or '').lower()]
                 report['used_seats'] = len(non_owner)
-                # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
-                try:
-                    acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
-                    ar = cffi_requests.get(acc_url, headers=self._headers(),
-                                           impersonate='chrome110', timeout=15)
-                    if ar.status_code == 200:
-                        acc = ar.json()
-                        report['_raw_account'] = str(acc)[:500]  # للتشخيص
-
-                        # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
-                        def _find_seats(obj, depth=0):
-                            if depth > 5 or not isinstance(obj, dict):
+                capacity_key = _cgpt_stock_key(self.account_id, self.access_token, self.session_token)
+                with _CGPT_STOCK_LOCK:
+                    cached_capacity = _CGPT_CAPACITY_CACHE.get(capacity_key)
+                if (getattr(self, '_capacity_cache_allowed', False) and cached_capacity and
+                        cached_capacity['expires'] > time.time()):
+                    total_seats = cached_capacity['total']
+                    report['total_seats'] = total_seats
+                    if total_seats:
+                        report['available_seats'] = max(0, int(total_seats) - len(users))
+                else:
+                    # نحاول جلب سعة المقاعد الكلية (بحث عميق في كل الأماكن)
+                    try:
+                        acc_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}'
+                        ar = cffi_requests.get(acc_url, headers=self._headers(),
+                                               impersonate='chrome110', timeout=15)
+                        if ar.status_code == 200:
+                            acc = ar.json()
+                            report['_raw_account'] = str(acc)[:500]  # للتشخيص
+    
+                            # بحث عميق عن أي مفتاح يحوي "seat" في كل البنية
+                            def _find_seats(obj, depth=0):
+                                if depth > 5 or not isinstance(obj, dict):
+                                    return None
+                                # المفاتيح المحتملة لعدد المقاعد
+                                for k in ('max_member_count', 'max_seats', 'seats',
+                                          'seat_count', 'total_seats', 'member_limit',
+                                          'max_members', 'paid_seats', 'licenses',
+                                          'subscription_seats', 'num_seats'):
+                                    v = obj.get(k)
+                                    if isinstance(v, int) and v > 0:
+                                        return v
+                                # نغوص في المستويات
+                                for nested in ('account', 'plan', 'subscription',
+                                               'billing', 'workspace', 'limits'):
+                                    if isinstance(obj.get(nested), dict):
+                                        found = _find_seats(obj[nested], depth + 1)
+                                        if found:
+                                            return found
                                 return None
-                            # المفاتيح المحتملة لعدد المقاعد
-                            for k in ('max_member_count', 'max_seats', 'seats',
-                                      'seat_count', 'total_seats', 'member_limit',
-                                      'max_members', 'paid_seats', 'licenses',
-                                      'subscription_seats', 'num_seats'):
-                                v = obj.get(k)
-                                if isinstance(v, int) and v > 0:
-                                    return v
-                            # نغوص في المستويات
-                            for nested in ('account', 'plan', 'subscription',
-                                           'billing', 'workspace', 'limits'):
-                                if isinstance(obj.get(nested), dict):
-                                    found = _find_seats(obj[nested], depth + 1)
-                                    if found:
-                                        return found
-                            return None
-
-                        total_seats = _find_seats(acc)
-                        # نجرّب أيضاً من endpoint الفواتير/الاشتراك
-                        if not total_seats:
-                            try:
-                                sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
-                                sr = cffi_requests.get(sub_url, headers=self._headers(),
-                                                       impersonate='chrome110', timeout=12)
-                                if sr.status_code == 200:
-                                    total_seats = _find_seats(sr.json())
-                            except Exception:
-                                pass
-                        # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
-                        if not total_seats:
-                            try:
-                                chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
-                                cr = cffi_requests.get(chk_url, headers=self._headers(),
-                                                       impersonate='chrome110', timeout=12)
-                                if cr.status_code == 200:
-                                    chk = cr.json()
-                                    report['_raw_check'] = str(chk)[:800]
-                                    total_seats = _find_seats(chk)
-                                    # نبحث في accounts داخل check
-                                    if not total_seats and isinstance(chk.get('accounts'), dict):
-                                        for _av in chk['accounts'].values():
-                                            found = _find_seats(_av) if isinstance(_av, dict) else None
-                                            if found:
-                                                total_seats = found
-                                                break
-                            except Exception:
-                                pass
-                        report['total_seats'] = total_seats
-                        if total_seats:
-                            report['available_seats'] = max(0, int(total_seats) - len(users))
-                except Exception as _se:
-                    report['_seat_err'] = str(_se)[:100]
+    
+                            total_seats = _find_seats(acc)
+                            # نجرّب أيضاً من endpoint الفواتير/الاشتراك
+                            if not total_seats:
+                                try:
+                                    sub_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/subscription'
+                                    sr = cffi_requests.get(sub_url, headers=self._headers(),
+                                                           impersonate='chrome110', timeout=12)
+                                    if sr.status_code == 200:
+                                        total_seats = _find_seats(sr.json())
+                                except Exception:
+                                    pass
+                            # نجرّب endpoint check (فيه معلومات الاشتراك الكاملة)
+                            if not total_seats:
+                                try:
+                                    chk_url = 'https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27'
+                                    cr = cffi_requests.get(chk_url, headers=self._headers(),
+                                                           impersonate='chrome110', timeout=12)
+                                    if cr.status_code == 200:
+                                        chk = cr.json()
+                                        report['_raw_check'] = str(chk)[:800]
+                                        total_seats = _find_seats(chk)
+                                        # نبحث في accounts داخل check
+                                        if not total_seats and isinstance(chk.get('accounts'), dict):
+                                            for _av in chk['accounts'].values():
+                                                found = _find_seats(_av) if isinstance(_av, dict) else None
+                                                if found:
+                                                    total_seats = found
+                                                    break
+                                except Exception:
+                                    pass
+                            report['total_seats'] = total_seats
+                            if total_seats:
+                                report['available_seats'] = max(0, int(total_seats) - len(users))
+                    except Exception as _se:
+                        report['_seat_err'] = str(_se)[:100]
+                    with _CGPT_STOCK_LOCK:
+                        if len(_CGPT_CAPACITY_CACHE) >= 128:
+                            _CGPT_CAPACITY_CACHE.pop(next(iter(_CGPT_CAPACITY_CACHE)), None)
+                        total_seats = report.get('total_seats')
+                        _CGPT_CAPACITY_CACHE[capacity_key] = {'total': total_seats,
+                            'expires': time.time() + (21600 if total_seats else 3600)}
                 # قائمة الإيميلات
                 report['user_emails'] = [u.get('email', '') for u in users][:20]
             elif r.status_code == 401:
@@ -1341,6 +1462,7 @@ def _cgpt_build_manager_from_doc(doc):
     if mgr.owner_email and mgr.owner_email not in mgr.invites_data.get('allowed_emails', []):
         mgr.invites_data.setdefault('allowed_emails', []).append(mgr.owner_email)
     mgr.allowed_emails = set(mgr.invites_data.get('allowed_emails', []))
+    mgr._saved_data_digest = _cgpt_data_fingerprint(mgr.invites_data)
     return mgr
 
 
@@ -1367,13 +1489,30 @@ def _cgpt_all_accounts():
     return accounts
 
 
-def _cgpt_account_seat_info(doc):
+def _cgpt_stock_guard(func):
+    @functools.wraps(func)
+    def guarded(doc, *args, **kwargs):
+        with _cgpt_account_lock(str(doc.get('_id'))):
+            return func(doc, *args, **kwargs)
+    return guarded
+
+
+@_cgpt_stock_guard
+def _cgpt_account_seat_info(doc, fresh=False):
     """يفحص حساباً ويرجّع معلومات مقاعده."""
+    key = _cgpt_stock_key(str(doc.get('_id')), doc.get('data', {}).get('accessToken'), doc.get('data', {}).get('sessionToken'), doc.get('manual_seats'))
+    with _CGPT_STOCK_LOCK:
+        hit = _CGPT_STOCK_CACHE.get(key)
+        if not fresh and hit and hit['expires'] > time.time():
+            return dict(hit['info'])
     mgr = _cgpt_build_manager_from_doc(doc)
     try:
+        mgr._capacity_cache_allowed = True
         rep = mgr.diagnose()
     except Exception:
         rep = {'connected': False, 'error': 'تعذر الاتصال بالحساب أثناء الفحص'}
+    finally:
+        mgr._capacity_cache_allowed = False
     total = rep.get('total_seats')
     used = rep.get('used_seats', 0)
     avail = rep.get('available_seats')
@@ -1382,7 +1521,7 @@ def _cgpt_account_seat_info(doc):
     if not total and manual_seats:
         total = int(manual_seats)
         avail = max(0, total - used) if rep.get('connected') else None
-    return {
+    info = {
         'id': str(doc.get('_id')),
         'name': doc.get('name', doc.get('data', {}).get('user', {}).get('email', 'حساب')),
         'email': doc.get('data', {}).get('user', {}).get('email') or rep.get('owner_email') or '?',
@@ -1394,6 +1533,11 @@ def _cgpt_account_seat_info(doc):
         'error': rep.get('error'),
         'mgr': mgr,
     }
+    with _CGPT_STOCK_LOCK:
+        if len(_CGPT_STOCK_CACHE) >= 128:
+            _CGPT_STOCK_CACHE.pop(next(iter(_CGPT_STOCK_CACHE)), None)
+        _CGPT_STOCK_CACHE[key] = {'expires': time.time() + (600 if info['connected'] else 120), 'info': dict(info)}
+    return info
 
 
 def _cgpt_process_pending_migrations():
@@ -1421,7 +1565,7 @@ def _cgpt_process_pending_migrations():
             db.cgpt_pending_migration.update_one({'_id': pm['_id']},
                 {'$set': {'status': 'migrated', 'to': target['email'],
                           'migrated_at': int(time.time())}})
-            _CGPT_SEATS_CACHE['exp'] = 0
+            _cgpt_stock_invalidate()
             # رسالة للعميل
             tg_uid = pm.get('telegram_uid')
             if tg_uid:
@@ -1550,7 +1694,7 @@ _CGPT_DISPLAY_LOCK = __import__('threading').Lock()
 def _cgpt_refresh_display_seats():
     try:
         value = _cgpt_total_available_seats()
-        _CGPT_DISPLAY_SEATS.update(value=value, expires=time.time() + 30)
+        _CGPT_DISPLAY_SEATS.update(value=value, expires=time.time() + 300)
     except Exception:
         # Keep the last known value and avoid spawning repeated failing checks.
         _CGPT_DISPLAY_SEATS['expires'] = time.time() + 15
@@ -1580,19 +1724,19 @@ def _cgpt_get_seats_cached():
     now = time.time()
     if _CGPT_SEATS_CACHE['exp'] > now:
         return _CGPT_SEATS_CACHE['val']
-    val = _cgpt_total_available_seats()
+    val = _cgpt_total_available_seats(fresh=True)
     _CGPT_SEATS_CACHE['val'] = val
     _CGPT_SEATS_CACHE['exp'] = now + 30
     return val
 
 
-def _cgpt_total_available_seats():
+def _cgpt_total_available_seats(fresh=False):
     """يرجّع إجمالي المقاعd المتاحة عبر كل الحسابات (تُستخdم كمخزون).
     دائماً يرجّع رقماً (لا غير محدود) — الحسابات بلا مقاعd مضبوطة تُعتبر 0."""
     total = 0
     for doc in _cgpt_all_accounts():
         try:
-            info = _cgpt_account_seat_info(doc)
+            info = _cgpt_account_seat_info(doc, fresh=fresh)
             if not info.get('connected'):
                 continue
             avail = info.get('available_seats')
@@ -1608,7 +1752,7 @@ def _cgpt_total_available_seats():
 def _cgpt_find_available_account():
     """يجد أول حساب فيه مقعد فارغ (للتوزيع التلقائي)."""
     for doc in _cgpt_all_accounts():
-        info = _cgpt_account_seat_info(doc)
+        info = _cgpt_account_seat_info(doc, fresh=True)
         if not info['connected']:
             continue
         avail = info.get('available_seats')
@@ -1717,6 +1861,38 @@ def _cgpt_notify_cookie_expired(account_id, email, status):
         logger.debug(f"_cgpt_notify_cookie_expired err: {_e}")
 
 
+def _cgpt_check_account(doc):
+    """Do not turn a temporary upstream outage into a cookie-expiry alert."""
+    manager = _cgpt_build_manager_from_doc(doc)
+    email = manager.owner_email or doc.get('name', 'حساب')
+    account = str(doc.get('_id'))
+    if not manager._loaded:
+        _cgpt_notify_cookie_expired(account, email, 'لا كوكيز')
+        return False
+    if not _cgpt_member_ready(manager):
+        _cgpt_send_expiry_reminders(manager)
+        return False
+    subscription = manager.check_subscription_status()
+    if subscription == 'deactivated':
+        logger.warning('[CGPT] subscription deactivated; migrating registered customers')
+        _cgpt_migrate_dead_account(doc)
+        _cgpt_notify_subscription_dead(account, email)
+        return False
+    if subscription == 'unauthorized':
+        _cgpt_member_defer(manager, 401)
+        _cgpt_notify_cookie_expired(account, email, '401 كوكيز')
+        return False
+    if subscription == 'error':
+        _cgpt_member_defer(manager, 'subscription-check')
+        _cgpt_send_expiry_reminders(manager)
+        return False
+    manager.check_and_cleanup()
+    if getattr(manager, '_last_fetch_failed', False) and getattr(manager, '_last_fetch_status', None) in (401, 403):
+        _cgpt_notify_cookie_expired(account, email, manager._last_fetch_status)
+    _cgpt_send_expiry_reminders(manager)
+    return not getattr(manager, '_last_fetch_failed', False)
+
+
 def _cgpt_daemon_loop():
     """Daemon thread يعمل كل 5 دقائق"""
     import time as _t
@@ -1737,30 +1913,7 @@ def _cgpt_daemon_loop():
             if _accs:
                 for _doc in _accs:
                     try:
-                        _m = _cgpt_build_manager_from_doc(_doc)
-                        _acc_email = _m.owner_email or _doc.get('name', 'حساب')
-                        _acc_id = str(_doc.get('_id'))
-                        if _m._loaded:
-                            # 1) نفحص حالة اشتراك البيزنس
-                            _sub = _m.check_subscription_status()
-                            if _sub == 'deactivated':
-                                # الاشتراك مات → ننقل عملاءه لحساب حيّ
-                                logger.warning(f"[CGPT] subscription DEAD for {_acc_email} — migrating")
-                                _cgpt_migrate_dead_account(_doc)
-                                _cgpt_notify_subscription_dead(_acc_id, _acc_email)
-                                continue
-                            elif _sub == 'unauthorized':
-                                _cgpt_notify_cookie_expired(_acc_id, _acc_email, '401 كوكيز')
-                                continue
-                            # 2) التنظيف العادي (منتهين + مخالفين)
-                            _m.check_and_cleanup()
-                            if getattr(_m, '_last_fetch_failed', False):
-                                _cgpt_notify_cookie_expired(_acc_id, _acc_email,
-                                    getattr(_m, '_last_fetch_status', '?'))
-                            # 3) تذكير قرب الانتهاء (قبل يوم)
-                            _cgpt_send_expiry_reminders(_m)
-                        else:
-                            _cgpt_notify_cookie_expired(_acc_id, _acc_email, 'لا كوكيز')
+                        _cgpt_check_account(_doc)
                     except Exception as _ce:
                         logger.debug(f"[CGPT] account cleanup err: {_ce}")
                 # بعd التنظيف: ننقل المعلّقين لو توفّرت مقاعd
@@ -2413,7 +2566,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 cg_emoji = cg.get('custom_emoji_id')
                 full_name = f"{cg.get('name','ChatGPT')} — {dur.get('label','')}"
                 try:
-                    cg_seats = _cgpt_get_seats_cached()
+                    cg_seats = _cgpt_total_available_seats()
                 except Exception:
                     cg_seats = None
                 return _json_resp(self, 200, {'success': True, 'product': {
@@ -2801,7 +2954,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 _mgr._last_buyer_uid = f"api_{uid}"
                 inv = _mgr.invite_user(buyer_email, cg_minutes)
                 if inv.get('ok'):
-                    _CGPT_SEATS_CACHE['exp'] = 0
+                    _cgpt_stock_invalidate()
                     order_id = "CGAPI" + __import__('uuid').uuid4().hex
                     try:
                         db.api_orders.insert_one({
@@ -3546,6 +3699,26 @@ def _net_host(url):
         return 'other'
 
 
+def _net_client_label(url):
+    host = _net_host(url)
+    try:
+        path = urllib.parse.urlsplit(str(url)).path
+        if host == 'api.telegram.org':
+            method = path.rsplit('/', 1)[-1]
+            known = {'getUpdates', 'getChatMember', 'getChat', 'getMe', 'getFile', 'sendMessage',
+                'sendDocument', 'sendPhoto', 'sendVideo', 'sendAnimation', 'editMessageText',
+                'editMessageReplyMarkup', 'answerCallbackQuery', 'copyMessage', 'deleteMessage',
+                'setChatMenuButton', 'getChatMenuButton', 'getCustomEmojiStickers'}
+            return host + '/' + (method if method in known else 'other')
+        if host == 'chatgpt.com':
+            route = 'members' if path.endswith('/users') else 'subscription' if path.endswith('/subscription') else \
+                    'subscription-check' if '/accounts/check/' in path else 'capacity' if re.search(r'/accounts/[^/]+/?$', path) else 'other'
+            return host + '/' + route
+    except Exception:
+        pass
+    return host
+
+
 def _net_accepts_gzip(headers):
     wildcard = False
     for item in str(headers.get('Accept-Encoding', '')).split(','):
@@ -3603,7 +3776,7 @@ def _net_install_clients():
                 raise
             finally:
                 try:
-                    _NET_METER.record('http_client', _net_host(request.url), sent=_net_request_size(request),
+                    _NET_METER.record('http_client', _net_client_label(request.url), sent=_net_request_size(request),
                         received=_net_received_size(response) if response is not None else 0,
                         errors=error or int(getattr(response, 'status_code', 0) >= 400))
                 except Exception:
@@ -3634,7 +3807,7 @@ def _net_install_clients():
                     received = _net_received_size(response) if response is not None else 0
                     if not received and response is not None and not kwargs.get('stream'):
                         received = _net_payload_size(getattr(response, 'content', None))
-                    _NET_METER.record('curl_client', _net_host(url), sent=request_size, received=received,
+                    _NET_METER.record('curl_client', _net_client_label(url), sent=request_size, received=received,
                         errors=error or int(getattr(response, 'status_code', 0) >= 400))
                 except Exception:
                     pass
@@ -3891,84 +4064,24 @@ def get_setting(key, default="Not Set"):
 REF_V2_INIT_KEY = 'referrals_v2_initialized_v6'
 
 def initialize_referrals_v2():
-    """يُنفّذ مرة واحدة فقط: يمسح كل ما يخص النظام القديم ويهيّئ الجدول الجديد."""
+    """Initialize indexes without deleting customers, referrals, balances or texts."""
     try:
-        already_init = db.settings.find_one({'key': REF_V2_INIT_KEY})
-        if already_init and already_init.get('value') == 'done':
-            logger.info("✅ نظام الإحالات V2 مُهيأ مسبقاً.")
-            return
-
-        logger.info("🔄 جاري تهيئة نظام الإحالات V2 (لأول مرة)...")
-
-        # 0. مسح المفاتيح القديمة لنسخ سابقة من التهيئة
-        try:
-            db.settings.delete_many({'key': {'$in': ['referrals_v2_initialized', 'referrals_v2_initialized_v2', 'referrals_v2_initialized_v3', 'referrals_v2_initialized_v4', 'referrals_v2_initialized_v5']}})
-        except Exception:
-            pass
-
-        # 1. مسح كامل لجدول الإحالات الجديد (لو موجود من تجارب سابقة)
-        try:
-            db.referrals_v2.delete_many({})
-        except Exception:
-            pass
-
-        # 2. مسح الحقول القديمة من جدول المستخدمين (referred_by القديم)
-        try:
-            db.users.update_many(
-                {},
-                {'$unset': {
-                    'referred_by': "",
-                    'ref_status': "",
-                    'ref_earned': "",
-                    'ref_v2_earned': ""
-                }}
-            )
-        except Exception as e:
-            logger.error(f"Error clearing old referral fields: {e}")
-        
-        # 2.5. مسح نص invite_txt المخصص القديم من custom_texts
-        # عشان يستخدم النص الجديد من الكود (اللي يحتوي على 6 متغيرات بدل 2)
-        try:
-            db.custom_texts.delete_many({'key': 'invite_txt'})
-            logger.info("✅ تم مسح النص القديم لرسالة الإحالات من custom_texts")
-        except Exception as e:
-            logger.error(f"Error clearing old invite_txt: {e}")
-
-        # 3. إنشاء فهارس (Indexes) لتسريع الاستعلامات
-        try:
-            db.referrals_v2.create_index('referrer_id')
-            db.referrals_v2.create_index('invited_id', unique=True)
-            db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
-            db.referrals_archived.create_index('referrer_id')
-            db.referrals_archived.create_index('invited_id')
-        except Exception as e:
-            logger.error(f"Error creating indexes: {e}")
-
-        # 🛡 4. حماية atomic ضد سرقة الحوالات (race conditions)
-        # هذولي الـ indexes حرجين - يمنعون أي مستخدمين من استخدام نفس الـ hash بنفس اللحظة
-        try:
-            db.used_transactions.create_index('transaction_id', unique=True)
-            logger.info("✅ تم إنشاء unique index على used_transactions")
-        except Exception as e:
-            # الـ index قد يكون موجود مسبقاً - هذا ok
-            logger.debug(f"used_transactions index info: {e}")
-        
-        try:
-            db.claimed_hashes.create_index('transaction_id', unique=True)
-            logger.info("✅ تم إنشاء unique index على claimed_hashes")
-        except Exception as e:
-            logger.debug(f"claimed_hashes index info: {e}")
-
-        # 4. وضع علامة أن النظام تم تهيئته
-        db.settings.update_one(
-            {'key': REF_V2_INIT_KEY},
-            {'$set': {'value': 'done', 'init_time': int(time.time())}},
-            upsert=True
-        )
-
-        logger.info("✅ تم تهيئة نظام الإحالات V2 بنجاح. (كل شي يبدأ من الصفر)")
-    except Exception as e:
-        logger.error(f"❌ فشل تهيئة نظام الإحالات V2: {e}")
+        db.referrals_v2.create_index('referrer_id')
+        db.referrals_v2.create_index('invited_id', unique=True)
+        db.referrals_v2.create_index([('referrer_id', 1), ('status', 1)])
+        db.referrals_v2.create_index([('status', 1), ('sub_next_check_at', 1)])
+        db.referrals_archived.create_index('referrer_id')
+        db.referrals_archived.create_index('invited_id')
+        db.used_transactions.create_index('transaction_id', unique=True)
+        db.claimed_hashes.create_index('transaction_id', unique=True)
+        db.ref_verification_challenges.create_index('expires_at', expireAfterSeconds=0)
+        db.ref_money_events.create_index([('status', 1), ('created_at', 1)])
+        db.ref_money_events.create_index([('ledger_pending', 1), ('created_at', 1)])
+        db.ref_balance_reconciliations.create_index('user_id')
+        db.settings.update_one({'key': REF_V2_INIT_KEY}, {'$setOnInsert': {
+            'value': 'done', 'init_time': int(time.time()), 'preserves_existing_data': True}}, upsert=True)
+    except Exception:
+        logger.exception('Could not initialize referral indexes; existing data was preserved')
 
 
 def normalize_tx_id(tx_id):
@@ -4439,6 +4552,7 @@ def register_new_referral(invited_id, referrer_id):
             db.referrals_v2.insert_one({
                 'invited_id': invited_id,
                 'referrer_id': referrer_id,
+                'ref_policy_version': 30,
                 'status': 'pending',
                 'created_at': int(time.time()),
                 'updated_at': int(time.time())
@@ -4465,6 +4579,69 @@ def register_new_referral(invited_id, referrer_id):
         return False
 
 
+def _ref_web_verified(rec):
+    if not rec or rec.get('dv') == 'rejected':
+        return False
+    if rec.get('web_verified_at') and rec.get('web_verified_version') == 2:
+        return rec.get('dv') in ('ok', 'ok_admin', 'flag')
+    # A prior website success is evidence; an administrator verdict alone is not.
+    if rec.get('dv') in ('ok', 'ok_admin', 'flag') and isinstance(rec.get('dv_at'), (int, float)) and rec['dv_at'] > 0:
+        failed_human = ('ما نجح في اختبار الإنسان', 'ضغطة مو حقيقية', 'ضغط أسرع من الإنسان')
+        return not any(any(token in str(reason) for token in failed_human) for reason in (rec.get('dv_reasons') or []))
+    return False
+
+
+def _ref_policy_requires_web(rec):
+    """Only referrals created by the new policy require the new website step."""
+    return bool(rec and rec.get('ref_policy_version') == 30)
+
+
+def _ref_countable(rec):
+    return bool(rec and rec.get('dv') != 'rejected' and
+                (not _ref_policy_requires_web(rec) or _ref_web_verified(rec)))
+
+
+def _ref_verified_query():
+    proof = {'dv': {'$in': ['ok', 'ok_admin', 'flag']}, '$or': [
+        {'web_verified_version': 2, 'web_verified_at': {'$gt': 0}},
+        {'dv_at': {'$gt': 0}, 'dv_reasons': {'$not': {'$elemMatch': {'$regex': 'ما نجح في اختبار الإنسان|ضغطة مو حقيقية|ضغط أسرع من الإنسان'}}}}]}
+    return {'$or': [{'ref_policy_version': {'$ne': 30}, 'dv': {'$ne': 'rejected'}}, proof]}
+
+
+def _ref_find(invited_id, restore=True):
+    invited_id = int(invited_id)
+    rec = db.referrals_v2.find_one({'invited_id': invited_id})
+    if rec or not restore:
+        return rec
+    old = db.referrals_archived.find_one({'invited_id': invited_id}, sort=[('archived_at', -1)])
+    if not old or not old.get('referrer_id'):
+        return None
+    restored = {k: v for k, v in old.items() if k not in ('_id', 'original_status') and v is not None}
+    restored.update(invited_id=invited_id, status='left', restored_at=int(time.time()))
+    try:
+        db.referrals_v2.update_one({'invited_id': invited_id}, {'$setOnInsert': restored}, upsert=True)
+    except Exception:
+        pass
+    return db.referrals_v2.find_one({'invited_id': invited_id})
+
+
+def _ref_lock_guard(func):
+    @functools.wraps(func)
+    def guarded(*args, **kwargs):
+        try:
+            if func.__name__ == 'mark_referral_status':
+                rec = _ref_find(args[0]) or {}
+                rid = int(rec.get('referrer_id') or 0)
+            else:
+                rid = int(args[0].data.replace('refwd_ok_', '').rsplit('_', 1)[0])
+        except (ValueError, TypeError, AttributeError, IndexError):
+            return func(*args, **kwargs)
+        with _get_referrer_lock(rid):
+            return func(*args, **kwargs)
+    return guarded
+
+
+@_ref_lock_guard
 def mark_referral_status(invited_id, new_status):
     """
     يحدّث حالة المُدعَى وبعدها يحدّث رصيد المُحيل تلقائياً.
@@ -4474,6 +4651,9 @@ def mark_referral_status(invited_id, new_status):
     """
     try:
         invited_id = int(invited_id)
+        if new_status == 'active':
+            if not _ref_countable(_ref_find(invited_id)) or check_forced_sub(invited_id) is not True:
+                return False
         
         # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
         result = db.referrals_v2.find_one_and_update(
@@ -4491,6 +4671,10 @@ def mark_referral_status(invited_id, new_status):
         )
         
         if result is None:
+            if new_status == 'active':
+                current = _ref_find(invited_id)
+                if current and current.get('cb_amount'):
+                    _ref_refund(current)
             return
         
         old_status = result.get('status', 'pending')
@@ -4524,7 +4708,7 @@ def mark_referral_status(invited_id, new_status):
 
 def _ms_fresh_q(referrer_id):
     """الإحالات النشطة اللي ما دخلت أي دفعة للحين — هذي بس اللي تنحسب للدفعة الجاية."""
-    return {'referrer_id': int(referrer_id), 'status': 'active', 'ms_batch': {'$exists': False}}
+    return dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active', ms_batch={'$exists': False})
 
 
 def ref_progress(referrer_id):
@@ -4539,7 +4723,7 @@ def ref_progress(referrer_id):
 
 def _ms_members(referrer_id, batch_no, threshold):
     """أعضاء دفعة: اللي انحسبوا لها من قبل (ms_batch) — ولو ناقصين نكمّل من الإحالات الجديدة (الأقدم أول)."""
-    q = {'referrer_id': int(referrer_id), 'status': 'active'}
+    q = dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active')
     mine = list(db.referrals_v2.find(dict(q, ms_batch=batch_no)).sort('_id', 1).limit(threshold))
     fresh = []
     if len(mine) < threshold:
@@ -4565,7 +4749,8 @@ def _ms_active_members(ms):
     ids = [int(x) for x in (ms or {}).get('members') or []]
     if not ids:
         return 0
-    return db.referrals_v2.count_documents({'invited_id': {'$in': ids}, 'status': 'active'})
+    return db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=int(ms['referrer_id']),
+                                               invited_id={'$in': ids}, status='active'))
 
 
 def _ms_cls(r):
@@ -4743,7 +4928,7 @@ def _ms_reopen_check(referrer_id):
             if ms.get('members'):
                 short = _ms_active_members(ms) < th
             else:      # دفعة قديمة بدون أعضاء محفوظين
-                short = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'}) < int(ms.get('active_count') or 0)
+                short = db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active')) < int(ms.get('active_count') or 0)
             if short:
                 db.referral_milestones.update_one({'_id': ms['_id'], 'status': 'pending'},
                                                   {'$set': {'status': 'reopened', 'reopened_at': now}})
@@ -4782,7 +4967,8 @@ def _notify_admin_referral_milestone(referrer_id):
             rth, _rw = _ms_snap(reo)
             if reo.get('members'):
                 have = [int(r['invited_id']) for r in db.referrals_v2.find(
-                    {'invited_id': {'$in': [int(x) for x in reo['members']]}, 'status': 'active'}, {'invited_id': 1})]
+                    dict(_ref_verified_query(), referrer_id=rid,
+                         invited_id={'$in': [int(x) for x in reo['members']]}, status='active'), {'invited_id': 1})]
                 need = rth - len(have)
                 add = [r['invited_id'] for r in db.referrals_v2.find(_ms_fresh_q(rid), {'invited_id': 1}).sort('_id', 1).limit(max(0, need))]
                 if need > 0 and len(add) < need:
@@ -4796,12 +4982,12 @@ def _notify_admin_referral_milestone(referrer_id):
                                                 {'$unset': {'ms_batch': ''}})
                 members = have + [int(x) for x in add]
             else:
-                if db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}) < int(reo.get('active_count') or 0):
+                if db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active')) < int(reo.get('active_count') or 0):
                     return
                 members = []
             db.referral_milestones.update_one({'_id': reo['_id'], 'status': 'reopened'},
                                               {'$set': {'status': 'pending', 'members': members, 'renotified_at': now,
-                                                        'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})}})
+                                                        'active_count': db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active'))}})
             txt, markup = _ms_summary_view(rid, reo['batch_no'])
             _ms_send_admins(txt, markup)
             return
@@ -4817,7 +5003,7 @@ def _notify_admin_referral_milestone(referrer_id):
                 db.referral_milestones.insert_one({
                     'referrer_id': rid, 'batch_no': batch_no, 'status': 'pending', 'members': ids,
                     'threshold': th, 'reward': float(get_referral_reward()),
-                    'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}),
+                    'active_count': db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active')),
                     'created_at': now})
             except Exception as e:
                 logger.warning(f"milestone save {rid}#{batch_no}: {e}")
@@ -4890,101 +5076,206 @@ def ref_unit_value(rec):
     if b is None:
         return None, None
     if int(b) == 0:
-        return _ref_legacy_unit(), 0
+        # A migration label is not proof that this referral was ever paid.
+        # Legacy rows without a recorded, attributable payment need review.
+        ms0 = db.referral_milestones.find_one({'referrer_id': int(rec.get('referrer_id') or 0),
+            'batch_no': 0, 'status': 'paid', 'members': int(rec.get('invited_id') or 0)})
+        if not ms0 or ms0.get('paid_amount') is None:
+            return None, 0
+        th, _reward = _ms_snap(ms0)
+        return round(float(ms0['paid_amount']) / max(1, th), 4), 0
     ms = db.referral_milestones.find_one({'referrer_id': int(rec.get('referrer_id') or 0), 'batch_no': int(b)})
-    if not ms or ms.get('status') != 'paid':
+    member_ids = {int(x) for x in (ms or {}).get('members', []) if str(x).isdigit()}
+    if not ms or ms.get('status') != 'paid' or (member_ids and int(rec.get('invited_id') or 0) not in member_ids):
         return None, int(b)
     th, rw = _ms_snap(ms)
     amt = ms.get('paid_amount')
-    amt = float(amt) if amt is not None else rw
+    if amt is None:
+        return None, int(b)
+    amt = float(amt)
     return round(amt / max(1, th), 4), int(b)
 
 
-def _ref_money(rid, delta, kind, note):
-    """يحرّك رصيد المحيل + «أرباح الإحالات» + سجل تعديلات الرصيد (يشوفه العميل)."""
-    u = db.users.find_one_and_update({'user_id': rid}, {'$inc': {'balance': delta}}, return_document=True)
-    if not u:
-        return None
-    try:
-        e = float(u.get('ref_v2_earned') or 0)
-    except Exception:
-        e = 0.0
-    db.users.update_one({'user_id': rid}, {'$set': {'ref_v2_earned': round(max(0.0, e + delta), 4)}})
-    try:
-        db.balance_logs.insert_one({'user_id': rid, 'type': kind, 'amount': round(delta, 4), 'note': note,
-                                    'date': datetime.datetime.utcnow(), 'new_balance': round(float(u.get('balance') or 0), 4)})
-    except Exception:
-        pass
-    try:
-        _invalidate_user_cache(rid)
-    except Exception:
-        pass
-    return u
+def _ref_units(value):
+    value = 0 if value in (None, '') else value
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError('Invalid referral money value')
+    return int((number * 10000).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+
+def _ref_money_finish(event, receipt):
+    rid, key = event['user_id'], event['_id']
+    db.ref_money_events.update_one({'_id': key}, {'$set': {
+        'status': 'applied', 'receipt': receipt, 'applied_at': int(time.time()), 'ledger_pending': True}})
+    db.balance_logs.update_one({'_id': 'ref:' + key}, {'$setOnInsert': {
+        'user_id': rid, 'type': event['kind'], 'amount': receipt['balance_delta'],
+        'nominal_amount': event['amount'], 'debt_delta': receipt['debt_delta'],
+        'ref_debt_after': receipt['debt_after'], 'ref_event': key, 'note': event['note'],
+        'date': datetime.datetime.fromtimestamp(event['created_at'], datetime.timezone.utc).replace(tzinfo=None),
+        'new_balance': receipt['balance_after']}}, upsert=True)
+    db.users.update_one({'user_id': rid}, {'$unset': {'_ref_ops.' + key: ''}})
+    db.ref_money_events.update_one({'_id': key}, {'$set': {'ledger_pending': False}})
+    _invalidate_user_cache(rid)
+    user = db.users.find_one({'user_id': rid})
+    if user:
+        user['_ref_receipt'] = receipt
+        user['_ref_event_id'] = key
+    return user
+
+
+def _ref_money(rid, delta, kind, note, event_key=None):
+    """Idempotent referral movement; liabilities never overdraw spendable balance."""
+    rid, nominal = int(rid), _ref_units(delta)
+    operation_key = str(event_key or secrets.token_hex(24))
+    key = hashlib.sha256(operation_key.encode()).hexdigest()[:32]
+    with _get_referrer_lock(rid):
+        event = db.ref_money_events.find_one_and_update({'_id': key}, {'$setOnInsert': {
+            'user_id': rid, 'amount': nominal / 10000, 'kind': kind, 'note': str(note)[:500],
+            'operation_key': operation_key,
+            'status': 'prepared', 'created_at': int(time.time())}}, upsert=True, return_document=True)
+        if event['user_id'] != rid or _ref_units(event['amount']) != nominal or event['kind'] != kind:
+            raise ValueError('Referral movement key was reused for another operation')
+        if event.get('status') == 'applied':
+            return _ref_money_finish(event, event['receipt'])
+        field = 'ref_v2_purchase_earned' if kind == 'ref_purchase' else 'ref_v2_earned'
+        for _attempt in range(12):
+            user = db.users.find_one({'user_id': rid})
+            if not user:
+                return None
+            saved = (user.get('_ref_ops') or {}).get(key)
+            if saved:
+                return _ref_money_finish(event, saved)
+            balance = _ref_units(user.get('balance'))
+            if balance < 0:
+                raise ValueError('Negative balance requires ledger review before referral movement')
+            debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
+            if nominal < 0:
+                balance_delta = -min(balance, -nominal)
+                debt_delta = -nominal + balance_delta
+            else:
+                debt_delta = -min(debt, nominal)
+                balance_delta = nominal + debt_delta
+            earned_delta = max(0, earned + nominal) - earned
+            receipt = {'balance_before': balance / 10000, 'balance_delta': balance_delta / 10000,
+                'balance_after': (balance + balance_delta) / 10000, 'debt_before': debt / 10000,
+                'debt_delta': debt_delta / 10000, 'debt_after': (debt + debt_delta) / 10000,
+                'earned_field': field, 'earned_delta': earned_delta / 10000}
+            query = {'user_id': rid, '_ref_ops.' + key: {'$exists': False}}
+            for name in ('balance', 'ref_debt', field):
+                query[name] = user[name] if name in user else {'$exists': False}
+            changed = db.users.find_one_and_update(query, {'$set': {
+                'balance': (balance + balance_delta) / 10000, 'ref_debt': (debt + debt_delta) / 10000,
+                '_ref_ops.' + key: receipt, field: (earned + earned_delta) / 10000}}, return_document=True)
+            if changed:
+                return _ref_money_finish(event, receipt)
+        raise RuntimeError('Referral wallet changed repeatedly; movement remains queued for retry')
 
 
 def _ref_clawback(rec, reason=None):
-    """إحالة كانت محسوبة في دفعة انصرفت ثم طلعت (أو انرفضت) → نخصم قيمتها بسعر دفعتها. مرة وحدة بس."""
+    """Reverse only an attributable paid reward, once per departure cycle."""
     try:
-        unit, b = ref_unit_value(rec)
+        unit, batch = ref_unit_value(rec)
         if not unit or unit <= 0:
             return 0.0
-        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
+        invited, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
         if not rid:
             return 0.0
-        now = int(time.time())
-        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': False}},
-                                                {'$set': {'cb_amount': unit, 'cb_at': now}})
-        if r is None:
-            return 0.0                     # انخصمت قبل
-        reason = reason or ('rejected' if rec.get('dv') == 'rejected' else 'left')
-        bl = f"الدفعة #{b}" if b else "قبل نظام الدفعات"
-        _ref_money(rid, -unit, 'ref_clawback', f"إحالة {'انرفضت' if reason == 'rejected' else 'طلعت من القناة'} ({inv}) · {bl}")
-        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'batch_no': b, 'amount': unit,
-                                     'kind': 'clawback', 'reason': reason, 'open': True, 'at': now})
-        try:
-            lang = get_lang(rid)
-            if lang == 'en':
-                t = (f"⚠️ <b>Referral deducted</b>\n\nSomeone you invited {'was rejected after review' if reason == 'rejected' else 'left the channel'}, "
-                     f"so <b>${unit:.2f}</b> was deducted — the same value it had when it was counted for you.")
-                if reason != 'rejected':
-                    t += "\n💡 If they join again, it is refunded automatically."
-            else:
-                t = (f"⚠️ <b>خصم إحالة</b>\n\nواحد من الناس اللي دعيتهم {'انرفض بعد المراجعة' if reason == 'rejected' else 'طلع من القناة'}، "
-                     f"فانخصم <b>${unit:.2f}</b> من رصيدك — نفس قيمته لما انحسب لك.")
-                if reason != 'rejected':
-                    t += "\n💡 لو رجع اشترك، يرجع لك المبلغ تلقائياً."
-            bot.send_message(rid, t, parse_mode='HTML')
-        except Exception:
-            pass
-        return unit
-    except Exception as e:
-        logger.warning(f"referral clawback {rec.get('invited_id')}: {e}")
+        with _get_referrer_lock(rid):
+            token = secrets.token_hex(16)
+            current = db.referrals_v2.find_one_and_update(
+                {'invited_id': invited, 'cb_amount': {'$exists': False}}, {'$set': {
+                    'cb_amount': unit, 'cb_at': int(time.time()), 'cb_token': token, 'cb_status': 'processing'}},
+                return_document=True)
+            if current is None:
+                current = db.referrals_v2.find_one({'invited_id': invited}) or {}
+                if current.get('cb_status') != 'processing' or not current.get('cb_token'):
+                    return 0.0
+            token, unit = current['cb_token'], float(current['cb_amount'])
+            reason = reason or ('rejected' if rec.get('dv') == 'rejected' else 'left')
+            note = f"إحالة {'انرفضت' if reason == 'rejected' else 'طلعت من القناة'} ({invited}) · الدفعة #{batch}"
+            user = _ref_money(rid, -unit, 'ref_clawback', note, event_key='clawback:' + token)
+            if not user:
+                return 0.0
+            receipt = user['_ref_receipt']
+            db.ref_clawbacks.update_one({'_id': 'cb:' + token}, {'$setOnInsert': {
+                'invited_id': invited, 'referrer_id': rid, 'batch_no': batch, 'amount': unit,
+                'kind': 'clawback', 'reason': reason, 'open': True, 'at': int(time.time()),
+                'withdrawn': -receipt['balance_delta'], 'deferred': receipt['debt_delta'],
+                'event_id': user['_ref_event_id']}}, upsert=True)
+            db.referrals_v2.update_one({'invited_id': invited, 'cb_token': token},
+                                       {'$set': {'cb_status': 'applied', 'cb_event_id': user['_ref_event_id']}})
+            try:
+                if get_lang(rid) == 'en':
+                    text = (f"⚠️ <b>Referral reward reversed</b>\n\nReward value: <b>${unit:.4f}</b>. "
+                            f"Balance deducted: <b>${-receipt['balance_delta']:.4f}</b>. "
+                            f"Pending against future referral rewards: <b>${receipt['debt_delta']:.4f}</b>."
+                            "\nIf the referral qualifies again, this reversal is refunded.")
+                else:
+                    text = (f"⚠️ <b>استرجاع مكافأة إحالة</b>\n\nقيمة المكافأة: <b>${unit:.4f}</b>. "
+                            f"المخصوم من الرصيد المتاح: <b>${-receipt['balance_delta']:.4f}</b>. "
+                            f"المتبقي للتسوية من مكافآت الإحالات القادمة: <b>${receipt['debt_delta']:.4f}</b>."
+                            "\nإذا عادت الإحالة واستوفت التحقق، يُعكس هذا الاسترجاع.")
+                bot.send_message(rid, text, parse_mode='HTML')
+            except Exception:
+                pass
+            return unit
+    except Exception:
+        logger.exception('Referral clawback deferred; its saved operation can be retried')
         return 0.0
 
 
 def _ref_refund(rec):
-    """الإحالة اللي انخصمت رجعت نشطة → نرجّع نفس المبلغ اللي انخصم."""
+    """Reverse the exact recorded clawback; a retry can never credit it twice."""
     try:
-        if not (rec or {}).get('cb_amount') or rec.get('dv') == 'rejected':
-            return 0.0
-        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
-        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': True}},
-                                                {'$unset': {'cb_amount': '', 'cb_at': ''}})
-        if r is None or not r.get('cb_amount'):
-            return 0.0
-        amt = float(r['cb_amount'])
-        _ref_money(rid, amt, 'ref_refund', f"رجعت إحالة ({inv})")
-        db.ref_clawbacks.update_many({'invited_id': inv, 'kind': 'clawback', 'open': True}, {'$set': {'open': False, 'refunded_at': int(time.time())}})
-        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'amount': amt, 'kind': 'refund', 'at': int(time.time())})
-        try:
-            bot.send_message(rid, (f"✅ <b>Referral back</b>\n\nThe person who left joined again — <b>${amt:.2f}</b> refunded."
-                                   if get_lang(rid) == 'en' else
-                                   f"✅ <b>رجعت لك إحالة</b>\n\nالشخص اللي طلع رجع اشترك، فرجّعنا لك <b>${amt:.2f}</b>."), parse_mode='HTML')
-        except Exception:
-            pass
-        return amt
-    except Exception as e:
-        logger.warning(f"referral refund {rec.get('invited_id')}: {e}")
+        invited, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
+        with _get_referrer_lock(rid):
+            current = db.referrals_v2.find_one({'invited_id': invited}) or {}
+            if not current.get('cb_amount') or not _ref_countable(current):
+                return 0.0
+            if current.get('cb_status') == 'processing':
+                _ref_clawback(current)
+                current = db.referrals_v2.find_one({'invited_id': invited}) or {}
+                if current.get('cb_status') != 'applied':
+                    return 0.0
+            amount = float(current['cb_amount'])
+            if not current.get('cb_token'):
+                proven_debit = db.balance_logs.find_one({'user_id': rid, 'type': 'ref_clawback',
+                    'amount': -amount, 'note': {'$regex': r'\(' + re.escape(str(invited)) + r'\)'}})
+                prior = db.ref_clawbacks.find_one({'invited_id': invited, 'kind': 'clawback',
+                    'open': True, 'amount': amount})
+                if not proven_debit or not prior:
+                    logger.warning('Legacy referral refund needs ledger review: invited=%s', invited)
+                    return 0.0
+            token = current.get('cb_token') or ('legacy-' + hashlib.sha256(
+                f"{invited}|{current.get('cb_at')}|{amount}".encode()).hexdigest()[:24])
+            db.referrals_v2.update_one({'invited_id': invited, 'cb_amount': amount},
+                {'$set': {'cb_refund_pending': True}})
+            user = _ref_money(rid, amount, 'ref_refund', f'رجعت إحالة ({invited})', event_key='refund:' + token)
+            if not user:
+                return 0.0
+            db.ref_clawbacks.update_many({'invited_id': invited, 'kind': 'clawback', 'open': True},
+                {'$set': {'open': False, 'refunded_at': int(time.time())}})
+            db.ref_clawbacks.update_one({'_id': 'rf:' + token}, {'$setOnInsert': {
+                'invited_id': invited, 'referrer_id': rid, 'amount': amount, 'kind': 'refund',
+                'at': int(time.time()), 'event_id': user['_ref_event_id'],
+                'credited': user['_ref_receipt']['balance_delta'],
+                'debt_cancelled': -user['_ref_receipt']['debt_delta']}}, upsert=True)
+            db.referrals_v2.update_one({'invited_id': invited, 'cb_amount': amount}, {'$unset': {
+                'cb_amount': '', 'cb_at': '', 'cb_token': '', 'cb_status': '', 'cb_event_id': '', 'cb_refund_pending': ''}})
+            try:
+                receipt = user['_ref_receipt']
+                text = (f"✅ <b>Referral restored</b>\n\nReversed ${amount:.4f}: "
+                        f"${receipt['balance_delta']:.4f} credited and ${-receipt['debt_delta']:.4f} liability cancelled."
+                        if get_lang(rid) == 'en' else
+                        f"✅ <b>رجعت لك إحالة</b>\n\nعُكس مبلغ ${amount:.4f}: "
+                        f"أُضيف ${receipt['balance_delta']:.4f} للرصيد وأُلغي ${-receipt['debt_delta']:.4f} من المستحق.")
+                bot.send_message(rid, text, parse_mode='HTML')
+            except Exception:
+                pass
+            return amount
+    except Exception:
+        logger.exception('Referral refund deferred; its saved operation can be retried')
         return 0.0
 
 
@@ -5003,7 +5294,7 @@ def ref_ms_scan(limit=500):
     n = 0
     try:
         rids = [d['_id'] for d in db.referrals_v2.aggregate([
-            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
+            {'$match': dict(_ref_verified_query(), status='active', ms_batch={'$exists': False})},
             {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}])][:limit]
     except Exception:
         rids = []
@@ -5021,7 +5312,7 @@ def ref_ms_ready_count():
     th = max(1, int(get_referral_threshold()))
     try:
         return sum(1 for _ in db.referrals_v2.aggregate([
-            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
+            {'$match': dict(_ref_verified_query(), status='active', ms_batch={'$exists': False})},
             {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}]))
     except Exception:
         return 0
@@ -5162,6 +5453,7 @@ def send_progress_log_notification(referrer_id):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_ok_"))
 @admin_required
+@_ref_lock_guard
 def ref_milestone_approve(call):
     """✅ الأدمن يمنح مكافأة إنجاز الإحالات يدوياً."""
     bot.answer_callback_query(call.id)
@@ -5174,25 +5466,35 @@ def ref_milestone_approve(call):
         return
 
     milestone = db.referral_milestones.find_one({
-        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
+        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}})
     _any = _ms_doc(referrer_id, batch_no) or {}
     _th, _rw = _ms_snap(_any)
     if not milestone and _any.get('status') == 'reopened':
         bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما تكمل {_th} إحالة.")
         return
     referrer = db.users.find_one({'user_id': referrer_id}) or {}
+    if milestone and not milestone.get('members'):
+        # Old aggregate totals cannot establish which referrals were paid. Pin only
+        # verified members of this batch or unassigned referrals, never a paid batch.
+        members = _ms_members(referrer_id, batch_no, _th)
+        if len(members) >= _th:
+            ids = [int(r['invited_id']) for r in members]
+            db.referral_milestones.update_one({'_id': milestone['_id']}, {'$set': {'members': ids}})
+            db.referrals_v2.update_many({'referrer_id': referrer_id, 'invited_id': {'$in': ids}},
+                                       {'$set': {'ms_batch': batch_no}})
+            milestone['members'] = ids
     if milestone and milestone.get('members'):
         _valid = _ms_active_members(milestone) >= _th
-    else:     # دفعة قديمة بدون أعضاء محفوظين: نفس الفحص القديم
-        _valid = db.referrals_v2.count_documents({'referrer_id': referrer_id, 'status': 'active'}) >= int((milestone or {}).get('active_count') or 0)
+    else:
+        _valid = False
     if not milestone or not referrer or referrer.get('is_banned') == 1 or not _valid:
         bot.send_message(call.message.chat.id, '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.')
         return
 
-    # 🛡 منع الصرف المزدوج: نعلّم الدفعة كـ paid ذرياً
+    # Save a resumable payment intent; mark paid only after the wallet receipt exists.
     res = db.referral_milestones.find_one_and_update(
-        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$ne': 'paid'}},
-        {'$set': {'status': 'paid', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
+        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}},
+        {'$set': {'status': 'paying', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
         return_document=False
     )
     if res is None:
@@ -5200,22 +5502,13 @@ def ref_milestone_approve(call):
         return
 
     reward = _rw     # 💰 سعر الدفعة لحظة اكتمالها — تغيير الإعداد بعدها ما يأثر عليها
-    db.users.update_one({'user_id': referrer_id}, {'$inc': {'balance': reward}})
-    try:      # «أرباح الإحالات» في حسابه تزيد بنفس المبلغ اللي انصرف فعلاً
-        _u = db.users.find_one({'user_id': referrer_id}, {'ref_v2_earned': 1}) or {}
-        try:
-            _old = float(_u.get('ref_v2_earned') or 0)
-        except Exception:
-            _old = 0.0
-        db.users.update_one({'user_id': referrer_id}, {'$set': {'ref_v2_earned': round(_old + reward, 4)}})
-        db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {'paid_amount': reward}})
-        _nb = (db.users.find_one({'user_id': referrer_id}, {'balance': 1}) or {}).get('balance')
-        db.balance_logs.insert_one({'user_id': referrer_id, 'type': 'ref_reward', 'amount': reward,
-                                    'note': f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", 'date': datetime.datetime.utcnow(),
-                                    'new_balance': round(float(_nb or 0), 4)})
-        _invalidate_user_cache(referrer_id)
-    except Exception:
-        pass
+    credited = _ref_money(referrer_id, reward, 'ref_reward',
+        f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", event_key=f'milestone:{referrer_id}:{batch_no}')
+    if not credited:
+        bot.send_message(call.message.chat.id, '⏳ لم يكتمل الصرف؛ الطلب محفوظ لإعادة المحاولة دون تكرار المكافأة.')
+        return
+    db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {
+        'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
     # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
     try:
         _mem = [int(x) for x in (milestone.get('members') or [])]
@@ -5231,6 +5524,10 @@ def ref_milestone_approve(call):
                f"مقابل إكمال {_th} إحالة ناجحة. شكراً لك!") if rl == 'ar' else \
               (f"🎉 <b>Referral reward!</b>\n\n<b>${reward:.2f}</b> has been added to your balance "
                f"for completing {_th} successful referrals. Thank you!")
+        receipt = credited['_ref_receipt']
+        if receipt['debt_delta'] < 0:
+            msg += (f"\nتمت تسوية ${-receipt['debt_delta']:.4f} من المستحقات؛ الصافي المضاف للرصيد ${receipt['balance_delta']:.4f}."
+                    if rl == 'ar' else f"\n${-receipt['debt_delta']:.4f} settled against liabilities; cash credited ${receipt['balance_delta']:.4f}.")
         bot.send_message(referrer_id, msg, parse_mode="HTML")
     except Exception:
         pass
@@ -5353,10 +5650,10 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
             return False  # الشراء أقل من الحد الأدنى - لا مكافأة
         
         # نشوف هل المشتري عنده مُحيل في النظام الجديد
-        ref_record = db.referrals_v2.find_one({'invited_id': buyer_uid})
+        ref_record = _ref_find(buyer_uid)
         if not ref_record:
             return False  # المشتري ما له مُحيل
-        if ref_record.get('dv') == 'rejected':
+        if ref_record.get('status') != 'active' or not _ref_countable(ref_record):
             return False  # 🛡 الأدمن رفض هذي الإحالة (جهاز مكرر / وهمي)
         
         referrer_id = int(ref_record.get('referrer_id', 0))
@@ -5369,16 +5666,8 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
             return False
         
         # 🛡 منح المكافأة atomic
-        result = db.users.find_one_and_update(
-            {'user_id': referrer_id},
-            {
-                '$inc': {
-                    'balance': purchase_reward,
-                    'ref_v2_purchase_earned': purchase_reward
-                }
-            },
-            return_document=True
-        )
+        result = _ref_money(referrer_id, purchase_reward, 'ref_purchase',
+                            f'مكافأة شراء إحالة ({buyer_uid})')
         
         if result is None:
             return False
@@ -5389,6 +5678,9 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
                 'referrer_id': referrer_id,
                 'buyer_id': buyer_uid,
                 'amount': purchase_reward,
+                'balance_credited': result['_ref_receipt']['balance_delta'],
+                'debt_settled': -result['_ref_receipt']['debt_delta'],
+                'ref_event': result['_ref_event_id'],
                 'product': product_name,
                 'purchase_amount': purchase_amount,
                 'timestamp': int(time.time())
@@ -5470,8 +5762,252 @@ def _get_referrer_lock(referrer_id):
     """يرجع lock مخصص لكل referrer لتفادي race conditions"""
     with _referrer_locks_master:
         if referrer_id not in _referrer_locks:
-            _referrer_locks[referrer_id] = threading.Lock()
+            _referrer_locks[referrer_id] = threading.RLock()
         return _referrer_locks[referrer_id]
+
+
+def _ref_repair_plan(uid):
+    user = db.users.find_one({'user_id': int(uid)}, {'user_id': 1, 'balance': 1, 'ref_debt': 1}) or {}
+    balance = _ref_units(user.get('balance'))
+    if balance >= 0:
+        return {'user_id': int(uid), 'state': 'clean', 'corrected': False}
+    running, evidence = balance, []
+    for log in db.balance_logs.find({'user_id': int(uid)}).sort([('date', -1), ('_id', -1)]).limit(5000):
+        try:
+            after, amount = _ref_units(log.get('new_balance')), _ref_units(log.get('amount'))
+        except (ValueError, InvalidOperation, TypeError):
+            break
+        if after != running or log.get('type') not in ('ref_clawback', 'ref_refund') or not amount:
+            break
+        if (log['type'] == 'ref_clawback' and amount >= 0) or (log['type'] == 'ref_refund' and amount <= 0):
+            break
+        evidence.append(str(log['_id']))
+        running -= amount
+        if running >= 0:
+            return {'user_id': int(uid), 'state': 'proven_referral_overdraft', 'corrected': False,
+                'balance_before': balance / 10000, 'debt_before': max(0, _ref_units(user.get('ref_debt'))) / 10000,
+                'move_to_debt': -balance / 10000, 'evidence_count': len(evidence),
+                'evidence_hash': hashlib.sha256('|'.join(evidence).encode()).hexdigest(),
+                'last_log': evidence[0]}
+    return {'user_id': int(uid), 'state': 'needs_ledger_review', 'corrected': False,
+            'balance_before': balance / 10000, 'reason': 'The available ledger does not prove the entire negative balance came from referral reversals.'}
+
+
+def _ref_repair_audit(user):
+    receipt = user.get('_ref_repair29') or {}
+    if not receipt or receipt.get('audited'):
+        return
+    key = receipt['reference']
+    db.ref_balance_reconciliations.update_one({'_id': key}, {'$setOnInsert': {
+        **receipt, 'user_id': user['user_id'], 'status': 'applied'}}, upsert=True)
+    db.balance_logs.update_one({'_id': 'ref-repair:' + key}, {'$setOnInsert': {
+        'user_id': user['user_id'], 'type': 'ref_debt_reclass', 'amount': receipt['move_to_debt'],
+        'debt_delta': receipt['move_to_debt'], 'new_balance': 0.0,
+        'ref_debt_after': receipt['debt_after'], 'net_change': 0.0,
+        'date': datetime.datetime.fromtimestamp(receipt['at'], datetime.timezone.utc).replace(tzinfo=None),
+        'note': 'نقل سالب موثق من استرجاع الإحالات إلى مستحقات منفصلة؛ صافي الحساب لم يتغير.'}}, upsert=True)
+    db.users.update_one({'user_id': user['user_id'], '_ref_repair29.reference': key},
+                        {'$set': {'_ref_repair29.audited': True}})
+
+
+def _ref_repair_user(uid):
+    with _get_referrer_lock(int(uid)):
+        plan = _ref_repair_plan(uid)
+        if plan['state'] != 'proven_referral_overdraft':
+            return plan
+        user = db.users.find_one({'user_id': int(uid)}) or {}
+        if _ref_units(user.get('balance')) != _ref_units(plan['balance_before']):
+            return {'user_id': int(uid), 'state': 'changed_during_review', 'corrected': False}
+        key = hashlib.sha256(f"r29|{uid}|{plan['balance_before']}|{plan['last_log']}".encode()).hexdigest()[:32]
+        receipt = {**plan, 'reference': key, 'at': int(time.time()), 'audited': False,
+                   'balance_after': 0.0, 'debt_after': round(plan['debt_before'] + plan['move_to_debt'], 4),
+                   'net_before': round(plan['balance_before'] - plan['debt_before'], 4),
+                   'net_after': -round(plan['debt_before'] + plan['move_to_debt'], 4)}
+        query = {'user_id': int(uid), 'balance': user['balance'],
+                 'ref_debt': user['ref_debt'] if 'ref_debt' in user else {'$exists': False}}
+        try:
+            changed = db.users.find_one_and_update(query, {'$set': {
+                'balance': 0.0, 'ref_debt': receipt['debt_after'], '_ref_repair29': receipt}}, return_document=True)
+        except Exception:
+            changed = db.users.find_one({'user_id': int(uid), '_ref_repair29.reference': key})
+            if not changed:
+                raise
+        if not changed:
+            return {'user_id': int(uid), 'state': 'changed_during_review', 'corrected': False}
+        _ref_repair_audit(changed)
+        _invalidate_user_cache(int(uid))
+        return {**receipt, 'corrected': True, 'state': 'reclassified'}
+
+
+def _ref_repair_batch():
+    result = {'checked': 0, 'corrected': 0, 'review': 0, 'moved': 0.0, 'rows': []}
+    for user in db.users.find({'balance': {'$lt': 0}}, {'user_id': 1}):
+        result['checked'] += 1
+        try:
+            row = _ref_repair_user(user['user_id'])
+        except Exception:
+            logger.exception('Referral balance reconciliation could not finish')
+            row = {'user_id': user['user_id'], 'state': 'retry_needed', 'corrected': False}
+        result['corrected'] += int(row.get('corrected', False))
+        result['review'] += int(not row.get('corrected') and row.get('state') != 'clean')
+        result['moved'] += row.get('move_to_debt', 0) if row.get('corrected') else 0
+        result['rows'].append(row)
+    for user in db.users.find({'_ref_repair29.audited': False}, {'user_id': 1, '_ref_repair29': 1}):
+        _ref_repair_audit(user)
+    return result
+
+
+def _ref_audit_send(chat_id):
+    result = _ref_repair_batch()
+    prior = list(db.ref_balance_reconciliations.find({}, {'user_id': 1, 'move_to_debt': 1}))
+    text = ('🧾 <b>تسوية أرصدة الإحالات</b>\n\n'
+        f"فُحص الآن: {result['checked']}\nأُعيد تصنيف السالب مع حفظ الصافي: {result['corrected']}\n"
+        f"يحتاج مراجعة لعدم كفاية السجل: {result['review']}\n"
+        f"إجمالي الحسابات المسوّاة سابقًا وحاليًا: {len(prior)}\n\n"
+        'التسوية تنقل السالب المثبت إلى مستحقات منفصلة؛ لا تمنح مالًا ولا تمحو مستحقًا. '
+        'الرصيد المتاح والمستحق يظهران للمستخدم، والتفاصيل في التقرير. '
+        'هذه ليست إثباتًا أن الخصم الأصلي صحيح. لمعرفة حركة حساب: /refwhy ثم الآيدي أو اليوزر.')
+    bot.send_message(chat_id, text, parse_mode='HTML')
+    payload = {'current_run': result, 'recorded_reconciliations': prior}
+    data = io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode())
+    data.name = 'referral-balance-reconciliation.json'
+    bot.send_document(chat_id, data, caption='تقرير التسوية؛ الحالات غير المثبتة تُترك للمراجعة.')
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'ad_ref_balance_audit')
+@admin_required
+def _ref_audit_cb(call):
+    bot.answer_callback_query(call.id)
+    _ref_audit_send(call.message.chat.id)
+
+
+@bot.message_handler(commands=['refaudit'])
+def _ref_audit_cmd(message):
+    if _is_admin_check(message.from_user.id):
+        _ref_audit_send(message.chat.id)
+
+
+def _ref_balance_diagnosis(target):
+    """Read-only, bounded account report. A stored reason is not membership proof."""
+    target = str(target or '').strip().lstrip('@')
+    if target.isdigit():
+        query = {'user_id': int(target)}
+    elif re.fullmatch(r'[A-Za-z0-9_]{3,32}', target):
+        query = {'username': {'$regex': '^@?' + re.escape(target) + '$', '$options': 'i'}}
+    else:
+        return {'state': 'invalid_target', 'read_only': True}
+    users = list(db.users.find(query, {'_id': 0, 'user_id': 1, 'username': 1, 'balance': 1,
+        'ref_debt': 1, 'ref_v2_earned': 1, 'ref_v2_purchase_earned': 1}).limit(3))
+    if len(users) != 1:
+        return {'state': 'not_found' if not users else 'ambiguous_username', 'read_only': True,
+                'matching_user_ids': [u['user_id'] for u in users]}
+    user, uid = users[0], int(users[0]['user_id'])
+    totals = list(db.balance_logs.aggregate([{'$match': {'user_id': uid}}, {'$group': {
+        '_id': '$type', 'count': {'$sum': 1}, 'cash_amount': {'$sum': '$amount'},
+        'debt_delta': {'$sum': '$debt_delta'}}}]))
+    recent = list(db.balance_logs.find({'user_id': uid}, {'_id': 0, 'type': 1, 'amount': 1,
+        'nominal_amount': 1, 'debt_delta': 1, 'new_balance': 1, 'old_balance': 1,
+        'balance_source': 1, 'date': 1, 'note': 1, 'by_admin': 1,
+        'ref_event': 1}).sort('date', -1).limit(250))
+    for log in recent:
+        if 'note' in log:
+            log['note'] = str(log['note'])[:400]
+    reasons = list(db.ref_clawbacks.aggregate([{'$match': {'referrer_id': uid, 'kind': 'clawback'}},
+        {'$group': {'_id': '$reason', 'count': {'$sum': 1}, 'nominal_amount': {'$sum': '$amount'}}}]))
+    statuses = list(db.referrals_v2.aggregate([{'$match': {'referrer_id': uid}},
+        {'$group': {'_id': '$status', 'count': {'$sum': 1}}}]))
+    tables = {}
+    sources = [('orders', {'user_id': uid}), ('ext_orders', {'user_id': uid}),
+        ('api_orders', {'api_user_id': uid}), ('used_transactions', {'user_id': uid}),
+        ('purchase_rewards', {'referrer_id': uid}), ('referral_milestones', {'referrer_id': uid}),
+        ('ref_money_events', {'user_id': uid})]
+    money_fields = ('amount', 'price', 'total_price', 'paid_amount', 'reward', 'balance_credited', 'debt_settled')
+    safe_fields = {key: 1 for key in ('_id', 'user_id', 'api_user_id', 'referrer_id', 'buyer_id',
+        'order_id', 'product_id', 'type', 'status', 'via', 'quantity', 'qty', 'date', 'created_at',
+        'timestamp', 'paid_at', 'batch_no', 'threshold', 'active_count', 'kind', 'applied_at',
+        'receipt.balance_before', 'receipt.balance_after', 'receipt.balance_delta',
+        'receipt.debt_before', 'receipt.debt_after', 'receipt.debt_delta', *money_fields)}
+    for name, match in sources:
+        group = {'_id': None, 'count': {'$sum': 1}}
+        group.update({'recorded_' + key: {'$sum': '$' + key} for key in money_fields})
+        summary = list(db[name].aggregate([{'$match': match}, {'$group': group}]))
+        tables[name] = {'summary': {k: v for k, v in (summary[0] if summary else {'count': 0}).items() if k != '_id'},
+            'recent': list(db[name].find(match, safe_fields).sort('_id', -1).limit(150)), 'recent_limit': 150}
+    last = next((row for row in recent if isinstance(row.get('new_balance'), (int, float))), None)
+    current_balance = round(float(user.get('balance') or 0), 4)
+    assessment = {'current_balance': current_balance, 'requires_review': current_balance < 0,
+        'latest_balance_log_value': round(float(last['new_balance']), 4) if last else None,
+        'latest_balance_log_date': last.get('date') if last else None,
+        'change_since_latest_balance_log': round(current_balance - float(last['new_balance']), 4) if last else None,
+        'latest_log_snapshot_independently_verified': bool(last and last.get('balance_source') == 'atomic_wallet_update'),
+        'caution': 'Legacy new_balance snapshots may have come from a stale user cache. '
+                   'The change since the latest balance log may include purchases, deposits and rewards kept in other tables. '
+                   'Separate table totals are not combined because a single movement may appear in more than one table.'}
+    referral_settings = list(db.settings.find({'key': {'$in': ['referral_threshold', 'referral_reward',
+        'referral_purchase_reward', 'referral_min_purchase', 'ref_batches_v2', 'ref_dv_since',
+        'referrals_v2_initialized_v6']}}, {'_id': 0, 'key': 1, 'value': 1, 'init_time': 1, 'at': 1}))
+    return {'report_version': 2, 'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals,
+        'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons,
+        'referrals_by_status': statuses, 'assessment': assessment, 'financial_tables': tables,
+        'referral_settings': referral_settings,
+        'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}),
+        'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. '
+                       'No credit, deduction, reclassification or debt forgiveness was performed.'}
+
+
+@bot.message_handler(commands=['refwhy'])
+def _ref_why_cmd(message):
+    if not _is_admin_check(message.from_user.id):
+        return
+    parts = str(message.text or '').split(maxsplit=1)
+    if len(parts) < 2:
+        bot.send_message(message.chat.id, '🔎 أرسل /refwhy ثم آيدي المستخدم أو @username. الفحص للقراءة فقط.')
+        return
+    report = _ref_balance_diagnosis(parts[1])
+    if report['state'] != 'found':
+        text = {'not_found': 'لم يوجد حساب بهذا اليوزر؛ قد يكون قد تغيّر. استخدم الآيدي الرقمي.',
+                'ambiguous_username': 'اليوزر موجود في أكثر من سجل قديم؛ استخدم الآيدي الرقمي.',
+                'invalid_target': 'اكتب آيدي Telegram رقميًا أو يوزر صحيحًا.'}[report['state']]
+        bot.send_message(message.chat.id, text)
+        return
+    user = report['account']
+    lines = ['🔎 <b>سبب رصيد المستخدم — فحص فقط</b>', f"🆔 <code>{user['user_id']}</code>",
+        f"الرصيد الحالي: <b>${float(user.get('balance') or 0):.4f}</b>",
+        f"مستحقات إحالات منفصلة: ${float(user.get('ref_debt') or 0):.4f}",
+        f"الإحالات القديمة: {report['legacy_referrals']}", '', '<b>إجمالي حركات السجل بحسب النوع:</b>']
+    for row in report['ledger_totals'][:20]:
+        lines.append(f"• {html.escape(str(row['_id']))}: {row['count']} حركة؛ صافي الرصيد ${float(row.get('cash_amount') or 0):.4f}")
+    lines.extend(['', '<b>الأسباب التي سجلها البوت للخصومات:</b>'])
+    labels = {'left': 'مغادرة مسجلة', 'rejected': 'رفض مسجل'}
+    for row in report['stored_clawback_reasons'][:10]:
+        label = labels.get(row['_id'], str(row['_id'] or 'غير محفوظ'))
+        lines.append(f"• {html.escape(label)}: {row['count']}؛ المبلغ الاسمي ${float(row.get('nominal_amount') or 0):.4f}")
+    lines.extend(['', '⚠️ وصف «مغادرة» في السجل لا يثبت وحده مغادرة فعلية؛ النسخ السابقة كانت قد تعامل فشل الاتصال كمغادرة.',
+                  'لم يتغير الرصيد. ملف التقرير يحفظ آخر 250 حركة لتحديد الخصومات التي تحتاج عكسًا مثبتًا.'])
+    bot.send_message(message.chat.id, '\n'.join(lines)[:3900], parse_mode='HTML')
+    data = io.BytesIO(json.dumps(report, ensure_ascii=False, indent=2, default=str).encode())
+    data.name = f"referral-balance-{user['user_id']}.json"
+    bot.send_document(message.chat.id, data, caption='تقرير قراءة فقط؛ لا يتضمن بيانات اتصال قاعدة البيانات.')
+
+
+def _ref_resume_financial():
+    for event in db.ref_money_events.find({'$or': [{'status': 'prepared'}, {'ledger_pending': True}]}).limit(100):
+        if not event.get('operation_key'):
+            continue
+        try:
+            _ref_money(event['user_id'], event['amount'], event['kind'], event['note'], event_key=event.get('operation_key'))
+        except Exception:
+            logger.debug('Saved referral movement is waiting for retry')
+    for milestone in db.referral_milestones.find({'status': 'paying'}).limit(100):
+        operation = f"milestone:{milestone['referrer_id']}:{milestone['batch_no']}"
+        event = db.ref_money_events.find_one({'_id': hashlib.sha256(operation.encode()).hexdigest()[:32], 'status': 'applied'})
+        if event:
+            db.referral_milestones.update_one({'_id': milestone['_id'], 'status': 'paying'}, {'$set': {
+                'status': 'paid', 'paid_amount': event['amount'], 'money_event': event['_id']}})
+    for rec in db.referrals_v2.find({'cb_status': 'processing'}).limit(100):
+        _ref_clawback(rec)
+    for rec in db.referrals_v2.find({'cb_refund_pending': True}).limit(100):
+        _ref_refund(rec)
 
 
 def get_ref_counts(referrer_id):
@@ -5479,137 +6015,87 @@ def get_ref_counts(referrer_id):
     try:
         rid = int(referrer_id)
         pending = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'pending'})
-        active = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
-        # left من الأرشيف فقط (المؤكد مغادرتهم)
-        left = db.referrals_archived.count_documents({'referrer_id': rid})
+        active = db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active'))
+        all_active = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
+        pending += all_active - active
+        left = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'left'})
+        old = list(db.referrals_archived.aggregate([{'$match': {'referrer_id': rid}},
+            {'$group': {'_id': '$invited_id'}}, {'$lookup': {'from': 'referrals_v2',
+                'localField': '_id', 'foreignField': 'invited_id', 'as': 'live'}},
+            {'$match': {'live.0': {'$exists': False}}}, {'$count': 'n'}]))
+        left += old[0]['n'] if old else 0
         total = pending + active + left
         return pending, active, left, total
     except Exception:
         return 0, 0, 0, 0
 
 
+_REF_SCAN_WAKE = threading.Event()
+_REF_SCAN_HEALTH = {'retry_at': 0}
+
+
+def _ref_checker_tick(limit=100):
+    """Only due, website-verified referrals need periodic membership requests."""
+    now = int(time.time())
+    if _REF_SCAN_HEALTH['retry_at'] > now:
+        return 0
+    due = {'status': {'$in': ['pending', 'active', 'left']}, '$and': [_ref_verified_query(),
+        {'$or': [{'sub_next_check_at': {'$exists': False}}, {'sub_next_check_at': {'$lte': now}}]}]}
+    refs = list(db.referrals_v2.find(due).sort('sub_next_check_at', 1).limit(max(1, min(200, int(limit)))))
+    errors, checked = 0, 0
+    for rec in refs:
+        uid = int(rec['invited_id'])
+        subscribed = check_forced_sub(uid, use_cache=False)
+        checked += 1
+        changes = {'sub_checked_at': now}
+        if subscribed is None:
+            errors += 1
+            changes.update(sub_next_check_at=now + 120)
+            if rec.get('left_checks', 0):
+                changes['left_checks'] = 0
+        elif subscribed is True:
+            errors = 0
+            if rec.get('status') != 'active' or rec.get('cb_amount'):
+                mark_referral_status(uid, 'active')
+            changes['sub_next_check_at'] = now + 21600 + uid % 301
+            if rec.get('left_checks', 0):
+                changes['left_checks'] = 0
+        elif rec.get('status') == 'active':
+            checks = int(rec.get('left_checks') or 0) + 1
+            changes.update(left_checks=checks, sub_next_check_at=now + 60)
+            if checks >= 3:
+                mark_referral_status(uid, 'left')
+                saved = db.referrals_v2.find_one({'invited_id': uid}) or rec
+                archive_id = 'ref-left:' + str(uid) + ':' + str(saved.get('cb_token') or now)
+                archived = {k: v for k, v in saved.items() if k != '_id'}
+                archived.update(status='left', original_status='active', archived_at=now)
+                db.referrals_archived.update_one({'_id': archive_id}, {'$setOnInsert': archived}, upsert=True)
+                changes['sub_next_check_at'] = now + 21600 + uid % 301
+        else:
+            changes['sub_next_check_at'] = now + (300 if rec.get('status') == 'pending' else 21600 + uid % 301)
+        db.referrals_v2.update_one({'_id': rec['_id']}, {'$set': changes})
+        if errors >= 3:
+            _REF_SCAN_HEALTH['retry_at'] = now + 120
+            break
+    return checked
+
+
 def background_referral_checker_v2():
-    """
-    فاحص خلفي ذكي - يتجنب Telegram Rate Limit
-    
-    🛡 الاستراتيجية:
-    - يفحص pending و active فقط
-    - لو شخص مو مشترك → يزيد عداد left_checks
-    - لازم 3 فحوصات متتالية تأكد المغادرة
-    - بعد التأكيد → ينقل للأرشيف (referrals_archived)
-    - خطأ اتصال = يتجاهل ويصفّر العداد
-    """
-    
-    # ═══ إصلاح لمرة واحدة: رجّع الإحالات اللي صارت 'left' بالغلط ═══
+    """Existing referrals keep their policy; new referrals require website verification."""
     try:
-        fix_key = db.settings.find_one({'key': 'ref_left_fix_v1'})
-        if not fix_key:
-            wrong_left = db.referrals_v2.count_documents({'status': 'left'})
-            if wrong_left > 0:
-                db.referrals_v2.update_many(
-                    {'status': 'left'},
-                    {'$set': {'status': 'active', 'left_checks': 0}}
-                )
-                logger.info(f"🔧 Fixed {wrong_left} wrongly-marked 'left' referrals → reset to 'active' for re-verification")
-            db.settings.insert_one({'key': 'ref_left_fix_v1', 'value': True})
-    except Exception as e:
-        logger.error(f"Error in referral fix: {e}")
-    BATCH_SIZE = 10
-    DELAY_BETWEEN_CHECKS = 0.15
-    DELAY_BETWEEN_CYCLES = 60
-    LEFT_CONFIRM_NEEDED = 3  # لازم 3 فحوصات متتالية تأكد إنه غادر
-    
-    # ⏳ انتظار 90 ثانية بعد تشغيل البوت عشان الاتصال يستقر
+        logger.info('Negative balances available for administrator ledger review: %s',
+                    db.users.count_documents({'balance': {'$lt': 0}}))
+    except Exception:
+        logger.exception('Could not read referral balance review count')
     time.sleep(90)
-    logger.info("🔄 Background referral checker started.")
-    
     while True:
         try:
-            # نفحص pending و active فقط (left محفوظة في referrals_archived)
-            cursor = db.referrals_v2.find({
-                'status': {'$in': ['pending', 'active']}
-            })
-            
-            batch_count = 0
-            for r in cursor:
-                inv_uid = r.get('invited_id')
-                if not inv_uid:
-                    continue
-                
-                current_status = r.get('status', 'pending')
-                
-                try:
-                    is_subbed = check_forced_sub(int(inv_uid))
-                except Exception:
-                    time.sleep(DELAY_BETWEEN_CHECKS)
-                    continue
-                
-                # None = خطأ اتصال — نحافظ على الحالة + نصفّر العداد
-                if is_subbed is None:
-                    if r.get('left_checks', 0) != 0:
-                        db.referrals_v2.update_one(
-                            {'invited_id': inv_uid},
-                            {'$set': {'left_checks': 0}}
-                        )
-                    time.sleep(DELAY_BETWEEN_CHECKS)
-                    continue
-                
-                if is_subbed:
-                    # مشترك ✅
-                    if current_status != 'active':
-                        if not ref_dv_required(r):
-                            mark_referral_status(inv_uid, 'active')
-                        elif r.get('dv') is None:
-                            _ref_dv_prompt(int(inv_uid))      # 🛡 نرسل له زر التحقق مرة وحدة
-                    # نصفّر عداد المغادرة
-                    if r.get('left_checks', 0) != 0:
-                        db.referrals_v2.update_one(
-                            {'invited_id': inv_uid},
-                            {'$set': {'left_checks': 0}}
-                        )
-                else:
-                    # مو مشترك — نزيد العداد
-                    if current_status == 'active':
-                        left_checks = r.get('left_checks', 0) + 1
-                        if left_checks >= LEFT_CONFIRM_NEEDED:
-                            # ✅ مؤكد غادر — ننقله للأرشيف
-                            referrer_id = r.get('referrer_id')
-                            _cb = _ref_clawback(r, 'left')          # 💸 بسعر دفعته
-                            db.referrals_archived.insert_one({
-                                'invited_id': inv_uid,
-                                'referrer_id': referrer_id,
-                                'status': 'left',
-                                'original_status': current_status,
-                                'ms_batch': r.get('ms_batch'),
-                                'cb_amount': _cb or None,
-                                'archived_at': int(time.time())
-                            })
-                            # نحذفه من الأساسي
-                            db.referrals_v2.delete_one({'invited_id': inv_uid})
-                            # نحدّث رصيد المُحيل
-                            try:
-                                _ms_reopen_check(referrer_id)
-                                update_referrer_balance(referrer_id)
-                            except Exception: pass
-                            logger.info(f"📤 Referral {inv_uid} archived as LEFT (confirmed {LEFT_CONFIRM_NEEDED}x)")
-                        else:
-                            db.referrals_v2.update_one(
-                                {'invited_id': inv_uid},
-                                {'$set': {'left_checks': left_checks}}
-                            )
-                    # pending ما يصير left — يبقى pending
-                
-                time.sleep(DELAY_BETWEEN_CHECKS)
-                
-                batch_count += 1
-                if batch_count >= BATCH_SIZE:
-                    batch_count = 0
-                    time.sleep(2)
-        except Exception as e:
-            logger.error(f"Background ref checker error: {e}")
-        
-        # دورة كاملة كل 30 ثانية (آمن وكافي)
-        time.sleep(DELAY_BETWEEN_CYCLES)
+            _ref_resume_financial()
+            _ref_checker_tick()
+        except Exception:
+            logger.exception('Background referral verification cycle failed')
+        _REF_SCAN_WAKE.wait(timeout=60)
+        _REF_SCAN_WAKE.clear()
 
 
 # 🆕 فاحص فوري للإحالات الجديدة عند الـ /start
@@ -6701,6 +7187,13 @@ def _has_arabic_letters(text):
                for ch in str(text))
 
 
+def _cms_arabic_count(text):
+    # Count actual unprotected letters, not Arabic commas, digits or emoji fallbacks.
+    import unicodedata
+    plain = html.unescape(_PRESERVE_RE.sub('', str(text or '')))
+    return sum('\u0600' <= ch <= '\u08ff' and unicodedata.category(ch).startswith('L') for ch in plain)
+
+
 def _try_previous_translator(text, target_lang):
     """Restore the original library without letting stalled calls consume all workers."""
     if not _LEGACY_TRANSLATOR_SLOTS.acquire(blocking=False):
@@ -7636,6 +8129,48 @@ def is_user_banned(uid):
 
 _FORCED_SUB_CACHE = {}          # {uid: (result, expiry_ts)}
 _FORCED_SUB_CACHE_TTL = 300     # 5 دقائق — نتذكّر أن الشخص مشترك فلا نستعلم كل ضغطة
+_FSUB_CHANNEL_CACHE = {'expires': 0, 'rows': []}
+_FSUB_CHANNEL_LOCK = threading.RLock()
+
+
+def _fsub_channels():
+    with _FSUB_CHANNEL_LOCK:
+        if _FSUB_CHANNEL_CACHE['expires'] <= time.time():
+            rows = list(db.required_channels.find())
+            _FSUB_CHANNEL_CACHE.update(rows=rows, expires=time.time() + 120)
+        return _FSUB_CHANNEL_CACHE['rows']
+
+
+def _fsub_invalidate():
+    _FSUB_CHANNEL_CACHE['expires'] = 0
+    _FORCED_SUB_CACHE.clear()
+
+
+def _fsub_joined(member):
+    status = getattr(member, 'status', None)
+    if status in ('left', 'kicked'):
+        return False
+    if status == 'restricted':
+        return getattr(member, 'is_member', None)
+    return True if status in ('member', 'administrator', 'creator', 'owner') else None
+
+
+@bot.chat_member_handler(func=lambda update: True)
+def _ref_channel_membership_changed(update):
+    chat = update.chat
+    identities = {str(chat.id), '@' + str(getattr(chat, 'username', '') or '').lower()}
+    if not any(str(c.get('channel_id', '')).lower() in identities for c in _fsub_channels()):
+        return
+    uid = int(update.new_chat_member.user.id)
+    _FORCED_SUB_CACHE.pop(uid, None)
+    db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
+        'sub_next_check_at': int(time.time()), 'membership_event_at': int(time.time())}})
+    _REF_SCAN_WAKE.set()
+
+
+def _ref_allowed_updates():
+    return sorted(set(getattr(telebot.util, 'update_types', ['message', 'callback_query', 'pre_checkout_query'])) |
+                  {'chat_member', 'my_chat_member'})
 
 
 def check_forced_sub(uid, use_cache=True):
@@ -7648,23 +8183,27 @@ def check_forced_sub(uid, use_cache=True):
     في كل ضغطة — التنقّل يصير فورياً. النتيجة False لا تُخزَّن (نعيد الفحص
     فوراً حتى يشترك). التخزين يُمسح تلقائياً بعد المدة.
     """
-    if uid == OWNER_ID: return True
-    user_db = get_user_data_full(uid)
-    if user_db and user_db.get('is_admin') == 1: return True
-    chans = list(db.required_channels.find())
-    if not chans: return True
-
     # ⚡ cache: لو عندنا نتيجة "مشترك" حديثة، نرجّعها فوراً بلا استعلام
     if use_cache:
         cached = _FORCED_SUB_CACHE.get(uid)
         if cached and cached[1] > time.time() and cached[0] is True:
             return True
 
+    if uid == OWNER_ID: return True
+    user_db = get_user_data_full(uid)
+    if user_db and user_db.get('is_admin') == 1: return True
+    chans = _fsub_channels()
+    if not chans: return True
+
     had_error = False
     for c in chans:
         try:
             member = bot.get_chat_member(c['channel_id'], uid)
-            if member.status in ['left', 'kicked']:
+            joined = _fsub_joined(member)
+            if joined is None:
+                had_error = True
+                continue
+            if not joined:
                 # غير مشترك: نمسح أي cache قديم ونرجّع False فوراً
                 _FORCED_SUB_CACHE.pop(uid, None)
                 return False  # طلع من قناة واحدة = مو مشترك أكيد
@@ -7709,6 +8248,7 @@ def _fsub_meta(c, refresh=False):
             logger.debug(f"fsub meta {cid}: {e}")
         try:
             db.required_channels.update_one({'_id': c['_id']}, {'$set': upd})
+            _fsub_invalidate()
         except Exception:
             pass
     if not link and uname:
@@ -7736,7 +8276,8 @@ def forced_sub_status(uid):
 def _telegram_delivery_kind(exc):
     text = str(exc).lower()
     if any(token in text for token in ('user is deactivated', 'bot was blocked by the user',
-                                      'chat not found', 'bot was kicked')):
+                                      'chat not found', 'bot was kicked', "can't initiate conversation",
+                                      'bot cannot initiate conversation', "bot can't send messages to bots")):
         return 'unreachable'
     if 'parse entities' in text or "can't parse" in text:
         return 'format'
@@ -7863,6 +8404,82 @@ def _cgpt_retry_api_receipts():
 
 # Temporary delivery backoff only; never remove administrator permissions.
 _ADMIN_NOTICE_PAUSED = {}
+_ADMIN_NOTICE_DELIVERY_CACHE = {}
+_ADMIN_NOTICE_DELIVERY_LOCK = threading.RLock()
+
+
+def _admin_notice_delivery_state(recipient):
+    now = time.time()
+    with _ADMIN_NOTICE_DELIVERY_LOCK:
+        cached = _ADMIN_NOTICE_DELIVERY_CACHE.get(recipient)
+        if cached and cached['until'] > now:
+            return cached['state']
+        try:
+            state = db.admin_notice_delivery.find_one({'_id': str(recipient)}) or {}
+        except Exception:
+            logger.debug('Could not read administrator delivery state')
+            return {}
+        if len(_ADMIN_NOTICE_DELIVERY_CACHE) >= 256:
+            _ADMIN_NOTICE_DELIVERY_CACHE.pop(next(iter(_ADMIN_NOTICE_DELIVERY_CACHE)), None)
+        _ADMIN_NOTICE_DELIVERY_CACHE[recipient] = {'until': now + 300, 'state': state}
+        if state.get('state') == 'unreachable' and state.get('retry_at', 0) > now:
+            _ADMIN_NOTICE_PAUSED[recipient] = state['retry_at']
+        return state
+
+
+def _admin_notice_pause_until(recipient):
+    _admin_notice_delivery_state(recipient)
+    return _ADMIN_NOTICE_PAUSED.get(recipient, 0)
+
+
+def _admin_notice_unreachable(recipient, exc):
+    """Persist one actionable incident and retain every queued notice for retry."""
+    with _ADMIN_NOTICE_DELIVERY_LOCK:
+        prior = _admin_notice_delivery_state(recipient)
+        failures = min(8, int(prior.get('failures', 0)) + 1)
+        retry_at = time.time() + min(86400, 3600 * 2 ** (failures - 1))
+        text = str(exc).lower()
+        reason = ('blocked' if 'blocked' in text else 'deactivated' if 'deactivated' in text else
+                  'not_started_or_wrong_id' if 'chat not found' in text or 'initiate conversation' in text else
+                  'unreachable')
+        with _error_scope(source='background', operation='admin-notice:' + str(recipient)):
+            reference = _error_capture(
+                'Admin notification unreachable; recipient=' + str(recipient) + '; reason=' + reason +
+                '. افتح البوت من هذا الحساب وأرسل /start، وتأكد من OWNER_ID وإلغاء الحظر. الإشعارات محفوظة لإعادة التسليم.',
+                level='WARNING', location='notify_admins')
+        state = {'state': 'unreachable', 'reason': reason, 'failures': failures,
+                 'retry_at': retry_at, 'last_failure_at': time.time(), 'error_ref': reference}
+        try:
+            db.admin_notice_delivery.update_one({'_id': str(recipient)}, {'$set': state}, upsert=True)
+        except Exception:
+            logger.debug('Could not persist administrator delivery pause')
+        if len(_ADMIN_NOTICE_PAUSED) >= 256:
+            _ADMIN_NOTICE_PAUSED.pop(next(iter(_ADMIN_NOTICE_PAUSED)), None)
+        _ADMIN_NOTICE_PAUSED[recipient] = retry_at
+        _ADMIN_NOTICE_DELIVERY_CACHE[recipient] = {'until': time.time() + 300, 'state': state}
+
+
+def _admin_notice_resume(recipient, incoming=False):
+    with _ADMIN_NOTICE_DELIVERY_LOCK:
+        state = _admin_notice_delivery_state(recipient)
+        paused = state.get('state') == 'unreachable' or recipient in _ADMIN_NOTICE_PAUSED
+        if not paused:
+            return False
+        try:
+            db.admin_notice_delivery.update_one({'_id': str(recipient)}, {'$set': {
+                'state': 'reachable', 'failures': 0, 'retry_at': 0, 'recovered_at': time.time(),
+                'recovery': 'private_start' if incoming else 'successful_delivery'}}, upsert=True)
+            db.api_purchase_notices.update_many({'status': 'pending', 'sent_to': {'$ne': recipient}},
+                                               {'$set': {'retry_at': time.time()}})
+        except Exception:
+            logger.debug('Could not resume persisted administrator delivery state')
+            return False
+        _ADMIN_NOTICE_PAUSED.pop(recipient, None)
+        _ADMIN_NOTICE_DELIVERY_CACHE.pop(recipient, None)
+        if state.get('error_ref'):
+            _error_resolve_automatic(state['error_ref'], 'Administrator can receive bot messages again')
+        _ADMIN_NOTICE_WAKE.set()
+        return True
 
 
 def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=None):
@@ -7896,7 +8513,7 @@ def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=N
         if until <= now:
             _ADMIN_NOTICE_PAUSED.pop(old_id, None)
     for recipient in recipients:
-        if _ADMIN_NOTICE_PAUSED.get(recipient, 0) > now:
+        if _admin_notice_pause_until(recipient) > now:
             continue
         failure = None
         try:
@@ -7913,13 +8530,11 @@ def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=N
                     failure = plain_exc
         if failure is None:
             delivered = True
+            _admin_notice_resume(recipient)
         if failure is not None:
             kind = _telegram_delivery_kind(failure)
             if kind == 'unreachable':
-                if len(_ADMIN_NOTICE_PAUSED) >= 256:
-                    _ADMIN_NOTICE_PAUSED.pop(next(iter(_ADMIN_NOTICE_PAUSED), None), None)
-                _ADMIN_NOTICE_PAUSED[recipient] = now + 3600
-                logger.warning('Admin notification unreachable: recipient=%s; paused for 1 hour', recipient)
+                _admin_notice_unreachable(recipient, failure)
             else:
                 logger.warning('Admin notification failed: recipient=%s kind=%s error_type=%s',
                                recipient, kind, type(failure).__name__)
@@ -8110,8 +8725,15 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
         logger.info(f"[HELPER] shop_detail_ui_helper called: chat_id={chat_id}, uid={uid}, pid={pid}, lang={lang}, msg_edit={message_id_to_edit}")
         p = find_product(pid)
         if not p:
-            logger.warning(f"[HELPER] find_product returned None for pid={pid}")
-            bot.send_message(chat_id, bil(uid, "❌ عذراً، المنتج غير متوفر.", "❌ Sorry, product is unavailable."), parse_mode="HTML")
+            logger.info('[HELPER] stale or unavailable product link: pid=%s', pid)
+            markup = InlineKeyboardMarkup(row_width=1)
+            markup.add(create_btn(uid, 'btn_shop_search', callback_data='shop_search'))
+            markup.add(create_btn(uid, 'btn_shop_avail', callback_data='shop_available'))
+            markup.add(create_btn(uid, 'btn_products', callback_data='open_shop'))
+            bot.send_message(chat_id, bil(uid,
+                'هذا الرابط قديم أو أن المنتج لم يعد متاحًا. يمكنك البحث عنه أو تصفح المنتجات المتوفرة.',
+                'This link is out of date or the product is no longer available. Search or browse available products below.'),
+                parse_mode='HTML', reply_markup=markup)
             return False
         
         pid_actual = p['_id']
@@ -8534,6 +9156,8 @@ def start_handler(message):
 
     user = get_user_data_full(uid)
     user_was_new = (user is None)
+    if chat_id == uid and (uid == OWNER_ID or (user and user.get('is_admin') == 1)):
+        _admin_notice_resume(uid, incoming=True)
     
     if not user:
         full_text = "" if is_callback else (message.text or "")
@@ -8589,9 +9213,19 @@ def start_handler(message):
     # ============================================================
     # ✅ تحديث حالة الإحالة (لو هذا المستخدم مُدعى من شخص آخر)
     # ============================================================
-    ref_record = db.referrals_v2.find_one({'invited_id': uid})
+    ref_record = _ref_find(uid)
     
-    if not check_forced_sub(uid):
+    subscription_state = check_forced_sub(uid)
+    if subscription_state is not True:
+        if subscription_state is None:
+            markup = InlineKeyboardMarkup()
+            markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
+            bot.send_message(chat_id,
+                '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'
+                if lang == 'en' else
+                '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
+                reply_markup=markup)
+            return
         if ref_record:
             current = ref_record.get('status', 'pending')
             if current == 'active':
@@ -9518,6 +10152,13 @@ def invite_ui(call):
             f"⚡ <i>تحديثات لحظية</i>"
         )
     
+    debt = max(0.0, float(u.get('ref_debt') or 0))
+    final_text += ("\n\n🛡 Referrals count only after website verification." if l == 'en' else
+                   "\n\n🛡 لا تُحسب الإحالة إلا بعد إكمال التحقق داخل الموقع.")
+    if debt:
+        final_text += (f"\n🧾 Pending referral reversal: <b>${debt:.4f}</b>. Future referral rewards settle this first; spendable balance is shown separately."
+                       if l == 'en' else f"\n🧾 مستحق استرجاع إحالات: <b>${debt:.4f}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.")
+
     # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
     sent_successfully = False
     
@@ -11266,7 +11907,7 @@ def cgpt_email_confirmed(call):
         db.users.update_one({'user_id': buyer_uid}, {'$inc': {'balance': price}})
         _invalidate_user_cache(buyer_uid)
         # نمسح الـ cache ليعيد الحساب
-        _CGPT_SEATS_CACHE['exp'] = 0
+        _cgpt_stock_invalidate()
         bot.send_message(buyer_uid,
             (get_text(buyer_uid, 'cg_notice_15')))
         return
@@ -11275,7 +11916,7 @@ def cgpt_email_confirmed(call):
     days = round(minutes / 1440, 1)
 
     if result['ok']:
-        _CGPT_SEATS_CACHE['exp'] = 0  # نمسح cache المقاعd (نقص مقعd)
+        _cgpt_stock_invalidate()  # نمسح cache المقاعd (نقص مقعd)
         expires_iso = result['expires_at']
         db.orders.insert_one({
             'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
@@ -18470,7 +19111,8 @@ def ad_ref_settings_ui(call):
         f"   <b>${purchase_reward:.2f}</b>\n\n"
         f"💵 الحد الأدنى لقيمة الشراء:\n"
         f"   <b>${min_purchase:.2f}</b>\n\n"
-        f"🛡 تحقق الجهاز قبل حساب الإحالة:\n"
+        f"🛡 التحقق داخل الموقع: <b>إجباري دائمًا</b>\n"
+        f"فحص الأجهزة الإضافي:\n"
         f"   <b>{'مفعّل' if ref_dv_enabled() else 'موقوف'}</b>\n"
         f"━━━━━━━━━━━━━━\n\n"
         f"💡 <b>مثال على آلية العمل:</b>\n"
@@ -18490,7 +19132,8 @@ def ad_ref_settings_ui(call):
         _dv_n = db.referrals_v2.count_documents({'dv': 'flag'})
     except Exception:
         _dv_on, _dv_n = True, 0
-    markup.add(InlineKeyboardButton(f"🛡 تحقق الجهاز للإحالات: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
+    markup.add(InlineKeyboardButton(f"🛡 فحص الأجهزة الإضافي: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
+    markup.add(InlineKeyboardButton('🧾 فحص وتسوية أرصدة الإحالات', callback_data='ad_ref_balance_audit'))
     markup.add(InlineKeyboardButton(f"⚠️ إحالات مشكوك فيها ({_dv_n})", callback_data="refdv_list"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
     
@@ -23078,7 +23721,6 @@ def ad_reset_text_to_default(call):
     except Exception:
         pass
 
-@safe_next_step
 def _text_fallback_for_lang(key, lang, expected_placeholders):
     """يرجّع أفضل نص متاح للغة المطلوبة عند فشل الترجمة.
 
@@ -23108,6 +23750,7 @@ def _text_fallback_for_lang(key, lang, expected_placeholders):
     return None
 
 
+@safe_next_step
 def ad_save_custom_text(message, key):
     if not _is_admin_check(message.from_user.id):
         return
@@ -23138,7 +23781,7 @@ def ad_save_custom_text(message, key):
             return
 
     # 🆕 اكتشاف اللغة: نشيك على النص بعد إزالة HTML والإيموجيات
-    text_only = re.sub(r'<[^>]+>', '', final_text)
+    text_only = _PRESERVE_RE.sub('', final_text)
     text_only = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', text_only, flags=re.DOTALL)
     text_only = re.sub(r'\{[^}]*\}', '', text_only)
     text_only = re.sub(r'[━─═]+', '', text_only)
@@ -23152,7 +23795,7 @@ def ad_save_custom_text(message, key):
     text_only = emoji_pattern.sub('', text_only).strip()
     
     # نعد أحرف عربية vs إنجليزية
-    arabic_chars = len(re.findall(r'[\u0600-\u06FF]', text_only))
+    arabic_chars = _cms_arabic_count(text_only)
     english_chars = len(re.findall(r'[a-zA-Z]', text_only))
     
     # نحدد لغة النص
@@ -23209,13 +23852,13 @@ def ad_save_custom_text(message, key):
     #    مع الترجمة بالتقسيم هذا نادر جداً، لكن لو حصل نعالج الأسطر المتبقية
     #    فقط — ولا نرمي الترجمة كلها (المستخدم يريد ترجمة، لا استسلاماً).
     if source_lang == 'ar':
-        _ar_left = len(re.findall(r'[\u0600-\u06FF]', final_text_en))
+        _ar_left = _cms_arabic_count(final_text_en)
         if _ar_left > 0:
-            logger.warning(f"Partial translation for '{key}': {_ar_left} Arabic chars remain — retrying lines")
+            logger.info(f"Partial translation for '{key}': {_ar_left} Arabic chars remain — retrying lines")
             try:
                 _fixed = []
                 for _ln in final_text_en.split('\n'):
-                    if re.search(r'[\u0600-\u06FF]', _ln):
+                    if _cms_arabic_count(_ln):
                         _re_tr = _translate_single_line(_ln, 'en')
                         _fixed.append(_re_tr if _re_tr else _ln)
                     else:
@@ -23225,17 +23868,23 @@ def ad_save_custom_text(message, key):
                 if (len(re.findall(r'\{[^}]*\}', _cand)) == ar_count and
                         len(re.findall(r'<tg-emoji', _cand)) == ar_emojis):
                     final_text_en = _cand
-                    _ar_left = len(re.findall(r'[\u0600-\u06FF]', final_text_en))
+                    _ar_left = _cms_arabic_count(final_text_en)
             except Exception as _re_err:
                 logger.debug(f"line retry err: {_re_err}")
 
             if _ar_left > 0:
-                bot.send_message(
-                    message.chat.id,
-                    "⚠️ <b>بعض الأسطر تعذّرت ترجمتها</b> (غالباً انقطاع مؤقت في خدمة الترجمة).\n\n"
-                    "💡 <i>أعد الحفظ بعد دقيقة، أو أرسل النص بالإنجليزية مباشرة.</i>",
-                    parse_mode="HTML"
-                )
+                logger.warning('CMS translation remains incomplete: key=%s letters=%s; previous English retained', key, _ar_left)
+                candidates = [_text_fallback_for_lang(key, 'en', ar_count), LANG.get('en', {}).get(key)]
+                fallback = next((value for value in candidates if value and not _cms_arabic_count(value)
+                    and len(re.findall(r'\{[^}]*\}', value)) == ar_count
+                    and not any(marker in str(value).lower() for marker in _BAD_TR_MARKERS)), None)
+                if fallback is None:
+                    bot.send_message(message.chat.id, '⚠️ تعذّرت ترجمة النص. لم يُحفظ التعديل؛ أرسل النسخة الإنجليزية أو حاول مجددًا.')
+                    return
+                final_text_en = fallback
+                _fallback_used = True
+            else:
+                logger.info('CMS line translation recovered: key=%s', key)
 
     if _fallback_used:
         _other = "العربي" if source_lang == 'en' else "الإنجليزي"
@@ -23994,7 +24643,7 @@ def _cgpt_store_verified_cookies(data, target_id=None):
         global _cgpt_manager_instance
         with _cgpt_lock:
             _cgpt_manager_instance = None
-        _CGPT_SEATS_CACHE['exp'] = 0
+        _cgpt_stock_invalidate()
         return {'updated': bool(matches), 'id': str(record_id), 'email': email, 'info': info, 'records': len(targets)}
 
 
@@ -24528,7 +25177,7 @@ def cgpt_delete_customer(call):
     mgr.invites_data.setdefault('invites', {})[cached['email']] = info
     mgr.allowed_emails.discard(cached['email'])
     mgr._save_data()
-    _CGPT_SEATS_CACHE['exp'] = 0
+    _cgpt_stock_invalidate()
     uid = info.get('telegram_uid')
     if str(uid).isdigit():
         try:
@@ -26429,6 +27078,7 @@ def ad_ban_exec(message):
 @admin_required
 def ad_users_main_ui(call):
     bot.answer_callback_query(call.id)
+    _up_clear_input(call.message.chat.id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(InlineKeyboardButton("🔍 بحث عن مستخدم", callback_data="ad_u_search"),
                InlineKeyboardButton("🏆 أعلى 10 أرصدة", callback_data="ad_u_top"))
@@ -26440,9 +27090,11 @@ def ad_users_main_ui(call):
 @admin_required
 def ad_u_top_ui(call):
     bot.answer_callback_query(call.id)
+    _up_clear_input(call.message.chat.id)
     top_users = list(db.users.find().sort('balance', -1).limit(10))
     markup = InlineKeyboardMarkup(row_width=1)
     for tu in top_users:
+        _up_member_origin(call.message.chat.id, tu['user_id'], 'ad_u_top')
         uname_display = f"@{tu['username']}" if tu.get('username') else tu['name']
         btn_text = f"💰 ${tu.get('balance', 0):.2f} | 👤 {clean_name(uname_display)[:15]}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"ad_u_det_{tu['user_id']}"))
@@ -26454,6 +27106,7 @@ def ad_u_top_ui(call):
 @admin_required
 def ad_u_search_prompt(call):
     bot.answer_callback_query(call.id)
+    _up_clear_input(call.message.chat.id)
     msg = bot.send_message(call.message.chat.id, "🔍 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username):</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_u_search_exec)
 
@@ -26463,7 +27116,9 @@ def ad_u_search_exec(message):
     if target.startswith('@') or not target.replace('-', '').isdigit():
         u = db.users.find_one({'username': target.replace('@', '').lower()})
     else: u = get_user_data_full(int(target))
-    if u: show_user_admin_profile(message.chat.id, u['user_id'])
+    if u:
+        _up_member_origin(message.chat.id, u['user_id'], 'ad_users_main')
+        show_user_admin_profile(message.chat.id, u['user_id'])
     else: bot.send_message(message.chat.id, "❌ لم يتم العثور على المستخدم.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_u_det_"))
@@ -26476,7 +27131,9 @@ def ad_u_det_router(call):
 def show_user_admin_profile(chat_id, target_uid, message_id=None):
     u = get_user_data_full(target_uid)
     if not u: return
-    buy_count = db.orders.count_documents({'user_id': target_uid})
+    _up_clear_input(chat_id)
+    purchase_summary = _up_summary(_up_dataset(target_uid))
+    buy_count = purchase_summary['orders']
     d_res = list(db.used_transactions.find({'user_id': target_uid}))
     dep_total = sum([float(d.get('amount', 0)) for d in d_res])
     uname_str = f"@{u['username']}" if u.get('username') else "لا يوجد"
@@ -26497,7 +27154,8 @@ def show_user_admin_profile(chat_id, target_uid, message_id=None):
     markup.add(InlineKeyboardButton("📋 سجل التعديلات المالية", callback_data=f"ad_view_ballogs_{target_uid}_0"))
     markup.add(InlineKeyboardButton("👑 VIP", callback_data=f"ad_vipu_{target_uid}"))
     markup.add(InlineKeyboardButton("👥 إحالاته", callback_data=f"ad_uref_{target_uid}_0"))
-    markup.add(InlineKeyboardButton("🔙 رجوع للبحث", callback_data="ad_users_main"))
+    markup.add(InlineKeyboardButton("🔍 بحث جديد", callback_data="ad_u_search"))
+    markup.add(InlineKeyboardButton("🔙 رجوع لقائمة الأعضاء", callback_data=_up_member_origin(chat_id, target_uid)))
     try:
         if message_id: bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
         else: bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
@@ -26680,137 +27338,20 @@ def ad_uh_dep_handler(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_uh_buy_"))
 @admin_required
 def ad_uh_buy_handler(call):
-    """عرض مشتريات المستخدم للأدمن مع التفاصيل الكاملة"""
+    """Products first; each product opens its complete, paginated purchase records."""
     bot.answer_callback_query(call.id)
-    target_uid = int(call.data.replace("ad_uh_buy_", ""))
-    
-    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
-    u = get_user_data_full(target_uid)
-    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
-    
-    if not recs:
-        text = f"📭 <b>لا توجد مشتريات</b>\n\n👤 {uname} | <code>{target_uid}</code>"
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
-        try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-        except: pass
-        return
-    
-    # إجمالي المبالغ
-    total_spent = 0.0
-    for r in recs:
-        try:
-            total_spent += _order_paid(r, find_product(str(r.get('product_id', ''))))[2]
-        except: pass
-    
-    text = (
-        f"🛍 <b>مشتريات المستخدم</b>\n\n"
-        f"👤 {uname} | <code>{target_uid}</code>\n"
-        f"📊 عدد الطلبات: <b>{len(recs)}</b>\n"
-        f"💰 إجمالي الإنفاق: <b>${total_spent:.2f}</b>\n"
-        f"━━━━━━━━━━━━━━\n"
-    )
-    
-    # آخر 10 مشتريات
-    for i, r in enumerate(recs[:10], 1):
-        try:
-            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
-            pid = str(r.get('product_id', ''))
-            if pid in ['GitHub_Student', 'Gemini_Activation']:
-                p_name = pid.replace('_', ' ')
-                p = None
-            else:
-                p = find_product(pid)
-                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else (_deleted_product_name(pid) or 'منتج محذوف')
-            price, qty, _tot = _order_paid(r, p)
-            _oid = r.get('order_id') or r.get('api_order_id')
-            text += (
-                f"\n#{i} 📦 <b>{p_name}</b>\n"
-                f"   📅 {date_str}" + (f" · 🧾 <code>{html.escape(str(_oid))}</code>" if _oid else "") + "\n"
-                f"   🔢 الكمية: {qty} | 💵 السعر: ${price:.2f}/قطعة\n"
-                f"   💰 الإجمالي: ${_tot:.2f}\n"
-            )
-        except: pass
-    
-    if len(recs) > 10:
-        text += f"\n<i>... و {len(recs) - 10} طلب آخر في الملف</i>"
-    
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📄 تحميل الملف الكامل", callback_data=f"ad_dlbuy_{target_uid}"))
-    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data=f"ad_u_det_{target_uid}"))
-    
-    try:
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except:
-        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+    target_uid = int(call.data.replace('ad_uh_buy_', ''))
+    _up_clear_input(call.message.chat.id)
+    _up_show_products(call, target_uid)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
 @admin_required
 def ad_dlbuy_handler(call):
-    """تحميل ملف كامل بكل مشتريات المستخدم"""
-    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
-    target_uid = int(call.data.replace("ad_dlbuy_", ""))
-    
-    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
-    u = get_user_data_full(target_uid)
-    uname = f"@{u['username']}" if u and u.get('username') else "بدون"
-    balance = float(u.get('balance', 0)) if u else 0
-    
-    total_spent = 0.0
-    lines = []
-    
-    for i, r in enumerate(recs, 1):
-        try:
-            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
-            pid = str(r.get('product_id', ''))
-            if pid in ['GitHub_Student', 'Gemini_Activation']:
-                p_name = pid.replace('_', ' ')
-                p = None
-            else:
-                p = find_product(pid)
-                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else (_deleted_product_name(pid) or 'منتج محذوف')
-            price, qty, subtotal = _order_paid(r, p)
-            total_spent += subtotal
-            
-            lines.append(
-                f"#{i}\n"
-                f"  التاريخ    : {date_str}\n"
-                f"  المنتج     : {p_name}\n"
-                f"  الكمية     : {qty}\n"
-                f"  سعر الوحدة : ${price:.2f}\n"
-                f"  الإجمالي   : ${subtotal:.2f}\n"
-                f"  {'─' * 40}"
-            )
-        except Exception as e:
-            lines.append(f"#{i} - خطأ: {e}\n{'─' * 40}")
-    
-    content = (
-        f"=== سجل مشتريات المستخدم ===\n"
-        f"المستخدم : {uname}\n"
-        f"الـ ID    : {target_uid}\n"
-        f"الرصيد   : ${balance:.2f}\n"
-        f"عدد الطلبات : {len(recs)}\n"
-        f"إجمالي الإنفاق : ${total_spent:.2f}\n"
-        f"{'=' * 50}\n\n"
-        + "\n".join(lines)
-    )
-    
-    try:
-        f = io.BytesIO(content.encode('utf-8'))
-        f.name = f"purchases_{target_uid}.txt"
-        bot.send_document(
-            call.message.chat.id, f,
-            caption=(
-                f"🛍 <b>مشتريات المستخدم</b>\n"
-                f"👤 {uname} | <code>{target_uid}</code>\n"
-                f"📊 العدد: {len(recs)}\n"
-                f"💰 الإجمالي: ${total_spent:.2f}"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ خطأ: {e}")
+    """Export all scoped ledgers and delivered details, including suppliers and API."""
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace('ad_dlbuy_', ''))
+    _up_send_export(call, target_uid)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dldep_"))
@@ -26858,30 +27399,10 @@ def ad_dldep_handler(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
 @admin_required
 def admin_download_buy_hist(call):
-    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
-    target_uid = int(call.data.replace("ad_dlbuy_", ""))
-    recs = list(db.orders.find({'user_id': target_uid}).sort('_id', -1))
-    if not recs:
-        bot.send_message(call.message.chat.id, "📭 العميل لم يقم بأي عمليات شراء.")
-        return
-        
-    content = f"=== سجل مشتريات العميل {target_uid} ===\n\n"
-    all_prods = {str(p.get('id', p.get('_id'))): p for p in db.products.find()}
-    
-    for i, r in enumerate(recs, 1):
-        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
-        pid = str(r.get('product_id'))
-        p = all_prods.get(pid)
-        
-        if pid in ['GitHub_Student', 'Gemini_Activation']: n = pid.replace('_', ' ')
-        else: n = clean_name(p.get('name_ar', p.get('name_en'))) if p else "Unknown Product"
-            
-        code = r.get('code_delivered', '')
-        content += f"{i}. التاريخ: {date_str}\nالمنتج: {n}\nالكود/التفاصيل: {code}\n{'-'*30}\n"
-        
-    f = io.BytesIO(content.encode('utf-8'))
-    f.name = f"Purchases_User_{target_uid}.txt"
-    bot.send_document(call.message.chat.id, f, caption=f"📄 سجل مشتريات العميل {target_uid}.")
+    """Export all scoped ledgers and delivered details, including suppliers and API."""
+    bot.answer_callback_query(call.id)
+    target_uid = int(call.data.replace('ad_dlbuy_', ''))
+    _up_send_export(call, target_uid)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_full_hist_"))
 @admin_required
@@ -27117,14 +27638,18 @@ def ad_gift_comp_exec(message, target_uid):
         val = float(message.text.strip())
         if not _vip_amount_sane(val):
             raise ValueError("المبلغ غير منطقي (لازم رقم بين -50,000 و 50,000 وغير صفر)")
-        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
-        u = get_user_data_full(target_uid)
-        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
+        u = db.users.find_one_and_update({'user_id': target_uid}, {'$inc': {'balance': val}}, return_document=True)
+        if not u:
+            raise ValueError('المستخدم غير موجود')
+        _invalidate_user_cache(target_uid)
+        new_bal = round(float(u.get('balance', 0)), 4)
         import datetime as _dt
         _bl = db.balance_logs.insert_one({
             'user_id': target_uid,
             'type': 'compensation',
             'amount': val,
+            'old_balance': round(float(u.get('balance', 0)) - val, 4),
+            'balance_source': 'atomic_wallet_update',
             'note': '',
             'new_balance': new_bal,
             'by_admin': message.from_user.id,
@@ -27182,14 +27707,18 @@ def ad_gift_note_exec(message, target_uid, val):
         return
     try:
         note = message.text.strip()
-        db.users.update_one({'user_id': target_uid}, {'$inc': {'balance': val}})
-        u = get_user_data_full(target_uid)
-        new_bal = round(float(u.get('balance', 0)), 2) if u else 0.0
+        u = db.users.find_one_and_update({'user_id': target_uid}, {'$inc': {'balance': val}}, return_document=True)
+        if not u:
+            raise ValueError('المستخدم غير موجود')
+        _invalidate_user_cache(target_uid)
+        new_bal = round(float(u.get('balance', 0)), 4)
         import datetime as _dt
         _bl = db.balance_logs.insert_one({
             'user_id': target_uid,
             'type': 'manual',
             'amount': val,
+            'old_balance': round(float(u.get('balance', 0)) - val, 4),
+            'balance_source': 'atomic_wallet_update',
             'note': note,
             'new_balance': new_bal,
             'by_admin': message.from_user.id,
@@ -27382,6 +27911,7 @@ def admin_fsub_save(message):
     if link:
         doc['invite_link'] = link
     res = db.required_channels.insert_one(doc)
+    _fsub_invalidate()
     doc['_id'] = res.inserted_id
     m = _fsub_meta(doc, refresh=True)
     kind = 'الجروب' if m['kind'] == 'group' else 'القناة'
@@ -27399,6 +27929,7 @@ def del_fsub_btn(call):
     bot.answer_callback_query(call.id)
     ch = call.data.replace("del_fsub_", "")
     db.required_channels.delete_one({'channel_id': ch})
+    _fsub_invalidate()
     bot.answer_callback_query(call.id, "✅ تم حذف القناة بنجاح!", show_alert=True)
     admin_fsub_list(call)
 
@@ -31333,6 +31864,7 @@ def _wa_bootstrap(identity, body):
                       'username': identity.get('username') or u.get('username') or '',
                       'photo_url': identity.get('photo_url') or '',
                       'balance': round(_wa_fnum(u.get('balance')), 2),
+                      'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
                       'lang': lang, 'is_admin': is_admin}, **_wa_user_stats(uid)),
         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
                   'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
@@ -31367,6 +31899,7 @@ def _wa_me(identity, body):
     except Exception:
         locked = False
     return 200, {'ok': True, 'balance': round(_wa_fnum(u.get('balance')), 2), 'locked': bool(locked),
+                 'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
                  'pending': _wa_pending_view(uid), 'banned': u.get('is_banned') == 1,
                  'vip': _wa_vip_view(uid, u)}
 
@@ -31374,9 +31907,9 @@ def _wa_me(identity, body):
 def _wa_forced_check(identity, body):
     uid = identity['id']
     try:
-        ok = check_forced_sub(uid, use_cache=False) is not False
+        ok = check_forced_sub(uid, use_cache=False) is True
     except Exception:
-        ok = True
+        ok = False
     return 200, {'ok': True, 'subscribed': ok, 'forced': None if ok else _wa_forced_info(uid)}
 
 
@@ -31991,6 +32524,7 @@ def _wa_referrals(identity, body):
     return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
+                 'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
                  'earned_buys': round(_wa_fnum(u.get('ref_v2_purchase_earned')), 2),
                  'threshold': threshold, 'reward': reward, 'progress': in_batch,
                  'purchase_reward': _wa_fnum(get_referral_purchase_reward()),
@@ -33247,6 +33781,7 @@ _ADM_SECTIONS = [
     ('panel', '🏠', 'لوحة الإدارة كاملة', 'Full admin panel', 'admin_panel_main'),
 ]
 _ADM_OPEN_OK = {s[4] for s in _ADM_SECTIONS} | {'toggle_amount_protection'}
+_ADM_OPEN_OK.add('ad_ref_balance_audit')
 
 # ✏️ التخصيص (CMS) و📢 البرودكاست: داخل البوت فقط — الموقع ما يعرض أزرارها ولا يشغّلها
 _WA_BOT_ONLY_RE = re.compile(r'^(?:ad_texts_main|ad_cms_\w*|edit_txt_\w*|rst_txt_\w*|edit_btn_\w*|btnstyle_\w*'
@@ -33520,12 +34055,15 @@ def _wa_admin_user(identity, body):
     for d in db.balance_logs.find({'user_id': target}).sort('_id', -1).limit(8):
         logs.append({'amount': round(_wa_fnum(d.get('amount')), 2), 'type': d.get('type'),
                      'note': _wa_plain(d.get('note'), 80), 'ts': _doc_ts(d)})
+    purchase_data = _up_products(target)
+    b.update(orders=purchase_data['summary']['orders'], spent=purchase_data['summary']['spent'])
+    b['ref_debt'] = round(_wa_fnum((get_user_data_full(target) or {}).get('ref_debt')), 4)
     st = vip_state(target)
     vip = {'level': st['raw_level'], 'cents': st['cents'], 'override': st['override'],
            'remaining': st['remaining'], 'next': st['next']['level'] if st['next'] else None,
            'range': vip_range_txt(st['tier']).strip('⁦⁩') if st['tier'] else None}
     return 200, {'ok': True, 'user': b, 'orders': orders, 'deposits': deps, 'logs': logs, 'vip': vip,
-                 'me': uid}
+                 'me': uid, 'purchases': purchase_data}
 
 
 def _wa_admin_balance(identity, body):
@@ -33978,6 +34516,9 @@ class _VcSession:
         self.job = None
         self.job_t = 0
         self.msgs = _VcOD()
+        self.section_start = 0
+        self.navigation = []
+        self.member_navigation = False
         self.next_id = 700000000 + secrets.randbelow(90000000)
         self.step = None
         self.toasts = []
@@ -34084,7 +34625,9 @@ class _VcSession:
         with self.mx:
             toasts, self.toasts = self.toasts[-5:], []
             return {'ok': True, 'msgs': [{k: m[k] for k in ('id', 'from', 'html', 'buttons', 'doc', 'ts')} for m in list(self.msgs.values())],
-                    'step': self.step is not None, 'toasts': toasts, 'busy': self.busy()}
+                    'step': self.step is not None, 'toasts': toasts, 'busy': self.busy(),
+                    'section_start': self.section_start, 'member_navigation': self.member_navigation,
+                    'back_available': bool(self.navigation)}
 
 
 def _vc_session(identity, reset=False):
@@ -34246,6 +34789,15 @@ def _vc_run(s, fn):
 
 def _vc_press(s, mid, data):
     msg = s.msgs.get(mid)
+    if _up_member_callback(data):
+        s.member_navigation = True
+        buttons = [b for row in (msg or {}).get('buttons', []) for b in row]
+        label = next((b['t'] for b in buttons if b.get('v') == data), '')
+        if not re.search(r'🔙|رجوع|العودة|\bback\b|إلغاء|cancel', label, re.I):
+            _up_vc_push(s)
+    elif data in _ADM_OPEN_OK:
+        s.member_navigation = False
+        s.navigation.clear()
     raw = (msg or {}).get('raw') or s._msg_dict(mid, ' ')
     call = types.CallbackQuery.de_json(json.loads(json.dumps({
         'id': 'vc_' + secrets.token_hex(8), 'from': s.frm, 'chat_instance': 'webapp-vc', 'data': data, 'message': raw})))
@@ -34282,7 +34834,7 @@ def _wa_admin_vc(identity, body):
     with s.lock:
         if action in ('state', 'reset'):
             return 200, s.view()
-        if action in ('open', 'press', 'send') and s.busy():
+        if action in ('open', 'press', 'send', 'back') and s.busy():
             return 409, dict(s.view(), error='busy')
         if action == 'open':
             cb = str(body.get('cb') or 'admin_panel_main')
@@ -34291,6 +34843,9 @@ def _wa_admin_vc(identity, body):
             if cb not in _ADM_OPEN_OK and not _ADM_OPEN_RE.fullmatch(cb):
                 return 400, {'error': 'bad_section'}
             ph = s.add('⏳', 'HTML')
+            s.section_start = ph.message_id
+            s.navigation.clear()
+            s.member_navigation = _up_member_callback(cb)
             s.step = None
 
             def _open(ph_id=ph.message_id):
@@ -34328,6 +34883,8 @@ def _wa_admin_vc(identity, body):
                 _vc_start(s, lambda: bot._run_middlewares_and_handler(msg, handlers=bot.message_handlers,
                                                                       middlewares=None, update_type='message'))
             return 200, s.view()
+        if action == 'back':
+            return _up_vc_back(s)
         if action == 'cancel':
             s.step = None
             return 200, s.view()
@@ -34406,7 +34963,7 @@ def _wa_send(handler, code, data, mime, cache='no-store', extra=None):
         if isinstance(data, str):
             data = data.encode('utf-8')
         gz = False
-        if (mime.startswith('text/') or mime in ('application/javascript', 'application/json', 'image/svg+xml')) \
+        if not (extra or {}).get('Content-Encoding') and (mime.startswith('text/') or mime in ('application/javascript', 'application/json', 'image/svg+xml')) \
                 and len(data) > 1024 and _net_accepts_gzip(handler.headers):
             data, gz = _wa_gzip.compress(data, 6), True
         handler.send_response(code)
@@ -34417,7 +34974,8 @@ def _wa_send(handler, code, data, mime, cache='no-store', extra=None):
         handler.send_header('X-Content-Type-Options', 'nosniff')
         if gz:
             handler.send_header('Content-Encoding', 'gzip')
-            handler.send_header('Vary', 'Accept-Encoding')
+            if not (extra or {}).get('Vary'):
+                handler.send_header('Vary', 'Accept-Encoding')
         for k, v in (extra or {}).items():
             handler.send_header(k, v)
         handler.end_headers()
@@ -34671,7 +35229,10 @@ def _wa_static(handler, rel):
         hit = _WA_STATIC_CACHE.get(path)
         if not hit or hit[0] != mtime:
             with open(path, 'rb') as f:
-                hit = (mtime, f.read())
+                raw = f.read()
+            tag = 'W/"' + hashlib.sha256(raw).hexdigest()[:32] + '"'
+            compressed = _wa_gzip.compress(raw, 6) if path.rsplit('.', 1)[-1].lower() in ('html', 'css', 'js', 'svg', 'json') and len(raw) > 1024 else None
+            hit = (mtime, raw, tag, compressed)
             _WA_STATIC_CACHE[path] = hit
         data = hit[1]
     except Exception:
@@ -34682,13 +35243,27 @@ def _wa_static(handler, rel):
             'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'ico': 'image/x-icon',
             'woff2': 'font/woff2'}.get(ext) or _wa_mimetypes.guess_type(path)[0] or 'application/octet-stream'
     cache = 'no-cache' if ext == 'html' else 'public, max-age=604800'
-    extra = None
+    extra = {'ETag': hit[2], 'Last-Modified': _http_date(mtime, usegmt=True)}
+    if ext in ('html', 'css', 'js', 'svg', 'json'):
+        extra['Vary'] = 'Accept-Encoding'
+    values = [v.strip() for v in str(handler.headers.get('If-None-Match', '')).split(',')]
+    unchanged = '*' in values or any(v.removeprefix('W/') == hit[2].removeprefix('W/') for v in values if v)
+    if not handler.headers.get('If-None-Match') and handler.headers.get('If-Modified-Since'):
+        try:
+            unchanged = int(_http_parse_date(handler.headers['If-Modified-Since']).timestamp()) >= int(mtime)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if unchanged:
+        return _wa_send(handler, 304, b'', mime, cache, extra)
+    if hit[3] and _net_accepts_gzip(handler.headers):
+        data = hit[3]
+        extra['Content-Encoding'] = 'gzip'
     if ext == 'html':
-        extra = {'Referrer-Policy': 'strict-origin-when-cross-origin',
+        extra.update({'Referrer-Policy': 'strict-origin-when-cross-origin',
                  'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdn.jsdelivr.net; "
                                              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; "
                                              "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https:; "
-                                             "object-src 'none'; base-uri 'self'; form-action 'none'")}
+                                             "object-src 'none'; base-uri 'self'; form-action 'none'")})
     return _wa_send(handler, 200, data, mime, cache, extra)
 
 
@@ -35234,11 +35809,76 @@ def _wa_check_report():
     return head, lines, problems, notes
 
 
+def _wa_store_link_info():
+    """Resolve owned public configuration, without catalog scans or guessed URLs."""
+    public = _wa_public_url()
+    if not public:
+        try:
+            menu = bot.get_chat_menu_button()
+            public = getattr(getattr(menu, 'web_app', None), 'url', None)
+        except Exception:
+            pass
+    if public:
+        try:
+            parsed = urllib.parse.urlsplit(public)
+            valid = (parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password and
+                     parsed.hostname not in ('localhost', '127.0.0.1', '::1') and len(public) <= 2000)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            public = None
+    main, username = None, ''
+    try:
+        me = bot.get_me()
+        username = str(me.username or '')
+        main = getattr(me, 'has_main_web_app', None)
+    except Exception:
+        pass
+    launch = ('https://t.me/' + username + '?startapp') if main is True and re.fullmatch(
+        r'[A-Za-z][A-Za-z0-9_]{4,31}', username) else None
+    return {'public': public, 'launch': launch, 'main': main}
+
+
+def _wa_send_store_links(message):
+    info = _wa_store_link_info()
+    public, launch = info['public'], info['launch']
+    if not public and not launch:
+        bot.send_message(message.chat.id,
+            'لم أجد رابط متجر عام صالحًا. اضبط APP_URL برابط خادمك العام أو WEBAPP_URL برابط المتجر، '
+            'ثم أرسل /link. رابط Render يؤخذ من صفحة الخدمة، ولا يمكن استنتاجه من اسم المشروع.')
+        return False
+    text = '🛍 <b>رابط المتجر</b>\n'
+    markup = InlineKeyboardMarkup(row_width=1)
+    if launch:
+        text += '\nرابط يفتح Mini App مباشرة، ويمكن وضعه في القناة:\n<code>' + html.escape(launch) + '</code>\n'
+        markup.add(CustomInlineButton('🛍 فتح المتجر', url=launch, style='success'))
+        markup.add(_copy_button('📋 نسخ رابط Mini App', launch))
+    if public:
+        text += '\nعنوان الموقع:\n<code>' + html.escape(public) + '</code>\n'
+        if not launch:
+            destination = {'web_app': types.WebAppInfo(url=public)} if message.chat.id == message.from_user.id else {'url': public}
+            markup.add(CustomInlineButton('🛍 فتح المتجر', style='success', **destination))
+        if len(public) <= 256:
+            markup.add(_copy_button('📋 نسخ رابط الموقع', public))
+        if not launch:
+            text += ('\nلفتحه مباشرة من رابط القناة: فعّل Main Mini App من @BotFather وضع عنوان الموقع أعلاه، ثم أرسل /link مجددًا.'
+                     if info['main'] is False else '\nتعذّر تأكيد إعداد Main Mini App؛ زر فتح المتجر في هذه المحادثة يفتح الموقع داخل Telegram.')
+    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+    return True
+
+
+@bot.message_handler(commands=['link', 'storelink'])
+def _wa_store_link_cmd(message):
+    if _is_admin_check(message.from_user.id):
+        _wa_send_store_links(message)
+
+
 @bot.message_handler(commands=['miniapp', 'miniapp_check'])
 def _wa_check_cmd(message):
     uid = message.from_user.id
     if not _is_admin_check(uid):
         return
+    _wa_send_store_links(message)
     wait = bot.reply_to(message, "⏳ جاري فحص قاعدة البيانات والواجهة (قراءة فقط)...")
     try:
         head, lines, problems, notes = _wa_check_report()
@@ -35398,27 +36038,16 @@ def _ref_dv_since():
 
 def ref_dv_required(rec):
     """هل هذي الإحالة لازم تنجح في تحقق الجهاز قبل ما تنحسب؟"""
-    if not rec or not ref_dv_enabled():
-        return False
-    dv = rec.get('dv')
-    if dv in ('ok', 'ok_admin', 'flag'):
-        return False            # ⚠️ المشكوك فيها تنحسب، والأدمن يراجعها لما تكتمل الدفعة
-    if dv == 'rejected':
-        return True
-    # إحالة قديمة انحسبت قبل تشغيل التحقق ثم طلع ورجع: ما نطلب منه تحقق
-    if rec.get('status') == 'left' and int(rec.get('created_at') or 0) < _ref_dv_since():
-        return False
-    return True
+    return bool(_ref_policy_requires_web(rec) and not _ref_web_verified(rec))
 
 
 def ref_dv_pending_for(uid):
     """المستخدم مُحال ولازم يسوي التحقق الحين (يطلع له شاشة التحقق في الموقع)."""
     try:
-        rec = db.referrals_v2.find_one({'invited_id': int(uid)})
+        rec = _ref_find(uid)
     except Exception:
         return False
-    return bool(rec and rec.get('status') in ('pending', 'left') and rec.get('dv') in (None, 'need')
-                and ref_dv_required(rec))
+    return bool(rec and rec.get('dv') != 'rejected' and ref_dv_required(rec))
 
 
 def _ref_dv_url():
@@ -35434,7 +36063,7 @@ def _ref_dv_prompt(uid, chat_id=None, lang=None):
     if not url:
         if not _DV_MARK_SEEN.get('_nourl'):
             _DV_MARK_SEEN['_nourl'] = 1
-            logger.warning('🛡 تحقق الإحالات: ما لقيت رابط الموقع (WEBAPP_URL) — الإحالات تنحسب بدون تحقق.')
+            logger.warning('🛡 تحقق الإحالات: رابط الموقع غير مضبوط — تظل الإحالات معلّقة حتى التحقق.')
         return False
     lang = lang or get_lang(uid)
     if lang == 'en':
@@ -35588,11 +36217,21 @@ def _dv_user_done(uid):
         pass
 
 
+def _wa_ref_challenge(identity, body):
+    options = random.SystemRandom().sample(['🍎', '🚗', '🐱', '⚽', '🌙', '🎁', '🔑', '🍕', '🎧', '🌵'], 4)
+    challenge = secrets.token_hex(20)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    target = random.SystemRandom().choice(options)
+    db.ref_verification_challenges.insert_one({'_id': challenge, 'user_id': int(identity['id']),
+        'target': target, 'used': False, 'issued_at': time.time(), 'expires_at': now + datetime.timedelta(minutes=5)})
+    return 200, {'ok': True, 'challenge': challenge, 'options': options, 'target': target}
+
+
 def _wa_ref_verify(identity, body):
     uid = int(identity['id'])
     res = _dv_analyze(uid, body.get('fp'), body.get('ch'))
-    rec = db.referrals_v2.find_one({'invited_id': uid})
-    pending = bool(rec and rec.get('dv') in (None, 'need') and ref_dv_required(rec))
+    rec = _ref_find(uid)
+    pending = bool(rec and rec.get('dv') != 'rejected' and ref_dv_required(rec))
     if pending:
         # الخطوة ١: لازم يكون مشترك في القنوات والجروبات قبل فحص الجهاز
         try:
@@ -35602,18 +36241,33 @@ def _wa_ref_verify(identity, body):
         _subbed = check_forced_sub(uid, use_cache=False)
         if _subbed is False:
             return 200, {'ok': False, 'state': 'join', 'forced': _wa_forced_info(uid)}
+        if _subbed is not True:
+            return 503, {'ok': False, 'error': 'verification_unavailable'}
+        challenge = str(body.get('challenge') or '')
+        click = body.get('ch') if isinstance(body.get('ch'), dict) else {}
+        if (not re.fullmatch(r'[0-9a-f]{40}', challenge) or click.get('ok') is not True or
+                click.get('trusted') is not True or _dv_int(click.get('ms')) < 350):
+            return 400, {'ok': False, 'error': 'verification_required'}
+        claim = db.ref_verification_challenges.find_one_and_update({'_id': challenge, 'user_id': uid,
+            'used': False, 'target': str(click.get('answer') or ''), 'issued_at': {'$lte': time.time() - .35},
+            'expires_at': {'$gt': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)}},
+            {'$set': {'used': True}}, return_document=True)
+        if not claim:
+            return 400, {'ok': False, 'error': 'verification_required'}
     others = _dv_relevant_others(uid, rec, res) if pending else []
     _dv_record(uid, res)
     if not pending:
         return 200, {'ok': True, 'state': 'done'}
     now = int(time.time())
-    if res['reasons'] or others:
+    if ref_dv_enabled() and (res['reasons'] or others):
         # ⚠️ مشكوك: تنحسب، بس تنعلّم — تطلع للأدمن في «قائمة الفحص» لما المحيل يكمل العتبة
         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
             'dv': 'flag', 'dv_at': now, 'dv_reasons': res['reasons'][:8], 'dv_others': others[:20],
-            'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp')}})
+            'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp'),
+            'web_verified_at': now, 'web_verified_version': 2}})
     else:
-        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now}})
+        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now,
+            'dv_reasons': [], 'web_verified_at': now, 'web_verified_version': 2}})
     try:
         if _subbed:
             mark_referral_status(uid, 'active')
@@ -35638,8 +36292,10 @@ def _wa_devmark(identity, body):
 
 
 _WA_POST_ROUTES['/webapp/verify'] = _wa_ref_verify
+_WA_POST_ROUTES['/webapp/verify/challenge'] = _wa_ref_challenge
 _WA_POST_ROUTES['/webapp/devmark'] = _wa_devmark
 _WA_HEAVY['/webapp/verify'] = 10
+_WA_HEAVY['/webapp/verify/challenge'] = 10
 _WA_HEAVY['/webapp/devmark'] = 10
 
 
@@ -35651,6 +36307,9 @@ def _refdv_apply(uid, verdict, admin_id, admin_name=None):
     uid = int(uid)
     who = html.escape(clean_name(admin_name or str(admin_id)))
     if verdict == 'ok':
+        if ref_dv_required(rec):
+            _ref_dv_prompt(uid)
+            return '⏳ لا يمكن اعتماد الإحالة قبل أن يُكمل المدعو التحقق داخل الموقع.'
         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': admin_id}})
         try:
             _FORCED_SUB_CACHE.pop(uid, None)
@@ -37112,7 +37771,7 @@ def _error_user_scope(identity, operation='', source='webapp', product_id=None):
                         request_id=secrets.token_hex(6), last_error=None)
 
 
-def _error_capture(message, exc=None, level='ERROR', source=None, location=None):
+def _error_capture(message, exc=None, level='ERROR', source=None, location=None, browser_trace=None):
     """Bounded, nonblocking capture; neither secrets nor request bodies enter records."""
     if getattr(_ERROR_LOCAL, 'busy', False):
         return None
@@ -37126,6 +37785,8 @@ def _error_capture(message, exc=None, level='ERROR', source=None, location=None)
         context = dict(getattr(_ERROR_CONTEXT, 'value', None) or {})
         frames = _error_traceback.extract_tb(exc.__traceback__) if exc and exc.__traceback__ else []
         trace = '\n'.join(f'{os.path.basename(f.filename)}:{f.lineno} in {f.name}' for f in frames[-20:])
+        if browser_trace and not trace:
+            trace = _error_redact(browser_trace, 3000)
         loc = location or (f'{os.path.basename(frames[-1].filename)}:{frames[-1].lineno} in {frames[-1].name}' if frames else '')
         msg = _error_redact(message, 2400)
         cause = _error_redact(str(exc), 1200) if exc else msg
@@ -37161,6 +37822,20 @@ def _error_capture(message, exc=None, level='ERROR', source=None, location=None)
         _ERROR_LOCAL.busy = False
 
 
+def _error_resolve_automatic(reference, reason):
+    """Resolve only a known incident after recovery; never delete its history."""
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    fields = {'resolved': True, 'resolved_at': now, 'resolution': reason}
+    with _ERROR_MEMORY_LOCK:
+        for record in _ERROR_MEMORY:
+            if record['_id'] == reference:
+                record.update(fields)
+    try:
+        db.system_errors.update_one({'_id': reference}, {'$set': fields})
+    except Exception:
+        pass
+
+
 class _ErrorLogHandler(logging.Handler):
     def emit(self, record):
         try:
@@ -37186,7 +37861,8 @@ def _error_notice(record):
     who = f'<code>{record["user_id"]}</code>' if record.get('user_id') is not None else 'مهمة خلفية / غير مرتبط بمستخدم'
     if record.get('username'):
         who += ' @' + _error_html(record['username'], 80)
-    return (f'🚨 <b>خطأ في LARA STOCK</b>\n🧩 {_error_html(record.get("source", ""), 60)}\n'
+    heading = '⚠️ <b>تحذير في LARA STOCK</b>' if record.get('level') == 'WARNING' else '🚨 <b>خطأ في LARA STOCK</b>'
+    return (f'{heading}\n🧩 {_error_html(record.get("source", ""), 60)}\n'
             f'👤 {who}\n⚙️ {_error_html(record.get("operation") or "—", 250)}\n'
             f'❗ <b>{_error_html(record.get("exception", ""), 100)}</b>\n'
             f'{_error_html(record.get("cause", ""), 800)}\n'
@@ -37208,7 +37884,7 @@ def _error_drain(limit=40):
                 break
             now = rec['last_at']
             data = {k: v for k, v in rec.items() if not k.startswith('_')}
-            data.update(resolved=False, expires_at=now + datetime.timedelta(days=30))
+            data.update(resolved=bool(rec.get('resolved')), expires_at=now + datetime.timedelta(days=30))
             try:
                 db.system_errors.update_one({'_id': rec['_id']},
                     {'$set': data, '$inc': {'count': 1}, '$setOnInsert': {'first_at': now}}, upsert=True)
@@ -37217,7 +37893,7 @@ def _error_drain(limit=40):
                 retry = True
                 break
             try:
-                if rec['level'] in ('ERROR', 'CRITICAL') and str(get_setting('error_alerts_enabled', 'on')) != 'off':
+                if not rec.get('resolved') and rec['level'] in ('ERROR', 'CRITICAL') and str(get_setting('error_alerts_enabled', 'on')) != 'off':
                     claim = db.system_errors.find_one_and_update({'_id': rec['_id'], '$or': [
                         {'last_alert_at': {'$exists': False}}, {'last_alert_at': {'$lt': now - datetime.timedelta(minutes=10)}}]},
                         {'$set': {'last_alert_at': now}}, return_document=True)
@@ -37348,9 +38024,11 @@ def ad_error_detail_cb(call):
             f'🕒 آخر ظهور: {rec.get("last_at")} UTC\n🔁 التكرار: {rec.get("count", 1)}\n'
             f'🧾 مرجع التتبع: <code>{html.escape(str(rec.get("request_id") or "—"))}</code>\n'
             f'📦 المنتج: <code>{_error_html(rec.get("product_id") or "—", 200)}</code>\n'
+            f'درجة السجل: {_error_html(rec.get("level") or "ERROR", 30)}\n'
             f'الحالة: {"✅ معالجة" if rec.get("resolved") else "🔴 غير معالجة"}')
     if rec.get('trace'):
-        text += '\n\n<pre>' + _error_html(rec['trace'][-1500:], 1000) + '</pre>'
+        visible_trace = rec['trace'][:1500] if rec.get('source') == 'browser' else rec['trace'][-1500:]
+        text += '\n\n<pre>' + _error_html(visible_trace, 1000) + '</pre>'
     mk = InlineKeyboardMarkup(row_width=1)
     if not rec.get('resolved'):
         mk.add(InlineKeyboardButton('✅ وضع علامة تمت المعالجة', callback_data='ad_err_resolve_' + key))
@@ -37364,8 +38042,25 @@ def _wa_client_error(identity, body):
     if not _wa_rate_ok(f'client-error:{identity["id"]}', 12):
         return 429, {'error': 'rate_limited'}
     with _error_user_scope(identity, 'browser:' + _error_redact(body.get('operation', 'runtime'), 100), 'browser'):
-        ref = _error_capture(_error_redact(body.get('message', ''), 1200), source='browser',
-                             location=_error_redact(body.get('location', ''), 200))
+        diagnostic = []
+        for field in ('build', 'platform', 'sdk_version', 'last_action', 'user_agent'):
+            if isinstance(body.get(field), str) and body[field]:
+                diagnostic.append(field + ': ' + _error_redact(body[field], 250))
+        stack = body.get('stack') if isinstance(body.get('stack'), str) else ''
+        location = _error_redact(body.get('location', ''), 240)
+        message = _error_redact(body.get('message', ''), 1200)
+        unknown_location = not location or location in ('0', ':0', ':0:0', 'Browser location unavailable',
+            'Browser did not expose the failing script')
+        # Infer this for older clients too; an untrusted `masked` flag alone
+        # must not downgrade a real error with a filename or stack trace.
+        masked = bool(re.fullmatch(r'Script error\.?', message.strip(), re.I) and unknown_location and not stack.strip())
+        if masked:
+            diagnostic.append('Browser policy hid error details; the failing script cannot be identified from this event.')
+        trace = '\n'.join(diagnostic + ([_error_redact(stack, 2000)] if stack else []))
+        if not location or location in ('0', ':0', ':0:0'):
+            location = 'Browser location unavailable'
+        ref = _error_capture(message, source='browser', level='WARNING' if masked else 'ERROR',
+                             location=location, browser_trace=trace)
     return 200, {'ok': True, 'reference': ref}
 
 
@@ -38401,7 +39096,7 @@ def _net_api_products_payload(uid):
                 cg_emoji = cg.get('custom_emoji_id')
                 # نحسب المقاعd المتاحة (المخزون)
                 try:
-                    cg_seats = _cgpt_get_seats_cached()
+                    cg_seats = _cgpt_total_available_seats()
                 except Exception:
                     cg_seats = None
                 for dur in cg.get('durations', []):
@@ -38676,6 +39371,490 @@ _net_install_clients()
 _net_install_server()
 
 
+# 👤 27. User inspection: products, purchase records and delivered details.
+def _up_uid_query(uid, field='user_id'):
+    return {field: {'$in': [int(uid), str(int(uid))]}}
+
+
+def _up_pid(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(int(value)) if int(value) == value else str(value)
+    pid = str(value or '').strip()
+    match = re.fullmatch(r'cgpt_(?:main_)?([0-9a-fA-F]{24})(?:_.*)?', pid)
+    return 'cgpt_' + match[1].lower() if match else pid
+
+
+def _up_key(value):
+    return hashlib.sha256(str(value).encode()).hexdigest()[:24]
+
+
+def _up_ts(value):
+    try:
+        if isinstance(value, datetime.datetime):
+            return int(value.replace(tzinfo=value.tzinfo or datetime.timezone.utc).timestamp())
+        if isinstance(value, (float, int)) or str(value).isdigit():
+            number = float(value)
+            return int(number / 1000 if number > 1e12 else number)
+        return _up_ts(datetime.datetime.fromisoformat(str(value).replace('Z', '+00:00')))
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
+def _up_doc_ts(doc):
+    for key in ('created_at', 'purchased_at', 'date', 'timestamp'):
+        stamp = _up_ts(doc.get(key))
+        if stamp:
+            return stamp
+    return _doc_ts(doc)
+
+
+def _up_dataset(uid):
+    """Explicit admin reads only. One scoped read per ledger; no external requests."""
+    uid, records = int(uid), {}
+    fields = ('product_id', 'product_name', 'name_ar', 'name_en', 'order_id', 'api_order_id',
+              'qty', 'quantity', 'price', 'total_price', 'created_at', 'purchased_at', 'date',
+              'timestamp', 'via', 'via_api', 'type', 'cgpt_email', 'buyer_email',
+              'cgpt_expires_at', 'cgpt_minutes', 'code_delivered', 'status', 'buyer_info',
+              'ext_product_id', 'ext_order_id', 'idempotency_key', 'email')
+    projection = {key: 1 for key in fields}
+    for source, owner in (('orders', 'user_id'), ('api_orders', 'api_user_id'), ('ext_orders', 'user_id')):
+        for doc in db[source].find(_up_uid_query(uid, owner), projection):
+            raw_pid = 'ext_' + str(doc.get('ext_product_id', '')) if source == 'ext_orders' else doc.get('product_id')
+            pid = _up_pid(raw_pid) or 'unknown_product'
+            marker = str(doc.get('code_delivered') or '')
+            ref = doc.get('order_id') or doc.get('api_order_id')
+            if not ref and marker.startswith(('API:', 'طلب يدوي:')):
+                ref = marker.split(':', 1)[1].strip()
+            ref = str(ref or doc.get('ext_order_id') or doc.get('idempotency_key') or doc['_id'])
+            index = (pid, ref)
+            row = records.setdefault(index, {'key': _up_key(f'{uid}:{pid}:{ref}'), 'pid': pid,
+                'product_key': _up_key(pid), 'ref': ref, 'qty': 0, 'total': 0.0, 'ts': 0,
+                'kind': 'delivered', 'status': 'delivered', 'via': '', 'email': '', 'expires': None,
+                'price_known': True, '_docs': [], '_sources': [], '_name': '', '_name_en': ''})
+            row['_docs'].append((source, doc))
+            row['_sources'].append(source)
+            row['ts'] = max(row['ts'], _up_doc_ts(doc))
+            row['_name'] = str(doc.get('product_name') or doc.get('name_ar') or row['_name'])
+            row['_name_en'] = str(doc.get('product_name') or doc.get('name_en') or row['_name_en'])
+            row['email'] = str(doc.get('cgpt_email') or doc.get('buyer_email') or doc.get('email') or row['email']).strip()
+            row['expires'] = doc.get('cgpt_expires_at') or row['expires']
+            if marker.startswith('chatgpt_seat:'):
+                row['email'] = row['email'] or marker.split(':', 1)[1].strip()
+            if source == 'orders':
+                row['kind'] = _card_status(marker, doc)
+                row['status'] = str(doc.get('status') or row['kind'])
+                row['via'] = str(doc.get('via') or ('api' if doc.get('via_api') else row['via']) or 'legacy')
+                _unit, quantity, paid = _order_paid(doc)
+                row['qty'] += quantity
+                row['total'] += paid
+                row['price_known'] &= doc.get('price') is not None or doc.get('total_price') is not None
+            else:
+                # The fulfilment ledger enriches the same transaction, not another sale.
+                row['kind'] = 'ext' if source == 'ext_orders' else 'api'
+                row['status'] = {'success': 'delivered', 'pending_verification': 'verifying'}.get(
+                    doc.get('status'), str(doc.get('status') or 'unknown'))
+                row['via'] = str(doc.get('via') or ('api' if source == 'api_orders' else row['via']) or 'legacy')
+                try:
+                    row['qty'] = max(1, int(doc.get('quantity', doc.get('qty', 1)) or 1))
+                except (ValueError, TypeError):
+                    row['qty'] = 1
+                value = doc.get('price') if source == 'ext_orders' else doc.get('total_price')
+                row['total'] = _wa_fnum(value)
+                row['price_known'] = value is not None
+    result = list(records.values())
+    for row in result:
+        row['total'] = round(row['total'], 2)
+        row['qty'] = max(1, row['qty'])
+        row['renewal'] = any(d.get('type') == 'cgpt_renewal' for _, d in row['_docs'])
+        if row['pid'].startswith('cgpt_') and not row['email']:
+            for _, doc in row['_docs']:
+                match = re.search(r'[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', str(doc.get('buyer_info') or ''))
+                if match:
+                    row['email'] = match[0]
+                    break
+    result.sort(key=lambda row: (row['ts'], row['key']), reverse=True)
+    return result
+
+
+def _up_name(row, cache=None):
+    info = _wa_product_names(row['pid'], cache if cache is not None else {})
+    return {'name': row.get('_name') or info.get('name_ar') or row['pid'],
+            'name_en': row.get('_name_en') or info.get('name_en') or row['pid']}
+
+
+def _up_summary(rows):
+    return {'orders': len(rows), 'products': len({r['pid'] for r in rows}),
+            'qty': sum(r['qty'] for r in rows),
+            'spent': round(sum(r['total'] for r in rows if r['status'] not in ('failed', 'refunded', 'cancelled')), 2),
+            'unknown_prices': sum(not r['price_known'] for r in rows)}
+
+
+def _up_page(items, page, size=12):
+    try:
+        page = max(1, min(100000, int(page)))
+    except (ValueError, TypeError):
+        raise ValueError('bad_page')
+    pages = max(1, (len(items) + size - 1) // size)
+    page = min(page, pages)
+    return items[(page - 1) * size:page * size], page, pages
+
+
+def _up_products(uid, page=1, rows=None):
+    rows = _up_dataset(uid) if rows is None else rows
+    groups = {}
+    for row in rows:
+        group = groups.setdefault(row['pid'], {'key': row['product_key'], '_row': row,
+            'orders': 0, 'qty': 0, 'total': 0.0, 'last': row['ts']})
+        group['orders'] += 1
+        group['qty'] += row['qty']
+        if row['status'] not in ('failed', 'refunded', 'cancelled'):
+            group['total'] += row['total']
+    selected, page, pages = _up_page(list(groups.values()), page)
+    names, products = {}, []
+    for group in selected:
+        out = {k: v for k, v in group.items() if not k.startswith('_')}
+        out.update(_up_name(group['_row'], names), total=round(group['total'], 2))
+        products.append(out)
+    return {'ok': True, 'uid': int(uid), 'summary': _up_summary(rows), 'products': products,
+            'page': page, 'pages': pages}
+
+
+def _up_row(row):
+    return {k: row[k] for k in ('key', 'product_key', 'ref', 'qty', 'total', 'ts', 'kind', 'status',
+                                 'via', 'email', 'expires', 'price_known', 'renewal')}
+
+
+def _up_product(uid, key, page=1):
+    rows = [r for r in _up_dataset(uid) if r['product_key'] == str(key)]
+    if not rows:
+        return None
+    selected, page, pages = _up_page(rows, page)
+    return {'ok': True, 'uid': int(uid), 'product': dict(key=str(key), **_up_name(rows[0])),
+            'summary': _up_summary(rows), 'records': [_up_row(row) for row in selected], 'page': page, 'pages': pages}
+
+
+def _up_subscription(uid, row):
+    if not row['pid'].startswith('cgpt_') or not row['email']:
+        return []
+    out, now = [], int(time.time())
+    # Read saved customer state only: never load cookies, tokens or call ChatGPT.
+    for account in db.cgpt_invites_data.find({}, {'data.invites': 1}):
+        invites = (account.get('data') or {}).get('invites') or {}
+        for email, saved in invites.items():
+            if not isinstance(saved, dict) or str(saved.get('telegram_uid')) != str(int(uid)):
+                continue
+            if email.strip().lower() != row['email'].lower():
+                continue
+            saved_pid = _up_pid(saved.get('product_id'))
+            if re.fullmatch('[0-9a-fA-F]{24}', saved_pid):
+                saved_pid = 'cgpt_' + saved_pid.lower()
+            if saved_pid and saved_pid != row['pid']:
+                continue
+            expires = saved.get('expires_at')
+            remaining = max(0, _up_ts(expires) - now)
+            state = str(saved.get('status') or 'unknown')
+            if state == 'active' and _up_ts(expires) and not remaining:
+                state = 'expired'
+            out.append({'account': str(account['_id']), 'email': email, 'status': state,
+                'stored_status': str(saved.get('status') or 'unknown'), 'expires': expires,
+                'invited_at': saved.get('invited_at'), 'remaining_seconds': remaining,
+                'basis': 'saved_record'})
+    return out
+
+
+def _up_detail(uid, key, page=1, all_codes=False, rows=None):
+    rows = _up_dataset(uid) if rows is None else rows
+    row = next((r for r in rows if r['key'] == str(key)), None)
+    if row is None:
+        return None
+    codes, notes, supplier = [], [], None
+    for source, doc in row['_docs']:
+        marker = str(doc.get('code_delivered') or '')
+        if source == 'orders':
+            if marker and not marker.startswith(('API:', 'طلب يدوي:', 'chatgpt_seat:')):
+                codes.append(marker)
+            elif marker.startswith('طلب يدوي:'):
+                notes.append(marker)
+        else:
+            owner = 'api_user_id' if source == 'api_orders' else 'user_id'
+            query = dict(_up_uid_query(uid, owner), _id=doc['_id'])
+            delivery = db[source].find_one(query, {'codes': 1, 'buyer_info': 1, 'ext_order_id': 1}) or {}
+            remote_codes = [str(c) for c in (delivery.get('codes') or [])]
+            if remote_codes:
+                codes = remote_codes  # Same sale projected in two ledgers; avoid duplicate credentials.
+            if delivery.get('buyer_info'):
+                notes.append(str(delivery['buyer_info']))
+            supplier = delivery.get('ext_order_id') or supplier
+    selected, page, pages = _up_page(codes, page, 20)
+    return dict(_up_row(row), ok=True, uid=int(uid), product=dict(key=row['product_key'], **_up_name(row)),
+        codes=codes if all_codes else selected, codes_total=len(codes), code_page=page, code_pages=pages,
+        notes=list(dict.fromkeys(notes)), supplier_order=str(supplier) if supplier else None,
+        subscriptions=_up_subscription(uid, row), subscription_basis='saved_record',
+        sources=list(dict.fromkeys(row['_sources'])))
+
+
+def _up_export(uid, key=None):
+    rows = _up_dataset(uid)
+    selected = [r for r in rows if r['key'] == str(key)] if key else rows
+    if not selected:
+        return None
+    user = db.users.find_one(_up_uid_query(uid), {'name': 1, 'username': 1, 'balance': 1}) or {}
+    summary = _up_summary(selected)
+    lines = [f'LARA STOCK — User {int(uid)}', 'Purchase records / سجلات المشتريات',
+        'Name / الاسم: ' + str(user.get('name') or ''),
+        'Username / اليوزر: ' + str(user.get('username') or ''),
+        f"Balance / الرصيد: ${_wa_fnum(user.get('balance')):.2f}",
+        f"Orders / الطلبات: {summary['orders']} | Recorded total / الإجمالي: ${summary['spent']:.2f}", '']
+    for row in selected:
+        detail = _up_detail(uid, row['key'], all_codes=True, rows=rows)
+        lines += [detail['product']['name_en'], f"Order: {row['ref']}",
+            f"Date (UTC): {_up_date(row['ts'])}", f"Quantity: {row['qty']} | Paid: ${row['total']:.2f}",
+            f"Unit price / سعر الوحدة: ${row['total'] / row['qty']:.4f}",
+            f"Status: {row['status']} | Via: {row['via']}"]
+        if not row['price_known']:
+            lines.append('Historical price was not saved / السعر التاريخي غير محفوظ')
+        if row['email']:
+            lines.append('Email: ' + row['email'])
+        if row['expires']:
+            lines.append('Expiry recorded for this purchase: ' + str(row['expires']))
+        for sub in detail['subscriptions']:
+            lines.append(f"Saved subscription: {sub['account']} | {sub['status']} | {sub['expires']}")
+        lines += detail['notes'] + detail['codes'] + ['-' * 50, '']
+    return '\n'.join(lines)
+
+
+def _up_date(stamp):
+    try:
+        return datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if stamp else '—'
+    except (ValueError, OverflowError, OSError):
+        return '—'
+
+
+def _up_web(identity, body, mode):
+    _admin, error = _wa_admin(identity)
+    if error:
+        return error
+    try:
+        uid = int(body.get('uid'))
+        if uid <= 0:
+            raise ValueError('bad_uid')
+        if mode == 'products':
+            return 200, _up_products(uid, body.get('page', 1))
+        key = str(body.get('key') or '')
+        if not re.fullmatch(r'[0-9a-f]{24}', key):
+            return 400, {'error': 'bad_request'}
+        if mode == 'product':
+            data = _up_product(uid, key, body.get('page', 1))
+        elif mode == 'detail':
+            data = _up_detail(uid, key, body.get('page', 1))
+        else:
+            content = _up_export(uid, key)
+            data = {'ok': True, 'text': content, 'filename': f'user_{uid}_{key}.txt'} if content else None
+        return (200, data) if data else (404, {'error': 'not_found'})
+    except (TypeError, ValueError, OverflowError):
+        return 400, {'error': 'bad_request'}
+
+
+def _up_web_products(identity, body):
+    return _up_web(identity, body, 'products')
+
+
+def _up_web_product(identity, body):
+    return _up_web(identity, body, 'product')
+
+
+def _up_web_detail(identity, body):
+    return _up_web(identity, body, 'detail')
+
+
+def _up_web_export(identity, body):
+    return _up_web(identity, body, 'export')
+
+
+for _up_route, _up_fn in [('purchases', _up_web_products), ('purchases/product', _up_web_product),
+                          ('purchases/detail', _up_web_detail), ('purchases/export', _up_web_export)]:
+    _WA_POST_ROUTES['/webapp/admin/user/' + _up_route] = _up_fn
+    _WA_HEAVY['/webapp/admin/user/' + _up_route] = 60
+
+
+_UP_ORIGINS = {}
+
+
+def _up_clear_input(chat_id):
+    bot.clear_step_handler_by_chat_id(chat_id=chat_id)
+
+
+def _up_member_origin(chat_id, uid, origin=None):
+    if origin:
+        if len(_UP_ORIGINS) >= 128:
+            _UP_ORIGINS.pop(next(iter(_UP_ORIGINS)))
+        _UP_ORIGINS[(int(chat_id), int(uid))] = origin
+    return _UP_ORIGINS.get((int(chat_id), int(uid)), 'ad_users_main')
+
+
+def _up_bot_show(call, text, markup):
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                              parse_mode='HTML', reply_markup=markup)
+    except Exception:
+        bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+
+def _up_cb(uid, mode, key='-', page=1, parent=1):
+    return f'ad_up_{int(uid)}:{mode}:{key}:{page}:{parent}'
+
+
+def _up_pager(markup, data, callback):
+    buttons = []
+    if data['page'] > 1:
+        buttons.append(InlineKeyboardButton('◀️ السابق', callback_data=callback(data['page'] - 1)))
+    if data['page'] < data['pages']:
+        buttons.append(InlineKeyboardButton('التالي ▶️', callback_data=callback(data['page'] + 1)))
+    if buttons:
+        markup.row(*buttons)
+
+
+def _up_show_products(call, uid, page=1):
+    data = _up_products(uid, page)
+    summary = data['summary']
+    text = (f'🛍 <b>منتجات المستخدم المشتراة</b>\n🆔 <code>{uid}</code>\n'
+        f"📦 المنتجات: <b>{summary['products']}</b> · الطلبات: <b>{summary['orders']}</b>\n"
+        f"💰 إجمالي المبالغ المسجلة: <b>${summary['spent']:.2f}</b>\n\n"
+        'اختر المنتج لعرض جميع عمليات شرائه، ثم افتح العملية لعرض الحسابات أو الاشتراك.\n'
+        f"الصفحة {data['page']} / {data['pages']}")
+    markup = InlineKeyboardMarkup(row_width=1)
+    for product in data['products']:
+        markup.add(InlineKeyboardButton(f"📦 {str(product['name_en'] or product['name'])[:65]} ({product['orders']})",
+            callback_data=_up_cb(uid, 'p', product['key'], 1, data['page'])))
+    if not data['products']:
+        text += '\n📭 لا توجد مشتريات مسجلة لهذا المستخدم.'
+    _up_pager(markup, data, lambda p: _up_cb(uid, 'g', page=p))
+    markup.add(InlineKeyboardButton('📄 تحميل جميع المشتريات', callback_data=f'ad_dlbuy_{uid}'))
+    markup.add(InlineKeyboardButton('🔙 ملف المستخدم', callback_data=f'ad_u_det_{uid}'))
+    _up_bot_show(call, text, markup)
+
+
+def _up_show_product(call, uid, key, page=1, parent=1):
+    data = _up_product(uid, key, page)
+    if not data:
+        bot.answer_callback_query(call.id, 'لم يعد السجل موجودًا', show_alert=True)
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    for row in data['records']:
+        label = f"🧾 {_up_date(row['ts'])[:16]} · ×{row['qty']} · ${row['total']:.2f} · {row['ref']}"
+        markup.add(InlineKeyboardButton(label[:110], callback_data=_up_cb(uid, 'd', row['key'], data['page'], parent)))
+    _up_pager(markup, data, lambda p: _up_cb(uid, 'p', key, p, parent))
+    markup.add(InlineKeyboardButton('🔙 منتجات المستخدم', callback_data=_up_cb(uid, 'g', page=parent)))
+    _up_bot_show(call, f"📦 <b>{html.escape(data['product']['name_en'] or data['product']['name'])}</b>\n🆔 <code>{uid}</code>\n"
+        f"الطلبات: <b>{data['summary']['orders']}</b> · الصفحة {data['page']} / {data['pages']}\n\n"
+        'اختر عملية الشراء لعرض تفاصيل التسليم أو الاشتراك.', markup)
+
+
+def _up_show_detail(call, uid, key, page=1, parent=1):
+    detail = _up_detail(uid, key)
+    if not detail:
+        bot.answer_callback_query(call.id, 'السجل غير موجود لهذا المستخدم', show_alert=True)
+        return
+    text = (f"🧾 <b>تفاصيل الشراء</b>\n📦 {html.escape(detail['product']['name_en'] or detail['product']['name'])}\n"
+        f"🆔 المستخدم: <code>{uid}</code>\n🔖 الطلب: <code>{html.escape(detail['ref'])}</code>\n"
+        f"📅 {_up_date(detail['ts'])}\n🔢 الكمية: {detail['qty']} · 💵 ${detail['total']:.2f}\n"
+        f"الحالة: {html.escape(detail['status'])} · المصدر: {html.escape(detail['via'])}\n")
+    if detail['email']:
+        text += f"📧 <code>{html.escape(detail['email'])}</code>\n"
+    if detail['expires']:
+        text += f"📅 الانتهاء المسجل وقت الشراء: {html.escape(str(detail['expires']))}\n"
+    for sub in detail['subscriptions']:
+        text += (f"\n👤 الاشتراك المحفوظ: <code>{html.escape(sub['account'])}</code>\n"
+            f"الحالة: {html.escape(sub['status'])} · المتبقي: {sub['remaining_seconds'] // 3600} ساعة\n"
+            f"الانتهاء الحالي: {html.escape(str(sub['expires'] or '—'))}\n")
+    if detail['kind'] == 'chatgpt' or detail['subscriptions']:
+        text += '\nℹ️ الحالة حسب سجلات البوت؛ إرسال الدعوة لا يثبت قبولها.\n'
+    if not detail['price_known']:
+        text += '\nℹ️ السعر التاريخي غير محفوظ في هذا السجل القديم.\n'
+    preview = '\n\n'.join(detail['notes'] + detail['codes'])
+    if preview:
+        text += '\n🔑 <b>بيانات التسليم</b>\n<pre>' + html.escape(preview[:900]) + '</pre>'
+    if len(preview) > 900 or detail['codes_total'] > len(detail['codes']):
+        text += '\n📄 بقية البيانات محفوظة كاملة في ملف تفاصيل الطلب.'
+    if not preview and not detail['email']:
+        text += '\nلا توجد بيانات تسليم محفوظة لهذا الطلب حتى الآن.'
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton('📄 تحميل تفاصيل الطلب كاملة', callback_data=_up_cb(uid, 'x', key, page, parent)))
+    markup.add(InlineKeyboardButton('🔙 سجلات هذا المنتج', callback_data=_up_cb(uid, 'p', detail['product_key'], page, parent)))
+    _up_bot_show(call, text, markup)
+
+
+def _up_send_export(call, uid, key=None):
+    content = _up_export(uid, key)
+    if content is None:
+        bot.send_message(call.message.chat.id, '📭 لا توجد مشتريات لهذا الاختيار.')
+        return
+    stream = io.BytesIO(content.encode('utf-8'))
+    stream.name = f'purchases_{uid}_{key or "all"}.txt'
+    bot.send_document(call.message.chat.id, stream, caption='📄 سجل المشتريات وبيانات التسليم المحفوظة.')
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ad_up_'))
+@admin_required
+def ad_user_purchase_navigation(call):
+    bot.answer_callback_query(call.id)
+    try:
+        uid, mode, key, page, parent = call.data[len('ad_up_'):].split(':')
+        uid, page, parent = int(uid), int(page), int(parent)
+        if uid <= 0 or page < 1 or parent < 1 or mode not in ('g', 'p', 'd', 'x'):
+            raise ValueError('bad_navigation')
+        if mode != 'g' and not re.fullmatch('[0-9a-f]{24}', key):
+            raise ValueError('bad_key')
+    except (ValueError, TypeError):
+        return
+    _up_clear_input(call.message.chat.id)
+    if mode == 'g':
+        _up_show_products(call, uid, page)
+    elif mode == 'p':
+        _up_show_product(call, uid, key, page, parent)
+    elif mode == 'd':
+        _up_show_detail(call, uid, key, page, parent)
+    else:
+        _up_send_export(call, uid, key)
+
+
+def _up_member_callback(data):
+    return bool(re.fullmatch(r'(?:ad_users_main|ad_u_(?:top|search|det_\d+)|ad_uh_(?:buy|dep)_\d+|'
+        r'ad_uref_\d+_\d+|ad_view_ballogs_\d+_\d+|ad_ugift_\d+|ad_gift_(?:comp|note)_\d+|'
+        r'ad_vipu_(?:\d+|adj_\d+|ov_\d+|u_\d+)|ad_up_\d+:[gpd]:[^:]+:\d+:\d+)', str(data)))
+
+
+def _up_vc_push(session):
+    if session.step is not None:
+        return
+    candidates = [m for m in session.msgs.values() if m['from'] == 'bot' and m['id'] >= session.section_start
+                  and any(b['k'] == 'cb' for row in m['buttons'] for b in row)]
+    if candidates:
+        import copy
+        snapshot = copy.deepcopy(candidates[-1])
+        if not session.navigation or session.navigation[-1]['raw'] != snapshot['raw']:
+            session.navigation.append(snapshot)
+            session.navigation[:] = session.navigation[-24:]
+
+
+def _up_vc_back(session):
+    was_step = session.step is not None
+    session.step = None
+    if not was_step:
+        pages = [m for m in session.msgs.values() if m['from'] == 'bot' and m['id'] >= session.section_start and m['buttons']]
+        current_buttons = pages[-1]['buttons'] if pages else None
+        while session.navigation and session.navigation[-1]['buttons'] == current_buttons:
+            session.navigation.pop()
+    if not session.navigation:
+        return 200, dict(session.view(), close_section=True)
+    snapshot = session.navigation.pop()
+    markup = snapshot['raw'].get('reply_markup')
+    markup = types.InlineKeyboardMarkup.de_json(markup) if markup else None
+    session.add(snapshot['html'], 'HTML', markup)
+    return 200, session.view()
+
+
+
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
@@ -38723,7 +39902,7 @@ def run_bot():
     time.sleep(5)
     while True:
         try: bot.polling(non_stop=True, skip_pending=False,
-                         timeout=60, long_polling_timeout=60)
+                         timeout=60, long_polling_timeout=60, allowed_updates=_ref_allowed_updates())
         except Exception as e:
             err = str(e)
             logger.error(f"Polling Error Critical: {err}")

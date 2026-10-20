@@ -1,0 +1,855 @@
+--- a/bot.py
++++ b/bot.py
+@@ -812,11 +812,70 @@
+ 
+ _CGPT_DATA_LOCK = threading.RLock()
+ _CGPT_ACCOUNT_LOCKS = {}
++_CGPT_MEMBER_HEALTH = {}
++_CGPT_MEMBER_HEALTH_LOCK = threading.RLock()
+ 
+ 
+ def _cgpt_account_lock(account_id):
+     with _CGPT_DATA_LOCK:
+         return _CGPT_ACCOUNT_LOCKS.setdefault(str(account_id), threading.RLock())
++
++
++def _cgpt_member_health(manager):
++    """Keep outage backoff across the temporary managers built by the daemon."""
++    key = str(getattr(manager, '_account_key', None) or manager.account_id or 'main')
++    credentials = hashlib.sha256((str(manager.access_token or '') + '\0' +
++                                 str(manager.session_token or '')).encode()).hexdigest()
++    with _CGPT_MEMBER_HEALTH_LOCK:
++        state = _CGPT_MEMBER_HEALTH.get(key)
++        if not state or state.get('credentials') != credentials:
++            if len(_CGPT_MEMBER_HEALTH) >= 256:
++                _CGPT_MEMBER_HEALTH.pop(next(iter(_CGPT_MEMBER_HEALTH)), None)
++            state = {'credentials': credentials, 'failures': 0, 'retry_at': 0, 'references': []}
++            _CGPT_MEMBER_HEALTH[key] = state
++        return state
++
++
++def _cgpt_member_ready(manager):
++    state = _cgpt_member_health(manager)
++    if state.get('retry_at', 0) > time.time():
++        manager._last_fetch_failed = True
++        manager._last_fetch_status = state.get('status', 'connection')
++        return False
++    return True
++
++
++def _cgpt_member_defer(manager, status, exc=None, retry_after=0):
++    """A failed read is never an empty member list and never proves expired cookies."""
++    state = _cgpt_member_health(manager)
++    with _CGPT_MEMBER_HEALTH_LOCK:
++        state['failures'] = min(10, state.get('failures', 0) + 1)
++        delay = 3600 if status in (401, 403) else min(900, 60 * 2 ** (state['failures'] - 1))
++        try:
++            delay = max(delay, min(3600, max(0, int(retry_after))))
++        except (TypeError, ValueError):
++            pass
++        state.update(status=status, retry_at=time.time() + delay)
++    manager._last_fetch_failed = True
++    manager._last_fetch_status = status
++    with _error_scope(source='background', operation='cgpt:members:' +
++                      str(getattr(manager, '_account_key', None) or manager.account_id or 'main')):
++        reference = _error_capture('ChatGPT member lookup unavailable; cleanup deferred safely',
++            exc=exc, level='WARNING', location='ChatGPTSeatManager._get_org_users',
++            browser_trace='Read status: ' + str(status) + '; retry after ' + str(delay) + ' seconds.')
++    if reference and reference not in state['references']:
++        state['references'] = (state['references'] + [reference])[-8:]
++
++
++def _cgpt_member_recovered(manager):
++    state = _cgpt_member_health(manager)
++    references = list(state.get('references', []))
++    with _CGPT_MEMBER_HEALTH_LOCK:
++        state.update(failures=0, retry_at=0, status=200, references=[])
++    manager._last_fetch_failed = False
++    manager._last_fetch_status = 200
++    for reference in references:
++        _error_resolve_automatic(reference, 'ChatGPT member lookup recovered')
+ 
+ 
+ def _cgpt_manager_guard(func):
+@@ -959,20 +1018,31 @@
+     def _get_org_users(self):
+         if not CFFI_AVAILABLE or not self._loaded:
+             self._last_fetch_failed = True
++            self._last_fetch_status = 401
+             return []
+-        try:
+-            url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
+-            r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
+-            if r.status_code == 200:
+-                self._last_fetch_failed = False
+-                return r.json().get('items', [])
+-            # فشل (401 مثلاً = كوكيز منتهية)
++        with _cgpt_account_lock(getattr(self, '_account_key', None) or self.account_id or 'main'):
++            if not _cgpt_member_ready(self):
++                return []
+             self._last_fetch_failed = True
+-            self._last_fetch_status = r.status_code
+-            logger.warning(f"[CGPT] get_org_users {r.status_code}: {r.text[:200]}")
+-        except Exception as e:
+-            self._last_fetch_failed = True
+-            logger.error(f"[CGPT] get_org_users error: {e}")
++            self._last_fetch_status = None
++            try:
++                url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/users'
++                r = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=(5, 20))
++                if r.status_code == 200:
++                    data = r.json()
++                    users = data.get('items') if isinstance(data, dict) else None
++                    if not isinstance(users, list) or any(not isinstance(u, dict) for u in users):
++                        raise ValueError('Invalid ChatGPT member-list response')
++                    if (data.get('has_more') or data.get('next') or data.get('next_cursor') or
++                            int(data.get('total', len(users)) or 0) > len(users)):
++                        raise ValueError('Incomplete ChatGPT member-list response; cleanup deferred')
++                    _cgpt_member_recovered(self)
++                    return users
++                _cgpt_member_defer(self, r.status_code,
++                                  retry_after=getattr(r, 'headers', {}).get('Retry-After', 0))
++            except Exception as e:
++                kind = 'timeout' if getattr(e, 'code', None) == 28 or 'timeout' in type(e).__name__.lower() else 'connection'
++                _cgpt_member_defer(self, kind, exc=e)
+         return []
+ 
+     @_cgpt_manager_guard
+@@ -1105,7 +1175,7 @@
+         """Remove expired access and unexpected members without punishing other customers."""
+         current_users = self._get_org_users()
+         if getattr(self, '_last_fetch_failed', False):
+-            logger.warning('[CGPT] fetch failed; skipping cleanup for %s', self.owner_email)
++            logger.debug('[CGPT] member read unavailable; cleanup deferred')
+             return
+         owner = str(self.owner_email or '').strip().lower()
+         members = {str(u.get('email') or '').strip().lower(): u for u in current_users}
+@@ -1717,6 +1787,38 @@
+         logger.debug(f"_cgpt_notify_cookie_expired err: {_e}")
+ 
+ 
++def _cgpt_check_account(doc):
++    """Do not turn a temporary upstream outage into a cookie-expiry alert."""
++    manager = _cgpt_build_manager_from_doc(doc)
++    email = manager.owner_email or doc.get('name', 'حساب')
++    account = str(doc.get('_id'))
++    if not manager._loaded:
++        _cgpt_notify_cookie_expired(account, email, 'لا كوكيز')
++        return False
++    if not _cgpt_member_ready(manager):
++        _cgpt_send_expiry_reminders(manager)
++        return False
++    subscription = manager.check_subscription_status()
++    if subscription == 'deactivated':
++        logger.warning('[CGPT] subscription deactivated; migrating registered customers')
++        _cgpt_migrate_dead_account(doc)
++        _cgpt_notify_subscription_dead(account, email)
++        return False
++    if subscription == 'unauthorized':
++        _cgpt_member_defer(manager, 401)
++        _cgpt_notify_cookie_expired(account, email, '401 كوكيز')
++        return False
++    if subscription == 'error':
++        _cgpt_member_defer(manager, 'subscription-check')
++        _cgpt_send_expiry_reminders(manager)
++        return False
++    manager.check_and_cleanup()
++    if getattr(manager, '_last_fetch_failed', False) and getattr(manager, '_last_fetch_status', None) in (401, 403):
++        _cgpt_notify_cookie_expired(account, email, manager._last_fetch_status)
++    _cgpt_send_expiry_reminders(manager)
++    return not getattr(manager, '_last_fetch_failed', False)
++
++
+ def _cgpt_daemon_loop():
+     """Daemon thread يعمل كل 5 دقائق"""
+     import time as _t
+@@ -1737,30 +1839,7 @@
+             if _accs:
+                 for _doc in _accs:
+                     try:
+-                        _m = _cgpt_build_manager_from_doc(_doc)
+-                        _acc_email = _m.owner_email or _doc.get('name', 'حساب')
+-                        _acc_id = str(_doc.get('_id'))
+-                        if _m._loaded:
+-                            # 1) نفحص حالة اشتراك البيزنس
+-                            _sub = _m.check_subscription_status()
+-                            if _sub == 'deactivated':
+-                                # الاشتراك مات → ننقل عملاءه لحساب حيّ
+-                                logger.warning(f"[CGPT] subscription DEAD for {_acc_email} — migrating")
+-                                _cgpt_migrate_dead_account(_doc)
+-                                _cgpt_notify_subscription_dead(_acc_id, _acc_email)
+-                                continue
+-                            elif _sub == 'unauthorized':
+-                                _cgpt_notify_cookie_expired(_acc_id, _acc_email, '401 كوكيز')
+-                                continue
+-                            # 2) التنظيف العادي (منتهين + مخالفين)
+-                            _m.check_and_cleanup()
+-                            if getattr(_m, '_last_fetch_failed', False):
+-                                _cgpt_notify_cookie_expired(_acc_id, _acc_email,
+-                                    getattr(_m, '_last_fetch_status', '?'))
+-                            # 3) تذكير قرب الانتهاء (قبل يوم)
+-                            _cgpt_send_expiry_reminders(_m)
+-                        else:
+-                            _cgpt_notify_cookie_expired(_acc_id, _acc_email, 'لا كوكيز')
++                        _cgpt_check_account(_doc)
+                     except Exception as _ce:
+                         logger.debug(f"[CGPT] account cleanup err: {_ce}")
+                 # بعd التنظيف: ننقل المعلّقين لو توفّرت مقاعd
+@@ -7743,7 +7822,8 @@
+ def _telegram_delivery_kind(exc):
+     text = str(exc).lower()
+     if any(token in text for token in ('user is deactivated', 'bot was blocked by the user',
+-                                      'chat not found', 'bot was kicked')):
++                                      'chat not found', 'bot was kicked', "can't initiate conversation",
++                                      'bot cannot initiate conversation', "bot can't send messages to bots")):
+         return 'unreachable'
+     if 'parse entities' in text or "can't parse" in text:
+         return 'format'
+@@ -7870,6 +7950,82 @@
+ 
+ # Temporary delivery backoff only; never remove administrator permissions.
+ _ADMIN_NOTICE_PAUSED = {}
++_ADMIN_NOTICE_DELIVERY_CACHE = {}
++_ADMIN_NOTICE_DELIVERY_LOCK = threading.RLock()
++
++
++def _admin_notice_delivery_state(recipient):
++    now = time.time()
++    with _ADMIN_NOTICE_DELIVERY_LOCK:
++        cached = _ADMIN_NOTICE_DELIVERY_CACHE.get(recipient)
++        if cached and cached['until'] > now:
++            return cached['state']
++        try:
++            state = db.admin_notice_delivery.find_one({'_id': str(recipient)}) or {}
++        except Exception:
++            logger.debug('Could not read administrator delivery state')
++            return {}
++        if len(_ADMIN_NOTICE_DELIVERY_CACHE) >= 256:
++            _ADMIN_NOTICE_DELIVERY_CACHE.pop(next(iter(_ADMIN_NOTICE_DELIVERY_CACHE)), None)
++        _ADMIN_NOTICE_DELIVERY_CACHE[recipient] = {'until': now + 300, 'state': state}
++        if state.get('state') == 'unreachable' and state.get('retry_at', 0) > now:
++            _ADMIN_NOTICE_PAUSED[recipient] = state['retry_at']
++        return state
++
++
++def _admin_notice_pause_until(recipient):
++    _admin_notice_delivery_state(recipient)
++    return _ADMIN_NOTICE_PAUSED.get(recipient, 0)
++
++
++def _admin_notice_unreachable(recipient, exc):
++    """Persist one actionable incident and retain every queued notice for retry."""
++    with _ADMIN_NOTICE_DELIVERY_LOCK:
++        prior = _admin_notice_delivery_state(recipient)
++        failures = min(8, int(prior.get('failures', 0)) + 1)
++        retry_at = time.time() + min(86400, 3600 * 2 ** (failures - 1))
++        text = str(exc).lower()
++        reason = ('blocked' if 'blocked' in text else 'deactivated' if 'deactivated' in text else
++                  'not_started_or_wrong_id' if 'chat not found' in text or 'initiate conversation' in text else
++                  'unreachable')
++        with _error_scope(source='background', operation='admin-notice:' + str(recipient)):
++            reference = _error_capture(
++                'Admin notification unreachable; recipient=' + str(recipient) + '; reason=' + reason +
++                '. افتح البوت من هذا الحساب وأرسل /start، وتأكد من OWNER_ID وإلغاء الحظر. الإشعارات محفوظة لإعادة التسليم.',
++                level='WARNING', location='notify_admins')
++        state = {'state': 'unreachable', 'reason': reason, 'failures': failures,
++                 'retry_at': retry_at, 'last_failure_at': time.time(), 'error_ref': reference}
++        try:
++            db.admin_notice_delivery.update_one({'_id': str(recipient)}, {'$set': state}, upsert=True)
++        except Exception:
++            logger.debug('Could not persist administrator delivery pause')
++        if len(_ADMIN_NOTICE_PAUSED) >= 256:
++            _ADMIN_NOTICE_PAUSED.pop(next(iter(_ADMIN_NOTICE_PAUSED)), None)
++        _ADMIN_NOTICE_PAUSED[recipient] = retry_at
++        _ADMIN_NOTICE_DELIVERY_CACHE[recipient] = {'until': time.time() + 300, 'state': state}
++
++
++def _admin_notice_resume(recipient, incoming=False):
++    with _ADMIN_NOTICE_DELIVERY_LOCK:
++        state = _admin_notice_delivery_state(recipient)
++        paused = state.get('state') == 'unreachable' or recipient in _ADMIN_NOTICE_PAUSED
++        if not paused:
++            return False
++        try:
++            db.admin_notice_delivery.update_one({'_id': str(recipient)}, {'$set': {
++                'state': 'reachable', 'failures': 0, 'retry_at': 0, 'recovered_at': time.time(),
++                'recovery': 'private_start' if incoming else 'successful_delivery'}}, upsert=True)
++            db.api_purchase_notices.update_many({'status': 'pending', 'sent_to': {'$ne': recipient}},
++                                               {'$set': {'retry_at': time.time()}})
++        except Exception:
++            logger.debug('Could not resume persisted administrator delivery state')
++            return False
++        _ADMIN_NOTICE_PAUSED.pop(recipient, None)
++        _ADMIN_NOTICE_DELIVERY_CACHE.pop(recipient, None)
++        if state.get('error_ref'):
++            _error_resolve_automatic(state['error_ref'], 'Administrator can receive bot messages again')
++        _ADMIN_NOTICE_WAKE.set()
++        return True
+ 
+ 
+ def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=None):
+@@ -7903,7 +8059,7 @@
+         if until <= now:
+             _ADMIN_NOTICE_PAUSED.pop(old_id, None)
+     for recipient in recipients:
+-        if _ADMIN_NOTICE_PAUSED.get(recipient, 0) > now:
++        if _admin_notice_pause_until(recipient) > now:
+             continue
+         failure = None
+         try:
+@@ -7920,13 +8076,11 @@
+                     failure = plain_exc
+         if failure is None:
+             delivered = True
++            _admin_notice_resume(recipient)
+         if failure is not None:
+             kind = _telegram_delivery_kind(failure)
+             if kind == 'unreachable':
+-                if len(_ADMIN_NOTICE_PAUSED) >= 256:
+-                    _ADMIN_NOTICE_PAUSED.pop(next(iter(_ADMIN_NOTICE_PAUSED), None), None)
+-                _ADMIN_NOTICE_PAUSED[recipient] = now + 3600
+-                logger.warning('Admin notification unreachable: recipient=%s; paused for 1 hour', recipient)
++                _admin_notice_unreachable(recipient, failure)
+             else:
+                 logger.warning('Admin notification failed: recipient=%s kind=%s error_type=%s',
+                                recipient, kind, type(failure).__name__)
+@@ -8117,8 +8271,15 @@
+         logger.info(f"[HELPER] shop_detail_ui_helper called: chat_id={chat_id}, uid={uid}, pid={pid}, lang={lang}, msg_edit={message_id_to_edit}")
+         p = find_product(pid)
+         if not p:
+-            logger.warning(f"[HELPER] find_product returned None for pid={pid}")
+-            bot.send_message(chat_id, bil(uid, "❌ عذراً، المنتج غير متوفر.", "❌ Sorry, product is unavailable."), parse_mode="HTML")
++            logger.info('[HELPER] stale or unavailable product link: pid=%s', pid)
++            markup = InlineKeyboardMarkup(row_width=1)
++            markup.add(create_btn(uid, 'btn_shop_search', callback_data='shop_search'))
++            markup.add(create_btn(uid, 'btn_shop_avail', callback_data='shop_available'))
++            markup.add(create_btn(uid, 'btn_products', callback_data='open_shop'))
++            bot.send_message(chat_id, bil(uid,
++                'هذا الرابط قديم أو أن المنتج لم يعد متاحًا. يمكنك البحث عنه أو تصفح المنتجات المتوفرة.',
++                'This link is out of date or the product is no longer available. Search or browse available products below.'),
++                parse_mode='HTML', reply_markup=markup)
+             return False
+         
+         pid_actual = p['_id']
+@@ -8541,6 +8702,8 @@
+ 
+     user = get_user_data_full(uid)
+     user_was_new = (user is None)
++    if chat_id == uid and (uid == OWNER_ID or (user and user.get('is_admin') == 1)):
++        _admin_notice_resume(uid, incoming=True)
+     
+     if not user:
+         full_text = "" if is_callback else (message.text or "")
+@@ -35140,11 +35303,76 @@
+     return head, lines, problems, notes
+ 
+ 
++def _wa_store_link_info():
++    """Resolve owned public configuration, without catalog scans or guessed URLs."""
++    public = _wa_public_url()
++    if not public:
++        try:
++            menu = bot.get_chat_menu_button()
++            public = getattr(getattr(menu, 'web_app', None), 'url', None)
++        except Exception:
++            pass
++    if public:
++        try:
++            parsed = urllib.parse.urlsplit(public)
++            valid = (parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password and
++                     parsed.hostname not in ('localhost', '127.0.0.1', '::1') and len(public) <= 2000)
++        except (TypeError, ValueError):
++            valid = False
++        if not valid:
++            public = None
++    main, username = None, ''
++    try:
++        me = bot.get_me()
++        username = str(me.username or '')
++        main = getattr(me, 'has_main_web_app', None)
++    except Exception:
++        pass
++    launch = ('https://t.me/' + username + '?startapp') if main is True and re.fullmatch(
++        r'[A-Za-z][A-Za-z0-9_]{4,31}', username) else None
++    return {'public': public, 'launch': launch, 'main': main}
++
++
++def _wa_send_store_links(message):
++    info = _wa_store_link_info()
++    public, launch = info['public'], info['launch']
++    if not public and not launch:
++        bot.send_message(message.chat.id,
++            'لم أجد رابط متجر عام صالحًا. اضبط APP_URL برابط خادمك العام أو WEBAPP_URL برابط المتجر، '
++            'ثم أرسل /link. رابط Render يؤخذ من صفحة الخدمة، ولا يمكن استنتاجه من اسم المشروع.')
++        return False
++    text = '🛍 <b>رابط المتجر</b>\n'
++    markup = InlineKeyboardMarkup(row_width=1)
++    if launch:
++        text += '\nرابط يفتح Mini App مباشرة، ويمكن وضعه في القناة:\n<code>' + html.escape(launch) + '</code>\n'
++        markup.add(CustomInlineButton('🛍 فتح المتجر', url=launch, style='success'))
++        markup.add(_copy_button('📋 نسخ رابط Mini App', launch))
++    if public:
++        text += '\nعنوان الموقع:\n<code>' + html.escape(public) + '</code>\n'
++        if not launch:
++            destination = {'web_app': types.WebAppInfo(url=public)} if message.chat.id == message.from_user.id else {'url': public}
++            markup.add(CustomInlineButton('🛍 فتح المتجر', style='success', **destination))
++        if len(public) <= 256:
++            markup.add(_copy_button('📋 نسخ رابط الموقع', public))
++        if not launch:
++            text += ('\nلفتحه مباشرة من رابط القناة: فعّل Main Mini App من @BotFather وضع عنوان الموقع أعلاه، ثم أرسل /link مجددًا.'
++                     if info['main'] is False else '\nتعذّر تأكيد إعداد Main Mini App؛ زر فتح المتجر في هذه المحادثة يفتح الموقع داخل Telegram.')
++    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
++    return True
++
++
++@bot.message_handler(commands=['link', 'storelink'])
++def _wa_store_link_cmd(message):
++    if _is_admin_check(message.from_user.id):
++        _wa_send_store_links(message)
++
++
+ @bot.message_handler(commands=['miniapp', 'miniapp_check'])
+ def _wa_check_cmd(message):
+     uid = message.from_user.id
+     if not _is_admin_check(uid):
+         return
++    _wa_send_store_links(message)
+     wait = bot.reply_to(message, "⏳ جاري فحص قاعدة البيانات والواجهة (قراءة فقط)...")
+     try:
+         head, lines, problems, notes = _wa_check_report()
+@@ -37069,6 +37297,20 @@
+         _ERROR_LOCAL.busy = False
+ 
+ 
++def _error_resolve_automatic(reference, reason):
++    """Resolve only a known incident after recovery; never delete its history."""
++    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
++    fields = {'resolved': True, 'resolved_at': now, 'resolution': reason}
++    with _ERROR_MEMORY_LOCK:
++        for record in _ERROR_MEMORY:
++            if record['_id'] == reference:
++                record.update(fields)
++    try:
++        db.system_errors.update_one({'_id': reference}, {'$set': fields})
++    except Exception:
++        pass
++
++
+ class _ErrorLogHandler(logging.Handler):
+     def emit(self, record):
+         try:
+@@ -37117,7 +37359,7 @@
+                 break
+             now = rec['last_at']
+             data = {k: v for k, v in rec.items() if not k.startswith('_')}
+-            data.update(resolved=False, expires_at=now + datetime.timedelta(days=30))
++            data.update(resolved=bool(rec.get('resolved')), expires_at=now + datetime.timedelta(days=30))
+             try:
+                 db.system_errors.update_one({'_id': rec['_id']},
+                     {'$set': data, '$inc': {'count': 1}, '$setOnInsert': {'first_at': now}}, upsert=True)
+@@ -37126,7 +37368,7 @@
+                 retry = True
+                 break
+             try:
+-                if rec['level'] in ('ERROR', 'CRITICAL') and str(get_setting('error_alerts_enabled', 'on')) != 'off':
++                if not rec.get('resolved') and rec['level'] in ('ERROR', 'CRITICAL') and str(get_setting('error_alerts_enabled', 'on')) != 'off':
+                     claim = db.system_errors.find_one_and_update({'_id': rec['_id'], '$or': [
+                         {'last_alert_at': {'$exists': False}}, {'last_alert_at': {'$lt': now - datetime.timedelta(minutes=10)}}]},
+                         {'$set': {'last_alert_at': now}}, return_document=True)
+@@ -37279,14 +37521,20 @@
+         for field in ('build', 'platform', 'sdk_version', 'last_action', 'user_agent'):
+             if isinstance(body.get(field), str) and body[field]:
+                 diagnostic.append(field + ': ' + _error_redact(body[field], 250))
+-        if body.get('masked') is True:
++        stack = body.get('stack') if isinstance(body.get('stack'), str) else ''
++        location = _error_redact(body.get('location', ''), 240)
++        message = _error_redact(body.get('message', ''), 1200)
++        unknown_location = not location or location in ('0', ':0', ':0:0', 'Browser location unavailable',
++            'Browser did not expose the failing script')
++        # Infer this for older clients too; an untrusted `masked` flag alone
++        # must not downgrade a real error with a filename or stack trace.
++        masked = bool(re.fullmatch(r'Script error\.?', message.strip(), re.I) and unknown_location and not stack.strip())
++        if masked:
+             diagnostic.append('Browser policy hid error details; the failing script cannot be identified from this event.')
+-        stack = body.get('stack') if isinstance(body.get('stack'), str) else ''
+         trace = '\n'.join(diagnostic + ([_error_redact(stack, 2000)] if stack else []))
+-        location = _error_redact(body.get('location', ''), 240)
+         if not location or location in ('0', ':0', ':0:0'):
+             location = 'Browser location unavailable'
+-        ref = _error_capture(_error_redact(body.get('message', ''), 1200), source='browser',
++        ref = _error_capture(message, source='browser', level='WARNING' if masked else 'ERROR',
+                              location=location, browser_trace=trace)
+     return 200, {'ok': True, 'reference': ref}
+ 
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -12,7 +12,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-27.1',queue=[],recent=new Map();
++ const build='lara-28.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+--- a/verification/test_client_diagnostics_browser.cjs
++++ b/verification/test_client_diagnostics_browser.cjs
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-27.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-28.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-27.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-28.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,3 @@
++[pytest]
++testpaths = verification
++python_files = test_*.py
+--- /dev/null
++++ b/verification/test_runtime_recovery.py
+@@ -0,0 +1,332 @@
++"""Reported outages, delivery recovery and direct store links; external services stay blocked."""
++import datetime
++import types
++from unittest.mock import Mock
++
++import pytest
++from harness import MESSAGES, reply
++from test_integration import mod, isolate, server, request, product
++from test_error_monitor import empty_monitor
++from test_products_menu import buttons
++from test_reliability import manager
++
++
++class Timeout(Exception):
++    code = 28
++
++
++def account_doc(session='test-session'):
++    return {'_id': 'test-account', 'data': {'accessToken': 'test-token', 'sessionToken': session,
++        'user': {'email': 'owner@example.test'}, 'account': {'id': 'test-account'}}}
++
++
++def message(mod, uid=9001, text='/start', chat=None):
++    return mod.types.Message.de_json({'message_id': 1, 'date': 1,
++        'chat': {'id': uid if chat is None else chat, 'type': 'private'},
++        'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'}, 'text': text})
++
++
++@pytest.fixture(autouse=True)
++def recovery_state(mod, isolate, empty_monitor, monkeypatch):
++    mod._CGPT_MEMBER_HEALTH.clear()
++    mod._ADMIN_NOTICE_PAUSED.clear()
++    mod._ADMIN_NOTICE_DELIVERY_CACHE.clear()
++    mod._ADMIN_NOTICE_WAKE.clear()
++    monkeypatch.setattr(mod, 'CFFI_AVAILABLE', True)
++    yield
++    mod._CGPT_MEMBER_HEALTH.clear()
++    mod._ADMIN_NOTICE_PAUSED.clear()
++    mod._ADMIN_NOTICE_DELIVERY_CACHE.clear()
++
++
++def test_timeout_preserves_expired_access_and_backoff_survives_rebuilt_manager(mod, monkeypatch):
++    clock = [1800000000.]
++    monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    m = manager(mod, (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat())
++    http = Mock(side_effect=[Timeout('Operation timed out after 15002 milliseconds with 0 bytes received') for _ in range(2)])
++    monkeypatch.setattr(mod.cffi_requests, 'get', http)
++    remove = Mock(); monkeypatch.setattr(m, '_remove_user', remove)
++    m.check_and_cleanup()
++    assert not remove.called and m.invites_data['invites']['paid@example.test']['status'] == 'active'
++    assert m._last_fetch_failed and m._last_fetch_status == 'timeout'
++    assert http.call_args.kwargs['timeout'] == (5, 20)
++    rebuilt = mod._cgpt_build_manager_from_doc(account_doc())
++    assert rebuilt._get_org_users() == [] and http.call_count == 1
++    clock[0] += 61
++    rebuilt._get_org_users()
++    assert http.call_count == 2
++    assert mod._cgpt_member_health(rebuilt)['retry_at'] == clock[0] + 120
++    mod._error_drain()
++    rows = list(mod.db.system_errors.find())
++    assert len(rows) == 1 and rows[0]['level'] == 'WARNING' and rows[0]['count'] == 2
++    assert mod.db.api_purchase_notices.count_documents({}) == 0
++
++
++def test_member_recovery_resets_old_status_and_resolves_only_its_warning(mod, monkeypatch):
++    clock = [1800000000.]; monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    m = manager(mod)
++    monkeypatch.setattr(mod.cffi_requests, 'get', Mock(side_effect=Timeout('Timed out')))
++    m._last_fetch_status = 401
++    assert m._get_org_users() == [] and m._last_fetch_status == 'timeout'
++    other = mod._error_capture('Unrelated real error')
++    mod._error_drain()
++    clock[0] += 61
++    users = [{'id': 'paid', 'email': 'paid@example.test'}]
++    monkeypatch.setattr(mod.cffi_requests, 'get', lambda *a, **k: types.SimpleNamespace(
++        status_code=200, json=lambda: {'items': users}))
++    assert m._get_org_users() == users
++    assert m._last_fetch_status == 200 and not m._last_fetch_failed
++    assert mod._cgpt_member_health(m)['failures'] == 0
++    assert mod.db.system_errors.find_one({'operation': 'cgpt:members:test-account'})['resolved']
++    assert not mod.db.system_errors.find_one({'_id': other})['resolved']
++
++
++def test_changed_cookie_credentials_allow_immediate_read_without_old_cooldown(mod, monkeypatch):
++    m = manager(mod)
++    http = Mock(side_effect=Timeout('Timed out')); monkeypatch.setattr(mod.cffi_requests, 'get', http)
++    m._get_org_users()
++    fresh = mod._cgpt_build_manager_from_doc(account_doc('replacement-test-session'))
++    fresh._get_org_users()
++    assert http.call_count == 2
++    assert 'test-token' not in str(mod._CGPT_MEMBER_HEALTH)
++    assert 'replacement-test-session' not in str(mod._CGPT_MEMBER_HEALTH)
++
++
++@pytest.mark.parametrize('payload', [{}, {'items': {}}, {'items': [None]},
++    {'items': [], 'has_more': True}, {'items': [], 'total': 2}])
++def test_invalid_or_incomplete_member_response_never_expires_or_removes_customers(mod, monkeypatch, payload):
++    m = manager(mod, (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat())
++    monkeypatch.setattr(mod.cffi_requests, 'get', lambda *a, **k: types.SimpleNamespace(status_code=200, json=lambda: payload))
++    remove = Mock(); monkeypatch.setattr(m, '_remove_user', remove)
++    m.check_and_cleanup()
++    assert m._last_fetch_failed and not remove.called
++    assert m.invites_data['invites']['paid@example.test']['status'] == 'active'
++
++
++@pytest.mark.parametrize('status,delay', [(401, 3600), (403, 3600), (429, 300), (503, 60)])
++def test_member_http_failures_use_bounded_retry_and_keep_status(mod, monkeypatch, status, delay):
++    clock = [1800000000.]; monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    m = manager(mod)
++    http = Mock(return_value=types.SimpleNamespace(status_code=status, headers={'Retry-After': '300' if status == 429 else '0'}))
++    monkeypatch.setattr(mod.cffi_requests, 'get', http)
++    assert m._get_org_users() == [] and m._last_fetch_status == status and m._last_fetch_failed
++    assert mod._cgpt_member_health(m)['retry_at'] == clock[0] + delay
++    assert m._get_org_users() == [] and http.call_count == 1
++
++
++def test_daemon_timeout_does_not_claim_cookies_expired_or_repeat_subscription_calls(mod, monkeypatch):
++    m = manager(mod)
++    subscription = Mock(return_value='active'); monkeypatch.setattr(m, 'check_subscription_status', subscription)
++    monkeypatch.setattr(mod, '_cgpt_build_manager_from_doc', lambda d: m)
++    monkeypatch.setattr(mod.cffi_requests, 'get', Mock(side_effect=Timeout('Timed out')))
++    cookies = Mock(); monkeypatch.setattr(mod, '_cgpt_notify_cookie_expired', cookies)
++    reminders = Mock(); monkeypatch.setattr(mod, '_cgpt_send_expiry_reminders', reminders)
++    assert not mod._cgpt_check_account(account_doc())
++    assert not mod._cgpt_check_account(account_doc())
++    assert subscription.call_count == 1 and not cookies.called and reminders.call_count == 2
++
++
++def test_unavailable_subscription_stops_extra_member_read_without_false_cookie_notice(mod, monkeypatch):
++    m = manager(mod)
++    monkeypatch.setattr(m, 'check_subscription_status', lambda: 'error')
++    cleanup = Mock(); monkeypatch.setattr(m, 'check_and_cleanup', cleanup)
++    monkeypatch.setattr(mod, '_cgpt_build_manager_from_doc', lambda d: m)
++    cookies = Mock(); monkeypatch.setattr(mod, '_cgpt_notify_cookie_expired', cookies)
++    assert not mod._cgpt_check_account(account_doc())
++    assert not cookies.called and not cleanup.called
++
++
++def test_daemon_preserves_real_unauthorized_cookie_alert_and_cooldown(mod, monkeypatch):
++    m = manager(mod)
++    monkeypatch.setattr(m, 'check_subscription_status', lambda: 'unauthorized')
++    monkeypatch.setattr(mod, '_cgpt_build_manager_from_doc', lambda d: m)
++    cookies = Mock(); monkeypatch.setattr(mod, '_cgpt_notify_cookie_expired', cookies)
++    mod._cgpt_check_account(account_doc()); mod._cgpt_check_account(account_doc())
++    assert cookies.call_count == 1 and mod._cgpt_member_health(m)['status'] == 401
++
++
++@pytest.mark.parametrize('cause', ['Forbidden: bot was blocked by the user', 'Bad Request: chat not found',
++    "Forbidden: bot can't initiate conversation with a user", 'Forbidden: user is deactivated'])
++def test_admin_unreachable_is_one_persisted_incident_not_an_error_per_notice(mod, monkeypatch, cause):
++    send = Mock(side_effect=RuntimeError(cause)); monkeypatch.setattr(mod.bot, 'send_message', send)
++    assert not mod.notify_admins('Purchase notice', recipient_ids={9001})
++    assert not mod.notify_admins('Second purchase notice', recipient_ids={9001})
++    assert send.call_count == 1
++    state = mod.db.admin_notice_delivery.find_one({'_id': '9001'})
++    assert state['state'] == 'unreachable' and state['failures'] == 1
++    mod._ADMIN_NOTICE_PAUSED.clear(); mod._ADMIN_NOTICE_DELIVERY_CACHE.clear()
++    assert not mod.notify_admins('After restart', recipient_ids={9001}) and send.call_count == 1
++    mod._error_drain()
++    record = mod.db.system_errors.find_one({})
++    assert record['level'] == 'WARNING' and record['count'] == 1 and '/start' in record['cause']
++
++
++def test_admin_retry_backs_off_across_restart_without_new_hourly_incidents(mod, monkeypatch):
++    clock = [1800000000.]; monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    send = Mock(side_effect=RuntimeError('Forbidden: bot was blocked by the user'))
++    monkeypatch.setattr(mod.bot, 'send_message', send)
++    mod.notify_admins('First', recipient_ids={9001})
++    clock[0] += 3601
++    mod._ADMIN_NOTICE_PAUSED.clear(); mod._ADMIN_NOTICE_DELIVERY_CACHE.clear()
++    mod.notify_admins('Later', recipient_ids={9001})
++    assert send.call_count == 2
++    state = mod.db.admin_notice_delivery.find_one({'_id': '9001'})
++    assert state['failures'] == 2 and state['retry_at'] == clock[0] + 7200
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({}) == 1
++    assert mod.db.system_errors.find_one({})['count'] == 2
++
++
++def test_blocked_admin_keeps_every_notice_and_other_admin_does_not_get_duplicates(mod, monkeypatch):
++    mod.db.users.update_one({'user_id': 1002}, {'$set': {'is_admin': 1}})
++    delivered = []
++    def send(uid, text, **kw):
++        if uid == 9001:
++            raise RuntimeError('Forbidden: bot was blocked by the user')
++        delivered.append((uid, text)); return reply(uid, text, **kw)
++    monkeypatch.setattr(mod.bot, 'send_message', send)
++    mod._queue_api_purchase_notice('ORDER-A', 'Paid order A')
++    mod._queue_api_purchase_notice('ORDER-B', 'Paid order B')
++    mod._retry_api_purchase_notices()
++    assert len(delivered) == 2 and {uid for uid, _ in delivered} == {1002}
++    assert mod.db.api_purchase_notices.count_documents({'status': 'pending'}) == 2
++    assert all(d['sent_to'] == [1002] for d in mod.db.api_purchase_notices.find())
++    monkeypatch.setattr(mod.bot, 'send_message', lambda uid, text, **kw: delivered.append((uid, text)) or reply(uid, text, **kw))
++    mod.start_handler(message(mod))
++    assert mod.db.admin_notice_delivery.find_one({'_id': '9001'})['state'] == 'reachable'
++    assert mod._ADMIN_NOTICE_WAKE.is_set()
++    mod._retry_api_purchase_notices(); mod._retry_api_purchase_notices()
++    assert mod.db.api_purchase_notices.count_documents({'status': 'sent'}) == 2
++    assert len([1 for uid, text in delivered if uid == 1002]) == 2
++    assert len([1 for uid, text in delivered if uid == 9001 and text.startswith('Paid order')]) == 2
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_successful_retry_resolves_delivery_incident_and_releases_pause(mod, monkeypatch):
++    clock = [1800000000.]; monkeypatch.setattr(mod.time, 'time', lambda: clock[0])
++    monkeypatch.setattr(mod.bot, 'send_message', Mock(side_effect=RuntimeError('chat not found')))
++    mod.notify_admins('First', recipient_ids={9001}); mod._error_drain()
++    clock[0] += 3601
++    monkeypatch.setattr(mod.bot, 'send_message', reply)
++    assert mod.notify_admins('Retry', recipient_ids={9001})
++    assert 9001 not in mod._ADMIN_NOTICE_PAUSED
++    assert mod.db.admin_notice_delivery.find_one({'_id': '9001'})['state'] == 'reachable'
++    assert mod.db.system_errors.find_one({})['resolved']
++
++
++def test_unrelated_user_start_cannot_resume_owner_delivery(mod, monkeypatch):
++    monkeypatch.setattr(mod.bot, 'send_message', Mock(side_effect=RuntimeError('chat not found')))
++    mod.notify_admins('First', recipient_ids={9001})
++    monkeypatch.setattr(mod.bot, 'send_message', reply)
++    mod.start_handler(message(mod, uid=1001))
++    assert mod.db.admin_notice_delivery.find_one({'_id': '9001'})['state'] == 'unreachable'
++
++
++@pytest.mark.parametrize('uid,word', [(1001, 'out of date'), (1002, 'قديم')])
++def test_old_product_link_offers_localized_search_and_stock_without_false_error(mod, uid, word):
++    assert mod.shop_detail_ui_helper(uid, uid, '6aa1a46f38acd40b50800e8c', 'en' if uid == 1001 else 'ar') is False
++    assert word in MESSAGES[-1][1]
++    actions = [b['callback_data'] for row in buttons(MESSAGES[-1]) for b in row]
++    assert actions == ['shop_search', 'shop_available', 'open_shop']
++    assert all('btn_' not in b['text'] for row in buttons(MESSAGES[-1]) for b in row)
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({}) == 0 and mod.db.orders.count_documents({}) == 0
++
++
++def test_real_product_database_failure_remains_an_error(mod, monkeypatch):
++    monkeypatch.setattr(mod.db.products, 'find_one', Mock(side_effect=RuntimeError('Product storage unavailable')))
++    mod.shop_detail_ui_helper(1001, 1001, '6aa1a46f38acd40b50800e8c', 'en')
++    mod._error_drain()
++    assert mod.db.system_errors.find_one({'level': 'ERROR'})
++
++
++def test_existing_product_objectid_deep_link_still_opens_real_product(mod):
++    p = product(mod)
++    assert mod.shop_detail_ui_helper(1001, 1001, str(p['_id']), 'en')
++    assert any('Test Product' in text for _, text, _ in MESSAGES)
++
++
++def test_old_client_masked_script_errors_remain_counted_without_repeated_alerts(mod, server, monkeypatch):
++    notices = Mock(); monkeypatch.setattr(mod, 'notify_admins', notices)
++    for _ in range(3):
++        status, data, _ = request(server, '/webapp/client/error', {'message': 'Script error.', 'location': '0', 'operation': 'runtime'})
++        assert status == 200 and data['reference']
++    mod._error_drain()
++    record = mod.db.system_errors.find_one({})
++    assert record['count'] == 3 and record['level'] == 'WARNING' and not notices.called
++    assert 'cannot be identified' in record['trace']
++
++
++@pytest.mark.parametrize('body', [
++    {'message': 'Script error.', 'location': '/app/store.js:12', 'masked': True},
++    {'message': 'Script error.', 'location': '0', 'stack': 'at store.js:14', 'masked': True},
++    {'message': 'TypeError: cart failed', 'location': '0', 'masked': True},
++    {'message': 'Failed to load JavaScript resource', 'location': '/app/missing.js', 'operation': 'script-load'}])
++def test_real_browser_errors_cannot_be_downgraded_with_masked_flag(mod, server, monkeypatch, body):
++    notices = Mock(); monkeypatch.setattr(mod, 'notify_admins', notices)
++    status, _, _ = request(server, '/webapp/client/error', body)
++    assert status == 200
++    mod._error_drain()
++    assert mod.db.system_errors.find_one({})['level'] == 'ERROR' and notices.call_count == 1
++
++
++def test_recovery_before_error_worker_flush_keeps_record_resolved_and_no_stale_alert(mod, monkeypatch):
++    notices = Mock(); monkeypatch.setattr(mod, 'notify_admins', notices)
++    ref = mod._error_capture('Recovered incident')
++    mod._error_resolve_automatic(ref, 'Verified recovery')
++    mod._error_drain()
++    assert mod.db.system_errors.find_one({'_id': ref})['resolved'] and not notices.called
++
++
++def test_link_command_exposes_copyable_real_config_and_verified_main_miniapp(mod, monkeypatch):
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: 'https://store.example/app/')
++    monkeypatch.setattr(mod.bot, 'get_me', lambda: types.SimpleNamespace(username='lara_local_test_bot', has_main_web_app=True))
++    monkeypatch.setattr(mod, '_wa_build_catalog_uncached', Mock(side_effect=AssertionError('Link command must not scan products')))
++    mod._wa_store_link_cmd(message(mod, text='/link'))
++    text = MESSAGES[-1][1]
++    assert 'https://store.example/app/' in text and 'https://t.me/lara_local_test_bot?startapp' in text
++    rows = buttons(MESSAGES[-1])
++    assert rows[0][0]['url'] == 'https://t.me/lara_local_test_bot?startapp'
++    copies = [b['copy_text']['text'] for row in rows for b in row if 'copy_text' in b]
++    assert copies == ['https://t.me/lara_local_test_bot?startapp', 'https://store.example/app/']
++
++
++def test_link_command_never_claims_main_app_ready_when_disabled(mod, monkeypatch):
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: 'https://store.example/app/')
++    monkeypatch.setattr(mod.bot, 'get_me', lambda: types.SimpleNamespace(username='lara_local_test_bot', has_main_web_app=False))
++    mod._wa_store_link_cmd(message(mod, text='/link'))
++    assert '?startapp' not in MESSAGES[-1][1] and '@BotFather' in MESSAGES[-1][1]
++    assert buttons(MESSAGES[-1])[0][0]['web_app']['url'] == 'https://store.example/app/'
++
++
++def test_link_command_can_read_existing_telegram_menu_when_file_has_no_url(mod, monkeypatch):
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: None)
++    monkeypatch.setattr(mod.bot, 'get_chat_menu_button', lambda: types.SimpleNamespace(web_app=types.SimpleNamespace(url='https://existing-store.example/app/')))
++    monkeypatch.setattr(mod.bot, 'get_me', Mock(side_effect=Timeout('Telegram unavailable')))
++    mod._wa_store_link_cmd(message(mod, text='/link'))
++    assert 'https://existing-store.example/app/' in MESSAGES[-1][1]
++    assert buttons(MESSAGES[-1])[0][0]['web_app']['url'] == 'https://existing-store.example/app/'
++
++
++def test_link_command_without_configuration_does_not_invent_a_domain_or_bot(mod, monkeypatch):
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: None)
++    monkeypatch.setattr(mod.bot, 'get_chat_menu_button', Mock(side_effect=Timeout('Telegram unavailable')))
++    monkeypatch.setattr(mod.bot, 'get_me', Mock(side_effect=Timeout('Telegram unavailable')))
++    mod._wa_store_link_cmd(message(mod, text='/link'))
++    assert 'APP_URL' in MESSAGES[-1][1] and 'https://' not in MESSAGES[-1][1]
++    assert not buttons(MESSAGES[-1])
++
++
++def test_link_command_is_admin_only(mod):
++    mod._wa_store_link_cmd(message(mod, uid=1001, text='/link'))
++    assert not MESSAGES
++
++
++@pytest.mark.parametrize('url', ['https://[broken', 'http://localhost/app/',
++    'https://user:PRIVATE_SECRET@host.example/app/', 'https://127.0.0.1/app/'])
++def test_malformed_private_or_local_public_url_does_not_crash_or_leak_credentials(mod, monkeypatch, url):
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: url)
++    monkeypatch.setattr(mod.bot, 'get_me', lambda: types.SimpleNamespace(username='lara_local_test_bot', has_main_web_app=False))
++    mod._wa_store_link_cmd(message(mod, text='/link'))
++    assert 'APP_URL' in MESSAGES[-1][1] and 'PRIVATE_SECRET' not in MESSAGES[-1][1]
++    assert not buttons(MESSAGES[-1])

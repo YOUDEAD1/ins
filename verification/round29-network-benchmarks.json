@@ -1,0 +1,26 @@
+{
+  "twenty_unchanged_invite_saves": {
+    "writes_before": 20,
+    "writes_after": 0,
+    "update_payload_bytes_before": 4340,
+    "update_payload_bytes_after": 0
+  },
+  "two_thousand_unverified_referrals": {
+    "background_membership_checks_before": 2000,
+    "background_membership_checks_after": 0
+  },
+  "ten_healthy_membership_cycles": {
+    "checks_before": 1200,
+    "checks_after": 120
+  },
+  "ten_emoji_revalidations": {
+    "response_body_bytes_before": 7287480,
+    "response_body_bytes_after": 728748,
+    "conditional_status": 304
+  },
+  "twenty_inventory_reads": {
+    "requests_before": 40,
+    "requests_after": 2,
+    "fresh_purchase_reads_current_members": true
+  }
+}

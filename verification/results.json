@@ -1,22 +1,29 @@
 {
-  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26)",
-  "verified_at": "2026-10-19T22:44:32.901344+00:00",
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31)",
+  "verified_at": "2026-10-20T14:59:56.646565+00:00",
   "python": "3.12.14",
   "tests": {
-    "total": 462,
-    "passed": 462,
+    "total": 650,
+    "passed": 650,
     "failed": 0,
     "skipped": 0,
     "by_module": {
-      "verification.test_integration": 183,
-      "verification.test_support": 31,
-      "verification.test_reliability": 35,
-      "verification.test_deposit_buttons": 29,
-      "verification.test_products_menu": 27,
       "verification.test_cart": 35,
-      "verification.test_error_monitor": 16,
       "verification.test_channel_broadcast": 59,
-      "verification.test_network": 47
+      "verification.test_client_diagnostics": 17,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_error_monitor": 16,
+      "verification.test_integration": 183,
+      "verification.test_network": 47,
+      "verification.test_products_menu": 27,
+      "verification.test_referral_bandwidth": 13,
+      "verification.test_referral_integrity": 40,
+      "verification.test_referral_policy": 19,
+      "verification.test_reliability": 35,
+      "verification.test_report_config": 17,
+      "verification.test_runtime_recovery": 42,
+      "verification.test_support": 31,
+      "verification.test_user_inspection": 40
     }
   },
   "python_compile": "passed",
@@ -71,7 +78,7 @@
     "premium_emoji_and_messages_editable": true,
     "console_cms_roundtrip_tested": true
   },
-  "preserved_immediately_previous_definitions": 1206,
+  "preserved_immediately_previous_definitions": 1330,
   "frontend_cart_chromium_integration": "passed",
   "frontend_viewports": [
     "1360x960",
@@ -114,7 +121,7 @@
     "system_errors",
     "cart_checkouts"
   ],
-  "current_definitions": 1250,
+  "current_definitions": 1330,
   "frontend_channel_deep_links_chromium": "passed",
   "frontend_channel_deep_links_cases": 4,
   "channel_publication_live_tested": false,
@@ -194,5 +201,165 @@
         "after": 1
       }
     }
+  },
+  "round27_validation": {
+    "new_python_tests": 57,
+    "chromium_user_inspection": "passed",
+    "chromium_cart_regression": "passed",
+    "desktop_mobile": true,
+    "arabic_english_rtl": true,
+    "javascript_errors": 0,
+    "balance_mutations": 0,
+    "product_buttons_then_records_then_details": true,
+    "credentials_not_in_product_lists": true,
+    "all_user_ledgers": true,
+    "no_duplicate_api_projection": true,
+    "saved_subscription_current_and_original_expiry": true,
+    "all_codes_paginated_and_exported": true,
+    "previous_page_retained_on_back": true,
+    "member_screen_stack_without_command_replay": true,
+    "cancel_pending_amount_on_back": true,
+    "section_scope_prevents_old_pages": true,
+    "fake_credentials_and_external_network_block": true
+  },
+  "user_inspection": {
+    "admin_only": true,
+    "on_demand_only": true,
+    "new_background_network_jobs": 0,
+    "products_per_page": 12,
+    "records_per_page": 12,
+    "codes_per_page": 20,
+    "navigation_stack_max_screens": 24,
+    "customer_credentials_require_detail_request": true,
+    "owner_cookies_excluded": true,
+    "current_subscription_state_basis": "saved bot records, not live membership verification"
+  },
+  "cms_translation": {
+    "counts_actual_unprotected_arabic_letters": true,
+    "recovered_line_not_an_error": true,
+    "previous_english_retained_on_failure": true,
+    "pure_fallback_helper_corrected": true
+  },
+  "browser_diagnostics": {
+    "chromium": "passed",
+    "early_boot_queue": true,
+    "runtime_and_promise_stack": true,
+    "resource_filename": true,
+    "masked_source_explicitly_unknown": true,
+    "action_values_and_form_values_not_collected": true,
+    "redaction_client_and_server": true,
+    "max_reports_per_minute": 12,
+    "real_report_7b7d0fb1e3f2_root_cause_identified": false,
+    "frontend_build": "lara-30.1"
+  },
+  "round28_validation": {
+    "new_python_tests": 42,
+    "chromium_client_diagnostics": "passed",
+    "chromium_user_inspection_and_back_navigation": "passed",
+    "outage_never_proves_empty_member_list": true,
+    "member_backoff_survives_temporary_manager_rebuild": true,
+    "credentials_change_resets_backoff": true,
+    "no_timeout_cookie_expiry_notice": true,
+    "admin_delivery_pause_persisted": true,
+    "admin_private_start_resumes_all_queued_notices": true,
+    "other_admin_delivery_not_repeated": true,
+    "old_product_links_offer_localized_navigation": true,
+    "real_database_errors_remain_visible": true,
+    "masked_script_events_counted_as_warning": true,
+    "actionable_browser_errors_still_alert": true,
+    "masked_script_root_cause_identified": false,
+    "link_command_reads_runtime_configuration_and_verified_main_app": true,
+    "public_site_url_present_in_received_archive": false,
+    "fake_credentials_and_external_network_block": true,
+    "production_services_tested": false
+  },
+  "round29_validation": {
+    "new_python_tests": 53,
+    "chromium_referral_verification_and_liability_display": "passed",
+    "chromium_cart_and_lost_response_recovery": "passed",
+    "chromium_user_inspection_and_back_navigation": "passed",
+    "chromium_client_diagnostics": "passed",
+    "website_verification_required_even_with_device_analysis_off": true,
+    "admin_approval_cannot_bypass_website": true,
+    "failed_human_or_unknown_membership_cannot_activate": true,
+    "signed_identity_bound_single_use_challenge": true,
+    "new_referral_reversal_never_overdraws_spendable_cash": true,
+    "resumable_wallet_event_and_durable_ledger": true,
+    "concurrent_credit_and_deposit_not_lost": true,
+    "legacy_migration_label_does_not_prove_payment": true,
+    "unknown_historical_balances_left_for_review": true,
+    "reconciliation_preserves_balance_minus_liability": true,
+    "archived_referral_rejoin_restores_record": true,
+    "unverified_referrals_background_member_requests": 0,
+    "healthy_membership_fallback_seconds": 21600,
+    "purchase_member_read_fresh": true,
+    "unchanged_invite_document_writes_skipped": true,
+    "static_etag_304_and_single_gzip": true,
+    "network_benchmarks": {
+      "twenty_unchanged_invite_saves": {
+        "writes_before": 20,
+        "writes_after": 0,
+        "update_payload_bytes_before": 4340,
+        "update_payload_bytes_after": 0
+      },
+      "two_thousand_unverified_referrals": {
+        "background_membership_checks_before": 2000,
+        "background_membership_checks_after": 0
+      },
+      "ten_healthy_membership_cycles": {
+        "checks_before": 1200,
+        "checks_after": 120
+      },
+      "ten_emoji_revalidations": {
+        "response_body_bytes_before": 7287480,
+        "response_body_bytes_after": 728748,
+        "conditional_status": 304
+      },
+      "twenty_inventory_reads": {
+        "requests_before": 40,
+        "requests_after": 2,
+        "fresh_purchase_reads_current_members": true
+      }
+    },
+    "fake_credentials_and_external_network_block": true,
+    "production_services_tested": false,
+    "live_customer_balances_modified": false,
+    "monthly_bandwidth_guaranteed": false
+  },
+  "old_javascript_function_names_missing": [],
+  "round30_validation": {
+    "new_python_tests": 18,
+    "prospective_policy_marker": 30,
+    "legacy_active_referrals_retain_admission": true,
+    "new_referrals_require_website": true,
+    "one_thousand_legacy_referrals_and_three_balance_cases": true,
+    "start_unknown_membership_never_becomes_departure": true,
+    "no_startup_negative_balance_reclassification": true,
+    "read_only_username_and_id_diagnosis": true,
+    "standalone_report_does_not_start_bot": true,
+    "report_contains_no_credentials": true,
+    "five_chromium_suites": "passed",
+    "loading_pending_reads_errors_retry_reduced_motion": "passed",
+    "real_user_review": "unavailable: session network unreachable before DNS completion",
+    "live_customer_balances_modified": false,
+    "historical_erroneous_deduction_amount_determined": false
+  },
+  "round31_validation": {
+    "new_python_tests": 18,
+    "report_version": 2,
+    "explicit_file_keeps_uri_and_database_together": true,
+    "blank_environment_uri_does_not_shadow_filled_file": true,
+    "windows_env_txt_utf8_bom_and_paths_with_spaces": true,
+    "settings_selection_precedes_target_prompt": true,
+    "configuration_files_and_environment_never_modified": true,
+    "credentials_not_printed_or_written_to_report": true,
+    "financial_tables_read_only_and_sensitive_fields_excluded": true,
+    "legacy_balance_snapshot_marked_unverified": true,
+    "admin_balance_snapshot_uses_atomic_result": true,
+    "admin_ledger_precision": 4,
+    "frontend_files_changed": false,
+    "native_windows_dialog_tested_on_user_device": false,
+    "live_customer_balances_modified": false,
+    "historical_refund_amount_determined": false
   }
 }

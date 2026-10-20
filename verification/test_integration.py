@@ -36,6 +36,11 @@ def isolate(mod,monkeypatch):
     for k,v in settings.items():mod.db.settings.insert_one({'key':k,'value':v})
     for n in ['_USER_CACHE','_VIP_STATE_CACHE','_WA_CAT_CACHE','_WA_RATE','_WA_BUY_LOCKS','_cgpt_pending','_purchase_locks','_VC_SESS']:
         getattr(mod,n).clear()
+    for n in ('_CGPT_STOCK_CACHE', '_CGPT_CAPACITY_CACHE', '_FORCED_SUB_CACHE'):
+        getattr(mod, n).clear()
+    mod._FSUB_CHANNEL_CACHE.update(expires=0, rows=[])
+    mod._REF_SCAN_HEALTH['retry_at'] = 0
+    mod._REF_SCAN_WAKE.clear()
     mod._PRODUCTS_CACHE=None
     mod._invalidate_products_cache()
     mod._VIP_CFG['v']=None
@@ -377,6 +382,13 @@ def _ref_fp(did, **kw):
           'wd': False, 'did': did, 'gl': 'Qualcomm|Adreno (TM) 740', 'cv': did}
     fp.update(kw); return fp
 
+def _verified_ref_request(mod, server, uid, fp, ch):
+    status, challenge, _ = request(server, '/webapp/verify/challenge', uid=uid)
+    assert status == 200
+    mod.db.ref_verification_challenges.update_one({'_id': challenge['challenge']}, {'$inc': {'issued_at': -1}})
+    return request(server, '/webapp/verify', {'fp': fp, 'challenge': challenge['challenge'],
+        'ch': dict(ch, answer=challenge['target'])}, uid=uid)
+
 def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
     mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': '2'}}, upsert=True)
     for uid in (2001, 2002):
@@ -384,13 +396,13 @@ def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
         mod.register_new_referral(uid, 1001)
         mod.db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'need'}})
     ch = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
-    s, d, _ = request(server, '/webapp/verify', {'fp': _ref_fp('a' * 32, wd=True), 'ch': ch}, uid=2001)
+    s, d, _ = _verified_ref_request(mod, server, 2001, _ref_fp('a' * 32, wd=True), ch)
     assert s == 200 and d['state'] == 'done'
     r = mod.db.referrals_v2.find_one({'invited_id': 2001})
     assert r['dv'] == 'flag' and r['status'] == 'active'          # counted, marked
     assert not [t for t in _admin_texts(mod) if 'مشكوك' in t]       # no message per referral
     assert not [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
-    s, d, _ = request(server, '/webapp/verify', {'fp': _ref_fp('b' * 32), 'ch': ch}, uid=2002)
+    s, d, _ = _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
     ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
     assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'rfl_1001_1_0' in json.dumps(ms[0][2].get('reply_markup').to_dict())
 
@@ -440,7 +452,7 @@ def test_referral_price_change_keeps_old_batches(mod, monkeypatch):
         for i in range(n):
             inv = 3000 + mod.db.referrals_v2.count_documents({})
             mod.db.users.insert_one({'user_id': inv, 'name': 'Inv', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
-            mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1})
+            mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1, 'dv': 'ok', 'dv_at': 1})
             mod.mark_referral_status(inv, 'active')
     def approve(b):
         mod.ref_milestone_approve(NS(id='c', data=f'refwd_ok_1001_{b}', from_user=NS(id=9001, first_name='Owner'),
@@ -470,7 +482,7 @@ def test_referral_leaving_is_charged_back_at_its_batch_price(mod, monkeypatch):
     for i in range(2):
         inv = 4000 + i
         mod.db.users.insert_one({'user_id': inv, 'name': 'Inv', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
-        mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1})
+        mod.db.referrals_v2.insert_one({'invited_id': inv, 'referrer_id': 1001, 'status': 'pending', 'created_at': 1, 'updated_at': 1, 'dv': 'ok', 'dv_at': 1})
         mod.mark_referral_status(inv, 'active'); invs.append(inv)
     mod.ref_milestone_approve(NS(id='c', data='refwd_ok_1001_1', from_user=NS(id=9001, first_name='Owner'),
                                  message=NS(chat=NS(id=9001), message_id=1, text='', html_text='')))

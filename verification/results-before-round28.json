@@ -1,0 +1,249 @@
+{
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27)",
+  "verified_at": "2026-10-20T00:56:37.711404+00:00",
+  "python": "3.12.14",
+  "tests": {
+    "total": 519,
+    "passed": 519,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_integration": 183,
+      "verification.test_support": 31,
+      "verification.test_reliability": 35,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_products_menu": 27,
+      "verification.test_cart": 35,
+      "verification.test_error_monitor": 16,
+      "verification.test_channel_broadcast": 59,
+      "verification.test_network": 47,
+      "verification.test_user_inspection": 40,
+      "verification.test_client_diagnostics": 17
+    }
+  },
+  "python_compile": "passed",
+  "undefined_names": 0,
+  "javascript_syntax": "passed",
+  "images_validated": 34,
+  "frontend_dom_http_integration": "passed",
+  "frontend_languages": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "frontend_javascript_errors": 0,
+  "preserved_original_definitions": 1052,
+  "old_functions_classes_and_methods_missing": [],
+  "external_live_services_tested": false,
+  "real_browser_render_tested": true,
+  "real_phones_tested": false,
+  "user_windows_machine_tested": false,
+  "test_isolation": "Fake credentials; MongoDB in memory; Telegram/payment/supplier/ChatGPT mocked. Browser server permanently blocks external HTTP integrations and outbound non-local sockets.",
+  "new_recovery_data": [
+    "stock_rollback_jobs collection",
+    "cgpt_invites_data.renewal_receipts",
+    "temporary user stock debit markers"
+  ],
+  "notes": "Local verification is not a guarantee of all external services or all physical devices.",
+  "deposit_copy_controls": {
+    "binance_amount_and_pay_id_first_row": true,
+    "shared_custom_copy_emoji": true,
+    "crypto_amount_copy_buttons": 1,
+    "crypto_amount_uses_native_currency": true,
+    "usdt_unique_precision": 6,
+    "bot_pending_quote_shared_with_site": true,
+    "telegram_note_id_copy_preserved": true
+  },
+  "products_menu": {
+    "search_above_available": true,
+    "full_width_rows": true,
+    "languages": [
+      "ar",
+      "en"
+    ],
+    "neutral_default_style": true,
+    "custom_styles_preserved": true,
+    "public_linked_table": true,
+    "quantity_discounts": true,
+    "hidden_products_excluded": true,
+    "text_fallback_preserves_links": true,
+    "old_available_browser_preserved": true,
+    "authenticated_admin_console_cms": true,
+    "premium_emoji_and_messages_editable": true,
+    "console_cms_roundtrip_tested": true
+  },
+  "preserved_immediately_previous_definitions": 1250,
+  "frontend_cart_chromium_integration": "passed",
+  "frontend_viewports": [
+    "1360x960",
+    "390x844"
+  ],
+  "frontend_themes": [
+    "light",
+    "dark"
+  ],
+  "frontend_rtl_tested": true,
+  "frontend_browser_lost_response_recovery": "passed",
+  "frontend_browser_safe_quote_cancel": "passed",
+  "frontend_browser_email_edit": "passed",
+  "error_monitor": {
+    "private_admin_records": true,
+    "redact_before_storage": true,
+    "repeat_count": true,
+    "important_error_alerts": true,
+    "alert_cooldown_seconds": 600,
+    "retention_days": 30,
+    "authenticated_browser_reporting": true,
+    "nonblocking_bounded_queue": true,
+    "db_failure_retry": true
+  },
+  "website_cart": {
+    "website_only": true,
+    "max_lines": 20,
+    "server_price_quote": true,
+    "quantity_and_vip_discounts": true,
+    "auth_and_visibility_enforced": true,
+    "stable_checkout_id": true,
+    "per_item_durable_result": true,
+    "repeat_confirmation_safe": true,
+    "lost_receipt_recovery": true,
+    "partial_fulfillment_explicit": true,
+    "unknown_outcomes_not_retried": true,
+    "old_direct_buy_preserved": true
+  },
+  "new_collections_round24": [
+    "system_errors",
+    "cart_checkouts"
+  ],
+  "current_definitions": 1285,
+  "frontend_channel_deep_links_chromium": "passed",
+  "frontend_channel_deep_links_cases": 4,
+  "channel_publication_live_tested": false,
+  "channel_publishing": {
+    "username_only": true,
+    "separate_from_forced_subscription": true,
+    "bot_and_admin_publish_rights_required": true,
+    "native_content_copy": true,
+    "private_preview_before_confirmation": true,
+    "frozen_reviewed_message": true,
+    "stale_confirmation_rejected": true,
+    "single_atomic_publish_claim": true,
+    "uncertain_delivery_not_retried": true,
+    "persisted_receipts": true,
+    "snapshot_table_english": true,
+    "product_names_link_to_website": true,
+    "customizable_green_buttons": true,
+    "dual_destinations": true,
+    "private_user_language": true,
+    "channel_language_selection": true,
+    "cms_in_bot_and_site_console": true
+  },
+  "new_collections_round25": [
+    "channel_broadcasts"
+  ],
+  "definition_count_scope": "All qualified functions, async functions and classes including nested definitions.",
+  "frontend_network_chromium_integration": "passed",
+  "round26_browser_cases": {
+    "unchanged_catalog_preserves_cards": true,
+    "profile_poll_pause_and_store_resume": true,
+    "inflight_catalog_coalescing": true,
+    "zero_javascript_exceptions": true,
+    "network_test_orders": 0,
+    "network_test_balance": 100,
+    "cart_recovery_regression": true
+  },
+  "network_usage": {
+    "admin_report": true,
+    "in_memory_only": true,
+    "no_secrets_or_payloads_recorded": true,
+    "approximate_sizes_not_billing": true,
+    "mongo_sizes_before_compression": true,
+    "mongo_zlib_negotiation": true,
+    "json_gzip_negotiation": true,
+    "private_api_etag": true,
+    "per_user_bounded_cache": true,
+    "catalog_conditional_body": true,
+    "supplier_success_interval_seconds": 120,
+    "supplier_failure_backoff_cap_seconds": 1800,
+    "payment_active_interval_seconds": 12,
+    "payment_idle_interval_seconds": 60,
+    "payment_new_pending_immediate_wake": true,
+    "binance_note_without_pending_preserved": true,
+    "admin_notice_idle_interval_seconds": 30,
+    "new_admin_notice_immediate_wake": true,
+    "real_render_dashboard_measured": false,
+    "monthly_5gb_guaranteed": false,
+    "benchmarks": {
+      "sample_api_json": {
+        "uncompressed_bytes": 86379,
+        "gzip_bytes": 571,
+        "saved_percent": 99.34,
+        "representative": "repeated bilingual test descriptions"
+      },
+      "sample_unchanged_catalog": {
+        "full_bytes": 8091,
+        "unchanged_bytes": 547
+      },
+      "root_prefix_steady_sync_requests": {
+        "before": 8,
+        "after": 1,
+        "reduction_percent": 87.5
+      },
+      "supplier_product_reads_per_sync": {
+        "products": 150,
+        "before": 151,
+        "after": 1
+      }
+    }
+  },
+  "round27_validation": {
+    "new_python_tests": 57,
+    "chromium_user_inspection": "passed",
+    "chromium_cart_regression": "passed",
+    "desktop_mobile": true,
+    "arabic_english_rtl": true,
+    "javascript_errors": 0,
+    "balance_mutations": 0,
+    "product_buttons_then_records_then_details": true,
+    "credentials_not_in_product_lists": true,
+    "all_user_ledgers": true,
+    "no_duplicate_api_projection": true,
+    "saved_subscription_current_and_original_expiry": true,
+    "all_codes_paginated_and_exported": true,
+    "previous_page_retained_on_back": true,
+    "member_screen_stack_without_command_replay": true,
+    "cancel_pending_amount_on_back": true,
+    "section_scope_prevents_old_pages": true,
+    "fake_credentials_and_external_network_block": true
+  },
+  "user_inspection": {
+    "admin_only": true,
+    "on_demand_only": true,
+    "new_background_network_jobs": 0,
+    "products_per_page": 12,
+    "records_per_page": 12,
+    "codes_per_page": 20,
+    "navigation_stack_max_screens": 24,
+    "customer_credentials_require_detail_request": true,
+    "owner_cookies_excluded": true,
+    "current_subscription_state_basis": "saved bot records, not live membership verification"
+  },
+  "cms_translation": {
+    "counts_actual_unprotected_arabic_letters": true,
+    "recovered_line_not_an_error": true,
+    "previous_english_retained_on_failure": true,
+    "pure_fallback_helper_corrected": true
+  },
+  "browser_diagnostics": {
+    "chromium": "passed",
+    "early_boot_queue": true,
+    "runtime_and_promise_stack": true,
+    "resource_filename": true,
+    "masked_source_explicitly_unknown": true,
+    "action_values_and_form_values_not_collected": true,
+    "redaction_client_and_server": true,
+    "max_reports_per_minute": 12,
+    "real_report_7b7d0fb1e3f2_root_cause_identified": false
+  }
+}
