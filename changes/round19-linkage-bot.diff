@@ -1,0 +1,444 @@
+--- a/bot.py	2026-10-19 18:29:24.063889473 +0000
++++ b/bot.py	2026-10-19 18:29:24.069983679 +0000
+@@ -8921,24 +8921,21 @@
+     try: bot.edit_message_text(get_text(uid, 'history_title'), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+     except: pass
+ 
+-@bot.callback_query_handler(func=lambda call: call.data == "h_dl_buy")
+-def user_download_buy_hist(call):
+-    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
+-    uid = call.from_user.id
++def _purchases_txt(uid):
++    """ملف «كل مشترياتي» — نفس الملف في البوت («📄 تحميل المشتريات») والموقع («تحميل كل المشتريات»)."""
+     recs = list(db.orders.find({'user_id': uid}).sort('_id', -1))
+-    l = get_lang(uid)
+-    
+     if not recs:
+-        empty_msg = "📭 No purchases found." if l == 'en' else "📭 لا يوجد سجل مشتريات."
+-        bot.send_message(uid, empty_msg)
+-        return
+-        
++        return None, None
++    l = get_lang(uid)
+     content = "=== Your Purchase History ===\n\n" if l == 'en' else "=== سجل المشتريات الخاص بك ===\n\n"
+     for i, r in enumerate(recs, 1):
+-        date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
++        try:
++            date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
++        except Exception:
++            date_str = datetime.datetime.utcfromtimestamp(int(r.get('timestamp') or 0)).strftime('%Y-%m-%d %H:%M:%S') if r.get('timestamp') else ''
+         pid = str(r.get('product_id'))
+         p = find_product(pid)
+-        
++
+         if pid in ['GitHub_Student', 'Gemini_Activation']:
+             n = pid.replace('_', ' ')
+         else:
+@@ -8951,9 +8948,21 @@
+             content += f"{i}. Date: {date_str}\nProduct: {n}\nCode/Details: {code}\n{'-'*30}\n"
+         else:
+             content += f"{i}. التاريخ: {date_str}\nالمنتج: {n}\nالكود/التفاصيل: {code}\n{'-'*30}\n"
+-        
++    return content, f"My_Purchases_{uid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
++
++
++@bot.callback_query_handler(func=lambda call: call.data == "h_dl_buy")
++def user_download_buy_hist(call):
++    bot.answer_callback_query(call.id, "⏳ جاري تجهيز الملف...")
++    uid = call.from_user.id
++    l = get_lang(uid)
++    content, fname = _purchases_txt(uid)
++    if not content:
++        empty_msg = "📭 No purchases found." if l == 'en' else "📭 لا يوجد سجل مشتريات."
++        bot.send_message(uid, empty_msg)
++        return
+     f = io.BytesIO(content.encode('utf-8'))
+-    f.name = f"My_Purchases_{uid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
++    f.name = fname
+     caption = "📄 Here are all your purchases." if l == 'en' else "📄 ملف يحتوي على جميع مشترياتك وتواريخها."
+     bot.send_document(call.message.chat.id, f, caption=caption)
+ 
+@@ -14575,87 +14584,107 @@
+         return
+     s = subs[idx]
+     l = get_lang(uid)
+-    # نجد المنتج والمدة المحددة
++    r = _cgpt_renew_core(uid, s, prod_id, dur_id)
++    err = r.get('error')
++    if err == 'no_plan':
++        bot.send_message(uid, "❌ الباقة غير متاحة.")
++    elif err == 'no_duration':
++        bot.send_message(uid, "❌ المدة غير متاحة.")
++    elif err == 'bad_duration':
++        bot.send_message(uid, "❌ مدة غير صالحة.")
++    elif err == 'insufficient_balance' and r.get('detail') == 'race':
++        bot.send_message(uid, "❌ رصيدك غير كافٍ.")
++    elif err == 'insufficient_balance':
++        price, balance = r['price'], r['balance']
++        markup = InlineKeyboardMarkup()
++        markup.add(create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
++        bot.send_message(uid,
++            (f"❌ <b>رصيدك غير كافٍ</b>\n\n"
++             f"💰 السعر: ${price:.2f}\n"
++             f"💼 رصيدك: ${balance:.2f}\n\n"
++             f"أضف رصيداً ثم أعد المحاولة.") if l != 'en' else
++            (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
++            parse_mode="HTML", reply_markup=markup)
++    elif err == 'not_found':
++        bot.send_message(uid, "❌ لم أجد الاشتراك. أُعيد رصيدك.")
++    elif err:
++        bot.send_message(uid, f"❌ خطأ، أُعيد رصيدك: {str(r.get('detail') or '')[:50]}")
++    else:
++        bot.send_message(uid,
++            (f"✅ <b>تم التجديد/الترقية بنجاح!</b>\n\n"
++             f"📧 <code>{html.escape(r['email'])}</code>\n"
++             f"➕ أُضيف: {r['add_days']} يوم\n"
++             f"⏳ المدة الجديدة: <b>{r['new_rem']} يوم</b>\n"
++             f"💰 خُصم: ${r['price']:.2f}") if l != 'en' else
++            (f"✅ <b>Renewed successfully!</b>\n➕ Added: {r['add_days']} days\n"
++             f"⏳ New total: {r['new_rem']} days\n💰 Charged: ${r['price']:.2f}"),
++            parse_mode="HTML")
++
++
++_CGPT_RENEW_LOCK = threading.Lock()
++
++
++def _cgpt_renew_core(uid, s, prod_id, dur_id, via='bot'):
++    """يضيف مدة باقة ChatGPT لاشتراك العميل (نفس الإيميل) ويخصم من رصيده — يستخدمه البوت (/my_chatgpt) والموقع.
++    s = اشتراك من _cgpt_get_user_subscriptions(uid). يرجّع dict: ok / error."""
+     try:
+         prod = db.cgpt_products.find_one({'_id': ObjectId(prod_id)})
+     except Exception:
+         prod = None
+     if not prod:
+-        bot.send_message(uid, "❌ الباقة غير متاحة.")
+-        return
+-    # نجد المدة بالـ dur_id
++        return {'ok': False, 'error': 'no_plan'}
+     dur = next((d for d in prod.get('durations', []) if d.get('dur_id') == dur_id), None)
+     if not dur:
+-        bot.send_message(uid, "❌ المدة غير متاحة.")
+-        return
++        return {'ok': False, 'error': 'no_duration'}
+     _cq = vip_quote(uid, f"cgpt_{prod_id}", float(dur.get('price', 0)))
+     price = _cq['unit']
+     add_minutes = int(dur.get('minutes', 0))
+     if add_minutes <= 0:
+-        bot.send_message(uid, "❌ مدة غير صالحة.")
+-        return
+-    # نفحص الرصيد
++        return {'ok': False, 'error': 'bad_duration'}
+     user = get_user_data_full(uid, use_cache=False)
+     balance = float(user.get('balance', 0)) if user else 0
+     if balance < price:
+-        markup = InlineKeyboardMarkup()
+-        markup.add(create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
+-        bot.send_message(uid,
+-            (f"❌ <b>رصيدك غير كافٍ</b>\n\n"
+-             f"💰 السعر: ${price:.2f}\n"
+-             f"💼 رصيدك: ${balance:.2f}\n\n"
+-             f"أضف رصيداً ثم أعد المحاولة.") if l != 'en' else
+-            (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
+-            parse_mode="HTML", reply_markup=markup)
+-        return
+-    # نخصم الرصيد ذرّياً
++        return {'ok': False, 'error': 'insufficient_balance', 'price': price, 'balance': balance}
+     updated = db.users.find_one_and_update(
+         {'user_id': uid, 'balance': {'$gte': price}},
+         {'$inc': {'balance': -price}}, return_document=True)
+     if not updated:
+         _invalidate_user_cache(uid)
+-        bot.send_message(uid, "❌ رصيدك غير كافٍ.")
+-        return
++        return {'ok': False, 'error': 'insufficient_balance', 'detail': 'race', 'price': price, 'balance': balance}
+     _invalidate_user_cache(uid)
+     vip_log_discount(uid, f"cgpt_{prod_id}", _cq, 'cgpt_renew')
+-    # نضيف المدة للمتبقّي (نحdّث expires_at في حساب الاشتراك)
+     acc_id = s['account_id']
+     email = s['email']
+     try:
+-        idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+-        data = idata.get('data', {}) if idata else {}
+-        inv = data.get('invites', {}).get(email)
+-        if inv:
+-            old_exp = _dt_mod.datetime.fromisoformat(inv['expires_at'])
+-            now = _dt_mod.datetime.now()
+-            base = old_exp if old_exp > now else now
+-            new_exp = base + _dt_mod.timedelta(minutes=add_minutes)
+-            data['invites'][email]['expires_at'] = new_exp.isoformat()
+-            db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}}, upsert=True)
+-            add_days = round(add_minutes / 1440, 1)
+-            new_rem = (new_exp - now).days
+-            bot.send_message(uid,
+-                (f"✅ <b>تم التجديد/الترقية بنجاح!</b>\n\n"
+-                 f"📧 <code>{html.escape(email)}</code>\n"
+-                 f"➕ أُضيف: {add_days} يوم\n"
+-                 f"⏳ المدة الجديدة: <b>{new_rem} يوم</b>\n"
+-                 f"💰 خُصم: ${price:.2f}") if l != 'en' else
+-                (f"✅ <b>Renewed successfully!</b>\n➕ Added: {add_days} days\n"
+-                 f"⏳ New total: {new_rem} days\n💰 Charged: ${price:.2f}"),
+-                parse_mode="HTML")
+-            # إشعار الأدمن
+-            try:
+-                notify_admins(f"🔄 تجديد/ترقية ChatGPT\n📧 {email}\n👤 {uid}\n➕ {add_days}ي\n💰 ${price:.2f}")
+-            except Exception:
+-                pass
+-        else:
++        with _CGPT_RENEW_LOCK:          # البوت والموقع يمكن يجددون نفس الحساب بنفس اللحظة
++            idata = db.cgpt_invites_data.find_one({'_id': acc_id})
++            data = idata.get('data', {}) if idata else {}
++            inv = data.get('invites', {}).get(email)
++            if inv and str(inv.get('telegram_uid')) == str(uid):
++                old_exp = _dt_mod.datetime.fromisoformat(inv['expires_at'])
++                now = _dt_mod.datetime.now()
++                base = old_exp if old_exp > now else now
++                new_exp = base + _dt_mod.timedelta(minutes=add_minutes)
++                data['invites'][email]['expires_at'] = new_exp.isoformat()
++                db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}}, upsert=True)
++            else:
++                inv = None
++        if not inv:
+             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+             _invalidate_user_cache(uid)
+-            bot.send_message(uid, "❌ لم أجد الاشتراك. أُعيد رصيدك.")
++            return {'ok': False, 'error': 'not_found', 'refunded': True}
++        add_days = round(add_minutes / 1440, 1)
++        new_rem = (new_exp - now).days
++        try:
++            notify_admins(f"🔄 تجديد/ترقية ChatGPT{' (من الموقع)' if via == 'webapp' else ''}\n📧 {email}\n👤 {uid}\n➕ {add_days}ي\n💰 ${price:.2f}")
++        except Exception:
++            pass
++        return {'ok': True, 'email': email, 'add_days': add_days, 'new_rem': new_rem, 'price': price,
++                'expires_at': new_exp.isoformat(), 'balance': round(float(updated.get('balance', 0)), 2)}
+     except Exception as e:
+         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+         _invalidate_user_cache(uid)
+-        bot.send_message(uid, f"❌ خطأ، أُعيد رصيدك: {str(e)[:50]}")
++        return {'ok': False, 'error': 'failed', 'refunded': True, 'detail': str(e)}
+ 
+ 
+ @bot.message_handler(commands=['ping'])
+@@ -30382,10 +30411,76 @@
+ _WA_CAT_LOCK = threading.Lock()
+ 
+ 
++_WA_CAT_VER = [0]
++
++
+ def _wa_invalidate_catalog():
++    _WA_CAT_VER[0] += 1
+     _WA_CAT_CACHE.clear()
+ 
+ 
++# ============================================================
++# 🔗 أي كتابة على المنتجات / الستوك / المجلدات / متاجر API / باقات ChatGPT / خصومات VIP
++#    (من أي أمر في البوت — قديم أو جديد) تمسح كاش البوت والموقع فوراً، فالموقع يعرض التغيير على طول.
++# ============================================================
++_CATALOG_COLLS = frozenset({'products', 'product_stock', 'catalogs', 'ext_products', 'ext_stores',
++                            'cgpt_products', 'vip_products', 'deleted_products'})
++_CATALOG_WRITE_METHODS = ('insert_one', 'insert_many', 'update_one', 'update_many', 'replace_one',
++                          'delete_one', 'delete_many', 'find_one_and_update', 'find_one_and_replace',
++                          'find_one_and_delete', 'bulk_write')
++
++
++def _catalog_changed():
++    try:
++        _invalidate_products_cache()
++    except Exception:
++        pass
++    try:
++        _wa_invalidate_catalog()
++    except Exception:
++        pass
++
++
++def _install_catalog_write_hook():
++    classes = []
++    try:
++        import pymongo.collection as _pmc
++        classes.append(_pmc.Collection)
++    except Exception:
++        pass
++    _mm = sys.modules.get('mongomock')          # الاختبارات بس (ما نستورده في التشغيل الحقيقي)
++    if _mm is not None and getattr(_mm, 'Collection', None) is not None:
++        classes.append(_mm.Collection)
++    for cls in classes:
++        if getattr(cls, '_lara_catalog_hook', False):
++            continue
++        for nm in _CATALOG_WRITE_METHODS:
++            orig = getattr(cls, nm, None)
++            if not callable(orig):
++                continue
++
++            def _mk(orig):
++                def _w(self, *a, **k):
++                    res = orig(self, *a, **k)
++                    try:
++                        if self.name in _CATALOG_COLLS:
++                            _catalog_changed()
++                    except Exception:
++                        pass
++                    return res
++                _w.__wrapped__ = orig
++                _w.__name__ = getattr(orig, '__name__', 'w')
++                return _w
++            setattr(cls, nm, _mk(orig))
++        cls._lara_catalog_hook = True
++
++
++try:
++    _install_catalog_write_hook()
++except Exception as _e:
++    logger.warning(f"catalog write hook not installed: {_e}")
++
++
+ def _wa_tiers(p):
+     out = []
+     for t in (p.get('discount_tiers') or []):
+@@ -30441,8 +30536,10 @@
+         hit = _WA_CAT_CACHE.get(key)
+         if hit and hit['exp'] > time.time():
+             return hit['data']
++        ver = _WA_CAT_VER[0]
+         data = _wa_build_catalog_uncached(include_hidden)
+-        _WA_CAT_CACHE[key] = {'data': data, 'exp': time.time() + 15}
++        if ver == _WA_CAT_VER[0]:        # لو تغيّر شي أثناء البناء ما نخزّن نسخة قديمة
++            _WA_CAT_CACHE[key] = {'data': data, 'exp': time.time() + 15}
+         return data
+ 
+ 
+@@ -31816,6 +31913,99 @@
+     return 200, {'ok': True, 'html': out}
+ 
+ 
++def _wa_cgpt_view(uid):
++    subs = _cgpt_get_user_subscriptions(uid)
++    out = [{'email': x['email'], 'days': int(x['remaining_days']), 'hours': int(x['remaining_hours']),
++            'expires_at': str(x['expires_at'])[:16]} for x in subs]
++    opts = []
++    if subs:
++        try:
++            for p in db.cgpt_products.find():
++                pid = str(p.get('_id'))
++                for dur in sorted(p.get('durations', []), key=lambda x: x.get('price', 0)):
++                    mins = int(dur.get('minutes', 0) or 0)
++                    if mins <= 0:
++                        continue
++                    opts.append({'product_id': pid, 'dur_id': str(dur.get('dur_id', '')),
++                                 'plan_ar': _wa_plain(p.get('name') or p.get('name_ar') or 'ChatGPT', 60),
++                                 'plan_en': _wa_plain(p.get('name_en') or p.get('name') or 'ChatGPT', 60),
++                                 'label_ar': _wa_plain(dur.get('label', ''), 40),
++                                 'label_en': _wa_plain(dur.get('label_en') or translate_duration_label(dur.get('label', ''), 'en'), 40),
++                                 'days': round(mins / 1440, 1),
++                                 'price': round(float(vip_unit(uid, f"cgpt_{pid}", float(dur.get('price', 0) or 0))[0]), 2)})
++        except Exception:
++            pass
++    return out, opts
++
++
++def _wa_cgpt_subs(identity, body):
++    """POST /webapp/cgpt/subs — نفس «/my_chatgpt» في البوت: اشتراكات ChatGPT النشطة + باقات التجديد."""
++    uid = identity['id']
++    u = db.users.find_one({'user_id': uid}) or {}
++    if u.get('is_banned') == 1:
++        return 403, {'error': 'banned'}
++    subs, opts = _wa_cgpt_view(uid)
++    return 200, {'ok': True, 'subs': subs, 'options': opts}
++
++
++def _wa_cgpt_renew(identity, body):
++    """POST /webapp/cgpt/renew {email, product_id, dur_id} — نفس زر التجديد/الترقية في البوت (نفس الكود)."""
++    uid = identity['id']
++    u = db.users.find_one({'user_id': uid}) or {}
++    if u.get('is_banned') == 1:
++        return 403, {'error': 'banned'}
++    email = str(body.get('email') or '')[:200]
++    pid = str(body.get('product_id') or '')[:40]
++    did = str(body.get('dur_id') or '')[:60]
++    if not email or not pid or not did:
++        return 400, {'error': 'bad_request'}
++    sub = next((x for x in _cgpt_get_user_subscriptions(uid) if x['email'] == email), None)
++    if not sub:
++        return 404, {'error': 'not_found'}
++    lk = _wa_user_lock(uid)
++    if not lk.acquire(timeout=8):
++        return 429, {'error': 'busy'}
++    try:
++        r = _cgpt_renew_core(uid, sub, pid, did, via='webapp')
++    finally:
++        lk.release()
++    if not r.get('ok'):
++        e = r.get('error')
++        if e == 'insufficient_balance':
++            return 402, {'error': 'insufficient_balance', 'required': r.get('price'), 'balance': round(float(r.get('balance') or 0), 2)}
++        if e in ('no_plan', 'no_duration', 'bad_duration'):
++            return 404, {'error': 'not_found'}
++        if e == 'not_found':
++            return 404, {'error': 'not_found'}
++        return 500, {'error': 'server_error'}
++    try:
++        l = get_lang(uid)
++        bot.send_message(uid, (f"✅ <b>Renewed from the store</b>\n📧 <code>{html.escape(r['email'])}</code>\n➕ {r['add_days']} days\n"
++                               f"⏳ New total: {r['new_rem']} days\n💰 ${r['price']:.2f}") if l == 'en' else
++                              (f"✅ <b>تم التجديد من المتجر</b>\n📧 <code>{html.escape(r['email'])}</code>\n➕ أُضيف: {r['add_days']} يوم\n"
++                               f"⏳ المدة الجديدة: <b>{r['new_rem']} يوم</b>\n💰 خُصم: ${r['price']:.2f}"), parse_mode='HTML')
++    except Exception:
++        pass
++    subs, opts = _wa_cgpt_view(uid)
++    return 200, {'ok': True, 'added_days': r['add_days'], 'new_days': r['new_rem'], 'charged': r['price'],
++                 'balance': r['balance'], 'subs': subs, 'options': opts}
++
++
++def _wa_set_lang(identity, body):
++    """POST /webapp/lang {lang: ar|en} — اختيار اللغة في الموقع يغيّر لغة البوت بعد (نفس زر 🌐 في البوت)."""
++    uid = identity['id']
++    lang = str(body.get('lang') or '')
++    if lang not in ('ar', 'en'):
++        return 200, {'ok': True, 'changed': False}      # الروسي/الصيني للموقع بس — البوت عربي/إنجليزي
++    u = db.users.find_one({'user_id': uid}, {'lang': 1, 'is_banned': 1})
++    if not u or u.get('is_banned') == 1:
++        return 200, {'ok': True, 'changed': False}
++    if u.get('lang') != lang:
++        db.users.update_one({'user_id': uid}, {'$set': {'lang': lang, 'lang_chosen': True}})
++        _invalidate_user_cache(uid)
++    return 200, {'ok': True, 'changed': u.get('lang') != lang, 'lang': lang}
++
++
+ _WA_POST_ROUTES = {
+     '/webapp/bootstrap': _wa_bootstrap,
+     '/webapp/catalog': _wa_catalog_ep,
+@@ -31843,10 +32033,13 @@
+     '/webapp/api/toggle': _wa_api_toggle,
+     '/webapp/api/docs': _wa_api_docs,
+     '/webapp/api/webhook': _wa_api_webhook,
++    '/webapp/cgpt/subs': _wa_cgpt_subs,
++    '/webapp/cgpt/renew': _wa_cgpt_renew,
++    '/webapp/lang': _wa_set_lang,
+ }
+ _WA_HEAVY = {'/webapp/buy': 12, '/webapp/deposit/create': 10, '/webapp/tr': 20, '/webapp/desc': 40,
+              '/webapp/api/generate': 5, '/webapp/api/regen': 5, '/webapp/api/disable': 5, '/webapp/api/webhook': 8,
+-             '/webapp/api/toggle': 60}
++             '/webapp/api/toggle': 60, '/webapp/cgpt/renew': 8, '/webapp/lang': 20}
+ 
+ 
+ # ============================================================
+@@ -36079,6 +36272,8 @@
+ 
+ 
+ def _codes_txt(uid, gid=None, ref=None):
++    if gid == '__all__':
++        return _purchases_txt(uid)
+     g = _wa_order_group(uid, gid, ref)
+     if not g or not g.get('codes'):
+         return None, None
+@@ -36120,8 +36315,8 @@
+ def _wa_codes_txt(identity, body):
+     """POST /webapp/codes/txt {id | ref, send}: رابط تحميل مؤقت (10 دقايق) أو يرسل الملف لمحادثة البوت."""
+     uid = identity['id']
+-    gid = str(body.get('id') or '')[:64] or None
+-    ref = str(body.get('ref') or '')[:80] or None
++    gid = '__all__' if body.get('all') is True else (str(body.get('id') or '')[:64] or None)
++    ref = None if gid == '__all__' else (str(body.get('ref') or '')[:80] or None)
+     if not gid and not ref:
+         return 400, {'error': 'bad_request'}
+     content, fname = _codes_txt(uid, gid, ref)

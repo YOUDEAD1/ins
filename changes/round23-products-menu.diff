@@ -1,0 +1,737 @@
+--- before/bot.py
++++ after/bot.py
+@@ -5729,8 +5729,10 @@
+         'btn_gh': '🎓 تفعيل GitHub',
+         'btn_gemini': '✨ تفعيل Gemini',
+         'btn_refresh': '🔄 تحديث',
+-        'btn_shop_search': '🔎 بحث عن منتج',
+-        'btn_shop_avail': '✅ المتوفر الآن',
++        'btn_shop_search': '🔎 البحث عن منتج',
++        'btn_shop_avail': 'المتوفر',
++        'btn_shop_available_list': '🛍 تصفح المتوفر',
++        'btn_shop_available_text': '📄 نسخة نصية',
+         'btn_main_menu': '🏠 القائمة الرئيسية',
+         'btn_back': '🔙 رجوع',
+         'btn_buy_now': '✅ شراء الآن',
+@@ -5768,8 +5770,10 @@
+         'btn_gh': '🎓 GitHub Pack',
+         'btn_gemini': '✨ Gemini Advanced',
+         'btn_refresh': '🔄 Refresh',
+-        'btn_shop_search': '🔎 Search',
+-        'btn_shop_avail': '✅ In stock now',
++        'btn_shop_search': '🔎 Search products',
++        'btn_shop_avail': 'Available',
++        'btn_shop_available_list': '🛍 Browse available items',
++        'btn_shop_available_text': '📄 Text version',
+         'btn_main_menu': '🏠 Main Menu',
+         'btn_back': '🔙 Back',
+         'btn_buy_now': '✅ Buy Now',
+@@ -6261,6 +6265,22 @@
+     }
+ }
+ 
++SHOP_CMS_BUTTONS = {'btn_shop_search', 'btn_shop_avail', 'btn_shop_available_list', 'btn_shop_available_text', 'btn_refresh', 'btn_back'}
++SHOP_CMS_TEXTS = {
++    'shop_search_prompt': ('رسالة البحث عن منتج',
++        '🔎 <b>ابحث عن منتج</b>\n\nاكتب اسم المنتج — تقدر تكتب اختصار (<code>nf</code>، <code>gpt</code>، <code>yt</code>) أو حتى لو فيه غلط إملائي: أقترح لك الأقرب.',
++        "🔎 <b>Search products</b>\n\nType the product name — a short form works too (<code>nf</code>, <code>gpt</code>, <code>yt</code>), and so does a typo: I'll find the closest match."),
++    'shop_available_title': ('عنوان جدول المتوفر وإيموجيه', 'المنتجات المتوفرة', 'Available products'),
++    'shop_available_count': ('سطر عدد المنتجات — {0}', 'عدد المنتجات: {0}', '{0} products'),
++    'shop_available_product': ('عنوان عمود المنتج', 'المنتج', 'PRODUCT'),
++    'shop_available_price': ('عنوان عمود السعر', 'السعر', 'PRICE'),
++    'shop_available_hint': ('رسالة وأزرار أسفل جدول المتوفر',
++        'اضغط اسم المنتج في الجدول لفتحه داخل البوت. يمكنك تحديث الجدول أو تصفح المتوفر كقائمة.',
++        'Tap a product name in the table to open it in the bot. You can refresh the table or browse available items as a list.'),
++}
++for _shop_key, (_shop_label, _shop_ar, _shop_en) in SHOP_CMS_TEXTS.items():
++    LANG['ar'][_shop_key] = _shop_ar
++    LANG['en'][_shop_key] = _shop_en
+ LANG['ar']['cg_expired_removed'] = '⌛ انتهت مدة اشتراك ChatGPT وأُلغي الوصول.\n📧 <code>{0}</code>\nيمكنك شراء اشتراك جديد من المتجر.'
+ LANG['en']['cg_expired_removed'] = '⌛ Your ChatGPT subscription expired and access was revoked.\n📧 <code>{0}</code>\nYou can purchase a new subscription in the store.'
+ 
+@@ -9939,9 +9959,9 @@
+ 
+ 
+ def _shop_tools_row(markup, uid):
+-    """أول القائمة: 🔎 بحث + ✅ المتوفر الآن (نصهم وإيموجيهم من «تخصيص البوت»)."""
+-    markup.row(create_btn(uid, 'btn_shop_search', callback_data='shop_search'),
+-               create_btn(uid, 'btn_shop_avail', callback_data='shop_avail_0'))
++    """Full-width search and available table; both remain editable in CMS."""
++    markup.row(create_btn(uid, 'btn_shop_search', callback_data='shop_search'))
++    markup.row(create_btn(uid, 'btn_shop_avail', callback_data='shop_available'))
+ 
+ 
+ def _shop_items(uid, is_admin=False):
+@@ -10024,10 +10044,7 @@
+     l = get_lang(uid)
+     mk = InlineKeyboardMarkup()
+     mk.add(create_btn(uid, 'btn_back', callback_data='open_shop'))
+-    txt = ("🔎 <b>Search products</b>\n\nType the product name — a short form works too (<code>nf</code>, <code>gpt</code>, <code>yt</code>), "
+-           "and so does a typo: I'll find the closest match." if l == 'en' else
+-           "🔎 <b>ابحث عن منتج</b>\n\nاكتب اسم المنتج — تقدر تكتب اختصار (<code>nf</code>، <code>gpt</code>، <code>yt</code>) "
+-           "أو حتى لو فيه غلط إملائي: أقترح لك الأقرب.")
++    txt = get_text(uid, 'shop_search_prompt')
+     msg = bot.send_message(call.message.chat.id, txt, parse_mode='HTML', reply_markup=mk)
+     bot.register_next_step_handler(msg, shop_search_msg)
+ 
+@@ -10111,6 +10128,30 @@
+     except Exception:
+         pass
+     _shop_search_show(call.message.chat.id, uid, w, edit_mid=call.message.message_id)
++
++
++@bot.callback_query_handler(func=lambda call: call.data in ('shop_available', 'shop_available_text'))
++def shop_available_table_cb(call):
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    uid = call.from_user.id
++    if is_user_banned(uid):
++        return
++    if check_forced_sub(uid) is False:
++        return start_handler(call)
++    bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
++    l = get_lang(uid)
++    _plist_send(call.message.chat.id, uid, as_text=call.data.endswith('_text'), lang=l)
++    mk = InlineKeyboardMarkup(row_width=1)
++    mk.add(create_btn(uid, 'btn_shop_search', callback_data='shop_search'))
++    mk.add(create_btn(uid, 'btn_refresh', callback_data='shop_available'))
++    mk.add(create_btn(uid, 'btn_shop_available_text', callback_data='shop_available_text'))
++    mk.add(create_btn(uid, 'btn_shop_available_list', callback_data='shop_avail_0'))
++    mk.add(create_btn(uid, 'btn_back', callback_data='open_shop'))
++    bot.send_message(call.message.chat.id, get_text(uid, 'shop_available_hint'),
++                     parse_mode='HTML', reply_markup=mk)
+ 
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith('shop_avail_'))
+@@ -22412,6 +22453,7 @@
+     markup = InlineKeyboardMarkup(row_width=2)
+     markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cms_cgpt"))
+     markup.add(InlineKeyboardButton("👑 نصوص VIP", callback_data="ad_cms_vip"))
++    markup.add(InlineKeyboardButton("🔎 البحث والمتوفر (أزرار ورسائل)", callback_data="ad_cms_shop"))
+     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
+                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
+     markup.add(InlineKeyboardButton("🌐 إيموجي الموقع (Premium)", callback_data="ad_cms_site_0"))
+@@ -22449,6 +22491,7 @@
+     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
+     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
+     markup.add(InlineKeyboardButton("🏪 عنوان المتجر", callback_data="edit_txt_store_title"))
++    markup.add(InlineKeyboardButton("🔎 البحث والمتوفر (أزرار ورسائل)", callback_data="ad_cms_shop"))
+     # 🆕 Wallet وإيداع
+     markup.add(InlineKeyboardButton("👛 رسالة الـ Wallet (عنوان + رصيد)", callback_data="edit_txt_wallet_header"))
+     markup.add(InlineKeyboardButton("✅ رسالة إيداع تلقائي (تم استلام)", callback_data="edit_txt_auto_deposit_msg"))
+@@ -22500,6 +22543,24 @@
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
+     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+ 
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_shop')
++@admin_required
++def ad_cms_shop(call):
++    bot.answer_callback_query(call.id)
++    mk = InlineKeyboardMarkup(row_width=1)
++    for key in ('btn_shop_search', 'btn_shop_avail', 'btn_shop_available_list', 'btn_shop_available_text', 'btn_refresh', 'btn_back'):
++        text, _ = get_btn_data(call.from_user.id, key)
++        mk.add(InlineKeyboardButton(f"🎛 {text}", callback_data=f"edit_btn_{key}"))
++    for key, (label, _ar, _en) in SHOP_CMS_TEXTS.items():
++        mk.add(InlineKeyboardButton(f"✏️ {label}", callback_data=f"edit_txt_{key}"))
++    back = 'admin_panel_main' if _vc_active(call.message.chat.id) else 'ad_texts_main'
++    mk.add(InlineKeyboardButton('🔙 رجوع', callback_data=back))
++    bot.edit_message_text('🔎 <b>تخصيص البحث والمتوفر</b>\nعدّل أسماء الأزرار وإيموجي Premium وألوانها، أو نصوص الرسائل بالعربية والإنجليزية.\n'
++                          'المنتجات والأسعار والمخزون وروابط الأسماء تُضاف تلقائياً من المتجر.\n'
++                          'عنوان الجدول يقبل إيموجي Premium؛ سطر العدد يستخدم <code>{0}</code>.',
++                          call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++
++
+ @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_btns_cats")
+ @admin_required
+ def ad_cms_btns_cats_ui(call):
+@@ -22523,7 +22584,7 @@
+         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc',
+                 'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'],
+         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy', 'btn_vip'],
+-        'shop': ['btn_shop_search', 'btn_shop_avail', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
++        'shop': ['btn_shop_search', 'btn_shop_avail', 'btn_shop_available_list', 'btn_shop_available_text', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
+     }
+     
+     markup = InlineKeyboardMarkup(row_width=1)
+@@ -22540,6 +22601,13 @@
+ def ad_edit_txt_prompt(call):
+     bot.answer_callback_query(call.id)
+     key = call.data.replace("edit_txt_", "")
++    if key in SHOP_CMS_TEXTS:
++        nav = InlineKeyboardMarkup()
++        nav.add(InlineKeyboardButton('🔙 البحث والمتوفر', callback_data='ad_cms_shop'))
++        guide = 'يمكنك تغيير النص وإرسال إيموجي Premium مباشرة؛ البيانات والروابط تُضاف تلقائياً.'
++        if key == 'shop_available_count':
++            guide += '\nاحتفظ بـ {0} ليظهر عدد المنتجات.'
++        bot.send_message(call.message.chat.id, guide, reply_markup=nav)
+     if key in CGPT_CMS_TEXTS:
+         nav = InlineKeyboardMarkup()
+         nav.add(InlineKeyboardButton("🔙 ChatGPT Business", callback_data="ad_cms_cgpt"))
+@@ -22880,6 +22948,7 @@
+ 
+     try:
+         res = db.custom_texts.delete_many({'key': key})
++        _invalidate_custom_texts_cache()
+         try:
+             _WA_TXT_CACHE.update(rows=None, exp=0)
+         except Exception:
+@@ -23136,6 +23205,13 @@
+         bot.send_message(call.message.chat.id, "تخصيص زر Business", reply_markup=nav)
+ 
+     current_text, current_emoji = get_btn_data(call.from_user.id, key)
++    if key in SHOP_CMS_BUTTONS:
++        nav = InlineKeyboardMarkup()
++        nav.add(InlineKeyboardButton('🔙 البحث والمتوفر', callback_data='ad_cms_shop'))
++        bot.send_message(call.message.chat.id,
++            'أرسل الاسم مع إيموجي Premium مباشرة من تيليجرام.\n'
++            'ومن الكونسول يمكنك كتابة: اسم الزر | رقم إيموجي Premium\n'
++            'مثال: المتوفر | 5271619747891388291', reply_markup=nav)
+ 
+     # نجيب اللون الحالي
+     try:
+@@ -23178,7 +23254,11 @@
+     bot.send_message(message.chat.id, "⏳ جاري الحفظ والترجمة التلقائية للزر...")
+     
+     text_ar, emoji_id = parse_button_input(message)
+-    
++    if key in SHOP_CMS_BUTTONS and not emoji_id:
++        match = re.fullmatch(r'(.+?)\s*\|\s*(\d{5,25})', message.text.strip(), flags=re.DOTALL)
++        if match:
++            text_ar, emoji_id = clean_old_emojis(match.group(1)).strip(), match.group(2)
++
+     if not text_ar or not text_ar.strip():
+          current_text, _ = get_btn_data(message.from_user.id, key)
+          text_ar = clean_old_emojis(current_text)
+@@ -33037,6 +33117,7 @@
+     ('cgpt', '🤖', 'ChatGPT Business', 'ChatGPT Business', 'ad_cgpt_panel'),
+     ('profit', '💹', 'الأرباح', 'Profit', 'ad_profit'),
+     ('plist', '📋', 'جدول المنتجات المتوفرة', 'Available products table', 'ad_plist'),
++    ('shop_cms', '🔎', 'تخصيص البحث والمتوفر', 'Search and availability settings', 'ad_cms_shop'),
+     ('reports', '📊', 'تقارير المبيعات (CSV)', 'Sales reports (CSV)', 'ad_reports'),
+     ('ref', '🤝', 'إعدادات الإحالات', 'Referral settings', 'ad_ref_settings'),
+     ('vip', '💎', 'نظام VIP', 'VIP tiers', 'ad_vip'),
+@@ -33051,7 +33132,18 @@
+ 
+ 
+ def _wa_bot_only(cb):
+-    return bool(cb) and bool(_WA_BOT_ONLY_RE.match(str(cb)))
++    # The shop's requested controls are also available in the authenticated console.
++    # Other CMS sections and broadcasts keep their existing routing.
++    data = str(cb or '')
++    if data == 'ad_cms_shop':
++        return False
++    for key in SHOP_CMS_TEXTS:
++        if data in (f'edit_txt_{key}', f'rst_txt_{key}'):
++            return False
++    for key in SHOP_CMS_BUTTONS:
++        if data == f'edit_btn_{key}' or data in {f'btnstyle_{key}_{v}' for v in ('default', 'primary', 'success', 'danger')}:
++            return False
++    return bool(cb) and bool(_WA_BOT_ONLY_RE.match(data))
+ _ADM_OPEN_RE = re.compile(r'^(?:edit_p_[\w-]{1,40}|ad_u_det_\d{1,15}|ad_vipu_\d{1,15}|ordinfo_[\w-]{1,40}|ad_view_ballogs_\d{1,15}_0)$')
+ 
+ # الضغطات اللي يرسلها الموقع نيابة عن الأدمن ما لها callback حقيقي عند تيليجرام
+@@ -36434,16 +36526,17 @@
+ 
+ 
+ # ============================================================
+-# 📋 جدول «المنتجات المتوفرة» للأدمن (رسالة غنية بجدول — جاهزة تنحوّل للقناة)
++# 📋 جدول «المنتجات المتوفرة» للعملاء والأدمن (رسالة غنية بروابط المنتجات)
+ # ============================================================
+ _PLIST_ROWS = 100            # صفوف كل رسالة (القوائم الطويلة تنقسم)
+ 
+ 
+-def _plist_rows():
+-    """المنتجات المتوفرة والظاهرة (عادية + ChatGPT + متاجر API) بالإنجليزي، مع المخزون وخصومات الكمية ورابط المنتج."""
++def _plist_rows(lang='en'):
++    """المنتجات المتوفرة والظاهرة باللغة المطلوبة، مع المخزون وخصومات الكمية وروابط المنتجات."""
+     bu = get_bot_username()
+     rows = []
+-    prods = [p for p in _get_all_products_cached() if not p.get('is_hidden')]
++    all_prods = _get_all_products_cached()
++    prods = [p for p in all_prods if not p.get('is_hidden')]
+     ids = []
+     for p in prods:
+         sp = str(p.get('id', p.get('_id')))
+@@ -36458,34 +36551,62 @@
+     except Exception:
+         pass
+     seats = None
++    parents = {str(cp['_id']): cp for cp in db.cgpt_products.find()}
++    linked = set()
++    for p in all_prods:
++        if p.get('product_type') == 'cgpt_main':
++            linked.add(str(p.get('cgpt_product_id') or str(p.get('id', p.get('_id', ''))).replace('cgpt_main_', '')))
+     for p in prods:
+         pid = str(p.get('id', p.get('_id')))
+         manual = bool(p.get('is_manual'))
+         emoji = p.get('custom_emoji_id')
++        name = (p.get('name_ar') or p.get('name_en')) if lang == 'ar' else (p.get('name_en') or p.get('name_ar'))
++        price, tiers, from_price = float(p.get('price') or 0), [], False
++        url_pid = pid
+         if p.get('product_type') == 'cgpt_main':
++            hexid = str(p.get('cgpt_product_id') or pid.replace('cgpt_main_', ''))
++            cg = parents.get(hexid)
++            if not _cgpt_product_visible(cg):
++                continue
++            durations = _wa_durations(cg)
++            if not durations:
++                continue
+             if seats is None:
+                 seats = _cgpt_display_seats() or 0
+             st, manual = seats, False
+-            try:
+-                cg = db.cgpt_products.find_one({'_id': ObjectId(pid.replace('cgpt_main_', ''))}, {'custom_emoji_id': 1})
+-                emoji = (cg or {}).get('custom_emoji_id') or emoji
+-            except Exception:
+-                pass
++            emoji = cg.get('custom_emoji_id') or emoji
++            name = (cg.get('name') or name) if lang == 'ar' else (cg.get('name_en') or cg.get('name') or name)
++            price, from_price = min(d['price'] for d in durations), True
++            url_pid = f'cgpt_main_{hexid}'
+         else:
+             st = stock.get(pid, 0)
+         if not manual and st <= 0:
+             continue
+         tiers = sorted([(int(t.get('min_qty', 0)), float(t.get('price', 0))) for t in (p.get('discount_tiers') or [])
+                         if t.get('min_qty') and t.get('price') is not None], key=lambda x: x[0])
+-        rows.append({'name': clean_name(p.get('name_en') or p.get('name_ar') or pid), 'stock': None if manual else st,
+-                     'price': float(p.get('price') or 0), 'tiers': tiers, 'emoji': emoji,
+-                     'url': f"https://t.me/{bu}?start=p_{pid}"})
++        rows.append({'name': html.unescape(clean_name(name or pid)), 'stock': None if manual else st,
++                     'price': price, 'tiers': tiers, 'emoji': emoji, 'from_price': from_price,
++                     'url': f"https://t.me/{bu}?start=p_{url_pid}"})
++    for hexid, cg in parents.items():
++        if hexid in linked or not _cgpt_product_visible(cg):
++            continue
++        durations = _wa_durations(cg)
++        if not durations:
++            continue
++        if seats is None:
++            seats = _cgpt_display_seats() or 0
++        if seats <= 0:
++            continue
++        name = (cg.get('name') or cg.get('name_en')) if lang == 'ar' else (cg.get('name_en') or cg.get('name'))
++        rows.append({'name': html.unescape(clean_name(name or 'ChatGPT')), 'stock': seats,
++                     'price': min(d['price'] for d in durations), 'from_price': True, 'tiers': [],
++                     'emoji': cg.get('custom_emoji_id'), 'url': f"https://t.me/{bu}?start=p_cgpt_main_{hexid}"})
+     try:
+         for ep in db.ext_products.find({'hidden': {'$ne': True}}, _EXT_LIGHT_PROJ):
+             st = int(ep.get('stock', 0) or 0)
+             if st <= 0 and not ep.get('unlimited'):
+                 continue
+-            rows.append({'name': clean_name(str(ep.get('name', ''))), 'stock': None if ep.get('unlimited') else st,
++            rows.append({'name': html.unescape(clean_name(str(ep.get('name', '')))), 'stock': None if ep.get('unlimited') else st,
+                          'price': float(ep.get('sell_price', ep.get('base_price', 0)) or 0), 'tiers': [],
+                          'emoji': ep.get('emoji_id'), 'url': f"https://t.me/{bu}?start=vext_{ep['_id']}"})
+     except Exception as e:
+@@ -36494,33 +36615,67 @@
+     return rows
+ 
+ 
+-def _plist_price_txt(r):
+-    t = f"${r['price']:.2f}"
++def _plist_text(lang, key, *args):
++    """Read the same localized CMS values as bot messages, without a user lookup."""
++    if not _CUSTOM_TEXTS_LOADED[0]:
++        _load_custom_texts_cache()
++    default = LANG.get(lang, LANG['en']).get(key, '')
++    value = _CUSTOM_TEXTS_CACHE.get((lang, key)) or default
++    if args:
++        try:
++            return value.format(*args)
++        except (ValueError, KeyError, IndexError, AttributeError):
++            return default.format(*args)
++    return value
++
++
++def _plist_rich_text(value):
++    """Preserve Premium emoji from CMS HTML in Telegram rich-message text."""
++    parts, pos = [], 0
++    pattern = r"<tg-emoji\s+emoji-id=[\"'](\d+)[\"']\s*>(.*?)</tg-emoji>"
++    for match in re.finditer(pattern, value, flags=re.DOTALL):
++        if match.start() > pos:
++            parts.append(html.unescape(re.sub(r'<[^>]+>', '', value[pos:match.start()])))
++        parts.append({'type': 'custom_emoji', 'custom_emoji_id': match.group(1),
++                      'alternative_text': html.unescape(re.sub(r'<[^>]+>', '', match.group(2))) or '✨'})
++        pos = match.end()
++    if pos < len(value):
++        parts.append(html.unescape(re.sub(r'<[^>]+>', '', value[pos:])))
++    return parts or ['']
++
++
++def _plist_price_txt(r, lang='en'):
++    t = ('من ' if lang == 'ar' else 'From ') if r.get('from_price') else ''
++    t += f"${r['price']:.2f}"
+     if r['tiers']:
+-        t += ' · ' + ' · '.join(f"{q}+ pcs ${pr:.2f}" for q, pr in r['tiers'])
++        t += ' · ' + ' · '.join(f"{q}+ {'قطعة' if lang == 'ar' else 'pcs'} ${pr:.2f}" for q, pr in r['tiers'])
+     return t
+ 
+ 
+-def _plist_rich(rows, part=1, parts=1):
+-    head_emoji = get_setting('emoji_store', '')
+-    title = 'Available products' + (f' ({part}/{parts})' if parts > 1 else '')
+-    head = ([{'type': 'custom_emoji', 'custom_emoji_id': str(head_emoji), 'alternative_text': '🛍'}, ' ' + title]
+-            if head_emoji and str(head_emoji).isdigit() else '🛍 ' + title)
++def _plist_rich(rows, part=1, parts=1, lang='en', total=None):
++    head_emoji = (_custom_button_for_view(lang, 'btn_shop_avail') or {}).get('emoji_id') or get_setting('emoji_store', '')
++    title = _plist_text(lang, 'shop_available_title') + (f' ({part}/{parts})' if parts > 1 else '')
++    count = _PLIST_TOTAL[0] if total is None else total
++    head = _plist_rich_text(title)
++    if '<tg-emoji' not in title:
++        icon = {'type': 'custom_emoji', 'custom_emoji_id': str(head_emoji), 'alternative_text': '🛍'} if head_emoji and str(head_emoji).isdigit() else '🛍'
++        head = [icon, ' '] + head
+     def cell(text, header=False, align='left'):
+         c = {'align': align, 'valign': 'middle', 'text': text}
+         if header:
+             c['is_header'] = True
+         return c
+-    cells = [[cell({'type': 'bold', 'text': 'PRODUCT'}, True), cell({'type': 'bold', 'text': 'PRICE'}, True, 'center')]]
++    cells = [[cell({'type': 'bold', 'text': _plist_rich_text(_plist_text(lang, 'shop_available_product'))}, True),
++              cell({'type': 'bold', 'text': _plist_rich_text(_plist_text(lang, 'shop_available_price'))}, True, 'center')]]
+     for r in rows:
+         name = r['name'] + (f" ({r['stock']})" if r['stock'] is not None else '')
+         icon = ({'type': 'custom_emoji', 'custom_emoji_id': str(r['emoji']), 'alternative_text': '📦'} if r['emoji'] else '📦')
+-        price = [f"${r['price']:.2f}"]
++        price = [(('من ' if lang == 'ar' else 'From ') if r.get('from_price') else '') + f"${r['price']:.2f}"]
+         if r['tiers']:
+-            price += [' · ', {'type': 'italic', 'text': ' · '.join(f"{q}+ pcs ${pr:.2f}" for q, pr in r['tiers'])}]
++            price += [' · ', {'type': 'italic', 'text': ' · '.join(f"{q}+ {'قطعة' if lang == 'ar' else 'pcs'} ${pr:.2f}" for q, pr in r['tiers'])}]
+         cells.append([cell([icon, ' ', {'type': 'url', 'text': name, 'url': r['url']}]), cell(price, align='center')])
+     return {'blocks': [{'type': 'heading', 'size': 3, 'text': head},
+-                       {'type': 'paragraph', 'text': f"{_PLIST_TOTAL[0]} products"},
++                       {'type': 'paragraph', 'text': _plist_rich_text(_plist_text(lang, 'shop_available_count', count))},
+                        {'type': 'table', 'cells': cells, 'is_bordered': True, 'is_striped': True, 'is_compact': True}],
+             'skip_entity_detection': True}
+ 
+@@ -36528,15 +36683,20 @@
+ _PLIST_TOTAL = [0]
+ 
+ 
+-def _plist_html(rows, part=1, parts=1):
++def _plist_html(rows, part=1, parts=1, lang='en', total=None):
+     """نسخة نصية عادية (لو الرسائل الغنية مو مدعومة، أو تبيها نص)."""
+-    emo = get_setting('emoji_store', '')
++    emo = (_custom_button_for_view(lang, 'btn_shop_avail') or {}).get('emoji_id') or get_setting('emoji_store', '')
+     head = (f'<tg-emoji emoji-id="{emo}">🛍</tg-emoji>' if emo and str(emo).isdigit() else '🛍')
+-    out = [f"{head} <b>Available products</b>" + (f" ({part}/{parts})" if parts > 1 else ''), f"{_PLIST_TOTAL[0]} products", ""]
++    title = _plist_text(lang, 'shop_available_title')
++    if '<tg-emoji' in title:
++        head = ''
++    count = _PLIST_TOTAL[0] if total is None else total
++    out = [f"{head} <b>{title}</b>" + (f" ({part}/{parts})" if parts > 1 else ''),
++           _plist_text(lang, 'shop_available_count', count), ""]
+     for r in rows:
+         icon = f'<tg-emoji emoji-id="{r["emoji"]}">📦</tg-emoji>' if r['emoji'] else '📦'
+         name = html.escape(r['name']) + (f" ({r['stock']})" if r['stock'] is not None else '')
+-        out.append(f'{icon} <a href="{html.escape(r["url"], quote=True)}">{name}</a> — <b>{html.escape(_plist_price_txt(r))}</b>')
++        out.append(f'{icon} <a href="{html.escape(r["url"], quote=True)}">{name}</a> — <b>{html.escape(_plist_price_txt(r, lang))}</b>')
+     return '\n'.join(out)
+ 
+ 
+@@ -36545,9 +36705,10 @@
+                                    method='post')
+ 
+ 
+-def _plist_send(chat_id, admin_uid, as_text=False):
+-    rows = _plist_rows()
+-    _PLIST_TOTAL[0] = len(rows)
++def _plist_send(chat_id, admin_uid, as_text=False, lang='en'):
++    rows = _plist_rows(lang=lang)
++    total = len(rows)
++    _PLIST_TOTAL[0] = total
+     vc = _vc_active(chat_id)
+     target = vc.uid if vc else chat_id
+     chunks = [rows[i:i + _PLIST_ROWS] for i in range(0, len(rows), _PLIST_ROWS)] or [[]]
+@@ -36556,18 +36717,24 @@
+     for i, ch in enumerate(chunks, 1):
+         if rich_ok:
+             try:
+-                _send_rich_raw(target, _plist_rich(ch, i, len(chunks)))
++                _send_rich_raw(target, _plist_rich(ch, i, len(chunks), lang=lang, total=total))
+                 sent += 1
+                 continue
+             except Exception as e:
+                 logger.warning(f"rich product list failed, sending text: {e}")
+                 rich_ok = False
+-        txt = _plist_html(ch, i, len(chunks))
+-        for j in range(0, len(txt), 3900):                 # حد رسالة تيليجرام العادية
+-            part = txt[j:j + 3900]
+-            if j:
+-                part = part[part.find('\n') + 1:] if '\n' in part else part
+-            (_VC_ORIG['send_message'] if vc else bot.send_message)(target, part, parse_mode='HTML', disable_web_page_preview=True)
++        txt = _plist_html(ch, i, len(chunks), lang=lang, total=total)
++        # Split between complete product lines, preserving HTML links/entities.
++        pieces, current = [], ''
++        for line in txt.splitlines(keepends=True):
++            if current and len(current) + len(line) > 3900:
++                pieces.append(current.rstrip())
++                current = ''
++            current += line
++        if current:
++            pieces.append(current.rstrip())
++        for piece in pieces:
++            (_VC_ORIG['send_message'] if vc else bot.send_message)(target, piece, parse_mode='HTML', disable_web_page_preview=True)
+         sent += 1
+     return len(rows), rich_ok and not as_text
+ 
+--- /dev/null
++++ after/verification/test_products_menu.py
+@@ -0,0 +1,255 @@
++"""Customer availability and admin customization, with isolated Telegram/DB calls."""
++import json
++import time
++from html.parser import HTMLParser
++from unittest.mock import Mock
++
++import pytest
++from harness import MESSAGES, reply
++from test_integration import mod, isolate, server, product, request
++
++
++def callback(mod, data, uid=1001):
++    return mod.types.CallbackQuery.de_json({
++        'id': 'products-test', 'from': {'id': uid, 'is_bot': False, 'first_name': 'Test'},
++        'chat_instance': 'test', 'data': data, 'message': {'message_id': 10, 'date': 1,
++        'chat': {'id': uid, 'type': 'private'}, 'text': 'menu'}})
++
++
++def dispatch(mod, data, uid=1001):
++    mod.bot._run_middlewares_and_handler(callback(mod, data, uid),
++        handlers=mod.bot.callback_query_handlers, middlewares=None, update_type='callback_query')
++
++
++def buttons(record):
++    mk = record[2].get('reply_markup')
++    return mk.to_dict()['inline_keyboard'] if mk else []
++
++
++@pytest.fixture
++def rich_sent(mod, monkeypatch):
++    sent = []
++    monkeypatch.setattr(mod, '_send_rich_raw', lambda target, rich: sent.append((target, rich)))
++    monkeypatch.setitem(mod._VC_ORIG, 'edit_message_text',
++        lambda text, chat_id, message_id, **kw: reply(chat_id, text, **kw))
++    return sent
++
++
++@pytest.mark.parametrize('uid,search,available', [
++    (1001, '🔎 Search products', 'Available'), (1002, '🔎 البحث عن منتج', 'المتوفر')])
++@pytest.mark.parametrize('mode,catalogs', [('flat', False), ('folders', False), ('folders', True)])
++def test_search_above_neutral_available_in_every_main_shop(mod, rich_sent, uid, search, available, mode, catalogs):
++    product(mod)
++    mod.db.users.update_one({'user_id': uid}, {'$set': {'shop_display_mode': mode}})
++    if catalogs:
++        mod.db.catalogs.insert_one({'name_ar': 'قسم', 'name_en': 'Category', 'product_ids': ['101']})
++    dispatch(mod, 'open_shop', uid)
++    rows = next(buttons(r) for r in reversed(MESSAGES) if buttons(r))
++    assert rows[0] == [{'text': search, 'callback_data': 'shop_search'}]
++    assert rows[1] == [{'text': available, 'callback_data': 'shop_available'}]
++    assert any(b.get('callback_data', '').startswith(('vi_p_', 'cat_')) for row in rows[2:] for b in row)
++
++
++@pytest.mark.parametrize('uid,lang,name', [(1001, 'en', 'Test Product'), (1002, 'ar', 'منتج')])
++def test_customer_table_has_localized_prices_quantities_links_and_navigation(mod, rich_sent, uid, lang, name):
++    product(mod, stock=3, discount_tiers=[{'min_qty': 5, 'price': 4.5}])
++    product(mod, '102', stock=0)
++    product(mod, '103', is_hidden=True)
++    dispatch(mod, 'shop_available', uid)
++    assert len(rich_sent) == 1 and rich_sent[0][0] == uid
++    rich = rich_sent[0][1]
++    table = next(b for b in rich['blocks'] if b['type'] == 'table')
++    assert len(table['cells']) == 2
++    linked = table['cells'][1][0]['text'][2]
++    assert linked == {'type': 'url', 'text': name + ' (3)',
++        'url': 'https://t.me/lara_local_test_bot?start=p_101'}
++    price = json.dumps(table['cells'][1][1]['text'], ensure_ascii=False)
++    assert '$5.00' in price and '$4.50' in price and ('قطعة' if lang == 'ar' else 'pcs') in price
++    assert ('عدد المنتجات: 1' if lang == 'ar' else '1 products') in json.dumps(rich, ensure_ascii=False)
++    nav = [b['callback_data'] for row in buttons(MESSAGES[-1]) for b in row]
++    assert nav == ['shop_search', 'shop_available', 'shop_available_text', 'shop_avail_0', 'open_shop']
++    assert not any(mod._is_admin_cb(cb) for cb in nav)
++    assert mod.db.orders.count_documents({}) == 0
++
++
++def test_refresh_tracks_stock_and_old_available_browser_still_works(mod, rich_sent):
++    product(mod, stock=1)
++    dispatch(mod, 'shop_avail_0')
++    assert any(b.get('callback_data') == 'vi_p_101' for r in MESSAGES for row in buttons(r) for b in row)
++    mod.db.product_stock.update_many({}, {'$set': {'is_sold': True}})
++    dispatch(mod, 'shop_available')
++    table = next(b for b in rich_sent[-1][1]['blocks'] if b['type'] == 'table')
++    assert len(table['cells']) == 1
++
++
++def test_search_button_registers_input_and_returns_matching_product(mod, rich_sent, monkeypatch):
++    product(mod, name_en='Netflix Premium')
++    step = Mock()
++    monkeypatch.setattr(mod.bot, 'register_next_step_handler', step)
++    dispatch(mod, 'shop_search')
++    assert step.call_args.args[1] is mod.shop_search_msg
++    msg = mod.types.Message.de_json({'message_id': 15, 'date': 1,
++        'chat': {'id': 1001, 'type': 'private'},
++        'from': {'id': 1001, 'is_bot': False, 'first_name': 'Test'}, 'text': 'netflix'})
++    mod.shop_search_msg(msg)
++    assert any(b.get('callback_data') == 'vi_p_101' for row in buttons(MESSAGES[-1]) for b in row)
++
++
++@pytest.mark.parametrize('gate', ['banned', 'forced', 'payment'])
++def test_public_table_respects_existing_access_gates(mod, rich_sent, monkeypatch, gate):
++    product(mod)
++    start = Mock()
++    monkeypatch.setattr(mod, 'start_handler', start)
++    if gate == 'banned':
++        mod.db.users.update_one({'user_id': 1001}, {'$set': {'is_banned': 1}})
++    elif gate == 'forced':
++        monkeypatch.setattr(mod, 'check_forced_sub', lambda uid: False)
++    else:
++        mod.db.users.update_one({'user_id': 1001}, {'$set': {
++            'deposit_locked': True, 'deposit_lock_expires': int(time.time()) + 600}})
++    dispatch(mod, 'shop_available')
++    assert not rich_sent
++    if gate == 'forced':
++        assert start.call_args.args[0].from_user.id == 1001
++    if gate == 'payment':
++        assert mod.is_deposit_locked(1001)
++
++
++def test_chatgpt_hidden_parents_and_hidden_links_are_excluded_without_duplicates(mod, rich_sent):
++    durations = [{'dur_id': 'month', 'label': 'Month', 'minutes': 43200, 'price': 8.5}]
++    hidden = mod.db.cgpt_products.insert_one({'name': 'Hidden parent', 'is_hidden': True, 'durations': durations}).inserted_id
++    linked = mod.db.cgpt_products.insert_one({'name': 'Hidden link', 'durations': durations}).inserted_id
++    visible = mod.db.cgpt_products.insert_one({'name': 'عربي', 'name_en': 'Visible linked', 'durations': durations}).inserted_id
++    standalone = mod.db.cgpt_products.insert_one({'name_en': 'Standalone', 'durations': durations}).inserted_id
++    product(mod, '201', product_type='cgpt_main', cgpt_product_id=str(hidden), stock=0)
++    product(mod, '202', product_type='cgpt_main', cgpt_product_id=str(linked), is_hidden=True, stock=0)
++    product(mod, '203', product_type='cgpt_main', cgpt_product_id=str(visible), stock=0)
++    rows = mod._plist_rows()
++    assert {r['name'] for r in rows} == {'Visible linked', 'Standalone'}
++    assert {r['url'].split('?start=')[1] for r in rows} == {f'p_cgpt_main_{visible}', f'p_cgpt_main_{standalone}'}
++    assert all(r['stock'] == 8 and r['price'] == 8.5 and r['from_price'] for r in rows)
++
++
++def test_manual_and_external_products_stay_available_but_hidden_external_stays_hidden(mod, rich_sent):
++    product(mod, stock=0, manual=True)
++    ext = mod.db.ext_products.insert_one({'name': 'Remote', 'stock': 2, 'sell_price': 6}).inserted_id
++    mod.db.ext_products.insert_one({'name': 'Hidden remote', 'stock': 2, 'hidden': True})
++    rows = mod._plist_rows()
++    assert len(rows) == 2
++    assert next(r for r in rows if r['name'] == 'Test Product')['stock'] is None
++    assert next(r for r in rows if r['name'] == 'Remote')['url'].endswith(f'?start=vext_{ext}')
++
++
++class Links(HTMLParser):
++    def __init__(self):
++        super().__init__()
++        self.urls, self.depth = [], 0
++    def handle_starttag(self, tag, attrs):
++        if tag == 'a':
++            assert self.depth == 0
++            self.depth += 1
++            self.urls.append(dict(attrs)['href'])
++    def handle_endtag(self, tag):
++        if tag == 'a':
++            self.depth -= 1
++            assert self.depth == 0
++
++
++@pytest.mark.parametrize('as_text', [False, True])
++def test_text_fallback_splits_between_complete_product_links(mod, monkeypatch, as_text):
++    for i in range(64):
++        product(mod, str(300 + i), stock=1, name_en=f'A & B <b>Product {i}</b> ' + 'Long name ' * 8)
++    monkeypatch.setattr(mod, '_send_rich_raw', Mock(side_effect=RuntimeError('rich unavailable')))
++    n, rich = mod._plist_send(1001, 1001, as_text=as_text)
++    assert n == 64 and not rich and len(MESSAGES) > 1
++    urls = []
++    for _, text, opts in MESSAGES:
++        assert len(text) <= 3900 and opts['parse_mode'] == 'HTML'
++        parser = Links(); parser.feed(text); parser.close()
++        assert parser.depth == 0
++        urls += parser.urls
++        assert '&amp;amp;' not in text
++    assert len(urls) == len(set(urls)) == 64
++
++
++@pytest.mark.parametrize('uid,lang', [(1001, 'en'), (1002, 'ar')])
++def test_new_buttons_preserve_admin_labels_premium_and_color(mod, rich_sent, uid, lang):
++    mod.db.custom_buttons.insert_many([
++        {'lang': lang, 'key': 'btn_shop_search', 'text': 'Find', 'emoji_id': '5271619747891388291'},
++        {'lang': lang, 'key': 'btn_shop_avail', 'text': 'Stock', 'emoji_id': '5368324170671202286', 'style': 'primary'}])
++    mk = mod.InlineKeyboardMarkup()
++    mod._shop_tools_row(mk, uid)
++    rows = mk.to_dict()['inline_keyboard']
++    assert rows[0][0]['text'] == 'Find' and rows[0][0]['icon_custom_emoji_id'] == '5271619747891388291'
++    assert rows[1][0]['text'] == 'Stock' and rows[1][0]['style'] == 'primary'
++    assert rows[1][0]['icon_custom_emoji_id'] == '5368324170671202286'
++    dispatch(mod, 'shop_available', uid)
++    assert rich_sent[-1][1]['blocks'][0]['text'][0]['custom_emoji_id'] == '5368324170671202286'
++
++
++def test_cms_message_edits_keep_premium_in_table_search_and_footer(mod, rich_sent):
++    emoji = '<tg-emoji emoji-id="5271619747891388291">⭐</tg-emoji>'
++    for key, value in [('shop_available_title', emoji + ' My stock'), ('shop_available_count', 'Total: {0}'),
++                       ('shop_search_prompt', emoji + ' Search here'), ('shop_available_hint', emoji + ' Choose below')]:
++        mod.db.custom_texts.insert_one({'lang': 'en', 'key': key, 'value': value})
++    product(mod)
++    dispatch(mod, 'shop_available')
++    assert rich_sent[-1][1]['blocks'][0]['text'][0]['custom_emoji_id'] == '5271619747891388291'
++    assert 'Total: 1' in json.dumps(rich_sent[-1][1])
++    assert MESSAGES[-1][1] == emoji + ' Choose below'
++    dispatch(mod, 'shop_search')
++    assert MESSAGES[-1][1] == emoji + ' Search here'
++    assert emoji in mod._plist_html(mod._plist_rows())
++
++
++@pytest.mark.parametrize('data', ['ad_cms_shop', 'edit_btn_btn_shop_avail', 'edit_txt_shop_available_hint',
++                                  'btnstyle_btn_shop_avail_danger', 'ad_plist'])
++def test_customer_cannot_change_cms_or_open_admin_table(mod, rich_sent, data):
++    dispatch(mod, data)
++    assert not rich_sent and mod.db.custom_buttons.count_documents({}) == 0
++    assert mod.db.custom_texts.count_documents({}) == 0
++
++
++def vc_request(mod, server, body):
++    status, data, _ = request(server, '/webapp/admin/vc', body, uid=9001)
++    assert status == 200, data
++    assert not data.get('toasts'), data
++    return data
++
++
++def vc_press(mod, server, view, cb):
++    msg = next(m for m in reversed(view['msgs']) if any(b.get('v') == cb for row in m.get('buttons', []) for b in row))
++    return vc_request(mod, server, {'action': 'press', 'mid': msg['id'], 'data': cb})
++
++
++def test_authenticated_console_edits_button_premium_color_and_message_end_to_end(mod, server, monkeypatch):
++    monkeypatch.setattr(mod, '_vc_start', lambda session, fn, wait=None: mod._vc_run(session, fn))
++    monkeypatch.setattr(mod, 'safe_translate_for_cms', lambda text, lang: 'Available now' if lang == 'en' else text)
++    view = vc_request(mod, server, {'action': 'open', 'cb': 'ad_cms_shop'})
++    view = vc_press(mod, server, view, 'edit_btn_btn_shop_avail')
++    view = vc_request(mod, server, {'action': 'send', 'text': 'المتوفر الآن | 5271619747891388291'})
++    view = vc_press(mod, server, view, 'btnstyle_btn_shop_avail_primary')
++    button = mod.create_btn(1001, 'btn_shop_avail', callback_data='shop_available').to_dict()
++    assert button['text'] == 'Available now' and button['style'] == 'primary'
++    assert button['icon_custom_emoji_id'] == '5271619747891388291'
++    view = vc_request(mod, server, {'action': 'open', 'cb': 'ad_cms_shop'})
++    view = vc_press(mod, server, view, 'edit_txt_shop_available_hint')
++    text = '<tg-emoji emoji-id="5271619747891388291">⭐</tg-emoji> اختر المنتج'
++    monkeypatch.setattr(mod, 'safe_translate_for_cms', lambda text, lang: text.replace('اختر المنتج', 'Choose a product') if lang == 'en' else text)
++    vc_request(mod, server, {'action': 'send', 'text': text})
++    assert 'Choose a product' in mod.get_text(1001, 'shop_available_hint')
++    assert '5271619747891388291' in mod.get_text(1002, 'shop_available_hint')
++    view = vc_request(mod, server, {'action': 'open', 'cb': 'ad_cms_shop'})
++    view = vc_press(mod, server, view, 'edit_txt_shop_available_hint')
++    vc_press(mod, server, view, 'rst_txt_shop_available_hint')
++    assert mod.get_text(1001, 'shop_available_hint') == mod.LANG['en']['shop_available_hint']
++
++
++def test_console_exposes_only_requested_customization_and_keeps_other_cms_routing(mod, server):
++    status, home, _ = request(server, '/webapp/admin/home', uid=9001)
++    assert status == 200 and any(s['cb'] == 'ad_cms_shop' for s in home['sections'])
++    for cb in ['ad_texts_main', 'ad_cms_vip', 'edit_txt_welcome', 'ad_bc']:
++        status, data, _ = request(server, '/webapp/admin/vc', {'action': 'open', 'cb': cb}, uid=9001)
++        assert status == 403 and data['error'] == 'bot_only'
++    status, _, _ = request(server, '/webapp/admin/vc', {'action': 'open', 'cb': 'ad_cms_shop'})
++    assert status == 403

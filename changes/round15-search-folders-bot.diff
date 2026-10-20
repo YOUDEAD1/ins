@@ -1,0 +1,1032 @@
+--- a/bot.py	2026-10-19 16:38:58.126249837 +0000
++++ b/bot.py	2026-10-19 16:38:58.129223064 +0000
+@@ -3452,7 +3452,7 @@
+ _ADMIN_CB_PREFIXES = ('ad_', 'admin_', 'edit_txt_', 'rst_txt_', 'edit_btn_', 'btnstyle_', 'toggle_amount_protection',
+                       'stk_', 'set_v_', 'set_pemj_', 'edit_p_', 'ep_', 'toggle_hide_', 'del_fsub_', 'gift_cancel_',
+                       'togglecoin_', 'hide_coins_menu', 'emj_reg_', 'p_set_first_', 'ext_add_store', 'ext_api_main',
+-                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_', 'pprofit_', 'baseurl_')
++                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_', 'pprofit_', 'baseurl_', 'wasl_')
+ 
+ 
+ def _is_admin_cb(data):
+@@ -5690,6 +5690,8 @@
+         'btn_gh': '🎓 تفعيل GitHub',
+         'btn_gemini': '✨ تفعيل Gemini',
+         'btn_refresh': '🔄 تحديث',
++        'btn_shop_search': '🔎 بحث عن منتج',
++        'btn_shop_avail': '✅ المتوفر الآن',
+         'btn_main_menu': '🏠 القائمة الرئيسية',
+         'btn_back': '🔙 رجوع',
+         'btn_buy_now': '✅ شراء الآن',
+@@ -5727,6 +5729,8 @@
+         'btn_gh': '🎓 GitHub Pack',
+         'btn_gemini': '✨ Gemini Advanced',
+         'btn_refresh': '🔄 Refresh',
++        'btn_shop_search': '🔎 Search',
++        'btn_shop_avail': '✅ In stock now',
+         'btn_main_menu': '🏠 Main Menu',
+         'btn_back': '🔙 Back',
+         'btn_buy_now': '✅ Buy Now',
+@@ -7164,13 +7168,42 @@
+ _PRODUCTS_CACHE_TTL = 60  # ثانية
+ 
+ 
++# القوائم (المتجر / المجلدات / /start) تحتاج الاسم والسعر والحالة بس — الوصف ثقيل ويتجاب لما تفتح المنتج نفسه
++_PRODUCTS_LIGHT_PROJ = {'desc_ar': 0, 'desc_en': 0, 'desc': 0, 'desc_text': 0, 'desc_ar_html': 0, 'desc_en_html': 0}
++_PRODUCTS_FULL = {}                        # str(id) / str(_id) → (المنتج كامل، ينتهي)
++_PRODUCTS_FULL_ALL = {'data': None, 'exp': 0}
++_PF_MISSES = []
++
++
++def _pf_put(doc, exp):
++    if doc.get('id') is not None:
++        _PRODUCTS_FULL[str(doc['id'])] = (doc, exp)
++    _PRODUCTS_FULL[str(doc.get('_id'))] = (doc, exp)
++
++
++def _get_all_products_full_cached():
++    """كل المنتجات بوصفها (للموقع والتصدير) — مرة كل 60 ثانية."""
++    now = time.time()
++    if _PRODUCTS_FULL_ALL['data'] is not None and _PRODUCTS_FULL_ALL['exp'] > now:
++        return _PRODUCTS_FULL_ALL['data']
++    try:
++        data = list(db.products.find())
++    except Exception:
++        return _PRODUCTS_FULL_ALL['data'] or []
++    exp = now + _PRODUCTS_CACHE_TTL
++    _PRODUCTS_FULL_ALL.update(data=data, exp=exp)
++    for d in data:
++        _pf_put(d, exp)
++    return data
++
++
+ def _get_all_products_cached():
+-    """يجلب كل المنتجات مرة كل 60 ثانية (بدل استعلام لكل مستخدم)."""
++    """كل المنتجات للقوائم (بدون الوصف) مرة كل 60 ثانية — أخف وأسرع."""
+     now = time.time()
+     if _PRODUCTS_LIST_CACHE['data'] is not None and _PRODUCTS_LIST_CACHE['exp'] > now:
+         return _PRODUCTS_LIST_CACHE['data']
+     try:
+-        data = list(db.products.find())
++        data = list(db.products.find({}, _PRODUCTS_LIGHT_PROJ))
+     except Exception:
+         return _PRODUCTS_LIST_CACHE['data'] or []
+     _PRODUCTS_LIST_CACHE['data'] = data
+@@ -7193,23 +7226,84 @@
+     _PRODUCTS_LIST_CACHE['exp'] = 0
+     _PRODUCTS_BY_ID_CACHE['map'] = {}
+     _PRODUCTS_BY_ID_CACHE['exp'] = 0
++    _PRODUCTS_FULL.clear()
++    _PRODUCTS_FULL_ALL.update(data=None, exp=0)
++
++
++def _remember_deleted_product(p):
++    try:
++        ids = list({str(p.get('_id'))} | ({str(p['id'])} if p.get('id') is not None else set()))
++        db.deleted_products.update_one({'_id': str(p.get('id', p.get('_id')))},
++                                       {'$set': {'ids': ids, 'name_ar': p.get('name_ar') or p.get('name_en') or '',
++                                                 'name_en': p.get('name_en') or p.get('name_ar') or '',
++                                                 'custom_emoji_id': p.get('custom_emoji_id'), 'at': int(time.time())}}, upsert=True)
++    except Exception as e:
++        logger.debug(f"remember deleted: {e}")
++
++
++def _deleted_product_name(pid, lang='ar'):
++    try:
++        d = db.deleted_products.find_one({'ids': str(pid)})
++    except Exception:
++        d = None
++    if not d:
++        return None
++    n = d.get('name_en') if lang == 'en' else d.get('name_ar')
++    return clean_name(n or d.get('name_ar') or d.get('name_en') or '') or None
++
++
++def _catalog_pull_product(p):
++    """يشيل المنتج المحذوف من كل المجلدات (بكل صيغ رقمه)."""
++    vals = [p.get('_id'), str(p.get('_id'))]
++    if p.get('id') is not None:
++        vals += [p['id'], str(p['id'])]
++        if str(p['id']).isdigit():
++            vals.append(int(str(p['id'])))
++    try:
++        db.catalogs.update_many({}, {'$pull': {'product_ids': {'$in': vals}}})
++    except Exception as e:
++        logger.debug(f"catalog pull: {e}")
++
++
++def _find_product_light(pid):
++    """للقوائم: المنتج بدون الوصف من الذاكرة (بدون أي استعلام)."""
++    now = time.time()
++    if _PRODUCTS_BY_ID_CACHE['exp'] <= now:
++        _get_all_products_cached()
++    p = _PRODUCTS_BY_ID_CACHE['map'].get(str(pid))
++    return p if p is not None else find_product(pid)
+ 
+ 
+ def find_product(pid):
++    """المنتج كامل (مع الوصف): من الذاكرة، ولا استعلام واحد لهذا المنتج بس."""
+     pid_str = str(pid)
+-    # ⚡ نجرّب الـ cache أولاً (يقطع استعلامات MongoDB بشدة)
+     now = time.time()
+-    if _PRODUCTS_BY_ID_CACHE['exp'] > now:
+-        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+-        if cached:
+-            return cached
+-    else:
+-        # نبني الـ cache لو منتهي
++    hit = _PRODUCTS_FULL.get(pid_str)
++    if hit and hit[1] > now:
++        return hit[0]
++    if _PRODUCTS_BY_ID_CACHE['exp'] <= now:
+         _get_all_products_cached()
+-        cached = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
+-        if cached:
+-            return cached
+-    return _find_product_db(pid)
++    lp = _PRODUCTS_BY_ID_CACHE['map'].get(pid_str)
++    if lp is not None:
++        # طلبات كثيرة ورا بعض (تقرير / قائمة) → نجيبهم كلهم مرة وحدة بدل استعلام لكل منتج
++        _PF_MISSES[:] = [t for t in _PF_MISSES if now - t < 2] + [now]
++        if len(_PF_MISSES) > 8:
++            _get_all_products_full_cached()
++            hit = _PRODUCTS_FULL.get(pid_str)
++            if hit:
++                return hit[0]
++        try:
++            full = db.products.find_one({'_id': lp['_id']})
++        except Exception:
++            full = None
++        if full:
++            _pf_put(full, now + _PRODUCTS_CACHE_TTL)
++            return full
++        return lp
++    p = _find_product_db(pid)
++    if p:
++        _pf_put(p, now + _PRODUCTS_CACHE_TTL)
++    return p
+ 
+ 
+ def _find_product_db(pid):
+@@ -8001,6 +8095,41 @@
+         logger.error(f"Error in shop_detail_ui_helper: {e}", exc_info=True)
+         return False
+ 
++def _light_lookup(x):
++    """المنتج من قائمة الذاكرة بأي صيغة لرقمه — بدون استعلام (اللي مو موجود = محذوف)."""
++    if _PRODUCTS_BY_ID_CACHE['exp'] <= time.time():
++        _get_all_products_cached()
++    m = _PRODUCTS_BY_ID_CACHE['map']
++    p = m.get(str(x))
++    if p is None and isinstance(x, float) and x.is_integer():
++        p = m.get(str(int(x)))
++    if p is None and not str(x).startswith('cgpt_main_'):
++        p = m.get('cgpt_main_' + str(x))
++    return p
++
++
++def _catalog_visible_count(cat):
++    """كم منتج ظاهر وموجود في المجلد (المحذوف والمخفي ما ينحسب)."""
++    seen = set()
++    for x in (cat.get('product_ids') or []):
++        p = _light_lookup(x)
++        if not p or p.get('is_hidden'):
++            continue
++        seen.add(str(p.get('_id')))
++    return len(seen)
++
++
++def _catalog_ext_counts(cat_ids):
++    out = {}
++    try:
++        for r in db.ext_products.aggregate([{'$match': {'catalog_id': {'$in': list(cat_ids)}, 'hidden': {'$ne': True}}},
++                                            {'$group': {'_id': '$catalog_id', 'n': {'$sum': 1}}}]):
++            out[str(r['_id'])] = int(r['n'])
++    except Exception:
++        pass
++    return out
++
++
+ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
+     try:
+         logger.info(f"[HELPER] catalog_view_helper called: chat_id={chat_id}, uid={uid}, cat_id={cat_id}, lang={lang}, msg_edit={message_id_to_edit}")
+@@ -8028,9 +8157,12 @@
+         # ⚡ نجمع المنتجات أولاً، ثم نجلب المخزون دفعة واحدة (batch) للسرعة
+         cat_prods = []
+         stock_ids = []
++        _seen = set()
+         for pid in prod_ids:
+-            p = find_product(str(pid))
++            p = _light_lookup(pid)
+             if not p: continue
++            if str(p.get('_id')) in _seen: continue          # نفس المنتج مسجّل مرتين بصيغتين
++            _seen.add(str(p.get('_id')))
+             if p.get('is_hidden', False) and not is_admin: continue
+             actual_pid = p.get('id', str(p.get('_id', '')))
+             cat_prods.append((p, actual_pid))
+@@ -8106,7 +8238,7 @@
+ 
+         # 🔌 منتجات API المُسندة لهذا المجلد (الظاهرة فقط) — مع العدد واللون
+         try:
+-            ext_list = list(db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}))
++            ext_list = list(db.ext_products.find({'catalog_id': cat_id, 'hidden': {'$ne': True}}, _EXT_LIGHT_PROJ))
+             # المتوفر أولاً (أبجدياً)، غير المتوفر في الأسفل
+             ext_list.sort(key=lambda e: (not (e.get('stock', 0) > 0),
+                                          str(e.get('name', '')).lower()))
+@@ -8880,7 +9012,7 @@
+                         p_name = clean_name(get_translated_product_name(p, l, is_cgpt=is_cgpt_flag))
+                         custom_emoji_id = p.get('custom_emoji_id')
+                     else:
+-                        p_name = "منتج محذوف" if l == 'ar' else "Deleted Product"
++                        p_name = _deleted_product_name(pid, l) or ("منتج محذوف" if l == 'ar' else "Deleted Product")
+                         custom_emoji_id = None
+                 
+                 count = len(orders)
+@@ -9334,6 +9466,7 @@
+     page_items = items[start:start + PER]
+ 
+     markup = InlineKeyboardMarkup(row_width=1)
++    _shop_tools_row(markup, uid)
+     for typ, iid, nm, emoji_id, price, st, in_stock, is_manual, is_cgpt in page_items:
+         short_n = nm[:25] + ".." if len(nm) > 25 else nm
+         if is_cgpt:
+@@ -9426,6 +9559,461 @@
+     except Exception: pass
+ 
+ 
++
++
++# ============================================================
++# 🔎 بحث المنتجات: اختصارات + أخطاء إملائية + «هل تقصد» (نفس الخوارزمية في الموقع)
++# ============================================================
++_SR_ALIASES = {
++    'netflix': ['nf', 'ntf', 'nflx', 'نتفلكس', 'نتفليكس', 'نتفلیکس', 'نيتفلكس', 'نتفلكيس'],
++    'youtube': ['yt', 'ytp', 'يوتيوب', 'يوتوب', 'يوتيب', 'يوتيوبي'],
++    'chatgpt': ['gpt', 'cgpt', 'chat', 'chatgbt', 'شات', 'شاتجبت', 'شات جي بي تي', 'جي بي تي', 'جبت'],
++    'spotify': ['sp', 'spot', 'سبوتيفاي', 'سبوتفاي', 'سبوتي', 'سبوتيفي'],
++    'shahid': ['شاهد', 'shahed'],
++    'disney': ['dz', 'dsn', 'ديزني', 'دزني'],
++    'prime': ['amazon', 'برايم', 'امازون', 'امزون'],
++    'canva': ['كانفا', 'كانفي', 'canvas'],
++    'capcut': ['cc', 'كاب كت', 'كابكت', 'كاب كات', 'كابكات'],
++    'tiktok': ['tt', 'تيك توك', 'تيكتوك', 'تك توك'],
++    'instagram': ['ig', 'insta', 'انستا', 'انستقرام', 'انستغرام', 'انستجرام'],
++    'telegram': ['tg', 'تيليجرام', 'تلقرام', 'تيليقرام', 'تليجرام'],
++    'premium': ['بريميوم', 'بريميم', 'prem', 'برميوم'],
++    'discord': ['dc', 'ديسكورد', 'دسكورد'],
++    'nitro': ['نيترو', 'نايترو'],
++    'pubg': ['ببجي', 'بوبجي', 'uc'],
++    'freefire': ['ff', 'فري فاير', 'فريفاير'],
++    'apple': ['ابل', 'آبل', 'itunes', 'ايتونز'],
++    'google': ['قوقل', 'جوجل', 'غوغل'],
++    'gemini': ['جيميني', 'جمناي', 'جيمناي'],
++    'office': ['اوفيس', 'm365', 'microsoft', 'مايكروسوفت'],
++    'adobe': ['ادوبي', 'ادوب'],
++    'snapchat': ['snap', 'سناب', 'سناب شات'],
++    'github': ['جيت هب', 'جيتهب', 'قيت هب'],
++    'playstation': ['ps', 'psn', 'بلايستيشن', 'بلاستيشن', 'سوني'],
++    'xbox': ['اكس بوكس', 'اكسبوكس'],
++    'steam': ['ستيم'],
++    'vpn': ['في بي ان'],
++    'osn': ['او اس ان'],
++    'iptv': ['اي بي تي في'],
++    'perplexity': ['pplx', 'بيربلكسيتي'],
++    'claude': ['كلود'],
++    'grok': ['قروك', 'جروك'],
++    'duolingo': ['دولينجو', 'دولنقو'],
++    'linkedin': ['لينكدان', 'لينكد ان'],
++    'cursor': ['كيرسر'],
++}
++_SR_AR_MAP = str.maketrans({'أ': 'ا', 'إ': 'ا', 'آ': 'ا', 'ٱ': 'ا', 'ة': 'ه', 'ى': 'ي', 'ؤ': 'و', 'ئ': 'ي', 'ی': 'ي', 'ک': 'ك',
++                            '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9'})
++_SR_DROP = re.compile(r'[ً-ٰٟـ]')
++_SR_NONW = re.compile(r'[^a-z0-9ء-ي]+')
++_SR_TAG = re.compile(r'<[^>]*>')
++
++
++def sr_norm(s):
++    s = _SR_TAG.sub(' ', str(s or '')).lower().translate(_SR_AR_MAP)
++    s = _SR_DROP.sub('', s)
++    return _SR_NONW.sub(' ', s).strip()
++
++
++_SR_ALIAS_IDX = {}
++for _canon, _alts in _SR_ALIASES.items():
++    for _a in [_canon] + _alts:
++        _SR_ALIAS_IDX.setdefault(sr_norm(_a).replace(' ', ''), set()).add(_canon)
++
++
++def _sr_dl(a, b, cap=3):
++    """مسافة دامراو-ليفنشتاين (مع حد أعلى عشان السرعة)."""
++    la, lb = len(a), len(b)
++    if abs(la - lb) > cap:
++        return cap + 1
++    prev2, prev = None, list(range(lb + 1))
++    for i in range(1, la + 1):
++        cur = [i] + [0] * lb
++        best = cur[0]
++        for j in range(1, lb + 1):
++            c = 0 if a[i - 1] == b[j - 1] else 1
++            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + c)
++            if prev2 is not None and i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
++                v = min(v, prev2[j - 2] + 1)
++            cur[j] = v
++            best = min(best, v)
++        if best > cap:
++            return cap + 1
++        prev2, prev = prev, cur
++    return prev[lb]
++
++
++def _sr_typo_ok(q, w):
++    if len(q) < 3:
++        return False
++    k = 1 if len(q) <= 5 else 2
++    if _sr_dl(q, w, k) <= k:
++        return True
++    return len(w) > len(q) and _sr_dl(q, w[:len(q)], k) <= k     # كتب جزء من الكلمة وفيه غلط
++
++
++def _sr_subseq(q, s):
++    if len(q) < 3 or not s or q[0] != s[0]:
++        return False
++    it, span = 0, 0
++    for i, ch in enumerate(s):
++        if it < len(q) and ch == q[it]:
++            it += 1
++            if it == len(q):
++                span = i + 1
++                break
++    return it == len(q) and len(q) / span >= 0.5
++
++
++def sr_prep(item):
++    """يجهّز منتج للبحث: كلماته، اسمه ملزّق، الحروف الأولى، والأسماء المعروفة (aliases)."""
++    toks = sr_norm(' '.join(str(item.get(k) or '') for k in ('name_ar', 'name_en'))).split()
++    compact = ''.join(toks)
++    canon = set()
++    for t in toks:
++        canon |= _SR_ALIAS_IDX.get(t, set())
++    for c, alts in _SR_ALIASES.items():
++        if c in compact:
++            canon.add(c)
++        for a in alts:
++            na = sr_norm(a).replace(' ', '')
++            if len(na) >= 3 and na in compact:
++                canon.add(c)
++    firsts = {n.split()[0] for n in (sr_norm(item.get('name_ar')), sr_norm(item.get('name_en'))) if n}
++    return {'toks': toks, 'compact': compact, 'initials': ''.join(t[0] for t in toks if t), 'canon': canon, 'firsts': firsts,
++            'desc': sr_norm(item.get('desc') or '')}
++
++
++def _sr_tok_score(q, P, typo):
++    best = 0.0
++    al = _SR_ALIAS_IDX.get(q)
++    if al and al & P['canon']:
++        best = 3.0
++    for w in P['toks']:
++        if w == q:
++            return 4.0
++        if w.startswith(q) and (len(q) >= 2 or w in P['firsts']):
++            best = max(best, 3.0)
++    if best >= 3:
++        return best
++    if len(q) >= 2 and q in P['compact']:
++        return 2.5
++    if len(q) >= 2 and P['initials'].startswith(q):
++        return 2.0
++    if _sr_subseq(q, P['compact']):
++        return 1.5
++    if typo:
++        for w in P['toks']:
++            if _sr_typo_ok(q, w):
++                return 1.0
++        if _sr_typo_ok(q, P['compact']):
++            return 0.9
++    if len(q) >= 3 and q in P['desc']:
++        return 0.5
++    return 0.0
++
++
++def _sr_match(qtoks, preps, typo):
++    out = []
++    for item, P in preps:
++        tot = 0.0
++        for q in qtoks:
++            sc = _sr_tok_score(q, P, typo)
++            if sc <= 0:
++                break
++            tot += sc
++        else:
++            out.append((tot, item))
++    out.sort(key=lambda x: (-x[0], not x[1].get('in_stock'), sr_norm(x[1].get('name_en') or x[1].get('name_ar'))))
++    return [it for _s, it in out]
++
++
++def _sr_vocab(preps):
++    v = {}
++    for _it, P in preps:
++        for w in P['toks']:
++            if len(w) >= 3:
++                v[w] = v.get(w, 0) + 1
++        for c in P['canon']:
++            v[c] = v.get(c, 0) + 1
++    return v
++
++
++def _sr_correct(qtoks, vocab, preps):
++    fixed, changed = [], False
++    for q in qtoks:
++        if q in vocab or len(q) < 3 or any(_sr_tok_score(q, P, False) > 0 for _i, P in preps):
++            fixed.append(q)
++            continue
++        k = 1 if len(q) <= 5 else 2
++        cands = sorted(((_sr_dl(q, w, k), -n, w) for w, n in vocab.items()), key=lambda x: (x[0], x[1], x[2]))
++        if cands and cands[0][0] <= k:
++            fixed.append(cands[0][2])
++            changed = True
++        else:
++            fixed.append(q)
++    return fixed, changed
++
++
++def shop_search(query, items, limit=None):
++    """{'items', 'query', 'corrected' (لو صححنا الكلمة), 'suggest' (هل تقصد)} — items: name_ar/name_en/desc/in_stock."""
++    q = sr_norm(query)
++    res = {'items': [], 'query': q, 'corrected': None, 'suggest': []}
++    if not q:
++        return res
++    qtoks = q.split()
++    preps = [(it, sr_prep(it)) for it in items]
++    found = _sr_match(qtoks, preps, typo=False)
++    if not found:
++        vocab = _sr_vocab(preps)
++        fixed, changed = _sr_correct(qtoks, vocab, preps)
++        if changed:
++            found = _sr_match(fixed, preps, typo=False)
++            if found:
++                res['corrected'] = ' '.join(fixed)
++        if not found:
++            found = _sr_match(qtoks, preps, typo=True)
++            if found:
++                res['corrected'] = res['corrected'] or None
++        if not found and len(q.replace(' ', '')) >= 3:
++            qc = q.replace(' ', '')
++            k = max(2, len(qc) // 3)
++            sug = sorted(((_sr_dl(qc, w, k), -n, w) for w, n in vocab.items() if len(w) >= 3), key=lambda x: (x[0], x[1], x[2]))
++            res['suggest'] = [w for d, _n, w in sug if d <= k][:3]
++    res['items'] = found[:limit] if limit else found
++    return res
++
++
++
++_EXT_LIGHT_PROJ = {'desc': 0, 'desc_text': 0, 'desc_ar': 0, 'desc_en': 0, 'desc_ar_html': 0, 'desc_en_html': 0}
++_SHOP_SQ = {}          # uid → اقتراحات «هل تقصد» (الأزرار تحمل رقم بس)
++
++
++def _shop_tools_row(markup, uid):
++    """أول القائمة: 🔎 بحث + ✅ المتوفر الآن (نصهم وإيموجيهم من «تخصيص البوت»)."""
++    markup.row(create_btn(uid, 'btn_shop_search', callback_data='shop_search'),
++               create_btn(uid, 'btn_shop_avail', callback_data='shop_avail_0'))
++
++
++def _shop_items(uid, is_admin=False):
++    """كل المنتجات اللي يقدر يشوفها العميل (عادية + ChatGPT + متاجر API) بالاسم والسعر والمخزون — بدون الوصف."""
++    l = get_lang(uid)
++    prods = [p for p in _get_all_products_cached() if is_admin or not p.get('is_hidden')]
++    ids = []
++    for p in prods:
++        sp = str(p.get('id', p.get('_id')))
++        ids.append(sp)
++        if sp.isdigit():
++            ids.append(int(sp))
++    stock = {}
++    try:
++        for r in db.product_stock.aggregate([{'$match': {'product_id': {'$in': ids}, 'is_sold': False}},
++                                             {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}]):
++            stock[str(r['_id'])] = r['c']
++    except Exception:
++        pass
++    seats = None
++    out = []
++    for p in prods:
++        pid = str(p.get('id', p.get('_id')))
++        is_cgpt = p.get('product_type') == 'cgpt_main'
++        manual = bool(p.get('is_manual'))
++        if is_cgpt:
++            if seats is None:
++                seats = _cgpt_display_seats() or 0
++            st = seats
++            cb = f"vi_p_cgpt_main_{pid.replace('cgpt_main_', '')}"
++        else:
++            st = stock.get(pid, 0)
++            cb = f"vi_p_{pid}"
++        try:
++            price, vipb = vip_unit(uid, pid, p.get('price', 0))
++        except Exception:
++            price, vipb = float(p.get('price') or 0), False
++        out.append({'name_ar': clean_name(p.get('name_ar') or p.get('name_en') or ''), 'name_en': clean_name(p.get('name_en') or p.get('name_ar') or ''),
++                    'cb': cb, 'price': float(price or 0), 'vip': bool(vipb), 'stock': st, 'manual': manual and not is_cgpt,
++                    'in_stock': bool(manual or st > 0), 'emoji_id': p.get('custom_emoji_id'), 'hidden': bool(p.get('is_hidden')),
++                    'style': p.get('btn_style'), 'cgpt': is_cgpt})
++    try:
++        for ep in db.ext_products.find({} if is_admin else {'hidden': {'$ne': True}}, _EXT_LIGHT_PROJ):
++            nm = str(ep.get('name', ''))
++            st = int(ep.get('stock', 0) or 0)
++            out.append({'name_ar': nm, 'name_en': nm, 'cb': f"vext_{ep['_id']}", 'price': float(ep.get('sell_price', ep.get('base_price', 0)) or 0),
++                        'vip': False, 'stock': st, 'manual': False, 'in_stock': st > 0 or bool(ep.get('unlimited')),
++                        'emoji_id': ep.get('emoji_id'), 'hidden': bool(ep.get('hidden')), 'style': None, 'cgpt': False})
++    except Exception as e:
++        logger.debug(f"shop items ext: {e}")
++    return out
++
++
++def _shop_item_btn(it, l):
++    n = it['name_en'] if l == 'en' else it['name_ar']
++    n = n[:25] + '..' if len(n) > 25 else n
++    st_txt = '∞' if it['manual'] else str(it['stock'])
++    txt = f"{n} | ${it['price']:.2f}{' 👑' if it['vip'] else ''} | 📦 {st_txt}{' 👻' if it['hidden'] else ''}"
++    style = it['style'] if (it['style'] and it['in_stock']) else ('success' if it['in_stock'] else 'danger')
++    kw = {'text': txt, 'callback_data': it['cb'], 'style': style}
++    if it.get('emoji_id'):
++        kw['icon_custom_emoji_id'] = it['emoji_id']
++    return CustomInlineButton(**kw)
++
++
++def _shop_is_admin(uid):
++    u = get_user_data_full(uid) or {}
++    return u.get('is_admin') == 1 or uid == OWNER_ID
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'shop_search')
++def shop_search_cb(call):
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    uid = call.from_user.id
++    if is_user_banned(uid):
++        return
++    l = get_lang(uid)
++    mk = InlineKeyboardMarkup()
++    mk.add(create_btn(uid, 'btn_back', callback_data='open_shop'))
++    txt = ("🔎 <b>Search products</b>\n\nType the product name — a short form works too (<code>nf</code>, <code>gpt</code>, <code>yt</code>), "
++           "and so does a typo: I'll find the closest match." if l == 'en' else
++           "🔎 <b>ابحث عن منتج</b>\n\nاكتب اسم المنتج — تقدر تكتب اختصار (<code>nf</code>، <code>gpt</code>، <code>yt</code>) "
++           "أو حتى لو فيه غلط إملائي: أقترح لك الأقرب.")
++    msg = bot.send_message(call.message.chat.id, txt, parse_mode='HTML', reply_markup=mk)
++    bot.register_next_step_handler(msg, shop_search_msg)
++
++
++def shop_search_msg(message):
++    t = (message.text or '').strip()
++    if not t:
++        return
++    if t.startswith('/'):
++        try:
++            bot.process_new_messages([message])       # أمر (مثل /start) → نشغّله عادي
++        except Exception:
++            pass
++        return
++    _shop_search_show(message.chat.id, message.from_user.id, t)
++
++
++@bot.message_handler(commands=['search'])
++def shop_search_cmd(message):
++    if is_user_banned(message.from_user.id):
++        return
++    q = (message.text or '').split(None, 1)
++    if len(q) < 2 or not q[1].strip():
++        call = types.SimpleNamespace(id='0', from_user=message.from_user, message=message)
++        return shop_search_cb(call)
++    _shop_search_show(message.chat.id, message.from_user.id, q[1].strip())
++
++
++def _shop_search_show(chat_id, uid, query, edit_mid=None):
++    l = get_lang(uid)
++    items = _shop_items(uid, _shop_is_admin(uid))
++    r = shop_search(query, items)
++    found = r['items']
++    mk = InlineKeyboardMarkup(row_width=1)
++    q_show = html.escape(query[:60])
++    if found:
++        head = (f"🔎 <b>{len(found)}</b> result(s) for «{q_show}»" if l == 'en' else f"🔎 لقيت <b>{len(found)}</b> لـ «{q_show}»")
++        if r['corrected']:
++            c = html.escape(r['corrected'])
++            head = (f"🔎 No results for «{q_show}» — showing «<b>{c}</b>» ({len(found)})" if l == 'en'
++                    else f"🔎 ما لقيت «{q_show}» — هذي نتائج «<b>{c}</b>» ({len(found)})")
++        for it in found[:20]:
++            mk.add(_shop_item_btn(it, l))
++        if len(found) > 20:
++            head += ("\n<i>Showing the first 20 — type more of the name to narrow it down.</i>" if l == 'en'
++                     else "\n<i>أعرض أول 20 — اكتب أكثر من الاسم عشان تضيّق.</i>")
++    else:
++        head = (f"😕 Nothing matches «{q_show}»." if l == 'en' else f"😕 ما لقيت شي بـ «{q_show}».")
++        if r['suggest']:
++            _SHOP_SQ[uid] = r['suggest'][:3]
++            head += ("\n\n💡 Did you mean:" if l == 'en' else "\n\n💡 هل تقصد:")
++            mk.row(*[InlineKeyboardButton(w, callback_data=f"shop_sq_{i}") for i, w in enumerate(_SHOP_SQ[uid])])
++        else:
++            head += ("\nTry another word or a short form like <code>nf</code>." if l == 'en'
++                     else "\nجرّب كلمة ثانية أو اختصار مثل <code>nf</code>.")
++    mk.row(create_btn(uid, 'btn_shop_search', callback_data='shop_search'), create_btn(uid, 'btn_back', callback_data='open_shop'))
++    if edit_mid:
++        try:
++            bot.edit_message_text(head, chat_id, edit_mid, parse_mode='HTML', reply_markup=mk)
++            return
++        except Exception:
++            pass
++    bot.send_message(chat_id, head, parse_mode='HTML', reply_markup=mk)
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith('shop_sq_'))
++def shop_sq_cb(call):
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    uid = call.from_user.id
++    try:
++        w = _SHOP_SQ.get(uid, [])[int(call.data.rsplit('_', 1)[1])]
++    except Exception:
++        w = None
++    if not w:
++        return shop_search_cb(call)
++    try:
++        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
++    except Exception:
++        pass
++    _shop_search_show(call.message.chat.id, uid, w, edit_mid=call.message.message_id)
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith('shop_avail_'))
++def shop_avail_cb(call):
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    uid = call.from_user.id
++    if is_user_banned(uid):
++        return
++    if check_forced_sub(uid) is False:
++        start_handler(call.message)
++        return
++    try:
++        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
++    except Exception:
++        pass
++    l = get_lang(uid)
++    try:
++        page = max(0, int(call.data.rsplit('_', 1)[1]))
++    except Exception:
++        page = 0
++    items = [it for it in _shop_items(uid, _shop_is_admin(uid)) if it['in_stock'] and not it['hidden']]
++    items.sort(key=lambda it: (not it['cgpt'], sr_norm(it['name_en'] if l == 'en' else it['name_ar'])))
++    PER = 15
++    pages = max(1, (len(items) + PER - 1) // PER)
++    page = min(page, pages - 1)
++    mk = InlineKeyboardMarkup(row_width=1)
++    for it in items[page * PER:(page + 1) * PER]:
++        mk.add(_shop_item_btn(it, l))
++    nav = []
++    if page > 0:
++        nav.append(InlineKeyboardButton("⬅️", callback_data=f"shop_avail_{page - 1}"))
++    if pages > 1:
++        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop"))
++    if page < pages - 1:
++        nav.append(InlineKeyboardButton("➡️", callback_data=f"shop_avail_{page + 1}"))
++    if nav:
++        mk.row(*nav)
++    mk.row(create_btn(uid, 'btn_shop_search', callback_data='shop_search'), create_btn(uid, 'btn_back', callback_data='open_shop'))
++    head = (f"✅ <b>In stock now</b> — {len(items)} products" if l == 'en' else f"✅ <b>المتوفر الحين</b> — {len(items)} منتج")
++    if not items:
++        head += ("\n\nNothing is in stock right now." if l == 'en' else "\n\nما فيه شي متوفر الحين.")
++    try:
++        bot.edit_message_text(head, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++    except Exception as e:
++        if 'not modified' not in str(e).lower():
++            bot.send_message(call.message.chat.id, head, parse_mode='HTML', reply_markup=mk)
++
++
++
+ @bot.callback_query_handler(func=lambda call: call.data == "open_shop")
+ def shop_list_ui(call):
+     bot.answer_callback_query(call.id)
+@@ -9448,6 +10036,7 @@
+     if catalogs:
+         # ═══ عرض الكتالوجات أولاً (مرتبة أبجدياً) ثم المنتجات العادية ═══
+         markup = InlineKeyboardMarkup(row_width=2)
++        _shop_tools_row(markup, uid)
+ 
+         # 🤖 منتج ChatGPT Business في البداية المطلقة (قبل المجلدات)
+         try:
+@@ -9483,22 +10072,14 @@
+         catalogs.sort(key=lambda c: (c.get(name_key) or c.get('name_ar', '')).lower())
+         
+         cat_buttons = []
++        _ext_counts = _catalog_ext_counts([str(c.get('_id', '')) for c in catalogs])   # استعلام واحد لكل المجلدات
+         for cat in catalogs:
+             cat_id = str(cat.get('_id', ''))
+             emoji = cat.get('emoji', '📁')
+             emoji_id = cat.get('emoji_id')
+             name = cat.get('name_en', cat.get('name_ar', '')) if l == 'en' else cat.get('name_ar', cat.get('name_en', ''))
+-            prod_ids = cat.get('product_ids') or []
+-            # ⚡ لا نستعلم عن كل منتج (كان 600+ استعلام)! نعرض عدد المنتجات
+-            #    المسجّلة في المجلد مباشرةً. العدّ الدقيق (المخفي/الفارغ) يظهر
+-            #    عند دخول المجلد نفسه — القائمة الرئيسية يجب أن تفتح فوراً.
+-            count = len(prod_ids)
+-            # نضيف عدد منتجات API المُسندة لهذا المجلد
+-            try:
+-                count += db.ext_products.count_documents(
+-                    {'catalog_id': cat_id, 'hidden': {'$ne': True}})
+-            except Exception:
+-                pass
++            # العدد = المنتجات الظاهرة الموجودة فعلاً (من الذاكرة — بدون استعلامات)
++            count = _catalog_visible_count(cat) + _ext_counts.get(cat_id, 0)
+             if count == 0 and not is_admin:
+                 continue
+             btn_text = f"{name} ({count})" if emoji_id else f"{emoji} {name} ({count})"
+@@ -9610,7 +10191,7 @@
+ 
+         # 🔌 منتجات API الخارجية الظاهرة (غير المخفية) وبلا مجلد فقط
+         try:
+-            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}):
++            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}, _EXT_LIGHT_PROJ):
+                 if ep.get('catalog_id'):
+                     continue
+                 if ep.get('hidden') and not is_admin:
+@@ -9689,6 +10270,7 @@
+             clean_name(x[0].get('name_en' if l == 'en' else 'name_ar', '')).lower()))
+ 
+         markup = InlineKeyboardMarkup(row_width=1)
++        _shop_tools_row(markup, uid)
+ 
+         for p, pid, st, is_manual, in_stock in nc_items:
+             is_hidden = p.get('is_hidden', False)
+@@ -9719,7 +10301,7 @@
+ 
+         # 🔌 منتجات API الخارجية (بنفس شكل المنتجات العادية)
+         try:
+-            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}):
++            for ep in db.ext_products.find({'catalog_id': {'$in': [None, '']}}, _EXT_LIGHT_PROJ):
+                 if ep.get('catalog_id'):
+                     continue
+                 if ep.get('hidden') and not is_admin:
+@@ -21551,6 +22133,7 @@
+     markup.add(InlineKeyboardButton("👑 نصوص VIP", callback_data="ad_cms_vip"))
+     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
+                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
++    markup.add(InlineKeyboardButton("🌐 إيموجي الموقع (Premium)", callback_data="ad_cms_site_0"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+     bot.edit_message_text("✏️ <b>نظام التخصيص (CMS):</b>\nاختر ماذا تريد أن تخصص:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+ 
+@@ -21659,7 +22242,7 @@
+         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc',
+                 'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'],
+         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy', 'btn_vip'],
+-        'shop': ['btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
++        'shop': ['btn_shop_search', 'btn_shop_avail', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
+     }
+     
+     markup = InlineKeyboardMarkup(row_width=1)
+@@ -22016,6 +22599,10 @@
+ 
+     try:
+         res = db.custom_texts.delete_many({'key': key})
++        try:
++            _WA_TXT_CACHE.update(rows=None, exp=0)
++        except Exception:
++            pass
+         deleted = res.deleted_count
+     except Exception as e:
+         logger.error(f"reset text err: {e}")
+@@ -22230,6 +22817,10 @@
+     # حفظ النصين
+     db.custom_texts.update_one({'lang': 'ar', 'key': key}, {'$set': {'value': final_text_ar}}, upsert=True)
+     db.custom_texts.update_one({'lang': 'en', 'key': key}, {'$set': {'value': final_text_en}}, upsert=True)
++    try:
++        _WA_TXT_CACHE.update(rows=None, exp=0)          # إيموجي النصوص يوصل للموقع على طول
++    except Exception:
++        pass
+     _invalidate_custom_texts_cache()
+     
+     # رسالة تأكيد بسيطة (بدون كود escape عشان يبان شكل النص الحقيقي)
+@@ -22325,6 +22916,7 @@
+             
+     db.custom_buttons.update_one({'lang': 'ar', 'key': key}, {'$set': {'text': text_ar, 'emoji_id': emoji_id}}, upsert=True)
+     db.custom_buttons.update_one({'lang': 'en', 'key': key}, {'$set': {'text': text_en, 'emoji_id': emoji_id}}, upsert=True)
++    _cms_site_refresh(emoji_id)
+ 
+     emoji_status = f"<code>{emoji_id}</code>" if emoji_id else "لا يوجد"
+ 
+@@ -22355,7 +22947,8 @@
+         f"🇸🇦 العربية: <b>{html.escape(text_ar)}</b>\n"
+         f"🇺🇸 الإنجليزية: <b>{html.escape(text_en)}</b>\n"
+         f"🌟 Premium Emoji: {emoji_status}\n"
+-        f"🎨 اللون الحالي: <b>{cur_label}</b>\n\n"
++        + (f"🌐 يظهر نفس الإيموجي في الموقع: {', '.join(_cms_site_slots_for(key))}\n" if emoji_id and _cms_site_slots_for(key) else "")
++        + f"🎨 اللون الحالي: <b>{cur_label}</b>\n\n"
+         f"━━━━━━━━━━━━━━\n"
+         f"👇 <b>اختر لون الزر:</b>\n"
+         f"<i>(Bot API 9.4 — تيليجرام الإصدار 11.0+)</i>",
+@@ -22382,6 +22975,7 @@
+ 
+         db.custom_buttons.update_one({'lang': 'ar', 'key': key}, update_doc, upsert=True)
+         db.custom_buttons.update_one({'lang': 'en', 'key': key}, update_doc, upsert=True)
++        _cms_site_refresh()
+ 
+         label_map = {
+             None: "⚪️ افتراضي (رمادي)",
+@@ -24965,8 +25559,10 @@
+         try: queries.append({'product_id': float(pid_str)})
+         except: pass
+         db.product_stock.delete_many({'$or': queries})
+-        db.orders.delete_many({'$or': queries})
++        # سجل طلبات العملاء والأرباح يبقى — نحفظ اسم المنتج عشان يطلع في «طلباتي» بدل «منتج محذوف»
++        _remember_deleted_product(p)
+         db.products.delete_one({'_id': p['_id']})
++        _catalog_pull_product(p)
+         _invalidate_products_cache()
+         # 🔄 بث حدث للمزامنة
+         try:
+@@ -25655,7 +26251,7 @@
+                 p = None
+             else:
+                 p = find_product(pid)
+-                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
++                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else (_deleted_product_name(pid) or 'منتج محذوف')
+             price, qty, _tot = _order_paid(r, p)
+             _oid = r.get('order_id') or r.get('api_order_id')
+             text += (
+@@ -25703,7 +26299,7 @@
+                 p = None
+             else:
+                 p = find_product(pid)
+-                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else 'منتج محذوف'
++                p_name = clean_name(p.get('name_ar', p.get('name_en', 'منتج محذوف'))) if p else (_deleted_product_name(pid) or 'منتج محذوف')
+             price, qty, subtotal = _order_paid(r, p)
+             total_spent += subtotal
+             
+@@ -29621,6 +30217,8 @@
+     'balance': ('btn_deposit', 'زر الرصيد + رصيد الأعلى'),
+     'profile': ('btn_profile', 'زر حسابي (الشريط السفلي)'),
+     'all': ('btn_view_flat', 'زر «الكل» في المنتجات'),
++    'search': ('btn_shop_search', 'خانة البحث عن منتج'),
++    'avail': ('btn_shop_avail', 'زر «المتوفر» في المنتجات'),
+     'buy': ('btn_buy_now', 'زر الشراء'),
+     'funds': (None, 'زر شحن الرصيد'),
+     'history': ('btn_dep_hist', 'سجل العمليات'),
+@@ -29664,6 +30262,8 @@
+     'balance': ('dep_choose', '5445353829304387411'),
+     'profile': (None, '5262742999678329061'),
+     'all': (None, '5947193849871862440'),
++    'search': (None, None),
++    'avail': (None, None),
+     'buy': (None, '5312361253610475399'),
+     'funds': (None, '5397916757333654639'),
+     'history': ('history_title', '5444856076954520455'),
+@@ -29844,7 +30444,7 @@
+ 
+ 
+ def _wa_build_catalog_uncached(include_hidden):
+-    prods = list(_get_all_products_cached() or [])
++    prods = list(_get_all_products_full_cached() or [])
+ 
+     # المجلدات (catalogs) — العضوية عبر product_ids كما في البوت
+     cat_out, cat_members = [], {}
+@@ -30716,7 +31316,8 @@
+                             emoji_id=str(p['custom_emoji_id']) if p.get('custom_emoji_id') else None,
+                             image=_wa_img_path(pid, p))
+             else:
+-                info.update(name_ar='منتج محذوف', name_en='Deleted product')
++                info.update(name_ar=_deleted_product_name(pid, 'ar') or 'منتج محذوف',
++                            name_en=_deleted_product_name(pid, 'en') or 'Deleted product')
+     except Exception:
+         pass
+     cache[pid] = info
+@@ -35174,6 +35775,125 @@
+     _baseurl_edit(call)
+ 
+ 
++
++# ============================================================
++# 🌐 إيموجي الموقع من «تخصيص البوت» — نفس الـ Premium Emoji يطلع في الموقع
++# ============================================================
++def _cms_site_refresh(emoji_id=None):
++    """أي تعديل على أزرار البوت يوصل للموقع من أول فتح جديد."""
++    try:
++        _WA_BTN_CACHE.update(rows=None, exp=0)
++        if emoji_id:
++            _WA_PREFETCHED.discard(str(emoji_id))
++            _wa_prefetch_emoji([str(emoji_id)])
++    except Exception:
++        pass
++
++
++def _cms_site_slots_for(btn_key):
++    return [lab for _slot, (b, lab) in _WA_SLOTS.items() if b == btn_key]
++
++
++def _cms_site_src(slot, ov, cur):
++    if ov.get(slot):
++        return 'من هنا'
++    btn = _WA_SLOTS.get(slot, (None, ''))[0]
++    if btn and cur and _wa_btn_emoji('ar', btn) == cur:
++        return f'من زر البوت «{html.escape(clean_name(get_btn_data(OWNER_ID or 0, btn)[0]))[:30]}»'
++    return 'الافتراضي' if cur else 'بدون (أيقونة الموقع)'
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith('ad_cms_site_'))
++@admin_required
++def ad_cms_site_list(call):
++    bot.answer_callback_query(call.id)
++    try:
++        page = int(call.data.rsplit('_', 1)[1])
++    except Exception:
++        page = 0
++    ov = _wa_slot_overrides()
++    cur = _wa_slot_emojis('ar')
++    slots = list(_WA_SLOTS.items())
++    PER = 10
++    pages = max(1, (len(slots) + PER - 1) // PER)
++    page = max(0, min(page, pages - 1))
++    lines = ["🌐 <b>إيموجي الموقع (Premium)</b>", "",
++             "كل خانة في الموقع تاخذ الإيموجي المميز من زر البوت المربوط فيها (من «🎛 أزرار البوت»)، "
++             "أو تحط لها إيموجي هنا مباشرة. التغيير يطلع في الموقع من أول فتح جديد.", ""]
++    mk = InlineKeyboardMarkup(row_width=1)
++    for slot, (btn, label) in slots[page * PER:(page + 1) * PER]:
++        e = cur.get(slot)
++        src = _cms_site_src(slot, ov, e)
++        lines.append((f'<tg-emoji emoji-id="{e}">✨</tg-emoji> ' if e else '▫️ ') + f"<b>{html.escape(label)}</b> — <i>{src}</i>")
++        mk.add(InlineKeyboardButton(f"{'✅' if ov.get(slot) else '✏️'} {label}"[:60], callback_data=f"wasl_{slot}"))
++    nav = []
++    if page > 0:
++        nav.append(InlineKeyboardButton("⬅️", callback_data=f"ad_cms_site_{page - 1}"))
++    if pages > 1:
++        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop"))
++    if page < pages - 1:
++        nav.append(InlineKeyboardButton("➡️", callback_data=f"ad_cms_site_{page + 1}"))
++    if nav:
++        mk.row(*nav)
++    mk.add(InlineKeyboardButton("🔙 التخصيص", callback_data="ad_texts_main"))
++    try:
++        bot.edit_message_text('\n'.join(lines)[:4000], call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++    except Exception as e:
++        if 'not modified' not in str(e).lower():
++            bot.send_message(call.message.chat.id, '\n'.join(lines)[:4000], parse_mode='HTML', reply_markup=mk)
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith('wasl_'))
++@admin_required
++def ad_cms_site_slot(call):
++    bot.answer_callback_query(call.id)
++    slot = call.data[len('wasl_'):]
++    if slot not in _WA_SLOTS:
++        return
++    btn, label = _WA_SLOTS[slot]
++    cur = _wa_slot_emojis('ar').get(slot)
++    hint = (f"\n\n<i>أو عدّل زر البوت المربوط فيها من «🎛 أزرار البوت» — الموقع ياخذ إيموجيه تلقائياً.</i>" if btn else "")
++    msg = bot.send_message(call.message.chat.id,
++                           f"🌐 <b>{html.escape(label)}</b>\nالحالي: " + (f'<tg-emoji emoji-id="{cur}">✨</tg-emoji> <code>{cur}</code>' if cur else '—')
++                           + "\n\n👇 أرسل الإيموجي المميز (Premium) نفسه، أو رقمه.\n"
++                           "للرجوع للتلقائي أرسل <code>حذف</code>، وللإلغاء <code>الغاء</code>." + hint, parse_mode='HTML')
++    bot.register_next_step_handler(msg, ad_cms_site_save, slot)
++
++
++def ad_cms_site_save(message, slot):
++    if not _is_admin_check(message.from_user.id):
++        return
++    t = (message.text or '').strip()
++    mk = InlineKeyboardMarkup()
++    mk.add(InlineKeyboardButton("🌐 إيموجي الموقع", callback_data="ad_cms_site_0"))
++    if t in ('الغاء', 'إلغاء', 'cancel', '/cancel'):
++        bot.send_message(message.chat.id, "❌ تم الإلغاء.", reply_markup=mk)
++        return
++    key = f'webapp_emoji_{slot}'
++    if t in ('حذف', 'delete', '-'):
++        db.settings.delete_one({'key': key})
++        bot.send_message(message.chat.id, "🗑 رجعت الخانة للتلقائي (من زر البوت أو الافتراضي).", reply_markup=mk)
++        return
++    eid = _wa_entities_emoji(message)
++    if not eid and re.fullmatch(r'\d{5,25}', t):
++        eid = t
++    if not eid:
++        msg = bot.send_message(message.chat.id, "❌ ما لقيت إيموجي مميز. أرسل الإيموجي Premium نفسه (أو رقمه)، أو <code>الغاء</code>.", parse_mode='HTML')
++        bot.register_next_step_handler(msg, ad_cms_site_save, slot)
++        return
++    try:
++        ok = bool(bot.get_custom_emoji_stickers([eid]))
++    except Exception:
++        ok = False
++    if not ok:
++        bot.send_message(message.chat.id, f"❌ تيليجرام ما تعرّف على <code>{html.escape(eid)}</code> كإيموجي مميز.", parse_mode='HTML', reply_markup=mk)
++        return
++    db.settings.update_one({'key': key}, {'$set': {'key': key, 'value': eid}}, upsert=True)
++    _cms_site_refresh(eid)
++    bot.send_message(message.chat.id, f'✅ <b>{html.escape(_WA_SLOTS[slot][1])}</b> صارت: <tg-emoji emoji-id="{eid}">✨</tg-emoji>\n'
++                     'تطلع في الموقع من أول فتح جديد.', parse_mode='HTML', reply_markup=mk)
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================

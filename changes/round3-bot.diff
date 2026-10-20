@@ -1,0 +1,11 @@
+--- bot.py.before
++++ bot.py
+@@ -61,7 +61,7 @@
+ TOKEN = os.getenv('TOKEN', '').strip()
+ try: OWNER_ID = int(os.getenv('OWNER_ID', '0').strip())
+ except ValueError: OWNER_ID = 0
+-OWNER_USER = os.getenv('OWNER_USER', '').strip()
++OWNER_USER = os.getenv('OWNER_USER', '').strip().lstrip('@')  # يقبل lara_v2 أو @lara_v2
+ 
+ BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
+ BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '').strip()

@@ -1,0 +1,257 @@
+--- a/bot.py	2026-10-19 18:48:21.074825440 +0000
++++ b/bot.py	2026-10-19 18:48:21.077995244 +0000
+@@ -15323,6 +15323,7 @@
+         emoji_id = ep.get('emoji_id')
+         price = float(ep.get('sell_price', ep.get('base_price', 0)))
+         stk = ep.get('stock', 0)
++        _nu = _notify_url(f"ext_{epid}")           # زر الشراء يفتح الموقع على المنتج
+         users = _bc_users()
+         for u in users:
+             try:
+@@ -15336,10 +15337,8 @@
+                 p_desc = _ext_safe_product_html(_ext_description_for_lang(ep, u_lang), 1200)
+                 alert_msg = get_text(uid_u, 'new_product', html.escape(p_name), f"{price:.2f}", delivery, p_desc)
+                 markup = InlineKeyboardMarkup()
+-                markup.add(CustomInlineButton(
+-                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+-                    style="success",
+-                    icon_custom_emoji_id=emoji_id if emoji_id else None))
++                markup.add(_notify_btn(f"🛒 {p_name}", f"vext_{epid}", url=_nu,
++                                       emoji_id=emoji_id if emoji_id else None))
+                 _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                 sent += 1
+                 time.sleep(0.05)
+@@ -15369,6 +15368,7 @@
+         epid = str(ep['_id'])
+         stk = ep.get('stock', 0)
+         emoji_id = ep.get('emoji_id')
++        _nu = _notify_url(f"ext_{epid}")           # زر الشراء يفتح الموقع على المنتج
+         users = _bc_users()
+         for u in users:
+             try:
+@@ -15382,10 +15382,8 @@
+                 alert_msg = get_text(uid_u, 'new_stock', html.escape(p_name), stk)
+                 alert_msg += f"\n\n💰 <b>{'السعر' if u_lang == 'ar' else 'Price'}:</b> ${price:.2f}"
+                 markup = InlineKeyboardMarkup()
+-                markup.add(CustomInlineButton(
+-                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+-                    style="success",
+-                    icon_custom_emoji_id=emoji_id if emoji_id else None))
++                markup.add(_notify_btn(f"🛒 {p_name}", f"vext_{epid}", url=_nu,
++                                       emoji_id=emoji_id if emoji_id else None))
+                 _broadcast_deliver(bot.send_message, uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+                 sent += 1
+                 time.sleep(0.05)
+@@ -15414,6 +15412,7 @@
+     try:
+         epid = str(ep['_id'])
+         emoji_id = ep.get('emoji_id')
++        _nu = _notify_url(f"ext_{epid}")           # زر الشراء يفتح الموقع على المنتج
+         users = _bc_users()
+         for u in users:
+             try:
+@@ -15425,17 +15424,15 @@
+                 p_name = clean_name(str(ep.get('name', '')))
+                 if u_lang == 'ar':
+                     msg = (f"📉 <b>تخفيض سعر!</b>\n\n🛍 <b>{html.escape(p_name)}</b>\n"
+-                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
++                           f"<s>${old_price:.2f}</s> → <b>${new_price:.2f}</b>\n\n"
+                            f"<i>سارع بالشراء الآن!</i>")
+                 else:
+                     msg = (f"📉 <b>Price Drop!</b>\n\n🛍 <b>{html.escape(p_name)}</b>\n"
+-                           f"~${old_price:.2f}~ → <b>${new_price:.2f}</b>\n\n"
++                           f"<s>${old_price:.2f}</s> → <b>${new_price:.2f}</b>\n\n"
+                            f"<i>Buy now!</i>")
+                 markup = InlineKeyboardMarkup()
+-                markup.add(CustomInlineButton(
+-                    text=f"🛒 {p_name}", callback_data=f"vext_{epid}",
+-                    style="success",
+-                    icon_custom_emoji_id=emoji_id if emoji_id else None))
++                markup.add(_notify_btn(f"🛒 {p_name}", f"vext_{epid}", url=_nu,
++                                       emoji_id=emoji_id if emoji_id else None))
+                 _broadcast_deliver(bot.send_message, uid_u, msg, parse_mode="HTML", reply_markup=markup)
+                 sent += 1
+                 time.sleep(0.05)
+@@ -23704,6 +23701,7 @@
+         f"📢 جاري إرسال البرودكاست لكل العملاء...\n🪑 المقاعد المتاحة: {total_avail}")
+ 
+     def _do_broadcast():
++        _nu = _notify_url(f"cgpt_main_{prod_id}")         # زر الشراء يفتح الموقع على المنتج
+         users = list(db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}))
+         success = 0
+         for u in users:
+@@ -23727,10 +23725,7 @@
+                 # Use the existing CMS and each recipient's language.
+                 txt = get_text(uid_u, 'cg_seats_broadcast', html.escape(name), total_avail) or txt
+                 markup = InlineKeyboardMarkup()
+-                bkw = {'text': btn, 'callback_data': f"vi_p_cgpt_main_{prod_id}", 'style': 'success'}
+-                if emoji_id:
+-                    bkw['icon_custom_emoji_id'] = emoji_id
+-                markup.add(CustomInlineButton(**bkw))
++                markup.add(_notify_btn(btn, f"vi_p_cgpt_main_{prod_id}", url=_nu, emoji_id=emoji_id or None))
+                 bot.send_message(uid_u, txt, parse_mode="HTML", reply_markup=markup)
+                 success += 1
+                 time.sleep(0.05)
+@@ -25415,6 +25410,7 @@
+                         bot.send_message(admin_id, "⚠️ المنتج مخفي — لم يُرسل إشعار التخفيض.")
+                         return
+ 
++                    _nu = _notify_url(_raw_pid)          # زر الشراء يفتح الموقع على المنتج
+                     users = list(db.users.find())
+                     success = 0
+                     fail = 0
+@@ -25438,7 +25434,7 @@
+                             _btn_txt = (f"🛒 شراء الآن — ${new_price:.2f}"
+                                         if u_lang == 'ar' else
+                                         f"🛒 Buy Now — ${new_price:.2f}")
+-                            _mk.add(InlineKeyboardButton(_btn_txt, callback_data=f"vi_p_{_pid_btn}"))
++                            _mk.add(_notify_btn(_btn_txt, f"vi_p_{_pid_btn}", url=_nu, style=None))
+ 
+                             bot.send_message(u['user_id'], alert_msg, parse_mode="HTML", reply_markup=_mk)
+                             success += 1
+@@ -25761,6 +25757,7 @@
+                 return
+             stk_total = get_product_stock_count(pid_for_thread)
+             custom_emoji_id = p.get('custom_emoji_id')
++            _nu = _notify_url(pid_for_thread)            # زر الشراء يفتح الموقع على المنتج
+             users = list(db.users.find())
+             logger.info(f"📢 جاري الإرسال لـ {len(users)} مستخدم")
+             success = 0
+@@ -25798,12 +25795,8 @@
+                     markup = InlineKeyboardMarkup()
+                     btn_label = f"🛒 {p_name_plain}"
+                     
+-                    buy_btn = CustomInlineButton(
+-                        text=btn_label,
+-                        callback_data=f"vi_p_{pid_for_thread}",
+-                        style="success",
+-                        icon_custom_emoji_id=custom_emoji_id if custom_emoji_id else None
+-                    )
++                    buy_btn = _notify_btn(btn_label, f"vi_p_{pid_for_thread}", url=_nu,
++                                          emoji_id=custom_emoji_id if custom_emoji_id else None)
+                     markup.add(buy_btn)
+                     
+                     bot.send_message(uid_u, alert_msg, parse_mode="HTML", reply_markup=markup)
+@@ -27301,6 +27294,8 @@
+     src_msg_id, src_chat_id = job['source_message'], job['source_chat']
+     product_id, catalog_id = job.get('product_id'), job.get('catalog_id')
+     sent, failed, blocked = job.get('sent', 0), job.get('failed', 0), job.get('blocked', 0)
++    _nu_p = _notify_url(product_id) if product_id else None          # الزر يفتح الموقع على المنتج
++    _nu_c = (_notify_url() if catalog_id == 'nocat' else _notify_url(cat=catalog_id)) if catalog_id else None
+     for user in _bc_users():
+         tuid = user['user_id']
+         try:
+@@ -27314,13 +27309,13 @@
+                     btn_text = f"🛒 عرض المنتج: {p_name}" if lang == 'ar' else f"🛒 View Product: {p_name}"
+                     short_pid = str(product_id).replace("cgpt_main_", "") if str(product_id).startswith("cgpt_main_") else str(product_id)
+                     markup = InlineKeyboardMarkup()
+-                    markup.add(CustomInlineButton(btn_text, callback_data=f"vi_p_{short_pid}", style="success"))
++                    markup.add(_notify_btn(btn_text, f"vi_p_{short_pid}", url=_nu_p))
+             elif catalog_id:
+                 if catalog_id == 'nocat':
+                     lang = get_lang(tuid)
+                     btn_text = f"🛍️ المنتجات غير المصنفة" if lang == 'ar' else f"🛍️ Uncategorized Products"
+                     markup = InlineKeyboardMarkup()
+-                    markup.add(CustomInlineButton(btn_text, callback_data="open_shop", style="primary"))
++                    markup.add(_notify_btn(btn_text, "open_shop", url=_nu_c, style="primary"))
+                 else:
+                     from bson import ObjectId
+                     cat = db.catalogs.find_one({'_id': ObjectId(catalog_id)})
+@@ -27330,7 +27325,7 @@
+                         cat_name = clean_name(cat_name)[:25]
+                         btn_text = f"📁 فتح المجلد: {cat_name}" if lang == 'ar' else f"📁 Open Folder: {cat_name}"
+                         markup = InlineKeyboardMarkup()
+-                        markup.add(CustomInlineButton(btn_text, callback_data=f"cat_{catalog_id}", style="primary"))
++                        markup.add(_notify_btn(btn_text, f"cat_{catalog_id}", url=_nu_c, style="primary"))
+ 
+             _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
+             sent += 1
+@@ -27374,6 +27369,8 @@
+     markup.add(InlineKeyboardButton("👁 إخفاء/إظهار العملات", callback_data="hide_coins_menu"))
+     markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
+     markup.add(InlineKeyboardButton("🌐 الرابط الأساسي (API والموقع)", callback_data="ad_baseurl"))
++    _no = str(get_setting('notify_open', 'site')) != 'bot'
++    markup.add(InlineKeyboardButton(f"🔔 زر الإشعارات يفتح: {'🛍 الموقع' if _no else '🤖 البوت'}", callback_data="ad_notify_open"))
+     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+     try: bot.edit_message_text("⚙️ <b>Settings:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+     except: pass
+@@ -34384,6 +34381,79 @@
+         logger.warning(f"Mini App owner hello failed: {e}")
+ 
+ 
++# ============================================================
++# 🔔 زر الشراء في الإشعارات (توفّر / تخفيض / منتج جديد / مقاعد ChatGPT / برودكاست بمنتج أو مجلد)
++#    يفتح الموقع على المنتج نفسه. الموقع يتحقق من القنوات الإجبارية (بس لو طلع منها) ومن تحقق الجهاز
++#    (بس لو ما سواه قبل)، وبعدها يفتح المنتج تلقائياً.
++# ============================================================
++def _wa_site_pid(raw):
++    """رقم المنتج مثل ما يعرفه الموقع — من أي صيغة يستخدمها البوت (id / _id / cgpt_main_ / vext_)."""
++    raw = str(raw or '').strip()
++    if not raw:
++        return ''
++    if raw.startswith('ext_') or raw.startswith('cgpt_') and not raw.startswith('cgpt_main_'):
++        return raw
++    if raw.startswith('vext_'):
++        return 'ext_' + raw[5:]
++    if raw.startswith('cgpt_main_'):
++        return 'cgpt_' + raw[len('cgpt_main_'):]
++    try:
++        p = find_product(raw)
++    except Exception:
++        p = None
++    if p:
++        if p.get('product_type') == 'cgpt_main' and p.get('cgpt_product_id'):
++            return f"cgpt_{p['cgpt_product_id']}"
++        return str(p.get('id') if p.get('id') is not None else p.get('_id'))
++    return raw
++
++
++def _notify_url(pid=None, cat=None):
++    """رابط الموقع للإشعار (على المنتج أو المجلد) — None لو الأدمن اختار «البوت» أو ما فيه رابط للموقع."""
++    try:
++        if str(get_setting('notify_open', 'site')) == 'bot':
++            return None
++        url = _wa_public_url()
++    except Exception:
++        return None
++    if not url:
++        return None
++    q = {}
++    if pid:
++        q['p'] = _wa_site_pid(pid)
++    if cat:
++        q['c'] = str(cat)
++    return url + (('&' if '?' in url else '?') + urllib.parse.urlencode(q) if q else '')
++
++
++def _notify_btn(text, fallback_cb, url=None, style='success', emoji_id=None):
++    """زر الإشعار: يفتح الموقع (url من _notify_url) — ولو ما فيه رابط يرجع لزر البوت القديم."""
++    kw = {'text': text}
++    if url:
++        kw['web_app'] = types.WebAppInfo(url=url)
++    else:
++        kw['callback_data'] = fallback_cb
++    if style:
++        kw['style'] = style
++    if emoji_id:
++        kw['icon_custom_emoji_id'] = emoji_id
++    return CustomInlineButton(**kw)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_notify_open')
++@admin_required
++def ad_notify_open_cb(call):
++    cur = str(get_setting('notify_open', 'site'))
++    new = 'bot' if cur != 'bot' else 'site'
++    db.settings.update_one({'key': 'notify_open'}, {'$set': {'value': new}}, upsert=True)
++    try:
++        bot.answer_callback_query(call.id, "🔔 أزرار الإشعارات تفتح: " + ("🛍 الموقع" if new == 'site' else "🤖 البوت"), show_alert=False)
++    except Exception:
++        pass
++    call.data = 'ad_shop_settings'
++    admin_shop_settings(call)
++
++
+ def _wa_start_button(uid):
+     """زر فتح الواجهة أعلى قائمة /start (نصه وإيموجيه قابلان للتعديل من CMS: btn_webapp)."""
+     url = _wa_public_url()

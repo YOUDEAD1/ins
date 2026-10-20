@@ -1,0 +1,684 @@
+--- bot.py (READY_8)	2026-10-19 14:22:27.265055156 +0000
++++ bot.py (READY_9)	2026-10-19 14:28:31.967871010 +0000
+@@ -4287,17 +4287,52 @@
+         logger.error(f"Error marking referral status: {e}")
+ 
+ 
++def _ms_fresh_q(referrer_id):
++    """الإحالات النشطة اللي ما دخلت أي دفعة للحين — هذي بس اللي تنحسب للدفعة الجاية."""
++    return {'referrer_id': int(referrer_id), 'status': 'active', 'ms_batch': {'$exists': False}}
++
++
++def ref_progress(referrer_id):
++    """(كم إحالة جديدة من آخر دفعة، حجم الدفعة الحالي، كم باقي). الإعدادات الجديدة تطبق على الجاي بس."""
++    th = max(1, int(get_referral_threshold()))
++    try:
++        fresh = db.referrals_v2.count_documents(_ms_fresh_q(referrer_id))
++    except Exception:
++        fresh = 0
++    return fresh, th, max(0, th - fresh)
++
++
+ def _ms_members(referrer_id, batch_no, threshold):
+-    """إحالات الدفعة: اللي دخلت هذي الدفعة من قبل (ms_batch) + أحدث الإحالات النشطة اللي ما دخلت أي دفعة."""
+-    q = {'referrer_id': referrer_id, 'status': 'active'}
+-    mine = list(db.referrals_v2.find(dict(q, ms_batch=batch_no)).sort('updated_at', -1).limit(threshold))
++    """أعضاء دفعة: اللي انحسبوا لها من قبل (ms_batch) — ولو ناقصين نكمّل من الإحالات الجديدة (الأقدم أول)."""
++    q = {'referrer_id': int(referrer_id), 'status': 'active'}
++    mine = list(db.referrals_v2.find(dict(q, ms_batch=batch_no)).sort('_id', 1).limit(threshold))
+     fresh = []
+     if len(mine) < threshold:
+-        fresh = list(db.referrals_v2.find(dict(q, ms_batch={'$exists': False}))
+-                     .sort('updated_at', -1).limit(threshold - len(mine)))
++        fresh = list(db.referrals_v2.find(_ms_fresh_q(referrer_id)).sort('_id', 1).limit(threshold - len(mine)))
+     return mine + fresh
+ 
+ 
++def _ms_snap(ms):
++    """حجم الدفعة ومكافأتها مثل ما كانت لحظة اكتمالها (مو الإعداد الحالي)."""
++    ms = ms or {}
++    try:
++        th = int(ms.get('threshold') or 0)
++    except Exception:
++        th = 0
++    try:
++        rw = float(ms['reward']) if ms.get('reward') is not None else None
++    except Exception:
++        rw = None
++    return (th or int(get_referral_threshold())), (rw if rw is not None else float(get_referral_reward()))
++
++
++def _ms_active_members(ms):
++    ids = [int(x) for x in (ms or {}).get('members') or []]
++    if not ids:
++        return 0
++    return db.referrals_v2.count_documents({'invited_id': {'$in': ids}, 'status': 'active'})
++
++
+ def _ms_cls(r):
+     dv = (r or {}).get('dv')
+     if dv in ('ok', 'ok_admin'):
+@@ -4353,8 +4388,7 @@
+ def _ms_summary_view(referrer_id, batch_no):
+     """ملخص الإنجاز: من المحيل + كم إحالة + نتيجة فحص الأجهزة + أزرار القرار."""
+     ms = _ms_doc(referrer_id, batch_no) or {}
+-    threshold = get_referral_threshold()
+-    reward = get_referral_reward()
++    threshold, reward = _ms_snap(ms)
+     recs = _ms_recs(ms)
+     c = _ms_counts(recs)
+     u = db.users.find_one({'user_id': int(referrer_id)}) or {}
+@@ -4364,8 +4398,9 @@
+     lines = [head, "",
+              f"👤 <b>المستخدم:</b> {html.escape(str(name))} ({uname_txt})",
+              f"🆔 <code>{int(referrer_id)}</code>",
+-             f"✅ <b>أكمل {int(ms.get('active_count') or batch_no * threshold)} إحالة</b> (الدفعة #{batch_no})",
+-             f"💰 <b>المكافأة المقترحة:</b> ${reward:.2f}", ""]
++             f"✅ <b>أكمل {threshold} إحالة جديدة</b> (الدفعة #{batch_no})"
++             + (f" · مجموع إحالاته النشطة {int(ms['active_count'])}" if ms.get('active_count') else ''),
++             f"💰 <b>المكافأة:</b> ${reward:.2f}" + (" <i>(سعر وقت اكتمال الدفعة)</i>" if abs(reward - float(get_referral_reward())) > 1e-9 else ''), ""]
+     if recs:
+         lines.append(f"🔎 <b>فحص الأجهزة لإحالات هذي الدفعة ({len(recs)}):</b>")
+         lines.append(f"✅ سليمة: <b>{c['ok']}</b>   ⚠️ مشكوك فيها: <b>{c['flag']}</b>   ➖ بدون فحص: <b>{c['none']}</b>"
+@@ -4385,8 +4420,8 @@
+     elif st == 'cancelled':
+         lines += ["", "❌ <b>الطلب ملغي.</b>"]
+     elif st == 'reopened':
+-        act = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'})
+-        lines += ["", f"⏳ <b>بعد الرفض صار عنده {act} من {batch_no * threshold}</b> — بيوصلك تنبيه جديد لما يكمل."]
++        act = _ms_active_members(ms)
++        lines += ["", f"⏳ <b>بعد الرفض صار في الدفعة {act} من {threshold}</b> — بيوصلك تنبيه جديد لما تكمل."]
+     else:
+         lines += ["", "<i>المكافأة ما تنصرف إلا بضغطك «منح المكافأة». افتح «قائمة الفحص» عشان تحسب أو ترفض أو تحظر كل إحالة.</i>"]
+     mk = InlineKeyboardMarkup(row_width=2)
+@@ -4456,8 +4491,7 @@
+               if open_ else "<i>الطلب مقفول.</i>"]
+     st = ms.get('status')
+     if st == 'reopened':
+-        act = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
+-        lines.append(f"⏳ <b>صار عنده {act} من {b * get_referral_threshold()}</b> — بيوصلك تنبيه لما يكمل.")
++        lines.append(f"⏳ <b>صار في الدفعة {_ms_active_members(ms)} من {_ms_snap(ms)[0]}</b> — بيوصلك تنبيه لما تكمل.")
+     if st in (None, 'pending'):
+         mk.row(InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{rid}_{b}"),
+                InlineKeyboardButton("🚫 حظر المحيل", callback_data=f"refwd_ban_{rid}_{b}"))
+@@ -4466,51 +4500,23 @@
+ 
+ 
+ def _ms_reopen_check(referrer_id):
+-    """لو الأدمن رفض إحالات من دفعة ما انصرفت، والعدد نزل تحت العتبة → الدفعة ترجع «تنتظر» وتنبّه لما تكمل."""
++    """لو الأدمن رفض إحالات من دفعة ما انصرفت ونقصت عن حجمها → الدفعة ترجع «تنتظر» وتتكمّل من الإحالات الجديدة."""
+     try:
+-        th = get_referral_threshold()
+-        act = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'})
+-        db.referral_milestones.update_many(
+-            {'referrer_id': int(referrer_id), 'status': 'pending', 'batch_no': {'$gt': act // max(1, th)}},
+-            {'$set': {'status': 'reopened', 'reopened_at': int(time.time())}})
++        now = int(time.time())
++        for ms in db.referral_milestones.find({'referrer_id': int(referrer_id), 'status': 'pending'}):
++            th, _rw = _ms_snap(ms)
++            if ms.get('members'):
++                short = _ms_active_members(ms) < th
++            else:      # دفعة قديمة بدون أعضاء محفوظين
++                short = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'}) < int(ms.get('active_count') or 0)
++            if short:
++                db.referral_milestones.update_one({'_id': ms['_id'], 'status': 'pending'},
++                                                  {'$set': {'status': 'reopened', 'reopened_at': now}})
+     except Exception as e:
+         logger.debug(f"milestone reopen check: {e}")
+ 
+ 
+-def _notify_admin_referral_milestone(referrer_id):
+-    """رسالة وحدة للأدمن لما المحيل يكمل العتبة (10 مثلاً): الملخص + نتيجة فحص الأجهزة + «قائمة الفحص».
+-    الإحالات المشكوك فيها ما يوصل عنها شي لحالها — تنعرض هنا. المكافأة يدوية — ما تنصرف إلا بضغط الأدمن."""
+-    threshold = get_referral_threshold()
+-    if threshold <= 0:
+-        return
+-    referrer_id = int(referrer_id)
+-    active_count = db.referrals_v2.count_documents({'referrer_id': referrer_id, 'status': 'active'})
+-    if active_count == 0 or active_count % threshold != 0:
+-        return
+-    batch_no = active_count // threshold
+-    prev = _ms_doc(referrer_id, batch_no)
+-    if prev and prev.get('status') != 'reopened':
+-        return                      # نفس الدفعة انرسلت قبل
+-    members = _ms_members(referrer_id, batch_no, threshold)
+-    ids = [int(r['invited_id']) for r in members]
+-    now = int(time.time())
+-    try:
+-        if prev:
+-            r = db.referral_milestones.update_one(
+-                {'_id': prev['_id'], 'status': 'reopened'},
+-                {'$set': {'status': 'pending', 'members': ids, 'active_count': active_count, 'renotified_at': now}})
+-            if not r.modified_count:
+-                return
+-        else:
+-            db.referral_milestones.insert_one({
+-                'referrer_id': referrer_id, 'batch_no': batch_no, 'active_count': active_count,
+-                'status': 'pending', 'members': ids, 'created_at': now})
+-        if ids:
+-            db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': referrer_id},
+-                                        {'$set': {'ms_batch': batch_no}})
+-    except Exception as e:
+-        logger.debug(f"milestone save: {e}")
+-    txt, markup = _ms_summary_view(referrer_id, batch_no)
++def _ms_send_admins(txt, markup):
+     sent = False
+     try:
+         for admin in db.users.find({'is_admin': 1}):
+@@ -4528,6 +4534,133 @@
+             pass
+ 
+ 
++def _notify_admin_referral_milestone(referrer_id):
++    """لما تكتمل دفعة جديدة (العدد المطلوب من إحالات ما انحسبت قبل) → رسالة وحدة للأدمن فيها الفحص و«قائمة الفحص».
++    كل دفعة تحفظ حجمها ومكافأتها لحظة اكتمالها: تغيير «كل كم إحالة» أو «كم المكافأة» يطبق على الدفعات الجاية بس."""
++    rid = int(referrer_id)
++    with _get_referrer_lock(rid):
++        th = max(1, int(get_referral_threshold()))
++        now = int(time.time())
++        # دفعة رجعت بعد رفض: نكمّلها أول من الإحالات الجديدة
++        reo = db.referral_milestones.find_one({'referrer_id': rid, 'status': 'reopened'}, sort=[('batch_no', 1)])
++        if reo:
++            rth, _rw = _ms_snap(reo)
++            if reo.get('members'):
++                have = [int(r['invited_id']) for r in db.referrals_v2.find(
++                    {'invited_id': {'$in': [int(x) for x in reo['members']]}, 'status': 'active'}, {'invited_id': 1})]
++                need = rth - len(have)
++                add = [r['invited_id'] for r in db.referrals_v2.find(_ms_fresh_q(rid), {'invited_id': 1}).sort('_id', 1).limit(max(0, need))]
++                if need > 0 and len(add) < need:
++                    return
++                if add:
++                    db.referrals_v2.update_many({'invited_id': {'$in': add}, 'referrer_id': rid}, {'$set': {'ms_batch': reo['batch_no']}})
++                members = have + [int(x) for x in add]
++            else:
++                if db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}) < int(reo.get('active_count') or 0):
++                    return
++                members = []
++            db.referral_milestones.update_one({'_id': reo['_id'], 'status': 'reopened'},
++                                              {'$set': {'status': 'pending', 'members': members, 'renotified_at': now,
++                                                        'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})}})
++            txt, markup = _ms_summary_view(rid, reo['batch_no'])
++            _ms_send_admins(txt, markup)
++            return
++        # دفعات جديدة كاملة (ممكن أكثر من وحدة لو العتبة نزلت)
++        for _ in range(20):
++            fresh = list(db.referrals_v2.find(_ms_fresh_q(rid), {'invited_id': 1}).sort('_id', 1).limit(th))
++            if len(fresh) < th:
++                return
++            last = db.referral_milestones.find_one({'referrer_id': rid}, sort=[('batch_no', -1)])
++            batch_no = int((last or {}).get('batch_no') or 0) + 1
++            ids = [int(r['invited_id']) for r in fresh]
++            try:
++                db.referral_milestones.insert_one({
++                    'referrer_id': rid, 'batch_no': batch_no, 'status': 'pending', 'members': ids,
++                    'threshold': th, 'reward': float(get_referral_reward()),
++                    'active_count': db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}),
++                    'created_at': now})
++            except Exception as e:
++                logger.warning(f"milestone save {rid}#{batch_no}: {e}")
++                return
++            db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': rid}, {'$set': {'ms_batch': batch_no}})
++            txt, markup = _ms_summary_view(rid, batch_no)
++            _ms_send_admins(txt, markup)
++
++
++def _ref_batches_migrate():
++    """مرة وحدة: الإحالات اللي انحسبت قبل هذا التحديث (انصرفت تلقائي أو لها طلب إنجاز) تنعلّم إنها «انحسبت»،
++    عشان ما تنحسب مرة ثانية ولا تتسعّر بالسعر الجديد. والطلبات القديمة تاخذ سعرها وحجمها الحالي كسعر ثابت لها."""
++    try:
++        if str(get_setting('ref_batches_v2', '')) == 'done':
++            return
++        th = max(1, int(get_referral_threshold()))
++        rw = float(get_referral_reward())
++        db.referral_milestones.update_many({'reward': {'$exists': False}}, {'$set': {'reward': rw}})
++        db.referral_milestones.update_many({'threshold': {'$exists': False}}, {'$set': {'threshold': th}})
++        stamped = {d['_id']: d['n'] for d in db.referrals_v2.aggregate([
++            {'$match': {'status': 'active', 'ms_batch': {'$exists': True}}}, {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}])}
++        covered_ms = {d['_id']: int(d['m'] or 0) for d in db.referral_milestones.aggregate([
++            {'$group': {'_id': '$referrer_id', 'm': {'$max': '$active_count'}}}])}
++        earned = set()
++        try:
++            for u in db.users.find({'ref_v2_earned': {'$gt': 0}}, {'user_id': 1}):
++                earned.add(u['user_id'])
++        except Exception:
++            pass
++        all_ids = []
++        for d in db.referrals_v2.aggregate([
++                {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}}, {'$sort': {'_id': 1}},
++                {'$group': {'_id': '$referrer_id', 'ids': {'$push': '$_id'}}}]):
++            rid = d['_id']
++            n = len(d['ids']) + stamped.get(rid, 0)
++            covered = covered_ms.get(rid, 0)
++            if rid in earned:
++                covered = max(covered, (n // th) * th)
++            need = min(covered, n) - stamped.get(rid, 0)
++            if need > 0:
++                all_ids += d['ids'][:need]
++        for i in range(0, len(all_ids), 5000):
++            db.referrals_v2.update_many({'_id': {'$in': all_ids[i:i + 5000]}}, {'$set': {'ms_batch': 0}})
++        db.settings.update_one({'key': 'ref_batches_v2'}, {'$set': {'value': 'done', 'at': int(time.time()), 'stamped': len(all_ids)}}, upsert=True)
++        if all_ids:
++            logger.info(f"🤝 Referral batches: {len(all_ids)} referrals already counted before were locked to their old batches")
++    except Exception as e:
++        logger.warning(f"referral batches migration: {e}")
++
++
++_ref_batches_migrate()
++
++
++def ref_ms_scan(limit=500):
++    """يفحص كل المحيلين: اللي صار عندهم دفعة مكتملة بالإعداد الحالي → يرسل إنجازهم للأدمن. ما يصرف شي تلقائي."""
++    th = max(1, int(get_referral_threshold()))
++    n = 0
++    try:
++        rids = [d['_id'] for d in db.referrals_v2.aggregate([
++            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
++            {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}])][:limit]
++    except Exception:
++        rids = []
++    for rid in rids:
++        try:
++            before = db.referral_milestones.count_documents({'referrer_id': rid})
++            _notify_admin_referral_milestone(rid)
++            n += db.referral_milestones.count_documents({'referrer_id': rid}) - before
++        except Exception as e:
++            logger.debug(f"ms scan {rid}: {e}")
++    return n
++
++
++def ref_ms_ready_count():
++    th = max(1, int(get_referral_threshold()))
++    try:
++        return sum(1 for _ in db.referrals_v2.aggregate([
++            {'$match': {'status': 'active', 'ms_batch': {'$exists': False}}},
++            {'$group': {'_id': '$referrer_id', 'n': {'$sum': 1}}}, {'$match': {'n': {'$gte': th}}}]))
++    except Exception:
++        return 0
++
++
+ def _ms_edit(call, txt, mk):
+     try:
+         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML",
+@@ -4599,16 +4732,14 @@
+     2. DM للمُحيل: "شخص جديد انضم عبر رابطك"
+     """
+     try:
+-        threshold = get_referral_threshold()
+         reward = get_referral_reward()
+-
+         active_count = db.referrals_v2.count_documents({
+             'referrer_id': referrer_id,
+             'status': 'active'
+         })
+-
+-        current_in_batch = active_count % threshold
+-        remaining = threshold - current_in_batch if current_in_batch > 0 else threshold
++        _fresh, threshold, remaining = ref_progress(referrer_id)
++        if remaining == 0:
++            remaining = threshold      # اكتملت دفعة (تنتظر موافقة الأدمن) — العدّ للجاية يبدأ من جديد
+ 
+         # 1) DM للمُحيل (بلغته مع CMS)
+         try:
+@@ -4679,19 +4810,18 @@
+     milestone = db.referral_milestones.find_one({
+         'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
+     _any = _ms_doc(referrer_id, batch_no) or {}
++    _th, _rw = _ms_snap(_any)
+     if not milestone and _any.get('status') == 'reopened':
+-        bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما يكمل {batch_no * get_referral_threshold()} إحالة.")
++        bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما تكمل {_th} إحالة.")
+         return
+     referrer = db.users.find_one({'user_id': referrer_id}) or {}
+-    active_count = db.referrals_v2.count_documents({
+-        'referrer_id': referrer_id, 'status': 'active'})
+-    if (not milestone or not referrer or referrer.get('is_banned') == 1
+-            or active_count < batch_no * get_referral_threshold()):
++    if milestone and milestone.get('members'):
++        _valid = _ms_active_members(milestone) >= _th
++    else:     # دفعة قديمة بدون أعضاء محفوظين: نفس الفحص القديم
++        _valid = db.referrals_v2.count_documents({'referrer_id': referrer_id, 'status': 'active'}) >= int((milestone or {}).get('active_count') or 0)
++    if not milestone or not referrer or referrer.get('is_banned') == 1 or not _valid:
+         bot.send_message(call.message.chat.id, '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.')
+         return
+-    if float(referrer.get('ref_v2_earned') or 0) >= batch_no * get_referral_reward() - 0.001:
+-        bot.send_message(call.message.chat.id, '⚠️ هذه الدفعة سبق صرفها تلقائياً في النسخة القديمة.')
+-        return
+ 
+     # 🛡 منع الصرف المزدوج: نعلّم الدفعة كـ paid ذرياً
+     res = db.referral_milestones.find_one_and_update(
+@@ -4703,8 +4833,19 @@
+         bot.send_message(call.message.chat.id, "⚠️ هذه الدفعة مصروفة سابقاً أو غير موجودة.")
+         return
+ 
+-    reward = get_referral_reward()
++    reward = _rw     # 💰 سعر الدفعة لحظة اكتمالها — تغيير الإعداد بعدها ما يأثر عليها
+     db.users.update_one({'user_id': referrer_id}, {'$inc': {'balance': reward}})
++    try:      # «أرباح الإحالات» في حسابه تزيد بنفس المبلغ اللي انصرف فعلاً
++        _u = db.users.find_one({'user_id': referrer_id}, {'ref_v2_earned': 1}) or {}
++        try:
++            _old = float(_u.get('ref_v2_earned') or 0)
++        except Exception:
++            _old = 0.0
++        db.users.update_one({'user_id': referrer_id}, {'$set': {'ref_v2_earned': round(_old + reward, 2)}})
++        db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {'paid_amount': reward}})
++        _invalidate_user_cache(referrer_id)
++    except Exception:
++        pass
+     # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
+     try:
+         _mem = [int(x) for x in (milestone.get('members') or [])]
+@@ -4717,9 +4858,9 @@
+     try:
+         rl = (db.users.find_one({'user_id': referrer_id}) or {}).get('lang', 'ar')
+         msg = (f"🎉 <b>مكافأة الإحالات!</b>\n\nتمت إضافة <b>${reward:.2f}</b> لرصيدك "
+-               f"مقابل إكمال {batch_no * get_referral_threshold()} إحالة ناجحة. شكراً لك!") if rl == 'ar' else \
++               f"مقابل إكمال {_th} إحالة ناجحة. شكراً لك!") if rl == 'ar' else \
+               (f"🎉 <b>Referral reward!</b>\n\n<b>${reward:.2f}</b> has been added to your balance "
+-               f"for completing {batch_no * get_referral_threshold()} successful referrals. Thank you!")
++               f"for completing {_th} successful referrals. Thank you!")
+         bot.send_message(referrer_id, msg, parse_mode="HTML")
+     except Exception:
+         pass
+@@ -4809,135 +4950,10 @@
+ 
+ 
+ def update_referrer_balance(referrer_id):
+-    """
+-    تحديث رصيد المُحيل.
+-    الإصلاح الرئيسي: الـ optimistic lock يفشل لو ref_v2_earned غير موجود في DB.
+-    """
+-    # Manual review is now the only way to pay a referral milestone.
+-    # Preserve the historical settlement implementation below for reference.
+-    _notify_admin_referral_milestone(int(referrer_id))
+-    return
++    """يفحص لو اكتملت دفعة إحالات جديدة ويرسلها للأدمن.
++    ما يعيد حساب أرباح أحد بالسعر الحالي ولا يصرف/يخصم تلقائياً (النظام القديم كان يغيّر أرباح الكل لو تغيّر السعر)."""
+     try:
+-        rid = int(referrer_id)
+-        with _get_referrer_lock(rid):
+-            threshold = get_referral_threshold()
+-            reward = get_referral_reward()
+-            
+-            active_count = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
+-            expected = round((active_count // threshold) * reward, 2)
+-
+-            referrer = db.users.find_one({'user_id': rid})
+-            if not referrer:
+-                return
+-
+-            # 🛡 الإصلاح: نتعامل مع الحقل المفقود أو القيمة الخاطئة
+-            raw_earned = referrer.get('ref_v2_earned', 0.0)
+-            try:
+-                current_earned = round(float(raw_earned), 2)
+-            except (ValueError, TypeError):
+-                current_earned = 0.0
+-
+-            if expected == current_earned:
+-                return  # لا يوجد تغيير
+-
+-            diff = round(expected - current_earned, 2)
+-
+-            # 🛡 الإصلاح الأساسي: شرط يقبل الحقل المفقود أو 0.0
+-            if current_earned == 0.0:
+-                match_condition = {
+-                    'user_id': rid,
+-                    '$or': [
+-                        {'ref_v2_earned': 0.0},
+-                        {'ref_v2_earned': 0},
+-                        {'ref_v2_earned': ''},
+-                        {'ref_v2_earned': {'$exists': False}}
+-                    ]
+-                }
+-            else:
+-                match_condition = {
+-                    'user_id': rid,
+-                    'ref_v2_earned': current_earned
+-                }
+-
+-            update_result = db.users.find_one_and_update(
+-                match_condition,
+-                {
+-                    '$inc': {'balance': diff},
+-                    '$set': {'ref_v2_earned': expected}
+-                },
+-                return_document=True
+-            )
+-
+-            if update_result is None:
+-                # فشل الـ optimistic lock - نعيد المحاولة مرة واحدة
+-                update_result = db.users.find_one_and_update(
+-                    {'user_id': rid},
+-                    {
+-                        '$inc': {'balance': diff},
+-                        '$set': {'ref_v2_earned': expected}
+-                    },
+-                    return_document=True
+-                )
+-
+-            if update_result is not None and diff > 0:
+-                new_balance = round(float(update_result.get('balance', 0)), 2)
+-                ref_lang = referrer.get('lang', 'ar')
+-
+-                # 1) رسالة للمُحيل في الخاص (من CMS)
+-                try:
+-                    cms_key = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_milestone_dm'})
+-                    if cms_key and cms_key.get('value'):
+-                        try:
+-                            milestone_msg = cms_key['value'].format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
+-                        except:
+-                            milestone_msg = LANG['en']['ref_milestone_dm'].format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
+-                    else:
+-                        lang_key = 'ar' if ref_lang == 'ar' else 'en'
+-                        milestone_msg = LANG[lang_key].get('ref_milestone_dm',
+-                            LANG['en']['ref_milestone_dm']
+-                        ).format(active_count, f"{diff:.2f}", f"{new_balance:.2f}")
+-                    bot.send_message(rid, milestone_msg, parse_mode="HTML")
+-                except Exception as dm_err:
+-                    logger.debug(f"Milestone DM failed for {rid}: {dm_err}")
+-
+-                # 2) إشعار قناة اللوق (يستخدم CMS)
+-                try:
+-                    log_ch = get_setting('log_channel')
+-                    if log_ch and log_ch != "Not Set":
+-                        # نجرب CMS أولاً
+-                        cms_log = db.custom_texts.find_one({'lang': 'en', 'key': 'log_ref_milestone'})
+-                        if cms_log and cms_log.get('value'):
+-                            try:
+-                                log_text = cms_log['value'].format(f"**", active_count, f"{diff:.2f}")
+-                            except:
+-                                log_text = LANG['en']['log_ref_milestone'].format(f"**", active_count, f"{diff:.2f}")
+-                        else:
+-                            log_text = LANG['en']['log_ref_milestone'].format(f"**", active_count, f"{diff:.2f}")
+-                        bot.send_message(log_ch, log_text, parse_mode="HTML")
+-                except Exception as log_err:
+-                    logger.debug(f"Milestone log failed: {log_err}")
+-
+-                # 3) إشعار للأدمن
+-                try:
+-                    ref_user = get_user_data_full(rid)
+-                    ref_username = ref_user.get('username') if ref_user else None
+-                    ref_name     = ref_user.get('name', '') if ref_user else ''
+-                    user_display = f"@{ref_username}" if ref_username else f"<code>{rid}</code>"
+-                    admin_notif = (
+-                        f"💎 <b>Referral Milestone!</b>\n\n"
+-                        f"👤 {user_display}"
+-                        + (f" ({ref_name[:20]})" if ref_name else "") +
+-                        f"\n🆔 <code>{rid}</code>\n"
+-                        f"✅ Active Refs: <b>{active_count}</b>\n"
+-                        f"💰 Reward: <b>+${diff:.2f}</b>\n"
+-                        f"💼 New Balance: <b>${new_balance:.2f}</b>"
+-                    )
+-                    notify_admins(admin_notif)
+-                except Exception:
+-                    pass
+-
+-                logger.info(f"✅ Referral reward: user {rid} → +${diff:.2f} (active: {active_count})")
+-
++        _notify_admin_referral_milestone(int(referrer_id))
+     except Exception as e:
+         logger.error(f"Error in update_referrer_balance({referrer_id}): {e}")
+ 
+@@ -8774,10 +8790,10 @@
+     total_earnings = round(earnings_from_referrals + earnings_from_purchases, 2)
+     
+     # 🆕 حساب باقي للمكافأة القادمة
+-    threshold = get_referral_threshold()
+     reward = get_referral_reward()
+-    current_in_batch = active_count % threshold
+-    remaining_to_milestone = threshold - current_in_batch if current_in_batch > 0 else 0
++    _fresh, threshold, remaining_to_milestone = ref_progress(uid)
++    if remaining_to_milestone == 0:
++        remaining_to_milestone = threshold
+ 
+     markup = InlineKeyboardMarkup()
+     markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
+@@ -17275,12 +17291,19 @@
+             upsert=True
+         )
+         
++        ready = ref_ms_ready_count()
++        mk = None
++        if ready:
++            mk = InlineKeyboardMarkup()
++            mk.add(InlineKeyboardButton(f"📨 أرسل لي دفعاتهم الحين ({ready})", callback_data="ref_ms_scan"))
+         bot.send_message(
+             message.chat.id,
+             f"✅ <b>تم الحفظ!</b>\n\n"
+             f"🎯 عدد الإحالات المطلوبة الآن: <b>{value}</b>\n\n"
+-            f"📌 <i>أي مستخدم يصل إلى {value} إحالة نشطة سيحصل على المكافأة تلقائياً.</i>",
+-            parse_mode="HTML"
++            f"🔒 <i>ينطبق على الدفعات الجديدة بس: الإحالات اللي انحسبت في دفعات سابقة ما تنحسب مرة ثانية، "
++            f"والدفعات اللي اكتملت قبل تبقى بعددها وسعرها.</i>"
++            + (f"\n\n📌 بالعدد الجديد فيه <b>{ready}</b> محيل صار عنده دفعة مكتملة. توصلك لما ينضاف لهم إحالة، أو اضغط الزر." if ready else ''),
++            parse_mode="HTML", reply_markup=mk
+         )
+     except ValueError:
+         bot.send_message(message.chat.id, "❌ أرسل رقم صحيح فقط.")
+@@ -17341,7 +17364,9 @@
+         bot.send_message(
+             message.chat.id,
+             f"✅ <b>تم الحفظ!</b>\n\n"
+-            f"💰 المكافأة الآن: <b>${value:.2f}</b> لكل <b>{threshold}</b> إحالة نشطة.",
++            f"💰 المكافأة الآن: <b>${value:.2f}</b> لكل <b>{threshold}</b> إحالة نشطة.\n\n"
++            f"🔒 <i>ينطبق على الدفعات الجديدة بس. الدفعات اللي اكتملت قبل (حتى اللي تنتظر موافقتك) تنصرف بسعرها القديم، "
++            f"وأرباح الناس السابقة ما تتغير.</i>",
+             parse_mode="HTML"
+         )
+     except ValueError:
+@@ -17454,10 +17479,9 @@
+         logger.error(f"Error saving min purchase: {e}")
+ 
+ 
+-@bot.message_handler(commands=['fix_innocent_bans'])
+ @bot.message_handler(commands=['fix_referrals'])
+ def fix_referrals_cmd(message):
+-    """🔧 يصلح ref_v2_earned لكل المستخدمين ويعطيهم مكافآتهم الفائتة"""
++    """🔧 يصلح حقول ref_v2_earned المكسورة، ويرسل للأدمن أي دفعة مكتملة ما انرسلت (بدون صرف تلقائي)."""
+     uid = message.from_user.id
+     if not _is_admin_check(uid):
+         return
+@@ -17479,80 +17503,24 @@
+     except Exception as e:
+         bot.send_message(message.chat.id, f"⚠️ خطأ في الخطوة 1: {e}")
+ 
+-    # الخطوة 2: إعطاء كل مستخدم مكافآته الفائتة
+-    threshold = get_referral_threshold()
+-    reward = get_referral_reward()
+-
+-    referrers = list(db.referrals_v2.distinct('referrer_id'))
+-    fixed = 0
+-    total_paid = 0.0
+-
+-    for referrer_id in referrers:
+-        try:
+-            active_count = db.referrals_v2.count_documents({
+-                'referrer_id': referrer_id,
+-                'status': 'active'
+-            })
+-            expected = round((active_count // threshold) * reward, 2)
+-            if expected <= 0:
+-                continue
+-
+-            user = db.users.find_one({'user_id': referrer_id})
+-            if not user:
+-                continue
+-
+-            raw = user.get('ref_v2_earned', 0.0)
+-            try:
+-                current = round(float(raw), 2)
+-            except:
+-                current = 0.0
+-
+-            if expected > current:
+-                diff = round(expected - current, 2)
+-                db.users.update_one(
+-                    {'user_id': referrer_id},
+-                    {
+-                        '$inc': {'balance': diff},
+-                        '$set': {'ref_v2_earned': expected}
+-                    }
+-                )
+-                fixed += 1
+-                total_paid += diff
++    # الخطوة 2: ما نعيد حساب أرباح أحد بالسعر الحالي (كان يغيّر أرباح الكل لو تغيّر السعر).
++    # بدلها: أي محيل عنده دفعة مكتملة ما انرسلت → يوصلك إنجازه للمراجعة، والصرف بيدك.
++    n = ref_ms_scan()
++    bot.send_message(message.chat.id,
++                     f"✅ <b>تم.</b>\n\n📨 دفعات مكتملة انرسلت لك للمراجعة: <b>{n}</b>\n"
++                     f"🔒 ما انصرف ولا انخصم شي تلقائياً، وأرباح الناس السابقة ما تغيّرت.",
++                     parse_mode="HTML")
+ 
+-                # نرسل للمستخدم
+-                try:
+-                    ref_lang = user.get('lang', 'ar')
+-                    if ref_lang == 'ar':
+-                        bot.send_message(
+-                            referrer_id,
+-                            f"🎉 <b>مبروك! تم إضافة مكافآتك الفائتة!</b>\n\n"
+-                            f"💰 المبلغ المضاف: <b>+${diff:.2f}</b>\n"
+-                            f"👥 إحالاتك النشطة: <b>{active_count}</b>",
+-                            parse_mode="HTML"
+-                        )
+-                    else:
+-                        bot.send_message(
+-                            referrer_id,
+-                            f"🎉 <b>Your missed referral rewards have been added!</b>\n\n"
+-                            f"💰 Amount Added: <b>+${diff:.2f}</b>\n"
+-                            f"👥 Active Referrals: <b>{active_count}</b>",
+-                            parse_mode="HTML"
+-                        )
+-                except:
+-                    pass
+-        except Exception as e:
+-            logger.error(f"fix_referrals error for {referrer_id}: {e}")
+ 
+-    bot.send_message(
+-        message.chat.id,
+-        f"✅ <b>اكتمل إصلاح الإحالات!</b>\n\n"
+-        f"👥 مستخدمين استلموا مكافآتهم: <b>{fixed}</b>\n"
+-        f"💰 إجمالي الدفع: <b>${total_paid:.2f}</b>\n"
+-        f"📊 العتبة: كل <b>{threshold}</b> إحالة = <b>${reward:.2f}</b>",
+-        parse_mode="HTML"
+-    )
++@bot.callback_query_handler(func=lambda call: call.data == 'ref_ms_scan')
++@admin_required
++def ref_ms_scan_cb(call):
++    bot.answer_callback_query(call.id, "⏳ جاري…")
++    n = ref_ms_scan()
++    bot.send_message(call.message.chat.id, f"📨 انرسلت لك <b>{n}</b> دفعة مكتملة للمراجعة.", parse_mode="HTML")
+ 
+ 
++@bot.message_handler(commands=['fix_innocent_bans'])
+ def fix_innocent_bans_cmd(message):
+     """🛡 يفك حظر المستخدمين اللي حُظروا بسبب bug في النظام (إرسال /start)"""
+     uid = message.from_user.id
+@@ -30455,7 +30423,8 @@
+     except Exception:
+         threshold = 10
+     reward = _wa_fnum(get_referral_reward())
+-    in_batch = active % threshold
++    in_batch, threshold, _left = ref_progress(uid)
++    in_batch = in_batch % threshold
+     return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
+                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
+                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),

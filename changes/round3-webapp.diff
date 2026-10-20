@@ -1,0 +1,186 @@
+--- index.html.before
++++ index.html
+@@ -1136,6 +1136,23 @@
+ [dir="ltr"] .ap-text,[dir="ltr"] .ap-note,[dir="ltr"] .ap-ul,[dir="ltr"] .ap-rt,[dir="ltr"] .ap-kv>span,[dir="ltr"] .ap-hero,[dir="ltr"] .ap-stat,[dir="ltr"] .ap-h4,[dir="ltr"] .ap-cap,[dir="ltr"] .ap-tile{text-align:left}
+ [dir="rtl"] .ap-kv>b{text-align:left}
+ [dir="ltr"] .ap-kv>b{text-align:right}
++
++/* ═════════ إيموجي المنتج: مربع ثابت (ما ينقص من تحت) + خلفية من ألوان الإيموجي نفسه ═════════ */
++.vis{position:relative}
++.pv .vis{width:auto;height:58%;aspect-ratio:1/1;margin-top:7%}
++.hero-vis .vis{margin-top:0}
++.vis > .ce{position:absolute!important;inset:0;width:100%!important;height:100%!important;display:block;overflow:visible}
++.vis > .ce > svg,.vis > .ce > video,.vis > .ce > img,.thumb > .ce > svg,.thumb > .ce > video,.thumb > .ce > img{position:absolute;inset:0;width:100%!important;height:100%!important;object-fit:contain}
++.vis > .ce > .ce-skel{position:absolute;inset:19%;width:auto;height:auto}
++.vis > .ce > .btile{position:absolute;inset:0}
++.vis > .ce > .fb{position:absolute;inset:0;display:grid;place-items:center}
++.thumb > .ce{position:relative;display:block}
++.pv-bg{position:absolute;inset:0;z-index:-2;opacity:0;transition:opacity .45s ease;pointer-events:none;
++  background:radial-gradient(72% 72% at 50% 44%, rgb(var(--ec1,128 128 128) / .7), transparent 72%),
++             linear-gradient(160deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 54%, var(--surface-2)), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 38%, var(--surface-2)))}
++.has-ec > .pv-bg{opacity:1}
++.thumb.has-ec{background:radial-gradient(70% 70% at 50% 40%, rgb(var(--ec1) / .55), transparent 75%), color-mix(in srgb, rgb(var(--ec2)) 34%, var(--surface-2))}
++@media (prefers-reduced-motion: reduce){.pv-bg{transition:none}}
+ </style>
+ </head>
+ <body>
+@@ -1384,6 +1401,110 @@
+   }
+   return CE.cache.get(id);
+ }
++
++/* ───────── ألوان الإيموجي: نقرأ ألوان الإيموجي الحقيقية (أول مرة) ونحفظها، والخلفية تصير بنفس ألوانه ───────── */
++const EC = { mem: new Map(), busy: new Set() };
++function ecGet(id) {
++  if (!id) return null;
++  if (EC.mem.has(id)) return EC.mem.get(id);
++  try { const v = localStorage.getItem('lara:ec:' + id); if (v) { const c = v.split('|'); if (c.length === 2) { EC.mem.set(id, c); return c; } } } catch (e) {}
++  return null;
++}
++function ecPut(id, c) { EC.mem.set(id, c); try { localStorage.setItem('lara:ec:' + id, c.join('|')); } catch (e) {} }
++function ecVars(id) { const c = ecGet(id); return c ? `--ec1:${c[0]};--ec2:${c[1]};` : ''; }
++function ecAttrs(id, extraStyle) { return id ? ` data-ec="${esc(id)}" style="${ecVars(id)}${extraStyle || ''}"` : (extraStyle ? ` style="${extraStyle}"` : ''); }
++function ecCls(id) { return ecGet(id) ? ' has-ec' : ''; }
++function ecApply(id) {
++  const c = ecGet(id); if (!c) return;
++  document.querySelectorAll('[data-ec]').forEach(el => {
++    if (el.dataset.ec !== id) return;
++    el.style.setProperty('--ec1', c[0]); el.style.setProperty('--ec2', c[1]); el.classList.add('has-ec');
++  });
++}
++/* يختار لونين من بكسلات الإيموجي: اللون الأكثر حضوراً (الحيوي أولاً) ولون ثاني مختلف عنه */
++function ecPick(px) {
++  const N = 24, bins = Array.from({ length: N }, () => ({ w: 0, r: 0, g: 0, b: 0 }));
++  let tw = 0, ar = 0, ag = 0, ab = 0, aw = 0;
++  for (let i = 0; i < px.length; i += 4) {
++    const a = px[i + 3] / 255; if (a < .45) continue;
++    const r = px[i] / 255, g = px[i + 1] / 255, b = px[i + 2] / 255;
++    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
++    const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
++    ar += r * a; ag += g * a; ab += b * a; aw += a;
++    if (sat < .2 || l < .1 || l > .94) continue;
++    let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
++    h = (h * 60 + 360) % 360;
++    const w = a * sat * (1.15 - Math.abs(l - .5)), B = bins[Math.floor(h / (360 / N)) % N];
++    B.w += w; B.r += r * w; B.g += g * w; B.b += b * w; tw += w;
++  }
++  if (!aw) return null;
++  const S = (r, g, b) => `${Math.round(Math.min(1, Math.max(0, r)) * 255)} ${Math.round(Math.min(1, Math.max(0, g)) * 255)} ${Math.round(Math.min(1, Math.max(0, b)) * 255)}`;
++  if (tw < aw * .05) {                       // إيموجي أبيض/أسود/رمادي: خلفية محايدة تبيّنه
++    let r = ar / aw, g = ag / aw, b = ab / aw; const L = .2126 * r + .7152 * g + .0722 * b;
++    if (L > .62) { r = .22; g = .26; b = .34; } else if (L < .3) { r = .58; g = .63; b = .72; }
++    return [S(r, g, b), S(r * .78, g * .8, b * .86)];
++  }
++  const sc = bins.map((B, k) => B.w + .45 * (bins[(k + N - 1) % N].w + bins[(k + 1) % N].w));
++  const ord = sc.map((v, k) => [v, k]).sort((x, y) => y[0] - x[0]);
++  const avg = k => { let w = 0, r = 0, g = 0, b = 0; for (const j of [k, (k + 1) % N, (k + N - 1) % N]) { const B = bins[j]; w += B.w; r += B.r; g += B.g; b += B.b; } return [r / w, g / w, b / w]; };
++  const k1 = ord[0][1], c1 = avg(k1);
++  const o2 = ord.find(([v, k]) => Math.min(Math.abs(k - k1), N - Math.abs(k - k1)) >= 3 && v >= ord[0][0] * .2);
++  const c2 = o2 ? avg(o2[1]) : c1.map(v => v * .62);
++  return [S(...c1), S(...c2)];
++}
++/* احتياطي للإيموجي المتحرك: ألوان الطبقات من ملف الحركة نفسه */
++function ecFromLottie(json) {
++  const cols = [];
++  const walk = o => {
++    if (!o || typeof o !== 'object') return;
++    if (Array.isArray(o)) { o.forEach(walk); return; }
++    if ((o.ty === 'fl' || o.ty === 'st') && o.c && o.c.k) {
++      const k = o.c.k, v = Array.isArray(k) && typeof k[0] === 'number' ? k : (Array.isArray(k) && k[0] && k[0].s) || null;
++      if (v && v.length >= 3) cols.push(v);
++    }
++    if ((o.ty === 'gf' || o.ty === 'gs') && o.g && o.g.k) {
++      const n = o.g.p || 0, k = Array.isArray(o.g.k.k) ? o.g.k.k : (o.g.k.k && o.g.k.k[0] && o.g.k.k[0].s) || [];
++      for (let i = 0; i < n; i++) if (k.length >= i * 4 + 4) cols.push([k[i * 4 + 1], k[i * 4 + 2], k[i * 4 + 3]]);
++    }
++    for (const key in o) if (key !== 'c' && key !== 'g') walk(o[key]);
++  };
++  try { walk(typeof json === 'string' ? JSON.parse(json) : json); } catch (e) { return null; }
++  if (!cols.length) return null;
++  const px = new Uint8ClampedArray(cols.length * 4);
++  cols.forEach((c, i) => { px[i * 4] = c[0] * 255; px[i * 4 + 1] = c[1] * 255; px[i * 4 + 2] = c[2] * 255; px[i * 4 + 3] = 255; });
++  return ecPick(px);
++}
++async function ecSample(el) {
++  const m = el.querySelector('svg,video,img'); if (!m) return null;
++  const Z = 48, cv = document.createElement('canvas'); cv.width = cv.height = Z;
++  const cx = cv.getContext('2d', { willReadFrequently: true });
++  if (m.tagName.toLowerCase() === 'svg') {
++    const cl = m.cloneNode(true);
++    cl.setAttribute('width', Z); cl.setAttribute('height', Z); cl.removeAttribute('style');
++    if (!cl.getAttribute('xmlns')) cl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
++    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(cl)], { type: 'image/svg+xml' }));
++    try {
++      const im = new Image();
++      await new Promise((ok, no) => { im.onload = ok; im.onerror = no; im.src = url; });
++      cx.drawImage(im, 0, 0, Z, Z);
++    } finally { URL.revokeObjectURL(url); }
++  } else cx.drawImage(m, 0, 0, Z, Z);
++  return ecPick(cx.getImageData(0, 0, Z, Z).data);
++}
++async function ecLearn(id, el, d) {
++  if (!id || !el.closest('.pv,.thumb')) return;
++  if (ecGet(id)) { ecApply(id); return; }
++  if (EC.busy.has(id)) return;
++  EC.busy.add(id);
++  try {
++    await new Promise(r => setTimeout(r, d.kind === 'lottie' ? 650 : 250));   // نترك الحركة تبدأ (بعض الإيموجي يبدأ فاضي)
++    let c = null;
++    try { if (el.isConnected) c = await ecSample(el); } catch (e) { c = null; }
++    if (!c && d.kind === 'lottie') c = ecFromLottie(d.json);
++    if (c) { ecPut(id, c); ecApply(id); }
++  } finally { EC.busy.delete(id); }
++}
++
+ async function ceMount(el) {
+   const id = el.dataset.ce;
+   if (!id || el.dataset.ceDone) return;
+@@ -1395,17 +1516,18 @@
+       await loadLottie();
+       if (!el.isConnected) return;
+       el.innerHTML = '';
+-      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: !matchMedia('(prefers-reduced-motion: reduce)').matches, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true } });
++      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: !matchMedia('(prefers-reduced-motion: reduce)').matches, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
+       CE.anims.set(el, anim);
++      ecLearn(id, el, d);
+     } else if (d.kind === 'video') {
+       const v = document.createElement('video');
+       v.src = d.url; v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', '');
+       v.onerror = () => {};
+-      v.addEventListener('loadeddata', () => { el.innerHTML = ''; el.appendChild(v); }, { once: true });
++      v.addEventListener('loadeddata', () => { el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d); }, { once: true });
+       v.play().catch(() => {});
+     } else {
+       const im = new Image(); im.alt = ''; im.decoding = 'async';
+-      im.onload = () => { if (el.isConnected) { el.innerHTML = ''; el.appendChild(im); } };
++      im.onload = () => { if (el.isConnected) { el.innerHTML = ''; el.appendChild(im); ecLearn(id, el, d); } };
+       im.src = d.url;
+     }
+   } catch (e) { if (el.dataset.tile && el.isConnected) el.innerHTML = el.dataset.tile; }
+@@ -1782,7 +1904,7 @@
+   const oos = !p.in_stock;
+   const kindIc = p.kind === 'cgpt' || p.kind === 'seat' ? ic.mail : p.manual ? ic.hand : ic.bolt;
+   return `<button class="card ${oos ? 'oos' : ''}" data-act="product" data-v="${esc(p.id)}" style="--h:${brandHue(p)};animation-delay:${Math.min(i, 10) * 35}ms" aria-label="${esc(nm(p))}">
+-    <span class="pv ${oos ? 'is-oos' : ''}">${visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
++    <span class="pv ${oos ? 'is-oos' : ''}${p.image ? '' : ecCls(p.emoji_id)}"${p.image ? '' : ecAttrs(p.emoji_id)}>${p.image || !p.emoji_id ? '' : '<span class="pv-bg" aria-hidden="true"></span>'}${visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
+       ${oos ? `<span class="xmark" aria-hidden="true"><i></i></span><span class="oos-tag">${esc(t('outOfStock'))}</span>` : ''}
+       ${p.hidden ? `<span class="pill hid">${esc(t('hiddenTag'))}</span>` : ''}</span>
+     <span class="body"><span class="name">${esc(nm(p))}</span>
+@@ -1866,7 +1988,7 @@
+ 
+   if (!onlyDyn) {
+     sh.title(nm(p)).body(`
+-      <div class="pv hero-vis ${oos ? 'is-oos' : ''}" style="--h:${brandHue(p)}">${visual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
++      <div class="pv hero-vis ${oos ? 'is-oos' : ''}${p.image ? '' : ecCls(p.emoji_id)}"${p.image ? ` style="--h:${brandHue(p)}"` : ecAttrs(p.emoji_id, `--h:${brandHue(p)}`)}>${p.image || !p.emoji_id ? '' : '<span class="pv-bg" aria-hidden="true"></span>'}${visual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
+       <div class="tags">${tags.join('')}</div>
+       ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : hasTr ? `<div class="tr-chip">${st.showTr ? esc(t('autoTr')) + ' · ' : ''}<button class="linkish" data-act="translate">${esc(st.showTr ? t('original') : t('translate'))}</button></div>` : ''}` : ''}
+       ${durs}${email}
+@@ -1949,7 +2071,7 @@
+   else if (S.tab === 'orders') { S.orders = { orders: [], count: 0, spent: 0, err: true }; renderView(); }
+ }
+ const stCls = { delivered: 'st-ok', manual: 'st-warn', chatgpt: 'st-info', verifying: 'st-warn', failed: 'st-bad', api: 'st-info' };
+-function thumb(o) { const f = findP(o.pid) || {}; const p = { name_en: o.name_en || f.name_en, name_ar: o.name_ar || f.name_ar, emoji_id: o.emoji_id || f.emoji_id, image: o.image, id: o.pid, ae: o.ae, cats: f.cats }; return `<span class="thumb" style="--h:${brandHue(p)}">${o.image ? `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy">` : visualInner(p, true)}</span>`; }
++function thumb(o) { const f = findP(o.pid) || {}; const p = { name_en: o.name_en || f.name_en, name_ar: o.name_ar || f.name_ar, emoji_id: o.emoji_id || f.emoji_id, image: o.image, id: o.pid, ae: o.ae, cats: f.cats }; return `<span class="thumb${o.image ? '' : ecCls(p.emoji_id)}"${o.image ? ` style="--h:${brandHue(p)}"` : ecAttrs(p.emoji_id, `--h:${brandHue(p)}`)}>${o.image ? `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy">` : visualInner(p, true)}</span>`; }
+ function vOrders() {
+   const o = S.orders;
+   if (!o) return `<h1 class="h-title">${esc(t('ordersTitle'))}</h1><div class="stats"><div class="skel" style="height:72px"></div><div class="skel" style="height:72px"></div></div><div class="list">${'<div class="skel" style="height:74px"></div>'.repeat(4)}</div>`;

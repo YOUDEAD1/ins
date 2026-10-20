@@ -1,0 +1,22 @@
+{
+  "sample_api_json": {
+    "uncompressed_bytes": 86379,
+    "gzip_bytes": 571,
+    "saved_percent": 99.34,
+    "representative": "repeated bilingual test descriptions"
+  },
+  "sample_unchanged_catalog": {
+    "full_bytes": 8091,
+    "unchanged_bytes": 547
+  },
+  "root_prefix_steady_sync_requests": {
+    "before": 8,
+    "after": 1,
+    "reduction_percent": 87.5
+  },
+  "supplier_product_reads_per_sync": {
+    "products": 150,
+    "before": 151,
+    "after": 1
+  }
+}

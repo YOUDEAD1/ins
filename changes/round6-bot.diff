@@ -1,0 +1,884 @@
+--- bot.py (READY_5)	2026-10-18 22:04:30.759143627 +0000
++++ bot.py (READY_6)	2026-10-18 22:26:13.650562403 +0000
+@@ -307,6 +307,15 @@
+     return msg
+ 
+ 
++_ADMIN_SRC_LABEL = {'webapp': '🌐 <b>الموقع</b> (Mini App)', 'bot': '💬 <b>البوت</b> (المحادثة)', 'api': '🔌 <b>API</b> (موزّع)'}
++
++
++def admin_src_line(src=None):
++    """سطر «المصدر» لإشعارات الإدارة (شراء/إيداع): من البوت ولا من الموقع ولا API."""
++    src = src or _log_src_get() or 'bot'
++    return "\n📍 المصدر: " + _ADMIN_SRC_LABEL.get(src, _ADMIN_SRC_LABEL['bot'])
++
++
+ def _dep_src(uid):
+     """مصدر الإيداع: لو آخر عملية دفع للمستخدم (آخر 3 ساعات) أُنشئت من الواجهة → Mini App."""
+     if _log_src_get():
+@@ -4278,65 +4287,230 @@
+         logger.error(f"Error marking referral status: {e}")
+ 
+ 
+-def _notify_admin_referral_milestone(referrer_id):
+-    """يرسل للأدمن إشعاراً عند بلوغ المُحيل عتبة إحالات (10 مثلاً) مع أزرار:
+-    ✅ منح المكافأة | 👁 عرض الإحالات | ❌ إلغاء.
+-    المكافأة يدوية — لا تُمنح إلا بضغط الأدمن."""
+-    threshold = get_referral_threshold()
+-    active_count = db.referrals_v2.count_documents({
+-        'referrer_id': referrer_id, 'status': 'active'
+-    })
+-    if active_count == 0 or threshold <= 0:
+-        return
+-    # فقط عند بلوغ مضاعف تام للعتبة (10, 20, 30...)
+-    if active_count % threshold != 0:
+-        return
++def _ms_members(referrer_id, batch_no, threshold):
++    """إحالات الدفعة: اللي دخلت هذي الدفعة من قبل (ms_batch) + أحدث الإحالات النشطة اللي ما دخلت أي دفعة."""
++    q = {'referrer_id': referrer_id, 'status': 'active'}
++    mine = list(db.referrals_v2.find(dict(q, ms_batch=batch_no)).sort('updated_at', -1).limit(threshold))
++    fresh = []
++    if len(mine) < threshold:
++        fresh = list(db.referrals_v2.find(dict(q, ms_batch={'$exists': False}))
++                     .sort('updated_at', -1).limit(threshold - len(mine)))
++    return mine + fresh
+ 
+-    # تجنّب تكرار الإشعار لنفس الدفعة
+-    batch_no = active_count // threshold
+-    already = db.referral_milestones.find_one({
+-        'referrer_id': referrer_id, 'batch_no': batch_no
+-    }) if 'referral_milestones' in db.list_collection_names() else None
++
++def _ms_cls(r):
++    dv = (r or {}).get('dv')
++    if dv in ('ok', 'ok_admin'):
++        return 'ok'
++    if dv == 'flag':
++        return 'flag'
++    if dv == 'rejected':
++        return 'rej'
++    return 'none'
++
++
++_MS_IC = {'ok': '✅', 'flag': '⚠️', 'none': '➖', 'rej': '❌'}
++
++
++def _ms_why(r, rid):
++    """سبب الشك بكلام بسيط (من نتيجة فحص الجهاز المحفوظة في الإحالة)."""
++    parts = []
++    others = [int(x) for x in (r.get('dv_others') or []) if str(x).lstrip('-').isdigit()]
++    if others:
++        if int(rid or 0) in others:
++            t = 'على جهاز المحيل نفسه'
++        elif len(others) == 1:
++            t = 'نفس جهاز حساب ثاني'
++        else:
++            t = f'نفس جهاز {len(others)} حسابات'
++        parts.append(t + (' (مؤكد)' if r.get('dv_strong') else ' (محتمل)'))
++    parts += [str(x) for x in (r.get('dv_reasons') or [])][:4]
++    return ' · '.join(parts)
++
++
++def _ms_counts(recs):
++    c = {'ok': 0, 'flag': 0, 'none': 0, 'rej': 0}
++    for r in recs:
++        c[_ms_cls(r)] += 1
++    return c
++
++
++def _ms_doc(referrer_id, batch_no):
+     try:
+-        if db.referral_milestones.find_one({'referrer_id': referrer_id, 'batch_no': batch_no}):
+-            return
++        return db.referral_milestones.find_one({'referrer_id': int(referrer_id), 'batch_no': int(batch_no)})
+     except Exception:
+-        pass
++        return None
++
+ 
++def _ms_recs(ms):
++    ids = [int(x) for x in (ms or {}).get('members') or []]
++    if not ids:
++        return []
++    by = {int(r['invited_id']): r for r in db.referrals_v2.find({'invited_id': {'$in': ids}})}
++    return [by[i] for i in ids if i in by]
++
++
++def _ms_summary_view(referrer_id, batch_no):
++    """ملخص الإنجاز: من المحيل + كم إحالة + نتيجة فحص الأجهزة + أزرار القرار."""
++    ms = _ms_doc(referrer_id, batch_no) or {}
++    threshold = get_referral_threshold()
+     reward = get_referral_reward()
+-    u = db.users.find_one({'user_id': referrer_id}) or {}
+-    uname = u.get('username', '')
+-    name = u.get('first_name', '') or 'مستخدم'
+-    uname_txt = f"@{uname}" if uname else "—"
++    recs = _ms_recs(ms)
++    c = _ms_counts(recs)
++    u = db.users.find_one({'user_id': int(referrer_id)}) or {}
++    name = clean_name(u.get('name') or u.get('first_name') or 'مستخدم')
++    uname_txt = f"@{html.escape(u['username'])}" if u.get('username') else "—"
++    head = "🎯 <b>إنجاز إحالات!</b>" + (" <i>(تحديث بعد المراجعة)</i>" if ms.get('renotified_at') else "")
++    lines = [head, "",
++             f"👤 <b>المستخدم:</b> {html.escape(str(name))} ({uname_txt})",
++             f"🆔 <code>{int(referrer_id)}</code>",
++             f"✅ <b>أكمل {int(ms.get('active_count') or batch_no * threshold)} إحالة</b> (الدفعة #{batch_no})",
++             f"💰 <b>المكافأة المقترحة:</b> ${reward:.2f}", ""]
++    if recs:
++        lines.append(f"🔎 <b>فحص الأجهزة لإحالات هذي الدفعة ({len(recs)}):</b>")
++        lines.append(f"✅ سليمة: <b>{c['ok']}</b>   ⚠️ مشكوك فيها: <b>{c['flag']}</b>   ➖ بدون فحص: <b>{c['none']}</b>"
++                     + (f"   ❌ مرفوضة: <b>{c['rej']}</b>" if c['rej'] else ''))
++        sus = [r for r in recs if _ms_cls(r) == 'flag']
++        if sus:
++            lines += ["", "⚠️ <b>المشكوك فيها:</b>"]
++            for r in sus[:6]:
++                lines.append(f"• {_dv_user_line(r['invited_id'], referrer_id)}\n   <i>{html.escape(_ms_why(r, referrer_id))}</i>")
++            if len(sus) > 6:
++                lines.append(f"… و{len(sus) - 6} ثانية (في قائمة الفحص)")
++        if c['none']:
++            lines.append("<i>➖ بدون فحص = انحسبت قبل تشغيل التحقق أو والتحقق موقوف.</i>")
++    st = ms.get('status')
++    if st == 'paid':
++        lines += ["", "✅ <b>انصرفت المكافأة.</b>"]
++    elif st == 'cancelled':
++        lines += ["", "❌ <b>الطلب ملغي.</b>"]
++    elif st == 'reopened':
++        act = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'})
++        lines += ["", f"⏳ <b>بعد الرفض صار عنده {act} من {batch_no * threshold}</b> — بيوصلك تنبيه جديد لما يكمل."]
++    else:
++        lines += ["", "<i>المكافأة ما تنصرف إلا بضغطك «منح المكافأة». افتح «قائمة الفحص» عشان تحسب أو ترفض أو تحظر كل إحالة.</i>"]
++    mk = InlineKeyboardMarkup(row_width=2)
++    rid, b = int(referrer_id), int(batch_no)
++    if recs:
++        mk.add(InlineKeyboardButton(f"🔎 قائمة الفحص" + (f" ({c['flag']} ⚠️)" if c['flag'] else ''), callback_data=f"rfl_{rid}_{b}_0"))
++    if st in (None, 'pending'):
++        mk.add(InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{rid}_{b}"),
++               InlineKeyboardButton("❌ إلغاء", callback_data=f"refwd_no_{rid}_{b}"))
++        mk.add(InlineKeyboardButton("🚫 حظر المحيل", callback_data=f"refwd_ban_{rid}_{b}"),
++               InlineKeyboardButton("📂 ملف المحيل", callback_data=f"ad_u_det_{rid}"))
++    else:
++        mk.add(InlineKeyboardButton("📂 ملف المحيل", callback_data=f"ad_u_det_{rid}"))
++    return '\n'.join(lines)[:4000], mk
++
++
++_MS_PG = 8
++
++
++def _ms_list_view(referrer_id, batch_no, page=0):
++    """قائمة الفحص: كل إحالة في الدفعة بنتيجتها + أزرار: ✅ احسبها / ❌ لا تحسبها / 🚫 حظر."""
++    ms = _ms_doc(referrer_id, batch_no)
++    if not ms:
++        return None, None
++    rid, b = int(referrer_id), int(batch_no)
++    order = {'flag': 0, 'none': 1, 'ok': 2, 'rej': 3}
++    recs = sorted(_ms_recs(ms), key=lambda r: (order[_ms_cls(r)], -int(r.get('updated_at') or 0)))
++    c = _ms_counts(recs)
++    pages = max(1, (len(recs) + _MS_PG - 1) // _MS_PG)
++    page = max(0, min(int(page), pages - 1))
++    chunk = recs[page * _MS_PG:(page + 1) * _MS_PG]
++    open_ = ms.get('status') in (None, 'pending', 'reopened')
++    lines = [f"🔎 <b>قائمة فحص الإحالات</b> — الدفعة #{b}",
++             f"🤝 المحيل: {_dv_user_line(rid)}",
++             f"✅ {c['ok']} سليمة · ⚠️ {c['flag']} مشكوك · ➖ {c['none']} بدون فحص" + (f" · ❌ {c['rej']} مرفوضة" if c['rej'] else ''), ""]
++    mk = InlineKeyboardMarkup()
++    for n, r in enumerate(chunk, page * _MS_PG + 1):
++        inv = int(r['invited_id'])
++        cls = _ms_cls(r)
++        tag = ''
++        if r.get('dv') == 'ok_admin':
++            tag = ' <i>(قبلتها)</i>'
++        if r.get('status') == 'left':
++            tag += ' 🚪 <i>طلع من القنوات</i>'
++        lines.append(f"{n}. {_MS_IC[cls]} {_dv_user_line(inv, rid)}{tag}")
++        why = _ms_why(r, rid) if cls in ('flag', 'rej') else ''
++        if why:
++            lines.append(f"     ↳ <i>{html.escape(why)}</i>")
++        if open_ and cls != 'rej':
++            iu = db.users.find_one({'user_id': inv}, {'name': 1}) or {}
++            nm = clean_name(iu.get('name') or str(inv))[:14]
++            row = [InlineKeyboardButton(f"{_MS_IC[cls]} {n}. {nm}", callback_data=f"ad_u_det_{inv}")]
++            if cls != 'ok':
++                row.append(InlineKeyboardButton("✅", callback_data=f"rfd_ok_{inv}_{rid}_{b}_{page}"))
++            row += [InlineKeyboardButton("❌", callback_data=f"rfd_no_{inv}_{rid}_{b}_{page}"),
++                    InlineKeyboardButton("🚫", callback_data=f"rfd_ban_{inv}_{rid}_{b}_{page}")]
++            mk.row(*row)
++    if pages > 1:
++        nav = []
++        if page > 0:
++            nav.append(InlineKeyboardButton("⬅️", callback_data=f"rfl_{rid}_{b}_{page - 1}"))
++        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data=f"rfl_{rid}_{b}_{page}"))
++        if page < pages - 1:
++            nav.append(InlineKeyboardButton("➡️", callback_data=f"rfl_{rid}_{b}_{page + 1}"))
++        mk.row(*nav)
++    lines += ["", "<i>✅ احسبها · ❌ لا تحسبها · 🚫 احظر المدعو. الرفض ينقص العدد، ولما يكمل من جديد يوصلك تنبيه ثاني.</i>"
++              if open_ else "<i>الطلب مقفول.</i>"]
++    st = ms.get('status')
++    if st == 'reopened':
++        act = db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'})
++        lines.append(f"⏳ <b>صار عنده {act} من {b * get_referral_threshold()}</b> — بيوصلك تنبيه لما يكمل.")
++    if st in (None, 'pending'):
++        mk.row(InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{rid}_{b}"),
++               InlineKeyboardButton("🚫 حظر المحيل", callback_data=f"refwd_ban_{rid}_{b}"))
++    mk.row(InlineKeyboardButton("🔙 الملخص", callback_data=f"rfs_{rid}_{b}"))
++    return '\n'.join(lines)[:4000], mk
+ 
+-    txt = (
+-        f"🎯 <b>إنجاز إحالات!</b>\n\n"
+-        f"👤 <b>المستخدم:</b> {html.escape(str(name))} ({uname_txt})\n"
+-        f"🆔 <code>{referrer_id}</code>\n"
+-        f"✅ <b>أكمل {active_count} إحالة ناجحة</b> (الدفعة #{batch_no})\n"
+-        f"💰 <b>المكافأة المقترحة:</b> ${reward:.2f}\n\n"
+-        f"<i>المكافأة تُمنح فقط بضغطك على زر المنح.</i>"
+-    )
+-    txt += "\n\n🔎 <b>الإحالات تحت المراجعة؛ افحصها قبل قرار المنح أو الحظر.</b>"
+-    markup = InlineKeyboardMarkup(row_width=2)
+-    markup.add(
+-        InlineKeyboardButton("✅ منح المكافأة", callback_data=f"refwd_ok_{referrer_id}_{batch_no}"),
+-        InlineKeyboardButton("👁 عرض الإحالات", callback_data=f"refwd_view_{referrer_id}")
+-    )
+-    markup.add(InlineKeyboardButton("❌ إلغاء", callback_data=f"refwd_no_{referrer_id}_{batch_no}"))
+-    markup.add(InlineKeyboardButton("🚫 حظر المحيل", callback_data=f"refwd_ban_{referrer_id}_{batch_no}"))
+ 
+-    # نسجّل الدفعة كـ "بانتظار" حتى لا يتكرر الإشعار
++def _ms_reopen_check(referrer_id):
++    """لو الأدمن رفض إحالات من دفعة ما انصرفت، والعدد نزل تحت العتبة → الدفعة ترجع «تنتظر» وتنبّه لما تكمل."""
+     try:
+-        db.referral_milestones.insert_one({
+-            'referrer_id': referrer_id, 'batch_no': batch_no,
+-            'active_count': active_count, 'status': 'pending',
+-            'created_at': int(time.time())
+-        })
+-    except Exception:
+-        pass
++        th = get_referral_threshold()
++        act = db.referrals_v2.count_documents({'referrer_id': int(referrer_id), 'status': 'active'})
++        db.referral_milestones.update_many(
++            {'referrer_id': int(referrer_id), 'status': 'pending', 'batch_no': {'$gt': act // max(1, th)}},
++            {'$set': {'status': 'reopened', 'reopened_at': int(time.time())}})
++    except Exception as e:
++        logger.debug(f"milestone reopen check: {e}")
++
+ 
+-    # نرسل لكل الأدمن (نمط موجود: is_admin=1)
++def _notify_admin_referral_milestone(referrer_id):
++    """رسالة وحدة للأدمن لما المحيل يكمل العتبة (10 مثلاً): الملخص + نتيجة فحص الأجهزة + «قائمة الفحص».
++    الإحالات المشكوك فيها ما يوصل عنها شي لحالها — تنعرض هنا. المكافأة يدوية — ما تنصرف إلا بضغط الأدمن."""
++    threshold = get_referral_threshold()
++    if threshold <= 0:
++        return
++    referrer_id = int(referrer_id)
++    active_count = db.referrals_v2.count_documents({'referrer_id': referrer_id, 'status': 'active'})
++    if active_count == 0 or active_count % threshold != 0:
++        return
++    batch_no = active_count // threshold
++    prev = _ms_doc(referrer_id, batch_no)
++    if prev and prev.get('status') != 'reopened':
++        return                      # نفس الدفعة انرسلت قبل
++    members = _ms_members(referrer_id, batch_no, threshold)
++    ids = [int(r['invited_id']) for r in members]
++    now = int(time.time())
++    try:
++        if prev:
++            r = db.referral_milestones.update_one(
++                {'_id': prev['_id'], 'status': 'reopened'},
++                {'$set': {'status': 'pending', 'members': ids, 'active_count': active_count, 'renotified_at': now}})
++            if not r.modified_count:
++                return
++        else:
++            db.referral_milestones.insert_one({
++                'referrer_id': referrer_id, 'batch_no': batch_no, 'active_count': active_count,
++                'status': 'pending', 'members': ids, 'created_at': now})
++        if ids:
++            db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': referrer_id},
++                                        {'$set': {'ms_batch': batch_no}})
++    except Exception as e:
++        logger.debug(f"milestone save: {e}")
++    txt, markup = _ms_summary_view(referrer_id, batch_no)
+     sent = False
+     try:
+         for admin in db.users.find({'is_admin': 1}):
+@@ -4354,6 +4528,70 @@
+             pass
+ 
+ 
++def _ms_edit(call, txt, mk):
++    try:
++        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode="HTML",
++                              reply_markup=mk, disable_web_page_preview=True)
++    except Exception as e:
++        if 'not modified' in str(e).lower():
++            return
++        try:
++            bot.send_message(call.message.chat.id, txt, parse_mode="HTML", reply_markup=mk, disable_web_page_preview=True)
++        except Exception:
++            pass
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith(("rfl_", "rfs_")))
++@admin_required
++def ref_milestone_list_cb(call):
++    """🔎 قائمة الفحص / 🔙 الملخص."""
++    try:
++        parts = call.data.split('_')
++        rid, b = int(parts[1]), int(parts[2])
++        page = int(parts[3]) if len(parts) > 3 else 0
++    except Exception:
++        bot.answer_callback_query(call.id)
++        return
++    bot.answer_callback_query(call.id)
++    if call.data.startswith('rfs_'):
++        txt, mk = _ms_summary_view(rid, b)
++    else:
++        txt, mk = _ms_list_view(rid, b, page)
++    if not txt:
++        bot.send_message(call.message.chat.id, "⚠️ الدفعة ما عادت موجودة.")
++        return
++    _ms_edit(call, txt, mk)
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith(("rfd_ok_", "rfd_no_", "rfd_ban_")))
++@admin_required
++def ref_milestone_decide_cb(call):
++    """قرار على إحالة من قائمة الفحص، ثم نحدّث القائمة بمكانها."""
++    try:
++        _, verdict, inv, rid, b, page = call.data.split('_')
++        inv, rid, b, page = int(inv), int(rid), int(b), int(page)
++    except Exception:
++        bot.answer_callback_query(call.id)
++        return
++    ms = _ms_doc(rid, b)
++    if not ms or ms.get('status') not in ('pending', 'reopened'):
++        bot.answer_callback_query(call.id, "الطلب مقفول.", show_alert=True)
++        return
++    note = _refdv_apply(inv, verdict, call.from_user.id, call.from_user.first_name)
++    if note is None:
++        bot.answer_callback_query(call.id, "الإحالة ما عادت موجودة.", show_alert=True)
++        return
++    toast = {'ok': '✅ انحسبت', 'no': '❌ ما تنحسب', 'ban': '🚫 انحظر المدعو'}.get(verdict, 'تم')
++    if verdict != 'ok':
++        ms2 = _ms_doc(rid, b) or {}
++        if ms2.get('status') == 'reopened':
++            toast += ' — نزل العدد تحت العتبة، بيوصلك تنبيه لما يكمل'
++    bot.answer_callback_query(call.id, toast, show_alert=verdict != 'ok')
++    txt, mk = _ms_list_view(rid, b, page)
++    if txt:
++        _ms_edit(call, txt, mk)
++
++
+ def send_progress_log_notification(referrer_id):
+     """
+     📢 لكل إحالة نشطة جديدة:
+@@ -4440,6 +4678,10 @@
+ 
+     milestone = db.referral_milestones.find_one({
+         'referrer_id': referrer_id, 'batch_no': batch_no, 'status': 'pending'})
++    _any = _ms_doc(referrer_id, batch_no) or {}
++    if not milestone and _any.get('status') == 'reopened':
++        bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما يكمل {batch_no * get_referral_threshold()} إحالة.")
++        return
+     referrer = db.users.find_one({'user_id': referrer_id}) or {}
+     active_count = db.referrals_v2.count_documents({
+         'referrer_id': referrer_id, 'status': 'active'})
+@@ -4463,6 +4705,14 @@
+ 
+     reward = get_referral_reward()
+     db.users.update_one({'user_id': referrer_id}, {'$inc': {'balance': reward}})
++    # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
++    try:
++        _mem = [int(x) for x in (milestone.get('members') or [])]
++        if _mem:
++            db.referrals_v2.update_many({'invited_id': {'$in': _mem}, 'dv': 'flag'},
++                                        {'$set': {'dv': 'ok_admin', 'dv_by': call.from_user.id}})
++    except Exception:
++        pass
+     # إشعار المستخدم
+     try:
+         rl = (db.users.find_one({'user_id': referrer_id}) or {}).get('lang', 'ar')
+@@ -4475,9 +4725,10 @@
+         pass
+ 
+     try:
++        _t, _mk = _ms_summary_view(referrer_id, batch_no)
+         bot.edit_message_text(
+-            call.message.text + f"\n\n✅ <b>مُنحت المكافأة (${reward:.2f}) بواسطة {call.from_user.id}</b>",
+-            call.message.chat.id, call.message.message_id, parse_mode="HTML")
++            _t + f"\n✅ <b>مُنحت المكافأة (${reward:.2f}) بواسطة {call.from_user.id}</b>",
++            call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=_mk)
+     except Exception:
+         bot.send_message(call.message.chat.id, f"✅ مُنحت المكافأة ${reward:.2f} للمستخدم {referrer_id}.")
+ 
+@@ -4500,8 +4751,8 @@
+     except Exception:
+         pass
+     try:
+-        bot.edit_message_text(call.message.text + "\n\n❌ <b>أُلغي (بلا صرف).</b>",
+-                              call.message.chat.id, call.message.message_id, parse_mode="HTML")
++        _t, _mk = _ms_summary_view(referrer_id, batch_no)
++        bot.edit_message_text(_t, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=_mk)
+     except Exception:
+         bot.send_message(call.message.chat.id, "❌ أُلغي.")
+ 
+@@ -6888,6 +7139,61 @@
+     _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
+     return True
+ 
++_FSUB_META_TTL = 24 * 3600
++
++
++def _fsub_meta(c, refresh=False):
++    """بيانات قناة/جروب الاشتراك الإجباري: الاسم + النوع (قناة/جروب) + رابط الانضمام.
++    لو ناقصة نجيبها من تيليجرام مرة (ونحفظها) — يشتغل مع القنوات والجروبات العامة والخاصة."""
++    cid = str(c.get('channel_id', '')).strip()
++    title, kind = c.get('title'), c.get('kind')
++    link = c.get('invite_link') or c.get('link')
++    uname = c.get('username') or (cid[1:] if cid.startswith('@') else '')
++    stale = int(time.time()) - int(c.get('meta_at') or 0) > _FSUB_META_TTL
++    if cid and (refresh or ((not title or not kind or not (link or uname)) and stale)):
++        upd = {'meta_at': int(time.time())}
++        try:
++            ch = bot.get_chat(cid)
++            title = getattr(ch, 'title', None) or title
++            t = str(getattr(ch, 'type', '') or '')
++            kind = 'channel' if t == 'channel' else ('group' if t in ('group', 'supergroup') else kind)
++            uname = getattr(ch, 'username', None) or uname
++            if not uname and not link:
++                link = getattr(ch, 'invite_link', None)
++                if not link:
++                    try:
++                        link = bot.export_chat_invite_link(cid)
++                    except Exception:
++                        link = None
++            upd.update({k: v for k, v in (('title', title), ('kind', kind), ('username', uname), ('invite_link', link)) if v})
++        except Exception as e:
++            logger.debug(f"fsub meta {cid}: {e}")
++        try:
++            db.required_channels.update_one({'_id': c['_id']}, {'$set': upd})
++        except Exception:
++            pass
++    if not link and uname:
++        link = f"https://t.me/{str(uname).lstrip('@')}"
++    if not link and cid and not cid.lstrip('-').isdigit():
++        link = f"https://t.me/{cid.lstrip('@')}"
++    return {'id': cid, 'title': str(title or (('@' + uname) if uname else cid)), 'kind': kind or 'channel', 'url': link}
++
++
++def forced_sub_status(uid):
++    """كل قناة/جروب إجباري مع حالة المستخدم: joined = True / False / None (ما قدرنا نفحص)."""
++    out = []
++    for c in db.required_channels.find():
++        m = _fsub_meta(c)
++        try:
++            st = bot.get_chat_member(c['channel_id'], uid).status
++            m['joined'] = st not in ('left', 'kicked')
++        except Exception:
++            m['joined'] = None
++        out.append(m)
++    return out
++
++
++
+ def _telegram_delivery_kind(exc):
+     text = str(exc).lower()
+     if any(token in text for token in ('user is deactivated', 'bot was blocked by the user',
+@@ -6977,6 +7283,7 @@
+ def _cgpt_queue_admin_purchase(uid, email, duration, amount, order_id, expires_at):
+     text = _cgpt_admin_purchase_text(uid, email, duration, amount, order_id)
+     text += '\n📅 ' + html.escape(str(expires_at))
++    text += admin_src_line()
+     _queue_api_purchase_notice('CGPT_' + str(order_id), text, buttons=order_admin_buttons(order_id, uid))
+ 
+ 
+@@ -7020,7 +7327,7 @@
+ 
+ 
+ def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=None):
+-    if _log_src_get() == 'webapp' and isinstance(message_text, str) and 'Mini App' not in message_text:
++    if _log_src_get() == 'webapp' and isinstance(message_text, str) and 'Mini App' not in message_text and 'المصدر:' not in message_text:
+         message_text = message_text + "\n🌐 <b>عبر الموقع (Mini App)</b>"
+     if recipient_ids is None:
+         # All general admin alerts (including normal purchases and deposits) use
+@@ -7635,11 +7942,17 @@
+             if current == 'active':
+                 mark_referral_status(uid, 'left')
+         
+-        chans = list(db.required_channels.find())
+         markup = InlineKeyboardMarkup(row_width=1)
+-        for c in chans: 
+-            btn_txt = "📢 Channel" if lang=='en' else "📢 القناة"
+-            markup.add(InlineKeyboardButton(btn_txt, url=f"https://t.me/{c['channel_id'].replace('@','') }"))
++        try:
++            _fs = forced_sub_status(uid)
++        except Exception:
++            _fs = []
++        _todo = [c for c in _fs if c.get('joined') is not True] or _fs
++        for c in _todo:
++            if not c.get('url'):
++                continue
++            ic = '👥' if c.get('kind') == 'group' else '📢'
++            markup.add(InlineKeyboardButton(f"{ic} {c['title'][:40]}", url=c['url']))
+         markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
+         bot.send_message(chat_id, get_text(uid, 'must_join'), reply_markup=markup, parse_mode="HTML")
+         return
+@@ -10115,7 +10428,7 @@
+                 msg_txt = f"✅ <b>Order Placed! (${total_price:.2f} deducted)</b>\n\nManual delivery product.\nOrder ID: <code>{order_id}</code>\n\nContact {support_user}"
+             msg_txt += vip_tag(_vq, lang)
+             bot.send_message(uid, msg_txt, parse_mode="HTML", reply_markup=order_copy_markup(order_id, lang))
+-            notify_admins(f"🔐 <b>إشعار إدارة (يدوي)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🧾 <code>{order_id}</code>" + (f"\n👑 VIP {_vq['level']} −{_vq['pct']:g}% (وفّر ${_vq['saved']:.2f})" if _vq['bp'] else ''),
++            notify_admins(f"🔐 <b>إشعار إدارة (يدوي)</b>{admin_src_line()}\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🧾 <code>{order_id}</code>" + (f"\n👑 VIP {_vq['level']} −{_vq['pct']:g}% (وفّر ${_vq['saved']:.2f})" if _vq['bp'] else ''),
+                           buttons=order_admin_buttons(order_id, uid))
+         else:
+             delivered_codes = []
+@@ -10202,7 +10515,7 @@
+                     notify_admins(f"🚨🚨 <b>فشل تسليم وفشل الاسترجاع!</b> راجع يدوياً فوراً!\n👤 <code>{uid}</code>\n💰 ${total_price:.2f}\nالأكواد: {delivered_codes}")
+ 
+             if _delivery_ok or not delivered_codes:
+-                notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🧾 <code>{order_id}</code>"
++                notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>{admin_src_line()}\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🧾 <code>{order_id}</code>"
+                               + (f"\n👑 VIP {_vq['level']} −{_vq['pct']:g}% (وفّر ${_vq['saved']:.2f})" if _vq['bp'] else ''),
+                               buttons=order_admin_buttons(order_id, uid))
+ 
+@@ -16798,9 +17111,7 @@
+     u = get_user_data_full(uid)
+     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
+     
+-    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id_original}</code>"
+-    if _dep_src(uid) == 'webapp':
+-        admin_msg += "\n🌐 <b>عبر الموقع (Mini App)</b>"
++    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>{admin_src_line(_dep_src(uid))}\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id_original}</code>"
+     notify_admins(admin_msg)
+     vip_on_deposit(uid, amt, tx_id_clean, method)   # 👑 صافي الشحن للـ VIP
+     
+@@ -16909,7 +17220,7 @@
+     except Exception:
+         _dv_on, _dv_n = True, 0
+     markup.add(InlineKeyboardButton(f"🛡 تحقق الجهاز للإحالات: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
+-    markup.add(InlineKeyboardButton(f"👁 إحالات موقوفة للمراجعة ({_dv_n})", callback_data="refdv_list"))
++    markup.add(InlineKeyboardButton(f"⚠️ إحالات مشكوك فيها ({_dv_n})", callback_data="refdv_list"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+     
+     try:
+@@ -19061,7 +19372,7 @@
+         u_data = get_user_data_full(uid) or {}
+         buyer_m = u_data.get('name') or u_data.get('username') or str(uid)
+         notify_admins(
+-            f"🛒 <b>بيع منتج (API)</b>\n"
++            f"🛒 <b>بيع منتج (API)</b>{admin_src_line()}\n"
+             f"👤 {html.escape(str(buyer_m))} (<code>{uid}</code>)\n"
+             f"📦 {html.escape(pname)}\n"
+             f"🔢 الكمية: {qty}\n💰 ${total:.2f}\n"
+@@ -25615,31 +25926,73 @@
+     bot.answer_callback_query(call.id)
+     chans = list(db.required_channels.find())
+     markup = InlineKeyboardMarkup(row_width=1)
++    lines = ["📢 <b>الاشتراك الإجباري (قنوات وجروبات)</b>", ""]
+     if chans:
+-        for c in chans: markup.add(InlineKeyboardButton(f"❌ حذف {c['channel_id']}", callback_data=f"del_fsub_{c['channel_id']}"))
+-    markup.add(InlineKeyboardButton("➕ إضافة قناة باليوزر (@)", callback_data="ad_fsub_add"))
++        for c in chans:
++            m = _fsub_meta(c)
++            ic = '👥 جروب' if m['kind'] == 'group' else '📢 قناة'
++            lines.append(f"• {ic}: <b>{html.escape(m['title'][:50])}</b> <code>{html.escape(m['id'])}</code>" + ('' if m.get('url') else ' ⚠️ <i>بدون رابط</i>'))
++            markup.add(InlineKeyboardButton(f"❌ حذف {m['title'][:30]}", callback_data=f"del_fsub_{c['channel_id']}"))
++    else:
++        lines.append("<i>ما فيه شي — الكل يدخل بدون اشتراك.</i>")
++    lines += ["", "<i>لازم البوت يكون مشرف في القناة، وعضو (يفضّل مشرف) في الجروب.</i>"]
++    markup.add(InlineKeyboardButton("➕ إضافة قناة أو جروب", callback_data="ad_fsub_add"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+-    try: bot.edit_message_text("📢 <b>إدارة قنوات الاشتراك الإجباري:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+-    except: pass
++    try: bot.edit_message_text('\n'.join(lines), call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
++    except Exception:
++        try: bot.send_message(call.message.chat.id, '\n'.join(lines), reply_markup=markup, parse_mode="HTML")
++        except Exception: pass
+ 
+ @bot.callback_query_handler(func=lambda call: call.data == "ad_fsub_add")
+ @admin_required
+ def admin_fsub_add(call):
+     bot.answer_callback_query(call.id)
+-    msg = bot.send_message(call.message.chat.id, "أرسل يوزر القناة (مثال: @ninto_dev):\n\n⚠️ <b>تنبيه:</b> ارفع البوت مشرف أولاً!", parse_mode="HTML")
++    msg = bot.send_message(call.message.chat.id,
++        "أرسل القناة أو الجروب بوحدة من هذي الطرق:\n"
++        "• اليوزر: <code>@ninto_dev</code>\n"
++        "• الرابط: <code>https://t.me/ninto_dev</code>\n"
++        "• للخاص: الأيدي ومعه رابط الدعوة: <code>-1001234567890 https://t.me/+AbCd</code>\n\n"
++        "⚠️ <b>قبلها:</b> ارفع البوت مشرف في القناة، أو ضيفه في الجروب (يفضّل مشرف).", parse_mode="HTML")
+     bot.register_next_step_handler(msg, admin_fsub_save)
+ 
+ def admin_fsub_save(message):
+-    cid = message.text.strip()
+-    if not cid.startswith('@') and not cid.startswith('-100'):
+-        bot.send_message(message.chat.id, "❌ خطأ! يجب أن يبدأ اليوزر بـ @")
+-        return
+-    try:
+-        bot.get_chat_member(cid, bot.get_me().id)
+-        db.required_channels.insert_one({'channel_id': cid})
+-        bot.send_message(message.chat.id, f"✅ تم إضافة القناة {cid} بنجاح.")
+-    except:
+-        bot.send_message(message.chat.id, f"❌ البوت ليس أدمن في القناة، أو أن اليوزر غير صحيح!")
++    raw = (message.text or '').strip()
++    parts = raw.split()
++    cid, link = '', None
++    for tok in parts:
++        t = tok.strip()
++        mm = re.match(r'^(?:https?://)?(?:t|telegram)\.me/(\+|joinchat/)?([A-Za-z0-9_\-]+)/?$', t)
++        if mm and mm.group(1):
++            link = 'https://t.me/' + ('+' if mm.group(1) == '+' else 'joinchat/') + mm.group(2)
++        elif mm:
++            cid = cid or '@' + mm.group(2)
++        elif re.match(r'^@[A-Za-z0-9_]{4,}$', t) or re.match(r'^-100\d{5,}$', t):
++            cid = cid or t
++    if not cid:
++        bot.send_message(message.chat.id, "❌ ما فهمت. أرسل @يوزر أو رابط t.me/… أو للخاص: الأيدي -100… ومعه رابط الدعوة.")
++        return
++    if db.required_channels.find_one({'channel_id': cid}):
++        bot.send_message(message.chat.id, "ℹ️ هذي مضافة من قبل.")
++        return
++    try:
++        st = bot.get_chat_member(cid, bot.get_me().id).status
++    except Exception:
++        bot.send_message(message.chat.id, "❌ البوت مو موجود فيها، أو اليوزر/الأيدي غلط. ضيف البوت (مشرف) وجرب مرة ثانية.")
++        return
++    doc = {'channel_id': cid}
++    if link:
++        doc['invite_link'] = link
++    res = db.required_channels.insert_one(doc)
++    doc['_id'] = res.inserted_id
++    m = _fsub_meta(doc, refresh=True)
++    kind = 'الجروب' if m['kind'] == 'group' else 'القناة'
++    warn = []
++    if m['kind'] == 'channel' and st not in ('administrator', 'creator'):
++        warn.append("⚠️ البوت مو مشرف في القناة — فحص الاشتراك ممكن ما يشتغل.")
++    if not m.get('url'):
++        warn.append("⚠️ ما قدرت أجيب رابط دعوة (خاص). احذفها وضيفها مع رابط الدعوة، أو خل البوت مشرف بصلاحية الدعوة.")
++    bot.send_message(message.chat.id, f"✅ تمت إضافة {kind} <b>{html.escape(m['title'])}</b> <code>{html.escape(cid)}</code>."
++                     + ('\n\n' + '\n'.join(warn) if warn else ''), parse_mode="HTML")
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("del_fsub_"))
+ def del_fsub_btn(call):
+@@ -29376,14 +29729,8 @@
+             return None
+     except Exception:
+         return None
+-    chans = []
+-    for c in db.required_channels.find():
+-        cid = str(c.get('channel_id', ''))
+-        link = c.get('invite_link') or c.get('link')
+-        if not link and cid and not cid.lstrip('-').isdigit():
+-            link = f"https://t.me/{cid.lstrip('@')}"
+-        chans.append({'id': cid, 'title': c.get('title') or cid, 'url': link})
+-    return {'channels': chans}
++    chans = forced_sub_status(uid)
++    return {'channels': chans, 'left': sum(1 for c in chans if c.get('joined') is False)}
+ 
+ 
+ def _wa_method_of_coin(coin):
+@@ -32905,7 +33252,9 @@
+ # • المدعو الجديد يشترك في القنوات ← البوت يعطيه زر «🛡 تحقق من جهازك» يفتح الموقع.
+ # • الموقع يسوي التحقق أول (ما يدخل المتجر على طول): اختبار إنسان بسيط + فحص الجهاز.
+ # • الفحص: هل الجهاز حقيقي (مو محاكي / أداة أتمتة)؟ وهل نفس الجهاز انستخدم قبل لحساب ثاني؟
+-# • لو نظيف ← الإحالة تنحسب. لو مشكوك ← ما تنحسب، ويوصل للأدمن تحذير فيه أزرار: احسبها / لا تحسبها / حظر.
++# • الإحالة تنحسب في الحالتين، بس المشكوك فيها تنعلّم ⚠️ (ما يوصل للأدمن رسالة عن كل وحدة).
++# • لما المحيل يكمل العتبة (10) يوصل للأدمن رسالة وحدة فيها نتيجة الفحص + «قائمة الفحص»: احسبها / لا تحسبها / حظر.
++# • قبل التحقق: لازم يكون مشترك في كل القنوات والجروبات الإجبارية (الموقع يعرضها له ويعيد الفحص).
+ # • المدعو ما ينقال له شي عن الكشف (عشان ما يتعلم يتحايل) — يشوف «تم التحقق» ويكمل عادي.
+ # • نحفظ رمز مشفّر للجهاز بس (SHA-256)، مو بيانات شخصية.
+ # • الإعداد: لوحة الأدمن ← إعدادات الإحالات ← «🛡 تحقق الجهاز» (مفعّل افتراضياً).
+@@ -32937,9 +33286,9 @@
+     if not rec or not ref_dv_enabled():
+         return False
+     dv = rec.get('dv')
+-    if dv in ('ok', 'ok_admin'):
+-        return False
+-    if dv in ('flag', 'rejected'):
++    if dv in ('ok', 'ok_admin', 'flag'):
++        return False            # ⚠️ المشكوك فيها تنحسب، والأدمن يراجعها لما تكتمل الدفعة
++    if dv == 'rejected':
+         return True
+     # إحالة قديمة انحسبت قبل تشغيل التحقق ثم طلع ورجع: ما نطلب منه تحقق
+     if rec.get('status') == 'left' and int(rec.get('created_at') or 0) < _ref_dv_since():
+@@ -33107,43 +33456,6 @@
+     return f"<a href=\"tg://user?id={int(u_id)}\">{nm}</a>{un} · <code>{int(u_id)}</code>{tag}{ban}"
+ 
+ 
+-def _dv_alert_admins(uid, rec, res, others):
+-    rid = int(rec.get('referrer_id') or 0)
+-    try:
+-        _p, act, _l, tot = get_ref_counts(rid)
+-    except Exception:
+-        act, tot = 0, 0
+-    inf = res['info']
+-    dev = {'android': 'أندرويد', 'android_x': 'أندرويد', 'ios': 'آيفون', 'tdesktop': 'تيليجرام ديسكتوب', 'macos': 'ماك',
+-           'weba': 'تيليجرام ويب', 'webk': 'تيليجرام ويب', 'web': 'تيليجرام ويب', 'unigram': 'Unigram'}.get(inf['tgp'], inf['tgp'])
+-    lines = ["⚠️ <b>إحالة مشكوك فيها — موقوفة لين تقرر</b>", "",
+-             f"👤 المدعو: {_dv_user_line(uid)}",
+-             f"🤝 المحيل: {_dv_user_line(rid)} · إحالاته النشطة {act} من {tot}",
+-             f"📱 الجهاز: {html.escape(dev)}" + (f" · <code>{html.escape(inf['gl'][:60])}</code>" if inf.get('gl') else '')]
+-    if others:
+-        lines += ["", f"🔁 <b>نفس الجهاز انستخدم قبل لـ {len(others)} حساب:</b>"]
+-        lines += [f"• {_dv_user_line(o, rid)}" for o in others[:8]]
+-        if len(others) > 8:
+-            lines.append(f"… و{len(others) - 8} حساب ثاني")
+-        if res['strong']:
+-            lines.append("<i>تطابق مؤكد: نفس الجهاز ونفس تطبيق تيليجرام.</i>")
+-        else:
+-            lines.append("<i>تطابق محتمل: نفس بصمة الجهاز بالضبط.</i>")
+-    if res['reasons']:
+-        lines += ["", "🧪 <b>فحص الجهاز:</b> " + html.escape('، '.join(res['reasons']))]
+-    else:
+-        lines += ["", "🧪 <b>فحص الجهاز:</b> يبدو جهاز حقيقي"]
+-    lines += ["", "<i>الإحالة ما تنحسب للمحيل إلا لو ضغطت «احسبها».</i>"]
+-    buttons = [['cb', '✅ احسبها', f'refdv_ok_{uid}'], ['cb', '❌ لا تحسبها', f'refdv_no_{uid}'],
+-               ['cb', '🚫 حظر المدعو', f'refdv_ban_{uid}']]
+-    if rid:
+-        buttons.append(['cb', '📂 ملف المحيل', f'ad_u_det_{rid}'])
+-    try:
+-        notify_admins('\n'.join(lines), buttons=buttons)
+-    except Exception as e:
+-        logger.warning(f"dv admin alert failed: {e}")
+-
+-
+ def _dv_user_done(uid):
+     lang = get_lang(uid)
+     kb = types.InlineKeyboardMarkup()
+@@ -33166,27 +33478,32 @@
+     res = _dv_analyze(uid, body.get('fp'), body.get('ch'))
+     rec = db.referrals_v2.find_one({'invited_id': uid})
+     pending = bool(rec and rec.get('dv') in (None, 'need') and ref_dv_required(rec))
++    if pending:
++        # الخطوة ١: لازم يكون مشترك في القنوات والجروبات قبل فحص الجهاز
++        try:
++            _FORCED_SUB_CACHE.pop(uid, None)
++        except Exception:
++            pass
++        _subbed = check_forced_sub(uid, use_cache=False)
++        if _subbed is False:
++            return 200, {'ok': False, 'state': 'join', 'forced': _wa_forced_info(uid)}
+     others = _dv_relevant_others(uid, rec, res) if pending else []
+     _dv_record(uid, res)
+     if not pending:
+         return 200, {'ok': True, 'state': 'done'}
+     now = int(time.time())
+     if res['reasons'] or others:
++        # ⚠️ مشكوك: تنحسب، بس تنعلّم — تطلع للأدمن في «قائمة الفحص» لما المحيل يكمل العتبة
+         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
+             'dv': 'flag', 'dv_at': now, 'dv_reasons': res['reasons'][:8], 'dv_others': others[:20],
+-            'dv_strong': bool(res['strong'])}})
+-        _dv_alert_admins(uid, rec, res, others)
++            'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp')}})
+     else:
+         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now}})
+-        try:
+-            _FORCED_SUB_CACHE.pop(uid, None)
+-        except Exception:
+-            pass
+-        try:
+-            if check_forced_sub(uid):
+-                mark_referral_status(uid, 'active')
+-        except Exception as e:
+-            logger.debug(f"dv activate {uid}: {e}")
++    try:
++        if _subbed:
++            mark_referral_status(uid, 'active')
++    except Exception as e:
++        logger.debug(f"dv activate {uid}: {e}")
+     _dv_user_done(uid)
+     return 200, {'ok': True, 'state': 'done'}     # نفس الرد دائماً — ما نكشف للمدعو نتيجة الفحص
+ 
+@@ -33211,42 +33528,49 @@
+ _WA_HEAVY['/webapp/devmark'] = 10
+ 
+ 
+-def _refdv_decide(call, verdict):
+-    try:
+-        uid = int(call.data.rsplit('_', 1)[1])
+-    except Exception:
+-        return
+-    rec = db.referrals_v2.find_one({'invited_id': uid})
++def _refdv_apply(uid, verdict, admin_id, admin_name=None):
++    """قرار الأدمن على إحالة: ok = احسبها · no = لا تحسبها · ban = احظر المدعو ولا تحسبها. يرجّع ملاحظة أو None."""
++    rec = db.referrals_v2.find_one({'invited_id': int(uid)})
+     if not rec:
+-        bot.answer_callback_query(call.id, "الإحالة ما عادت موجودة.", show_alert=True)
+-        return
+-    who = html.escape(clean_name(call.from_user.first_name or str(call.from_user.id)))
++        return None
++    uid = int(uid)
++    who = html.escape(clean_name(admin_name or str(admin_id)))
+     if verdict == 'ok':
+-        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': call.from_user.id}})
++        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': admin_id}})
+         try:
+             _FORCED_SUB_CACHE.pop(uid, None)
+         except Exception:
+             pass
++        if rec.get('status') == 'active':
++            return f"✅ <b>انحسبت</b> للمحيل (بواسطة {who})."
+         if check_forced_sub(uid):
+             mark_referral_status(uid, 'active')
+-            note = f"✅ <b>انحسبت</b> للمحيل (بواسطة {who})."
+-        else:
+-            note = f"✅ <b>مقبولة</b> (بواسطة {who}) — تنحسب أول ما يكون مشترك في القنوات."
+-        bot.answer_callback_query(call.id, "✅ تم")
+-    else:
+-        db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'rejected', 'dv_by': call.from_user.id}})
+-        if rec.get('status') == 'active':
+-            mark_referral_status(uid, 'pending')
+-        if verdict == 'ban':
+-            db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
+-            try:
+-                _invalidate_user_cache(uid)
+-            except Exception:
+-                pass
+-            note = f"🚫 <b>انحظر المدعو</b> والإحالة ما تنحسب (بواسطة {who})."
+-        else:
+-            note = f"❌ <b>ما تنحسب</b> (بواسطة {who})."
+-        bot.answer_callback_query(call.id, "تم")
++            return f"✅ <b>انحسبت</b> للمحيل (بواسطة {who})."
++        return f"✅ <b>مقبولة</b> (بواسطة {who}) — تنحسب أول ما يكون مشترك في القنوات."
++    db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'rejected', 'dv_by': admin_id}})
++    if rec.get('status') == 'active':
++        mark_referral_status(uid, 'pending')
++    _ms_reopen_check(int(rec.get('referrer_id') or 0))
++    if verdict == 'ban':
++        db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
++        try:
++            _invalidate_user_cache(uid)
++        except Exception:
++            pass
++        return f"🚫 <b>انحظر المدعو</b> والإحالة ما تنحسب (بواسطة {who})."
++    return f"❌ <b>ما تنحسب</b> (بواسطة {who})."
++
++
++def _refdv_decide(call, verdict):
++    try:
++        uid = int(call.data.rsplit('_', 1)[1])
++    except Exception:
++        return
++    note = _refdv_apply(uid, verdict, call.from_user.id, call.from_user.first_name)
++    if note is None:
++        bot.answer_callback_query(call.id, "الإحالة ما عادت موجودة.", show_alert=True)
++        return
++    bot.answer_callback_query(call.id, "✅ تم" if verdict == 'ok' else "تم")
+     try:
+         bot.edit_message_text((call.message.html_text or call.message.text or '') + "\n\n" + note,
+                               call.message.chat.id, call.message.message_id, parse_mode='HTML')
+@@ -33280,15 +33604,14 @@
+     bot.answer_callback_query(call.id)
+     recs = list(db.referrals_v2.find({'dv': 'flag'}).sort('dv_at', -1).limit(15))
+     if not recs:
+-        bot.send_message(call.message.chat.id, "✅ ما فيه إحالات موقوفة للمراجعة.")
++        bot.send_message(call.message.chat.id, "✅ ما فيه إحالات مشكوك فيها تنتظر قرارك.")
+         return
+     mk = InlineKeyboardMarkup(row_width=3)
+-    lines = [f"🛡 <b>إحالات موقوفة للمراجعة ({db.referrals_v2.count_documents({'dv': 'flag'})})</b>", ""]
++    lines = [f"⚠️ <b>إحالات مشكوك فيها ({db.referrals_v2.count_documents({'dv': 'flag'})})</b>",
++             "<i>تنحسب للمحيل لين ترفضها. تطلع لك كذلك في «قائمة الفحص» لما يكمل العتبة.</i>", ""]
+     for r in recs:
+         inv = int(r['invited_id'])
+-        why = '، '.join(r.get('dv_reasons') or []) or ''
+-        dup = f"جهاز مكرر ({len(r.get('dv_others') or [])})" if r.get('dv_others') else ''
+-        lines.append(f"• {_dv_user_line(inv)} ← المحيل <code>{int(r.get('referrer_id') or 0)}</code>\n   <i>{html.escape(' · '.join(x for x in (dup, why) if x))}</i>")
++        lines.append(f"• {_dv_user_line(inv)} ← المحيل <code>{int(r.get('referrer_id') or 0)}</code>\n   <i>{html.escape(_ms_why(r, r.get('referrer_id')))}</i>")
+         mk.row(InlineKeyboardButton(f"✅ {inv}", callback_data=f"refdv_ok_{inv}"),
+                InlineKeyboardButton("❌", callback_data=f"refdv_no_{inv}"),
+                InlineKeyboardButton("🚫", callback_data=f"refdv_ban_{inv}"))

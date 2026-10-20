@@ -1,0 +1,1111 @@
+--- before/bot.py
++++ after/bot.py
+@@ -406,6 +406,29 @@
+     if not doc:
+         return None, None
+     return doc, get_user_data_full(doc['user_id'])
++
++
++def _cgpt_product_visible(parent, uid=None, public_id=None):
++    """Share ChatGPT visibility rules across the store and reseller API."""
++    if not parent or parent.get('is_hidden'):
++        return False
++    hexid = str(parent['_id'])
++    refs = [hexid]
++    try:
++        refs.append(ObjectId(hexid))
++    except Exception:
++        pass
++    links = list(db.products.find({'product_type': 'cgpt_main',
++        'cgpt_product_id': {'$in': refs}}, {'is_hidden': 1}))
++    if links and all(p.get('is_hidden') for p in links):
++        return False
++    if uid is not None:
++        ids = [f'cgpt_{hexid}', f'cgpt_main_{hexid}']
++        if public_id:
++            ids.append(public_id)
++        if db.api_hidden.find_one({'api_user_id': uid, 'product_id': {'$in': ids}}):
++            return False
++    return True
+ 
+ 
+ def _api_json_body(handler):
+@@ -764,6 +787,29 @@
+ # ChatGPT Business Seat Manager — مدمج مع البوت
+ # ================================================================
+ 
++_CGPT_DATA_LOCK = threading.RLock()
++_CGPT_ACCOUNT_LOCKS = {}
++
++
++def _cgpt_account_lock(account_id):
++    with _CGPT_DATA_LOCK:
++        return _CGPT_ACCOUNT_LOCKS.setdefault(str(account_id), threading.RLock())
++
++
++def _cgpt_manager_guard(func):
++    @functools.wraps(func)
++    def guarded(self, *args, **kwargs):
++        with _cgpt_account_lock(getattr(self, '_account_key', 'main')):
++            doc = db.cgpt_invites_data.find_one({'_id': getattr(self, '_account_key', 'main')})
++            if doc and doc.get('data'):
++                self.invites_data = doc['data']
++                self.allowed_emails = set(self.invites_data.get('allowed_emails', []))
++                if self.owner_email:
++                    self.allowed_emails.add(self.owner_email)
++            return func(self, *args, **kwargs)
++    return guarded
++
++
+ class ChatGPTSeatManager:
+     """
+     مدير مقاعد ChatGPT Business.
+@@ -906,6 +952,7 @@
+             logger.error(f"[CGPT] get_org_users error: {e}")
+         return []
+ 
++    @_cgpt_manager_guard
+     def invite_user(self, email: str, minutes_valid: int) -> dict:
+         """
+         يدعو مستخدم ويرجع dict:
+@@ -949,56 +996,57 @@
+         return False
+ 
+     def remove_by_email(self, email):
+-        """يطرد بالإيميل — يفحص العضو (member) وقائمة الانتظار (pending invite).
+-        يرجّع: 'member' | 'pending' | 'not_found' | 'error'"""
++        """Remove a member or pending invite; distinguish absence from failed checks."""
+         if not CFFI_AVAILABLE or not self._loaded:
+             return 'error'
+         email_l = str(email).strip().lower()
+-        # 1) نفحص الأعضاء الفعليين
++        if email_l == str(self.owner_email or '').strip().lower():
++            return 'error'
+         try:
+             users = self._get_org_users()
+-            for u in users:
+-                if str(u.get('email', '')).lower() == email_l:
+-                    uid_org = u.get('id') or u.get('user_id')
+-                    if uid_org and self._remove_user(uid_org, email):
+-                        return 'member'
+-        except Exception as e:
+-            logger.debug(f"[CGPT] remove member err: {e}")
+-        # 2) نفحص قائمة الانتظار (invites المعلّقة)
+-        try:
++            if getattr(self, '_last_fetch_failed', False):
++                return 'error'
++            for user in users:
++                if str(user.get('email') or '').strip().lower() == email_l:
++                    user_id = user.get('id') or user.get('user_id')
++                    return 'member' if user_id and self._remove_user(user_id, email) else 'error'
+             url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+-            r = cffi_requests.get(url, headers=self._headers(),
+-                                  impersonate='chrome110', timeout=15)
+-            if r.status_code == 200:
+-                data = r.json()
+-                invites = data.get('items', data.get('invites', []))
+-                for inv in invites:
+-                    inv_email = str(inv.get('email_address', inv.get('email', ''))).lower()
+-                    if inv_email == email_l:
+-                        inv_id = inv.get('id') or inv.get('invite_id')
+-                        # نحذف الدعوة المعلّقة
+-                        del_url = f'https://chatgpt.com/backend-api/accounts/{self.account_id}/invites'
+-                        # بعض الحسابات تحذف بـ DELETE مع body، بعضها بـ id في المسD
+-                        try:
+-                            dr = cffi_requests.delete(
+-                                f'{del_url}/{inv_id}',
+-                                headers=self._headers(), impersonate='chrome110', timeout=15)
+-                            if dr.status_code in (200, 204):
+-                                return 'pending'
+-                        except Exception:
+-                            pass
+-                        # محاولة بديلة: DELETE مع body {email}
+-                        try:
+-                            dr2 = cffi_requests.delete(
+-                                del_url, headers=self._headers(),
+-                                json={'email_address': email}, impersonate='chrome110', timeout=15)
+-                            if dr2.status_code in (200, 204):
+-                                return 'pending'
+-                        except Exception:
+-                            pass
+-        except Exception as e:
+-            logger.debug(f"[CGPT] remove pending err: {e}")
+-        return 'not_found'
++            response = cffi_requests.get(url, headers=self._headers(), impersonate='chrome110', timeout=15)
++            if response.status_code != 200:
++                return 'error'
++            data = response.json()
++            invites = data if isinstance(data, list) else data.get('items', data.get('invites')) if isinstance(data, dict) else None
++            if not isinstance(invites, list):
++                return 'error'
++            for invite in invites:
++                if str(invite.get('email_address', invite.get('email', ''))).strip().lower() != email_l:
++                    continue
++                invite_id = invite.get('id') or invite.get('invite_id')
++                if invite_id:
++                    try:
++                        removed = cffi_requests.delete(f'{url}/{invite_id}', headers=self._headers(),
++                            impersonate='chrome110', timeout=15)
++                        if removed.status_code in (200, 204):
++                            return 'pending'
++                    except Exception:
++                        pass
++                try:
++                    removed = cffi_requests.delete(url, headers=self._headers(), json={'email_address': email},
++                        impersonate='chrome110', timeout=15)
++                    if removed.status_code in (200, 204):
++                        return 'pending'
++                except Exception:
++                    pass
++                return 'error'
++            # Do not claim absence if the invitation list is paginated/incomplete.
++            if isinstance(data, dict) and (data.get('has_more') or data.get('next') or data.get('next_cursor')
++                    or int(data.get('total', len(invites)) or 0) > len(invites)):
++                return 'error'
++            return 'not_found'
++        except Exception:
++            logger.warning('[CGPT] member/invitation removal could not be verified')
++            return 'error'
++
+ 
+     def _remove_user(self, user_id, email) -> bool:
+         if email == self.owner_email: return False
+@@ -1029,92 +1077,65 @@
+             logger.error(f"[CGPT] remove error: {e}")
+             return False
+ 
++    @_cgpt_manager_guard
+     def check_and_cleanup(self):
+-        """فحص المنتهين والمخالفين وحذفهم"""
+-        now = _dt_mod.datetime.now()
+-        emails_to_remove = []
+-
+-        # منتهو الصلاحية
+-        for email, info in self.invites_data['invites'].items():
+-            if info.get('status') != 'active': continue
++        """Remove expired access and unexpected members without punishing other customers."""
++        current_users = self._get_org_users()
++        if getattr(self, '_last_fetch_failed', False):
++            logger.warning('[CGPT] fetch failed; skipping cleanup for %s', self.owner_email)
++            return
++        owner = str(self.owner_email or '').strip().lower()
++        members = {str(u.get('email') or '').strip().lower(): u for u in current_users}
++        invites = self.invites_data.setdefault('invites', {})
++        expired = []
++        for email, info in invites.items():
++            if info.get('status') != 'active' or str(email).strip().lower() == owner:
++                continue
+             try:
+                 exp = _dt_mod.datetime.fromisoformat(info['expires_at'])
+-                if now > exp:
+-                    emails_to_remove.append(email)
+-                    self.allowed_emails.discard(email)
+-            except: pass
+-
+-        current_users = self._get_org_users()
+-
+-        # 🛡 لو فشل جلب المستخدمين (كوكيز منتهية/خطأ اتصال) → لا ننفّذ أي طرد
+-        #    (لتفادي طرد عملاء بالخطأ ونحن لا نعرف الحالة الحقيقية)
+-        if getattr(self, '_last_fetch_failed', False):
+-            logger.warning(f"[CGPT] fetch failed for {self.owner_email} — skipping cleanup")
+-            return
+-
+-        # مخالفون (دُعوا خارج البوت)
+-        unauthorized = [u.get('email') for u in current_users
+-                        if u.get('email') != self.owner_email
+-                        and u.get('email') not in self.allowed_emails
+-                        and u.get('email') not in emails_to_remove]
+-
+-        if unauthorized:
+-            logger.warning(f"[CGPT] {len(unauthorized)} unauthorized users — punishing all active")
+-
+-            # بناء تقرير كامل: إيميل المخالف + إيميل العميل المسبب
+-            violation_lines = []
+-            for unauth_email in unauthorized:
+-                violation_lines.append(f"  🔴 مضاف خارج البوت: <code>{unauth_email}</code>")
+-
+-            # نعاقب كل النشطين، نرسل لهم رسالة، ونسجلهم
+-            punished_lines = []
+-            for email, info in self.invites_data['invites'].items():
+-                if info.get('status') == 'active':
+-                    emails_to_remove.append(email)
+-                    self.allowed_emails.discard(email)
+-                    punished_lines.append(f"  👤 عميل مُعاقب: <code>{email}</code>")
+-                    # إرسال رسالة مباشرة للعميل المخالف في تيليغرام
+-                    tg_uid = info.get('telegram_uid')
+-                    if tg_uid:
+-                        try:
+-                            violation_msg = (
+-                                "🚫 <b>تم إلغاء وصولك إلى ChatGPT Business</b>\n\n"
+-                                "❌ <b>السبب: مخالفة شروط الاستخدام</b>\n\n"
+-                                f"تم رصد إضافة مستخدم غير مصرح به من حسابك:\n"
+-                                + "\n".join([f"📧 <code>{ue}</code>" for ue in unauthorized]) +
+-                                "\n\n"
+-                                "⛔️ <b>قرار نهائي:</b>\n"
+-                                "• تم حذف وصولك فوراً\n"
+-                                "• <b>لن يتم تعويضك أو استرجاع أموالك</b>\n"
+-                                "• لا يحق لك المطالبة بأي تعويض\n\n"
+-                                "📜 لأنك خالفت القوانين المنصوص عليها عند الشراء، "
+-                                "فقدت حق الحماية والضمان."
+-                            )
+-                            bot.send_message(tg_uid, violation_msg, parse_mode="HTML")
+-                        except Exception as _nm:
+-                            logger.debug(f"[CGPT] notify violated user {tg_uid} failed: {_nm}")
+-
+-            report = (
+-                f"⚠️ <b>ChatGPT — مخالفة اكتُشفت!</b>\n\n"
+-                f"<b>المستخدمون المضافون خارج البوت ({len(unauthorized)}):</b>\n"
+-                + "\n".join(violation_lines) +
+-                f"\n\n<b>العملاء الذين تم إلغاء صلاحيتهم ({len(punished_lines)}):</b>\n"
+-                + ("\n".join(punished_lines) if punished_lines else "  لا يوجد") +
+-                f"\n\n<i>تم حذف جميع المضافين وإلغاء كل الصلاحيات النشطة.</i>"
+-            )
+-            notify_admins(report)
+-
+-        # تنفيذ الحذف
+-        for u in current_users:
+-            uid_org, email = u.get('id'), u.get('email')
+-            if email == self.owner_email: continue
+-            if email in emails_to_remove or email in unauthorized:
+-                ok = self._remove_user(uid_org, email)
+-                if ok and email in self.invites_data['invites']:
+-                    self.invites_data['invites'][email]['status'] = 'expired'
+-                    self.invites_data['invites'][email]['removed_at'] = now.isoformat()
+-
++                if _dt_mod.datetime.now(exp.tzinfo) > exp:
++                    expired.append(email)
++            except (ValueError, TypeError, KeyError):
++                logger.warning('[CGPT] invalid expiry; manual review needed')
++
++        allowed = {str(e).strip().lower() for e in self.allowed_emails}
++        allowed.update(str(e).strip().lower() for e, info in invites.items() if info.get('status') == 'active')
++        unauthorized = [u for e, u in members.items() if e and e != owner and e not in allowed
++                        and e not in {str(x).strip().lower() for x in expired}]
++        unexpected = sorted(str(u.get('email') or '') for u in unauthorized)
++        prior = self.invites_data.get('unauthorized_notice') or {}
++        if unexpected and (prior.get('emails') != unexpected or int(time.time()) - prior.get('at', 0) >= 3600):
++            notify_admins('⚠️ <b>ChatGPT — أعضاء مضافون خارج البوت</b>\n' +
++                '\n'.join(f'📧 <code>{html.escape(e)}</code>' for e in unexpected) +
++                '\nسيُزال هؤلاء الأعضاء فقط. اشتراكات العملاء المسجلة محفوظة.')
++            self.invites_data['unauthorized_notice'] = {'emails': unexpected, 'at': int(time.time())}
++        for user in unauthorized:
++            if not self._remove_user(user.get('id') or user.get('user_id'), user.get('email')):
++                logger.warning('[CGPT] could not remove an unexpected member; will retry')
++
++        for email in expired:
++            info = invites[email]
++            member = members.get(str(email).strip().lower())
++            if member:
++                result = 'member' if self._remove_user(member.get('id') or member.get('user_id'), email) else 'error'
++            else:
++                result = self.remove_by_email(email)   # also checks and revokes pending invitations
++            if result not in ('member', 'pending', 'not_found'):
++                if int(time.time()) - int(info.get('_expiry_retry_notice', 0)) >= 3600:
++                    notify_admins(f'⚠️ تعذّر إلغاء اشتراك ChatGPT المنتهي؛ سيُعاد الفحص.\n📧 <code>{html.escape(email)}</code>')
++                    info['_expiry_retry_notice'] = int(time.time())
++                continue
++            info.update(status='expired', removed_at=_dt_mod.datetime.now().isoformat(), removal_result=result)
++            self.allowed_emails = {e for e in self.allowed_emails if str(e).strip().lower() != str(email).strip().lower()}
++            notify_admins(f'⌛ <b>انتهت مدة ChatGPT وأُلغي الوصول</b>\n📧 <code>{html.escape(email)}</code>\nالحالة: {result}')
++            tg_uid = info.get('telegram_uid')
++            if tg_uid and str(tg_uid).isdigit():
++                try:
++                    bot.send_message(int(tg_uid), get_text(int(tg_uid), 'cg_expired_removed', html.escape(email)), parse_mode='HTML')
++                except Exception:
++                    pass
+         self._save_data()
++
+ 
+     def list_active(self):
+         """يرجع قائمة المدعوين النشطين"""
+@@ -1687,6 +1708,7 @@
+                 interval = 300
+             _t.sleep(interval)
+             _cgpt_retry_api_receipts()
++            _cgpt_retry_renewal_receipts()
+             # ننظّف كل الحسابات (متعددة)
+             _accs = _cgpt_all_accounts()
+             if _accs:
+@@ -2471,6 +2493,8 @@
+             # 🤖 منتجات ChatGPT Business — كل مدة تظهر كمنتج منفصل بسعرها
+             try:
+                 for cg in db.cgpt_products.find():
++                    if not _cgpt_product_visible(cg, uid):
++                        continue
+                     cg_id = str(cg['_id'])
+                     cg_name = cg.get('name', 'ChatGPT Business')
+                     cg_desc = cg.get('desc', '')
+@@ -2488,6 +2512,8 @@
+                         dur_days = round(dur_mins / 1440, 1) if dur_mins else 0
+                         full_name = f"{cg_name} — {dur_label}" if dur_label else cg_name
+                         cgid = f"cgpt_{cg_id}_{dur_id}"
++                        if not _cgpt_product_visible(cg, uid, cgid):
++                            continue
+                         cg_item = {
+                             'id': cgid,
+                             'name_ar': full_name, 'name_en': full_name,
+@@ -2529,7 +2555,7 @@
+                     cg = db.cgpt_products.find_one({'_id': ObjectId(_cgid)})
+                 except Exception:
+                     cg = None
+-                if not cg:
++                if not _cgpt_product_visible(cg, uid, pid):
+                     return _json_resp(self, 404, {'error': 'Product not found'})
+                 dur = next((d for d in cg.get('durations', []) if d.get('dur_id') == _durid), None)
+                 if not dur:
+@@ -2882,7 +2908,7 @@
+                     cg = db.cgpt_products.find_one({'_id': ObjectId(_cgid)})
+                 except Exception:
+                     cg = None
+-                if not cg:
++                if not _cgpt_product_visible(cg, uid, product_id):
+                     return _json_resp(self, 404, {'error': 'Product not found'})
+                 dur = next((d for d in cg.get('durations', []) if d.get('dur_id') == _durid), None)
+                 if not dur:
+@@ -3063,7 +3089,7 @@
+             try: qs.append({'product_id': float(pid_str)})
+             except: pass
+ 
+-            res_id = f"api_{uid}_{int(time.time()*1000)}"
++            res_id = f"api_{uid}_{secrets.token_hex(16)}"
+             reserved = []
+             for _ in range(qty):
+                 r = db.product_stock.find_one_and_update({'$or': qs, 'is_sold': False}, {'$set': {'is_sold': True, 'reservation_id': res_id}}, return_document=True)
+@@ -3072,18 +3098,29 @@
+                     return _json_resp(self, 409, {'error': 'Stock ran out during purchase'})
+                 reserved.append(r)
+ 
+-            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}}, {'$inc': {'balance': -total}}, return_document=True)
++            debit_field = '_stock_debits.' + order_id
++            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}},
++                {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
+             if not updated:
+                 db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
+                 return _json_resp(self, 402, {'error': 'Insufficient balance'})
+ 
+             codes = []
+-            for item in reserved:
+-                db.product_stock.update_one({'_id': item['_id']}, {'$unset': {'reservation_id': ''}})
+-                codes.append(item.get('code_line', ''))
+-                db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': item.get('code_line', ''), 'qty': 1, 'price': unit, 'via_api': True, 'api_order_id': order_id, **_order_cost(pid, 1)})
+-
+-            db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': codes, 'buyer_info': buyer_info, 'status': 'completed'})
++            try:
++                for item in reserved:
++                    codes.append(item.get('code_line', ''))
++                    db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': item.get('code_line', ''),
++                        'qty': 1, 'price': purchase_unit, 'via': 'api', 'via_api': True, 'order_id': order_id,
++                        'api_order_id': order_id, **_order_cost(pid, 1)})
++                db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': codes, 'buyer_info': buyer_info, 'status': 'completed'})
++                db.product_stock.update_many({'reservation_id': res_id},
++                    {'$set': {'sale_order_id': order_id}, '$unset': {'reservation_id': ''}})
++            except Exception:
++                refunded = _stock_refund_attempt(uid, order_id, res_id, total, debit_field,
++                    [i['_id'] for i in reserved], api=True)
++                return _json_resp(self, 503, {'success': False, 'error': 'Order could not be completed',
++                    'code': 'purchase_failed', 'refunded': refunded, 'order_id': order_id})
++            _stock_forget_debit(uid, debit_field)
+ 
+             # 📢 لوق القناة — نفس شكل الشراء العادي + CMS
+             try:
+@@ -3350,6 +3387,7 @@
+         return _json_resp(self, 404, {'error': 'Endpoint not found'})
+ 
+ 
++
+ def keep_alive():
+     port = int(os.environ.get('PORT', 10000))
+     # ThreadingHTTPServer: كل طلب في خيط منفصل — طلب بطيء لا يعلّق الباقي
+@@ -3404,6 +3442,7 @@
+     'cancel_deposit',       # زر إلغاء الدفع
+     'binance_check_',       # زر فحص الدفع
+     'copy_fb',              # fallback نسخ
++    'open_support',         # يظل الدعم متاحاً أثناء الدفع
+ )
+ 
+ 
+@@ -6202,6 +6241,9 @@
+     }
+ }
+ 
++LANG['ar']['cg_expired_removed'] = '⌛ انتهت مدة اشتراك ChatGPT وأُلغي الوصول.\n📧 <code>{0}</code>\nيمكنك شراء اشتراك جديد من المتجر.'
++LANG['en']['cg_expired_removed'] = '⌛ Your ChatGPT subscription expired and access was revoked.\n📧 <code>{0}</code>\nYou can purchase a new subscription in the store.'
++
+ # ============================================================
+ # 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
+ # ============================================================
+@@ -8273,6 +8315,84 @@
+ # ============================================================
+ # 🏠 8. معالج البداية 
+ # ============================================================
++def _support_contact_links():
++    """Build native Telegram and HTTPS alternatives without a network lookup."""
++    username = re.sub(r'[\u200b-\u200f\ufeff]', '', str(OWNER_USER or '')).strip()
++    if re.match(r'^(?:t\.me|telegram\.me|telegram\.dog)/', username, re.I):
++        username = 'https://' + username
++    if '://' in username:
++        try:
++            parsed = urllib.parse.urlsplit(username)
++        except ValueError:
++            username = ''
++        else:
++            if parsed.scheme.lower() in ('http', 'https') and parsed.hostname in ('t.me', 'telegram.me', 'telegram.dog'):
++                username = urllib.parse.unquote(parsed.path.strip('/'))
++            elif parsed.scheme.lower() == 'tg' and parsed.netloc.lower() == 'resolve':
++                username = urllib.parse.parse_qs(parsed.query).get('domain', [''])[0]
++            else:
++                username = ''
++    username = username.lstrip('@')
++    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,31}', username):
++        return {'username': username,
++                'native': 'tg://resolve?domain=' + username,
++                'web': 'https://t.me/' + username}
++    try:
++        owner_id = int(OWNER_ID)
++    except (ValueError, TypeError):
++        owner_id = 0
++    if owner_id > 0:
++        return {'username': '', 'native': f'tg://user?id={owner_id}', 'web': None}
++    return None
++
++
++def _send_support_contact(uid, chat_id):
++    """Always show a usable contact card, including a copyable username."""
++    links = _support_contact_links()
++    lang = get_lang(uid)
++    if not links:
++        text = ('الدعم غير مضبوط حالياً. يرجى المحاولة لاحقاً.' if lang == 'ar' else
++                'Support is not configured yet. Please try again later.')
++        return bot.send_message(chat_id, text)
++
++    title, _ = get_btn_data(uid, 'btn_support')
++    title, _ = _parse_btn_label(title)
++    title = title or ('الدعم الفني' if lang == 'ar' else 'Support')
++    body = ('اختر طريقة فتح المحادثة أدناه.' if lang == 'ar' else
++            'Choose an option below to open the support chat.')
++    text = f'<b>{html.escape(title)}</b>\n\n{body}'
++    if links['username']:
++        handle = html.escape('@' + links['username'])
++        text += (f'\n\nمعرّف الدعم: <code>{handle}</code>\n'
++                 'إذا لم يفتح الرابط، انسخ المعرّف وابحث عنه داخل Telegram.' if lang == 'ar' else
++                 f'\n\nSupport username: <code>{handle}</code>\n'
++                 'If a link does not open, copy the username and search for it in Telegram.')
++
++    # Plain URL buttons keep the fallback card independent of newer emoji/style
++    # features. Both URL forms are documented at https://core.telegram.org/api/links.
++    markup = InlineKeyboardMarkup(row_width=1)
++    markup.add(InlineKeyboardButton('فتح المحادثة داخل تيليجرام' if lang == 'ar' else 'Open in Telegram',
++                                   url=links['native']))
++    if links['web']:
++        markup.add(InlineKeyboardButton('رابط بديل' if lang == 'ar' else 'Alternative link',
++                                       url=links['web']))
++    return bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=markup,
++                            disable_web_page_preview=True)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'open_support')
++def show_support(call):
++    """Support is available even while a payment is pending or an account is banned."""
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    uid = call.from_user.id
++    chat_id = getattr(getattr(getattr(call, 'message', None), 'chat', None), 'id', uid)
++    return _send_support_contact(uid, chat_id)
++
++
++
+ @bot.message_handler(commands=['start'])
+ @_start_view_guard
+ def start_handler(message):
+@@ -8399,7 +8519,7 @@
+     markup.add(create_btn(uid, 'btn_products', callback_data="open_shop", style="primary"),
+                create_btn(uid, 'btn_deposit', callback_data="open_deposit"))
+     markup.add(create_btn(uid, 'btn_invite', callback_data="open_invite"),
+-               create_btn(uid, 'btn_support', url=f"https://t.me/{OWNER_USER}"))
++               create_btn(uid, 'btn_support', callback_data="open_support"))
+     # ⚙️ الإعدادات: يجمع الملف الشخصي واللغة (نص قابل للتعديل من CMS)
+     markup.add(create_btn(uid, 'btn_settings', callback_data="open_settings"))
+ 
+@@ -11153,6 +11273,62 @@
+         notify_admins(f"\U0001f6a8 ChatGPT Seat \u2014 \u0641\u0634\u0644 \u062f\u0639\u0648\u0629\n<code>{buyer_uid}</code> / <code>{html.escape(str(email))}</code>\n{result.get('error', '')}")
+ 
+ 
++def _stock_refund_attempt(uid, order_id, reservation_id, amount, debit_field, item_ids, api=False):
++    """Durable, repeatable compensation before an undelivered stock sale is exposed."""
++    job = {'user_id': uid, 'order_id': order_id, 'reservation_id': reservation_id,
++           'amount': amount, 'debit_field': debit_field, 'item_ids': item_ids,
++           'api': bool(api), 'status': 'pending', 'created_at': int(time.time())}
++    try:
++        db.stock_rollback_jobs.update_one({'_id': order_id}, {'$setOnInsert': job}, upsert=True)
++        return _stock_refund_job(dict(job, _id=order_id))
++    except Exception:
++        logger.exception('Stock rollback needs attention: order=%s', order_id)
++        try:
++            notify_admins(f"🚨 طلب أكواد يحتاج مراجعة الاسترجاع: <code>{order_id}</code>\n👤 {uid}\n💰 ${amount:.2f}")
++        except Exception:
++            pass
++        return False
++
++
++def _stock_refund_job(job):
++    uid, oid = job['user_id'], job['order_id']
++    # Remove only this attempt's receipts. Never match older orders by code text.
++    db.orders.delete_many({'user_id': uid, '$or': [{'order_id': oid}, {'api_order_id': oid}]})
++    if job.get('api'):
++        db.api_orders.delete_many({'api_user_id': uid, 'order_id': oid})
++    db.product_stock.update_many({'_id': {'$in': job['item_ids']}, '$or': [
++        {'reservation_id': job['reservation_id']}, {'sale_order_id': oid}]},
++        {'$set': {'is_sold': False}, '$unset': {'reservation_id': '', 'reserved_at': '', 'sale_order_id': ''}})
++    # Credit and removal of the debit marker are one atomic user-document write.
++    field = job['debit_field']
++    db.users.update_one({'user_id': uid, field: job['amount']},
++        {'$inc': {'balance': job['amount']}, '$unset': {field: ''}})
++    user = db.users.find_one({'user_id': uid})
++    if not user:
++        raise RuntimeError('Refund customer record is missing')
++    if field.split('.', 1)[1] in user.get('_stock_debits', {}):
++        raise RuntimeError('Stock refund marker is still present')
++    _invalidate_user_cache(uid)
++    db.stock_rollback_jobs.update_one({'_id': oid}, {'$set': {'status': 'done', 'done_at': int(time.time())}})
++    return True
++
++
++def _stock_forget_debit(uid, debit_field):
++    try:
++        db.users.update_one({'user_id': uid}, {'$unset': {debit_field: ''}})
++    except Exception:
++        # The saved receipt remains authoritative after delivery.
++        logger.warning('Completed stock purchase retains a debit marker: uid=%s', uid)
++
++
++def _retry_stock_refunds():
++    for job in db.stock_rollback_jobs.find({'status': 'pending'}).limit(50):
++        try:
++            _stock_refund_job(job)
++        except Exception:
++            logger.warning('Stock rollback remains pending: order=%s', job['order_id'])
++
++
+ def _do_purchase(uid, pid, qty, lang):
+     """المنطق الفعلي للشراء"""
+     # Resolve pid to actual product id field if it exists
+@@ -11202,7 +11378,9 @@
+ 
+         # 🛡 حجز الأكواد atomically
+         reserved_items = []
+-        reservation_id = f"{uid}_{int(time.time() * 1000)}"
++        reservation_id = f"{uid}_{secrets.token_hex(16)}"
++        stock_order_id = new_order_id() if not is_manual and product_type != 'chatgpt_seat' else None
++        debit_field = '_stock_debits.' + stock_order_id if stock_order_id else None
+ 
+         if not is_manual:
+             pid_str = str(pid)
+@@ -11230,7 +11408,7 @@
+         # 🛡 خصم الرصيد atomically
+         updated_user = db.users.find_one_and_update(
+             {'user_id': uid, 'balance': {'$gte': total_price}},
+-            {'$inc': {'balance': -total_price}},
++            {'$inc': {'balance': -total_price}, **({'$set': {debit_field: total_price}} if debit_field else {})},
+             return_document=True
+         )
+ 
+@@ -11305,13 +11483,9 @@
+                           buttons=order_admin_buttons(order_id, uid))
+         else:
+             delivered_codes = []
+-            order_id = new_order_id()
++            order_id = stock_order_id
+             try:
+                 for item in reserved_items:
+-                    db.product_stock.update_one(
+-                        {'_id': item['_id']},
+-                        {'$unset': {'reservation_id': "", 'reserved_at': ""}}
+-                    )
+                     db.orders.insert_one({
+                         'user_id': uid,
+                         'product_id': str(pid),
+@@ -11322,9 +11496,18 @@
+                         **({'vip_level': _vq['level'], 'vip_bp': _vq['bp']} if _vq['bp'] else {})
+                     })
+                     delivered_codes.append(item['code_line'])
+-            except Exception as e:
+-                logger.error(f"Critical: Failed during code delivery: {e}")
+-                notify_admins(f"⚠️ <b>تنبيه!</b>\nفشل تسليم أكواد للمستخدم <code>{uid}</code>\nالخطأ: {e}")
++                db.product_stock.update_many({'reservation_id': reservation_id},
++                    {'$set': {'sale_order_id': order_id}, '$unset': {'reservation_id': '', 'reserved_at': ''}})
++            except Exception:
++                refunded = _stock_refund_attempt(uid, order_id, reservation_id, total_price,
++                    debit_field, [i['_id'] for i in reserved_items])
++                try:
++                    bot.send_message(uid, bil(uid,
++                        "❌ تعذّر حفظ الطلب. أُعيد رصيدك بالكامل." if refunded else "⏳ تعذّر إكمال الطلب؛ جارٍ التحقق من استرجاع رصيدك.",
++                        "❌ Could not save the order. Your balance was fully refunded." if refunded else "⏳ Order incomplete; your refund is being verified."))
++                except Exception:
++                    pass
++                return {'ok': False, 'error': 'purchase_failed', 'refunded': refunded}
+ 
+             # إرسال الأكواد كملف
+             _delivery_ok = False
+@@ -11360,32 +11543,17 @@
+                     _delivery_ok = False
+ 
+             # 🛡 لو فشل إيصال الأكواد نهائياً → نسترجع الرصيد ونعيد المخزون (وإلا العميل يخسر فلوسه بلا مقابل)
+-            if not _delivery_ok and delivered_codes:
++            if not _delivery_ok:
++                refunded = _stock_refund_attempt(uid, order_id, reservation_id, total_price,
++                    debit_field, [i['_id'] for i in reserved_items])
+                 try:
+-                    # 1) إرجاع الرصيد
+-                    db.users.update_one({'user_id': uid}, {'$inc': {'balance': total_price}})
+-                    # 2) إعادة الأكواد للمخزون (نلغي is_sold)
+-                    for item in reserved_items:
+-                        db.product_stock.update_one(
+-                            {'_id': item['_id']},
+-                            {'$set': {'is_sold': False}, '$unset': {'reservation_id': "", 'reserved_at': ""}}
+-                        )
+-                    # 3) حذف سجلات الطلب التي أُنشئت لهذه العملية
+-                    try:
+-                        db.orders.delete_many({'user_id': uid, 'product_id': str(pid),
+-                                               'code_delivered': {'$in': delivered_codes}})
+-                    except Exception: pass
+-                    # 4) إبلاغ المستخدم والإدارة
+-                    try:
+-                        bot.send_message(uid, bil(uid,
+-                            "⚠️ <b>تعذّر تسليم الأكواد وتم إرجاع رصيدك بالكامل.</b>\nحاول مرة ثانية.",
+-                            "⚠️ <b>Could not deliver the codes — your balance was fully refunded.</b>\nPlease try again."),
+-                            parse_mode="HTML")
+-                    except Exception: pass
+-                    notify_admins(f"🚨 <b>فشل تسليم أكواد + تم الاسترجاع تلقائياً</b>\n👤 <code>{uid}</code>\n📦 {clean_name(p.get('name_ar'))}\n💰 ${total_price:.2f} (رجّعناه)")
+-                except Exception as refund_err:
+-                    logger.error(f"Refund-on-delivery-fail error: {refund_err}")
+-                    notify_admins(f"🚨🚨 <b>فشل تسليم وفشل الاسترجاع!</b> راجع يدوياً فوراً!\n👤 <code>{uid}</code>\n💰 ${total_price:.2f}\nالأكواد: {delivered_codes}")
++                    bot.send_message(uid, bil(uid,
++                        "⚠️ تعذّر تسليم الأكواد. أُعيد رصيدك بالكامل." if refunded else "⏳ تعذّر التسليم؛ جارٍ التحقق من الاسترجاع.",
++                        "⚠️ Delivery failed. Your balance was fully refunded." if refunded else "⏳ Delivery failed; your refund is being verified."))
++                except Exception:
++                    pass
++                return {'ok': False, 'error': 'purchase_failed', 'refunded': refunded}
++            _stock_forget_debit(uid, debit_field)
+ 
+             if _delivery_ok or not delivered_codes:
+                 notify_admins(f"🔐 <b>إشعار إدارة (شراء)</b>{admin_src_line()}\n👤 {buyer_m} (<code>{uid}</code>)\n📦 {clean_name(p.get('name_ar'))}\n🔢 {qty}\n💰 ${total_price:.2f}\n🧾 <code>{order_id}</code>"
+@@ -11450,6 +11618,7 @@
+ 
+     finally:
+         _release_purchase_lock(uid)
++
+ 
+ 
+ def _release_reservation(reservation_id):
+@@ -11821,7 +11990,7 @@
+         l = get_lang(uid)
+         _LOG_SRC.v = 'webapp' if payload.endswith('_wa') else 'bot'
+         try:
+-            credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️")
++            credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️", trusted_txid=True)
+         finally:
+             _LOG_SRC.v = None
+ 
+@@ -14605,6 +14774,9 @@
+              f"أضف رصيداً ثم أعد المحاولة.") if l != 'en' else
+             (f"❌ <b>Insufficient balance</b>\n💰 Price: ${price:.2f}\n💼 Yours: ${balance:.2f}"),
+             parse_mode="HTML", reply_markup=markup)
++    elif err == 'renewal_pending':
++        bot.send_message(uid, bil(uid, "⏳ نتيجة التجديد قيد التحقق. لا تكرر الدفع، وتواصل مع الدعم.",
++                                  "⏳ Renewal is being verified. Do not pay again; contact support."))
+     elif err == 'not_found':
+         bot.send_message(uid, "❌ لم أجد الاشتراك. أُعيد رصيدك.")
+     elif err:
+@@ -14621,7 +14793,23 @@
+             parse_mode="HTML")
+ 
+ 
+-_CGPT_RENEW_LOCK = threading.Lock()
++_CGPT_RENEW_LOCK = _CGPT_DATA_LOCK
++
++
++def _cgpt_flush_renewal_receipt(account_id, order_id, receipt):
++    """Project the receipt saved atomically with the extension into order history."""
++    db.orders.update_one({'_id': receipt['_id']}, {'$setOnInsert': receipt}, upsert=True)
++    db.cgpt_invites_data.update_one({'_id': account_id}, {'$unset': {'renewal_receipts.' + order_id: ''}})
++    _PROFIT_CACHE['t'] = 0
++
++
++def _cgpt_retry_renewal_receipts():
++    for doc in db.cgpt_invites_data.find({'renewal_receipts': {'$exists': True}}):
++        for oid, receipt in list((doc.get('renewal_receipts') or {}).items())[:100]:
++            try:
++                _cgpt_flush_renewal_receipt(doc['_id'], oid, receipt)
++            except Exception:
++                logger.warning('ChatGPT renewal receipt remains queued: order=%s', oid)
+ 
+ 
+ def _cgpt_renew_core(uid, s, prod_id, dur_id, via='bot'):
+@@ -14655,24 +14843,40 @@
+     vip_log_discount(uid, f"cgpt_{prod_id}", _cq, 'cgpt_renew')
+     acc_id = s['account_id']
+     email = s['email']
+-    try:
+-        with _CGPT_RENEW_LOCK:          # البوت والموقع يمكن يجددون نفس الحساب بنفس اللحظة
++    renewal_order_id = new_order_id()
++    receipt = None
++    committed = False
++    try:
++        with _cgpt_account_lock(acc_id):  # التنظيف والتجديد يشتركان بقفل الحساب نفسه
+             idata = db.cgpt_invites_data.find_one({'_id': acc_id})
+             data = idata.get('data', {}) if idata else {}
+             inv = data.get('invites', {}).get(email)
+             if inv and str(inv.get('telegram_uid')) == str(uid):
+                 old_exp = _dt_mod.datetime.fromisoformat(inv['expires_at'])
+-                now = _dt_mod.datetime.now()
++                now = _dt_mod.datetime.now(old_exp.tzinfo)
+                 base = old_exp if old_exp > now else now
+                 new_exp = base + _dt_mod.timedelta(minutes=add_minutes)
+                 data['invites'][email]['expires_at'] = new_exp.isoformat()
+-                db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {'data': data}}, upsert=True)
++                receipt = {'_id': ObjectId(), 'user_id': uid, 'product_id': f'cgpt_{prod_id}',
++                    'code_delivered': f'chatgpt_seat: {email}', 'qty': 1, 'total_price': price,
++                    'order_id': renewal_order_id, 'via': via, 'type': 'cgpt_renewal',
++                    'cgpt_email': email, 'cgpt_expires_at': new_exp.isoformat(),
++                    **_order_cost(f'cgpt_{prod_id}', 1)}
++                # Extension and durable receipt commit in the same MongoDB write.
++                db.cgpt_invites_data.update_one({'_id': acc_id}, {'$set': {
++                    'data': data, 'renewal_receipts.' + renewal_order_id: receipt}}, upsert=True)
++                committed = True
+             else:
+                 inv = None
+         if not inv:
+             db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+             _invalidate_user_cache(uid)
+             return {'ok': False, 'error': 'not_found', 'refunded': True}
++        try:
++            _cgpt_flush_renewal_receipt(acc_id, renewal_order_id, receipt)
++        except Exception:
++            logger.warning('ChatGPT renewed; its receipt is safely queued: order=%s', renewal_order_id)
++        _CGPT_EXPIRY_REMINDED.pop(email, None)
+         add_days = round(add_minutes / 1440, 1)
+         new_rem = (new_exp - now).days
+         try:
+@@ -14682,9 +14886,26 @@
+         return {'ok': True, 'email': email, 'add_days': add_days, 'new_rem': new_rem, 'price': price,
+                 'expires_at': new_exp.isoformat(), 'balance': round(float(updated.get('balance', 0)), 2)}
+     except Exception as e:
++        if receipt is not None and not committed:
++            try:
++                saved = db.cgpt_invites_data.find_one({'_id': acc_id}) or {}
++                committed = renewal_order_id in (saved.get('renewal_receipts') or {})
++            except Exception:
++                # An ambiguous write must never grant a free extension by refunding blindly.
++                logger.error('ChatGPT renewal outcome needs verification: order=%s', renewal_order_id)
++                try:
++                    notify_admins(f'⚠️ تجديد ChatGPT يحتاج تحققاً: <code>{renewal_order_id}</code> / {uid}')
++                except Exception:
++                    pass
++                return {'ok': False, 'error': 'renewal_pending', 'refunded': False}
++        if committed:
++            return {'ok': True, 'email': email, 'add_days': round(add_minutes / 1440, 1),
++                'new_rem': (new_exp - now).days, 'price': price, 'expires_at': new_exp.isoformat(),
++                'balance': round(float(updated.get('balance', 0)), 2)}
+         db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
+         _invalidate_user_cache(uid)
+         return {'ok': False, 'error': 'failed', 'refunded': True, 'detail': str(e)}
++
+ 
+ 
+ @bot.message_handler(commands=['ping'])
+@@ -17879,6 +18100,10 @@
+         method=method,
+         tx_timestamp=current_time
+     )
++    if trusted_txid:
++        # Provider IDs, rather than amount/time, distinguish legitimate payments.
++        tx_fingerprint = 'tx:' + hashlib.sha256(tx_id_clean.encode('utf-8')).hexdigest()
++
+     
+     # 🛡 الخطوة 4: فحص duplicate صريح ثاني (احتياط)
+     existing_check = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+@@ -22118,6 +22343,7 @@
+ 
+ CGPT_CMS_TEXTS = {'cg_page': ('صفحة المنتج', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ التسليم: تلقائي فوري\n📦 المقاعد المتاحة: {3}\n\n🗓 اختر المدة:', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ Delivery: Instant\n📦 Available seats: {3}\n\n🗓 Choose duration:'), 'cg_email_prompt': ('طلب إيميل الشراء', '✅ <b>المدة المختارة: {0} — ${1}</b>\n\n📧 أرسل إيميل حساب ChatGPT الخاص بك:', '✅ <b>Selected: {0} — ${1}</b>\n\n📧 Send your ChatGPT account email:'), 'cg_email_confirm': ('تأكيد الإيميل', '📧 <b>الإيميل:</b> <code>{0}</code>\n\nهل هذا الإيميل صحيح؟', '📧 <b>Email:</b> <code>{0}</code>\n\nIs this email correct?'), 'cg_success': ('رسالة نجاح الشراء', '✅ <b>تم الشراء وإرسال الدعوة بنجاح!</b>\n\n📧 <code>{0}</code>\n⏱ المدة: {1}\n📅 الانتهاء: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nتفقد بريدك واقبل الدعوة.\nاشتراكاتك: /my_chatgpt', '✅ <b>Purchase complete — invitation sent!</b>\n\n📧 <code>{0}</code>\n⏱ Duration: {1}\n📅 Expires: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nCheck your email and accept the invitation.\nYour subscriptions: /my_chatgpt'), 'cg_details': ('تفاصيل الاشتراك', '⚙️ <b>تفاصيل الاشتراك</b>\n\n📧 <code>{0}</code>\n⏳ المتبقي: {1} يوم و{2} ساعة\n📅 الانتهاء: {3}\n\nاختر التجديد أو الترقية:', '⚙️ <b>Subscription details</b>\n\n📧 <code>{0}</code>\n⏳ Remaining: {1} days, {2} hours\n📅 Expires: {3}\n\nChoose renewal or upgrade:'), 'cg_notice_5': ('❌ المنتج غير موجود.', '❌ المنتج غير موجود.', '❌ Product not found.'), 'cg_notice_6': ('❌ المدة غير موجودة.', '❌ المدة غير موجودة.', '❌ Duration not found.'), 'cg_notice_7': ('❌ تم إلغاء عملية الشراء.', '❌ تم إلغاء عملية الشراء.', '❌ Purchase cancelled.'), 'cg_notice_8': ('❌ لا توجد عملية شراء جارية.', '❌ لا توجد عملية شراء جارية.', '❌ No active purchase in progress.'), 'cg_notice_9': ('❌ إيميل غير صحيح، أرسله مجدداً.', '❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>', '❌ <b>Invalid email, please send again.</b>'), 'cg_notice_10': ('📧 أرسل إيميل حساب ChatGPT:', '📧 <b>أرسل إيميل حساب ChatGPT:</b>', '📧 <b>Send your ChatGPT email:</b>'), 'cg_notice_11': ('📧 أرسل الإيميل الصحيح:', '📧 <b>أرسل الإيميل الصحيح:</b>', '📧 <b>Send the correct email:</b>'), 'cg_notice_12': ('⏳ جاري إرسال الدعوة...', '⏳ <b>جاري إرسال الدعوة...</b>', '⏳ <b>Sending invite...</b>'), 'cg_notice_13': ('❌ انتهت الجلسة.', '❌ انتهت الجلسة.', '❌ Session expired.'), 'cg_notice_14': ('❌ عذراً، نفدت المقاعd المتاحة حالياً.', '❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً.', '❌ Sorry, no seats available right now. Try later.'), 'cg_notice_15': ('❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ No seats available. Your balance was refunded.'), 'cg_notice_16': ('📭 لا اشتراكات ChatGPT نشطة لديك.', '📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\nاشترِ باقة من المتجر!', '📭 <b>You have no active ChatGPT subscriptions.</b>'), 'cg_reminder': ('تذكير قرب انتهاء الاشتراك', '⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n📧 <code>{0}</code>\n⏰ يتبقى حوالي {1} ساعة.\nجدد الآن؛ يُلغى الوصول تلقائياً عند الانتهاء.', '⏳ <b>Your ChatGPT subscription expires soon!</b>\n📧 <code>{0}</code>\n⏰ About {1} hours left.\nRenew now; access ends automatically at expiry.'), 'cg_renew_prompt': ('اختيار باقة التجديد', '🔄 <b>تجديد اشتراك ChatGPT</b>\n📧 <code>{0}</code>\nاختر باقة التجديد بالسعر الحالي. يمكنك استخدام الإيميل نفسه أو تغييره.', '🔄 <b>Renew ChatGPT subscription</b>\n📧 <code>{0}</code>\nChoose a package at its current price. You can use the same email or change it.'), 'cg_subs_title': ('عنوان اشتراكاتي', '🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n', '🤖 <b>Your ChatGPT subscriptions</b>\n'), 'cg_refund_cancel': ('إلغاء الشراء وإرجاع الرصيد', '❌ تم إلغاء الشراء وإرجاع <b>${0}</b> إلى رصيدك.', '❌ Purchase cancelled. <b>${0}</b> was refunded to your balance.'), 'cg_invite_failed': ('فشل الدعوة وإرجاع الرصيد', '❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{0}</code>', '❌ <b>Invitation failed. Your balance was refunded.</b>\n<code>{0}</code>'), 'cg_kicked': ('إشعار العميل بعد الطرد', '🚫 ألغت الإدارة وصولك إلى ChatGPT Business.\n📧 {0}', '🚫 Your ChatGPT Business access was removed by the administrator.\n📧 {0}'), 'cg_admin_purchase': ('إشعار شراء للأدمن', '🤖 <b>ChatGPT Business — شراء</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>', '🤖 <b>ChatGPT Business — purchase</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>')}
+ CGPT_CMS_BUTTONS = {'cg_buy': ('زر الشراء والمدة', '🛒 شراء', '🛒 Buy'), 'cg_cancel': ('زر إلغاء الشراء', '❌ إلغاء', '❌ Cancel'), 'cg_confirm': ('زر تأكيد الإيميل', '✅ نعم، صحيح', '✅ Yes, correct'), 'cg_change': ('زر تغيير الإيميل', '✏️ تغييره', '✏️ Change it'), 'cg_back': ('زر الرجوع', '🔙 رجوع', '🔙 Back'), 'cg_upgrade': ('زر تجديد / ترقية', '⬆️ تجديد / ترقية', '⬆️ Renew / upgrade'), 'cg_renew': ('زر التجديد', '🔄 تجديد الاشتراك', '🔄 Renew subscription'), 'cg_sub_item': ('زر فتح الاشتراك', '⚙️ الاشتراك', '⚙️ Subscription')}
++CGPT_CMS_TEXTS['cg_expired_removed'] = ('انتهاء الاشتراك وإلغاء الوصول', LANG['ar']['cg_expired_removed'], LANG['en']['cg_expired_removed'])
+ CGPT_CMS_TEXTS['cg_api_debit'] = (
+     'إشعار خصم شراء API',
+     '✅ تم شراء ChatGPT Business عبر API وإرسال الدعوة.\n📧 <code>{0}</code>\n💳 المبلغ المخصوم: <b>${1}</b>\n👛 الرصيد بعد الخصم: <b>${2}</b>\n🆔 <code>{3}</code>\n📅 الانتهاء: {4}',
+@@ -31041,9 +31267,12 @@
+     previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
+     _LOG_SRC.wa_purchase_id = request_id
+     try:
+-        _do_purchase(uid, pid, qty, lang)   # ← نفس دالة الشراء في البوت
++        outcome = _do_purchase(uid, pid, qty, lang)   # ← نفس دالة الشراء في البوت
+     finally:
+         _LOG_SRC.wa_purchase_id = previous_request
++
++    if isinstance(outcome, dict) and outcome.get('ok') is False:
++        return 502, {'error': 'purchase_failed', 'refunded': outcome.get('refunded', False), 'balance': _wa_balance(uid)}
+ 
+     cands = list({pid, _wa_norm_id(raw), str(p.get('_id'))})
+     docs = list(db.orders.find({'user_id': uid, 'webapp_request_id': request_id,
+@@ -31968,6 +32197,8 @@
+         lk.release()
+     if not r.get('ok'):
+         e = r.get('error')
++        if e == 'renewal_pending':
++            return 202, {'ok': False, 'error': 'renewal_pending'}
+         if e == 'insufficient_balance':
+             return 402, {'error': 'insufficient_balance', 'required': r.get('price'), 'balance': round(float(r.get('balance') or 0), 2)}
+         if e in ('no_plan', 'no_duration', 'bad_duration'):
+@@ -32137,6 +32368,17 @@
+     """تكلفة الطلب لحظة الشراء (من «سعر التكلفة» للمنتج) — عشان الربح ما يتغير لو غيّرت التكلفة بعدين."""
+     try:
+         p = find_product(str(pid)) or {}
++        if p.get('cost') is None and str(pid).startswith('cgpt_'):
++            hexid = str(pid)[5:].removeprefix('main_').split('_')[0]
++            try:
++                parent = db.cgpt_products.find_one({'_id': ObjectId(hexid)}) or {}
++                if parent.get('cost') is not None:
++                    p = parent
++                else:
++                    p = db.products.find_one({'product_type': 'cgpt_main',
++                        'cgpt_product_id': {'$in': [hexid, ObjectId(hexid)]}, 'cost': {'$ne': None}}) or p
++            except Exception:
++                pass
+         if p.get('cost') is None:
+             return {}
+         return {'cost_total': round(float(p['cost']) * max(1, int(qty or 1)), 4)}
+@@ -36496,6 +36738,15 @@
+     _API_READY.set()
+     logger.info('✅ Reseller API ready — ext-purchase-v3')
+     # 🛍 Mini App: زر القائمة في تيليجرام يفتح الواجهة
++    try:
++        _retry_stock_refunds()
++        _cgpt_retry_renewal_receipts()
++    except Exception:
++        logger.warning('Stock refund recovery will retry in the background')
++    threading.Thread(target=_run_periodic, args=(_retry_stock_refunds, 60, 15, 'Stock refunds'),
++                     daemon=True, name='stock-refunds').start()
++    threading.Thread(target=_run_periodic, args=(_cgpt_retry_renewal_receipts, 60, 15, 'Renewal receipts'),
++                     daemon=True, name='renewal-receipts').start()
+     threading.Thread(target=_wa_setup_menu_button, daemon=True, name='webapp-menu-button').start()
+     threading.Thread(target=_wa_owner_hello, daemon=True, name='webapp-owner-hello').start()
+     threading.Thread(target=_vip_backfill_thread, daemon=True, name='vip-backfill').start()
+@@ -36522,11 +36773,11 @@
+     except Exception as e:
+         logger.error(f"❌ فشل بدء خيط مراقبة مقاعد ChatGPT: {e}")
+ 
+-    try: bot.delete_webhook(drop_pending_updates=True); time.sleep(1)
++    try: bot.delete_webhook(drop_pending_updates=False); time.sleep(1)
+     except: pass
+     time.sleep(5)
+     while True:
+-        try: bot.polling(non_stop=True, skip_pending=True,
++        try: bot.polling(non_stop=True, skip_pending=False,
+                          timeout=60, long_polling_timeout=60)
+         except Exception as e:
+             err = str(e)
+--- before/webapp/index.html
++++ after/webapp/index.html
+@@ -1409,7 +1409,7 @@
+ joinT:'Join our channels',joinB:'Subscribe to keep using the store.',join:'Join',joined:"I've joined",notYet:"You haven't joined every channel yet",channel:'Channel',
+ banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
+ activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
+-e_insufficient_balance:'Not enough balance. You need {p} more.',e_out_of_stock:'This product is out of stock.',e_not_enough_stock:'Only {n} available.',e_deposit_pending:'Finish or cancel your pending payment first.',e_busy:'Another purchase is in progress. Wait a moment.',e_must_join:'Join the required channels first.',e_banned:'Your account is blocked.',e_bad_email:'Enter a valid email address.',e_bad_duration:'Choose a plan first.',e_invite_failed:"The invite couldn't be sent. Your balance was refunded.",e_supplier_failed:'The supplier rejected the order. Your balance was refunded.',e_purchase_failed:"The purchase didn't go through. Check your balance and try again.",e_rate_limited:'Too many requests. Try again in a minute.',e_auth:'Session expired. Reopen the store.',e_method_unavailable:"This payment method isn't available.",e_amount_range:'Enter an amount between {min} and {max}.',e_busy_amount:'No unique amount is free right now. Try another amount.',e_price_unavailable:"Couldn't get the coin price. Try again shortly.",e_invoice_failed:"Couldn't create the Stars invoice.",e_server_error:'Something went wrong. Try again.',e_network:'No connection. Check your internet and try again.',e_not_found:'This product is no longer available.',e_bad_qty:'Enter a valid quantity.',e_bot_only:'This is managed from the bot only.',vfT:"Activate your account",vfB:"Two quick steps that keep the store safe from fake accounts.",vfS1:"Channels & groups",vfS2:"Human check",vfS3:"Ready",vfJoinT:"Join our channels and groups",vfJoinB:"{n} of {t} left. Join them, then tap “Check”.",vfJoinAll:"All set here. Tap “Check” to continue.",vfKindC:"Channel",vfKindG:"Group",vfJoined:"Joined",vfJoin:"Join",vfOpened:"Opened",vfCheck:"Check",vfChecking:"Checking…",vfLeft:"{n} still not joined",vfHumT:"Show us you’re human",vfHumB:"Tap the emoji that matches.",vfTap:"Tap",vfW1:"Checking your device",vfW2:"Confirming the Telegram app",vfW3:"Activating your account",vfDoneT:"You’re all set",vfDoneB:"Your account is active. Enjoy the store.",vfEnter:"Enter the store",vfOpenP:"Open the product",vfOpening:"Opening {p} for you…",deepGone:"This product isn't available right now.",vfPriv:"No personal data is collected, only an encrypted device code.",vfFail:"Couldn't check right now. Try again.",vfNoLink:"Ask support",pvVerify:"Preview the referral activation screen",poSub:"Your codes and order history",dvT:"One last step",dvB:"Tap the matching emoji to verify your device. It keeps the store safe from fake accounts — no personal data is collected.",dvTap:"Tap {e}",dvWrong:"Not that one — try again",dvWork:"Checking your device…",dvOkT:"Verified",dvOkB:"You can use the store now.",dvEnter:"Enter the store",dvFail:"Couldn't verify right now. Try again.",e_no_account:'Start the bot first, then reopen the store.',e_deposit_failed:"Couldn't create the payment. Try again or pick another method.",e_deposit_exists:"You already have a payment in progress. Finish or cancel it first.",e_unavailable:"This isn't available right now. Try again shortly.",e_bad_request:"Something in the request was wrong. Refresh and try again.",e_too_large:"That's too much text at once. Send it in smaller parts.",e_bad_json:"Something in the request was wrong. Refresh and try again.",e_expired:"This link expired. Try again.",e_forbidden:"You don't have permission for this.",e_no_key:"Generate an API key first.",e_no_webhook:"Set a webhook URL first.",e_bad_url:"Enter a valid http(s) URL.",e_private_url:"Use a public internet address (not localhost or a private network).",e_empty:"Nothing was entered.",e_bad_amount:"Enter a valid amount.",e_bad_price:"Enter a valid price.",e_bad_vip:"Invalid VIP setting.",e_cannot_ban:"This account can't be banned.",e_bad_section:"This section isn't available.",e_open_failed:"Couldn't open this section. Try again.",h_all:'All',h_deposit:'Deposits',h_purchase:'Purchases',h_adjust:'Adjustments',opsN:'{n} operations',details:'Details',f_type:'Type',f_method:'Method',f_network:'Network',f_sent:'Amount sent',f_requested:'Requested',f_status:'Status',completed:'Completed',f_date:'Date',f_ref:'Reference',f_tx:'Transaction ID',f_product:'Product',f_note:'Note',f_after:'Balance after',adj_compensation:'Compensation',adj_manual:'Manual top-up',adj_gift:'Gift',adj_adjustment:'Balance adjustment',adj_ref_reward:'Referral reward',adj_ref_clawback:'Referral deducted (left)',adj_ref_refund:'Referral back',adj_deduct:'Deduction',refunded:'Refunded',g_tg:'Telegram',g_ex:'Exchanges',g_cr:'Crypto wallets',change:'Change',lastUsed:'Last used',mInstant:'Instant',mAuto:'Credited automatically',minFrom:'from {min}',newBal:'New balance',uniqueNote:"You'll get a unique amount with extra decimals. Send exactly that amount.",prev:'Previous',next:'Next',codesN:'{n} codes'},
++e_insufficient_balance:'Not enough balance. You need {p} more.',e_out_of_stock:'This product is out of stock.',e_not_enough_stock:'Only {n} available.',e_deposit_pending:'Finish or cancel your pending payment first.',e_busy:'Another purchase is in progress. Wait a moment.',e_renewal_pending:'Renewal is being verified. Do not pay again; contact support.',e_must_join:'Join the required channels first.',e_banned:'Your account is blocked.',e_bad_email:'Enter a valid email address.',e_bad_duration:'Choose a plan first.',e_invite_failed:"The invite couldn't be sent. Your balance was refunded.",e_supplier_failed:'The supplier rejected the order. Your balance was refunded.',e_purchase_failed:"The purchase didn't go through. Check your balance and try again.",e_rate_limited:'Too many requests. Try again in a minute.',e_auth:'Session expired. Reopen the store.',e_method_unavailable:"This payment method isn't available.",e_amount_range:'Enter an amount between {min} and {max}.',e_busy_amount:'No unique amount is free right now. Try another amount.',e_price_unavailable:"Couldn't get the coin price. Try again shortly.",e_invoice_failed:"Couldn't create the Stars invoice.",e_server_error:'Something went wrong. Try again.',e_network:'No connection. Check your internet and try again.',e_not_found:'This product is no longer available.',e_bad_qty:'Enter a valid quantity.',e_bot_only:'This is managed from the bot only.',vfT:"Activate your account",vfB:"Two quick steps that keep the store safe from fake accounts.",vfS1:"Channels & groups",vfS2:"Human check",vfS3:"Ready",vfJoinT:"Join our channels and groups",vfJoinB:"{n} of {t} left. Join them, then tap “Check”.",vfJoinAll:"All set here. Tap “Check” to continue.",vfKindC:"Channel",vfKindG:"Group",vfJoined:"Joined",vfJoin:"Join",vfOpened:"Opened",vfCheck:"Check",vfChecking:"Checking…",vfLeft:"{n} still not joined",vfHumT:"Show us you’re human",vfHumB:"Tap the emoji that matches.",vfTap:"Tap",vfW1:"Checking your device",vfW2:"Confirming the Telegram app",vfW3:"Activating your account",vfDoneT:"You’re all set",vfDoneB:"Your account is active. Enjoy the store.",vfEnter:"Enter the store",vfOpenP:"Open the product",vfOpening:"Opening {p} for you…",deepGone:"This product isn't available right now.",vfPriv:"No personal data is collected, only an encrypted device code.",vfFail:"Couldn't check right now. Try again.",vfNoLink:"Ask support",pvVerify:"Preview the referral activation screen",poSub:"Your codes and order history",dvT:"One last step",dvB:"Tap the matching emoji to verify your device. It keeps the store safe from fake accounts — no personal data is collected.",dvTap:"Tap {e}",dvWrong:"Not that one — try again",dvWork:"Checking your device…",dvOkT:"Verified",dvOkB:"You can use the store now.",dvEnter:"Enter the store",dvFail:"Couldn't verify right now. Try again.",e_no_account:'Start the bot first, then reopen the store.',e_deposit_failed:"Couldn't create the payment. Try again or pick another method.",e_deposit_exists:"You already have a payment in progress. Finish or cancel it first.",e_unavailable:"This isn't available right now. Try again shortly.",e_bad_request:"Something in the request was wrong. Refresh and try again.",e_too_large:"That's too much text at once. Send it in smaller parts.",e_bad_json:"Something in the request was wrong. Refresh and try again.",e_expired:"This link expired. Try again.",e_forbidden:"You don't have permission for this.",e_no_key:"Generate an API key first.",e_no_webhook:"Set a webhook URL first.",e_bad_url:"Enter a valid http(s) URL.",e_private_url:"Use a public internet address (not localhost or a private network).",e_empty:"Nothing was entered.",e_bad_amount:"Enter a valid amount.",e_bad_price:"Enter a valid price.",e_bad_vip:"Invalid VIP setting.",e_cannot_ban:"This account can't be banned.",e_bad_section:"This section isn't available.",e_open_failed:"Couldn't open this section. Try again.",h_all:'All',h_deposit:'Deposits',h_purchase:'Purchases',h_adjust:'Adjustments',opsN:'{n} operations',details:'Details',f_type:'Type',f_method:'Method',f_network:'Network',f_sent:'Amount sent',f_requested:'Requested',f_status:'Status',completed:'Completed',f_date:'Date',f_ref:'Reference',f_tx:'Transaction ID',f_product:'Product',f_note:'Note',f_after:'Balance after',adj_compensation:'Compensation',adj_manual:'Manual top-up',adj_gift:'Gift',adj_adjustment:'Balance adjustment',adj_ref_reward:'Referral reward',adj_ref_clawback:'Referral deducted (left)',adj_ref_refund:'Referral back',adj_deduct:'Deduction',refunded:'Refunded',g_tg:'Telegram',g_ex:'Exchanges',g_cr:'Crypto wallets',change:'Change',lastUsed:'Last used',mInstant:'Instant',mAuto:'Credited automatically',minFrom:'from {min}',newBal:'New balance',uniqueNote:"You'll get a unique amount with extra decimals. Send exactly that amount.",prev:'Previous',next:'Next',codesN:'{n} codes'},
+ ar:{api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
+ outOfStock:'غير متوفر',stockN:'{n} متوفر',onlyLeft:'باقي {n} فقط',unlimited:'غير محدود',seats:'{n} مقعد',instant:'تسليم فوري',manual:'تسليم يدوي',invite:'دعوة على الإيميل',from:'يبدأ من',buyFor:'شراء · {p}',confirmFor:'اضغط للتأكيد · {p}',processing:'جاري التنفيذ…',
+ about:'عن المنتج',tiers:'خصم الكمية',tierRow:'{n}+ قطعة',perPc:'/قطعة',duration:'اختر المدة',email:'إيميل حساب ChatGPT',emailHint:'تُرسل الدعوة لهذا الإيميل، ويجب أن يكون مسجلاً على chatgpt.com.',qty:'الكمية',unit:'سعر القطعة',total:'الإجمالي',yourBal:'رصيدك',after:'بعد الشراء',needMore:'ينقصك {p}',addFunds:'شحن الرصيد',days:'{n} يوم',hiddenTag:'مخفي',
+@@ -1424,7 +1424,7 @@
+ joinT:'اشترك في قنواتنا',joinB:'الاشتراك مطلوب لمتابعة استخدام المتجر.',join:'اشتراك',joined:'اشتركت',notYet:'لم تشترك في كل القنوات بعد',channel:'القناة',
+ banned:'حسابك محظور',bannedB:'تواصل مع الدعم إذا كنت تعتقد أن هذا خطأ.',authT:'انتهت الجلسة',authB:'أغلق المتجر وافتحه من جديد من البوت.',close:'إغلاق',noTgT:'افتحه من تيليجرام',noTgB:'هذا المتجر يعمل داخل تيليجرام. افتحه من قائمة البوت.',
+ activity:'النشاط',noActivity:'لا يوجد شيء بعد',translate:'ترجمة',original:'عرض الأصل',translating:'جاري الترجمة…',demo:'معاينة',loading:'جاري التحميل…',retry:'إعادة المحاولة',pcs:'قطعة',
+-e_insufficient_balance:'رصيدك غير كافٍ، ينقصك {p}.',e_out_of_stock:'هذا المنتج غير متوفر حالياً.',e_not_enough_stock:'المتوفر {n} فقط.',e_deposit_pending:'أكمل عملية الدفع الحالية أو ألغها أولاً.',e_busy:'يوجد طلب شراء قيد التنفيذ، انتظر قليلاً.',e_must_join:'اشترك في القنوات المطلوبة أولاً.',e_banned:'حسابك محظور.',e_bad_email:'اكتب إيميلاً صحيحاً.',e_bad_duration:'اختر المدة أولاً.',e_invite_failed:'تعذّر إرسال الدعوة وتم إرجاع رصيدك.',e_supplier_failed:'رفض المورّد الطلب وتم إرجاع رصيدك.',e_purchase_failed:'لم تكتمل عملية الشراء، تحقق من رصيدك وحاول مجدداً.',e_rate_limited:'طلبات كثيرة، حاول بعد دقيقة.',e_auth:'انتهت الجلسة، أعد فتح المتجر.',e_method_unavailable:'طريقة الدفع هذه غير متاحة.',e_amount_range:'اكتب مبلغاً بين {min} و {max}.',e_busy_amount:'لا يوجد مبلغ مميز متاح الآن، جرّب مبلغاً آخر.',e_price_unavailable:'تعذّر جلب سعر العملة، حاول بعد قليل.',e_invoice_failed:'تعذّر إنشاء فاتورة النجوم.',e_server_error:'حدث خطأ، حاول مجدداً.',e_network:'لا يوجد اتصال، تحقق من الإنترنت وحاول مجدداً.',e_not_found:'هذا المنتج لم يعد متاحاً.',e_bad_qty:'اكتب كمية صحيحة.',e_bot_only:'هذا من البوت فقط.',vfT:"فعّل حسابك",vfB:"خطوتين سريعة تحمي المتجر من الحسابات الوهمية.",vfS1:"القنوات والجروبات",vfS2:"تأكيد إنك إنسان",vfS3:"جاهز",vfJoinT:"انضم لقنواتنا وجروباتنا",vfJoinB:"باقي {n} من {t}. انضم لها وبعدين اضغط «تحقق».",vfJoinAll:"كل شي تمام هنا. اضغط «تحقق» وكمّل.",vfKindC:"قناة",vfKindG:"جروب",vfJoined:"منضم",vfJoin:"انضم",vfOpened:"فتحتها",vfCheck:"تحقق",vfChecking:"نتحقق…",vfLeft:"باقي {n} ما انضميت لها",vfHumT:"أكّد إنك إنسان",vfHumB:"اضغط على الإيموجي المطابق.",vfTap:"اضغط على",vfW1:"نفحص الجهاز",vfW2:"نتأكد من تطبيق تيليجرام",vfW3:"نفعّل حسابك",vfDoneT:"كل شي جاهز",vfDoneB:"حسابك مفعّل. تسوّق براحتك.",vfEnter:"ادخل المتجر",vfOpenP:"افتح المنتج",vfOpening:"نفتح لك {p}…",deepGone:"هذا المنتج غير متاح حالياً.",vfPriv:"ما نجمع بيانات شخصية، بس رمز مشفّر للجهاز.",vfFail:"تعذّر التحقق الحين، جرّب مرة ثانية.",vfNoLink:"اطلب الرابط من الدعم",pvVerify:"شوف شاشة تفعيل الإحالة",poSub:"أكوادك وسجل مشترياتك",dvT:"خطوة أخيرة",dvB:"اضغط على الإيموجي المطلوب عشان نتحقق من جهازك. هذا يحمي المتجر من الحسابات الوهمية، وما نجمع أي بيانات شخصية.",dvTap:"اضغط على {e}",dvWrong:"مو هذا — جرّب مرة ثانية",dvWork:"نتحقق من جهازك…",dvOkT:"تم التحقق",dvOkB:"تقدر الحين تستخدم المتجر.",dvEnter:"ادخل المتجر",dvFail:"تعذّر التحقق الحين، حاول مرة ثانية.",e_no_account:'ابدأ البوت أولاً ثم افتح المتجر.',e_deposit_failed:"تعذّر إنشاء عملية الدفع، حاول مجدداً أو اختر طريقة أخرى.",e_deposit_exists:"لديك عملية دفع قيد التنفيذ، أكملها أو ألغها أولاً.",e_unavailable:"غير متاح حالياً، حاول بعد قليل.",e_bad_request:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_too_large:"النص طويل جداً، أرسله على أجزاء.",e_bad_json:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_expired:"انتهت صلاحية الرابط، حاول مجدداً.",e_forbidden:"ليست لديك صلاحية لهذا.",e_no_key:"أنشئ مفتاح API أولاً.",e_no_webhook:"أضف رابط Webhook أولاً.",e_bad_url:"اكتب رابط http(s) صحيح.",e_private_url:"استخدم رابطاً عاماً على الإنترنت (ليس localhost ولا شبكة خاصة).",e_empty:"لم يتم إدخال شيء.",e_bad_amount:"اكتب مبلغاً صحيحاً.",e_bad_price:"اكتب سعراً صحيحاً.",e_bad_vip:"إعداد VIP غير صحيح.",e_cannot_ban:"لا يمكن حظر هذا الحساب.",e_bad_section:"هذا القسم غير متاح.",e_open_failed:"تعذّر فتح هذا القسم، حاول مجدداً.",h_all:'الكل',h_deposit:'الإيداعات',h_purchase:'المشتريات',h_adjust:'التعديلات',opsN:'{n} عملية',details:'التفاصيل',f_type:'النوع',f_method:'الطريقة',f_network:'الشبكة',f_sent:'المبلغ المرسل',f_requested:'المبلغ المطلوب',f_status:'الحالة',completed:'مكتمل',f_date:'التاريخ',f_ref:'المرجع',f_tx:'رقم العملية',f_product:'المنتج',f_note:'ملاحظة',f_after:'الرصيد بعدها',adj_compensation:'تعويض',adj_manual:'شحن يدوي',adj_gift:'هدية',adj_adjustment:'تعديل رصيد',adj_ref_reward:'مكافأة إحالات',adj_ref_clawback:'خصم إحالة طلعت',adj_ref_refund:'رجوع إحالة',adj_deduct:'خصم',refunded:'مسترجع',g_tg:'تيليجرام',g_ex:'المنصات',g_cr:'محافظ الكريبتو',change:'تغيير',lastUsed:'آخر استخدام',mInstant:'فوري',mAuto:'يُضاف تلقائياً',minFrom:'من {min}',newBal:'الرصيد الجديد',uniqueNote:'ستحصل على مبلغ مميز بكسور إضافية، أرسله بالضبط.',prev:'السابق',next:'التالي',codesN:'{n} كود'},
++e_insufficient_balance:'رصيدك غير كافٍ، ينقصك {p}.',e_out_of_stock:'هذا المنتج غير متوفر حالياً.',e_not_enough_stock:'المتوفر {n} فقط.',e_deposit_pending:'أكمل عملية الدفع الحالية أو ألغها أولاً.',e_busy:'يوجد طلب شراء قيد التنفيذ، انتظر قليلاً.',e_renewal_pending:'نتيجة التجديد قيد التحقق. لا تكرر الدفع، وتواصل مع الدعم.',e_must_join:'اشترك في القنوات المطلوبة أولاً.',e_banned:'حسابك محظور.',e_bad_email:'اكتب إيميلاً صحيحاً.',e_bad_duration:'اختر المدة أولاً.',e_invite_failed:'تعذّر إرسال الدعوة وتم إرجاع رصيدك.',e_supplier_failed:'رفض المورّد الطلب وتم إرجاع رصيدك.',e_purchase_failed:'لم تكتمل عملية الشراء، تحقق من رصيدك وحاول مجدداً.',e_rate_limited:'طلبات كثيرة، حاول بعد دقيقة.',e_auth:'انتهت الجلسة، أعد فتح المتجر.',e_method_unavailable:'طريقة الدفع هذه غير متاحة.',e_amount_range:'اكتب مبلغاً بين {min} و {max}.',e_busy_amount:'لا يوجد مبلغ مميز متاح الآن، جرّب مبلغاً آخر.',e_price_unavailable:'تعذّر جلب سعر العملة، حاول بعد قليل.',e_invoice_failed:'تعذّر إنشاء فاتورة النجوم.',e_server_error:'حدث خطأ، حاول مجدداً.',e_network:'لا يوجد اتصال، تحقق من الإنترنت وحاول مجدداً.',e_not_found:'هذا المنتج لم يعد متاحاً.',e_bad_qty:'اكتب كمية صحيحة.',e_bot_only:'هذا من البوت فقط.',vfT:"فعّل حسابك",vfB:"خطوتين سريعة تحمي المتجر من الحسابات الوهمية.",vfS1:"القنوات والجروبات",vfS2:"تأكيد إنك إنسان",vfS3:"جاهز",vfJoinT:"انضم لقنواتنا وجروباتنا",vfJoinB:"باقي {n} من {t}. انضم لها وبعدين اضغط «تحقق».",vfJoinAll:"كل شي تمام هنا. اضغط «تحقق» وكمّل.",vfKindC:"قناة",vfKindG:"جروب",vfJoined:"منضم",vfJoin:"انضم",vfOpened:"فتحتها",vfCheck:"تحقق",vfChecking:"نتحقق…",vfLeft:"باقي {n} ما انضميت لها",vfHumT:"أكّد إنك إنسان",vfHumB:"اضغط على الإيموجي المطابق.",vfTap:"اضغط على",vfW1:"نفحص الجهاز",vfW2:"نتأكد من تطبيق تيليجرام",vfW3:"نفعّل حسابك",vfDoneT:"كل شي جاهز",vfDoneB:"حسابك مفعّل. تسوّق براحتك.",vfEnter:"ادخل المتجر",vfOpenP:"افتح المنتج",vfOpening:"نفتح لك {p}…",deepGone:"هذا المنتج غير متاح حالياً.",vfPriv:"ما نجمع بيانات شخصية، بس رمز مشفّر للجهاز.",vfFail:"تعذّر التحقق الحين، جرّب مرة ثانية.",vfNoLink:"اطلب الرابط من الدعم",pvVerify:"شوف شاشة تفعيل الإحالة",poSub:"أكوادك وسجل مشترياتك",dvT:"خطوة أخيرة",dvB:"اضغط على الإيموجي المطلوب عشان نتحقق من جهازك. هذا يحمي المتجر من الحسابات الوهمية، وما نجمع أي بيانات شخصية.",dvTap:"اضغط على {e}",dvWrong:"مو هذا — جرّب مرة ثانية",dvWork:"نتحقق من جهازك…",dvOkT:"تم التحقق",dvOkB:"تقدر الحين تستخدم المتجر.",dvEnter:"ادخل المتجر",dvFail:"تعذّر التحقق الحين، حاول مرة ثانية.",e_no_account:'ابدأ البوت أولاً ثم افتح المتجر.',e_deposit_failed:"تعذّر إنشاء عملية الدفع، حاول مجدداً أو اختر طريقة أخرى.",e_deposit_exists:"لديك عملية دفع قيد التنفيذ، أكملها أو ألغها أولاً.",e_unavailable:"غير متاح حالياً، حاول بعد قليل.",e_bad_request:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_too_large:"النص طويل جداً، أرسله على أجزاء.",e_bad_json:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_expired:"انتهت صلاحية الرابط، حاول مجدداً.",e_forbidden:"ليست لديك صلاحية لهذا.",e_no_key:"أنشئ مفتاح API أولاً.",e_no_webhook:"أضف رابط Webhook أولاً.",e_bad_url:"اكتب رابط http(s) صحيح.",e_private_url:"استخدم رابطاً عاماً على الإنترنت (ليس localhost ولا شبكة خاصة).",e_empty:"لم يتم إدخال شيء.",e_bad_amount:"اكتب مبلغاً صحيحاً.",e_bad_price:"اكتب سعراً صحيحاً.",e_bad_vip:"إعداد VIP غير صحيح.",e_cannot_ban:"لا يمكن حظر هذا الحساب.",e_bad_section:"هذا القسم غير متاح.",e_open_failed:"تعذّر فتح هذا القسم، حاول مجدداً.",h_all:'الكل',h_deposit:'الإيداعات',h_purchase:'المشتريات',h_adjust:'التعديلات',opsN:'{n} عملية',details:'التفاصيل',f_type:'النوع',f_method:'الطريقة',f_network:'الشبكة',f_sent:'المبلغ المرسل',f_requested:'المبلغ المطلوب',f_status:'الحالة',completed:'مكتمل',f_date:'التاريخ',f_ref:'المرجع',f_tx:'رقم العملية',f_product:'المنتج',f_note:'ملاحظة',f_after:'الرصيد بعدها',adj_compensation:'تعويض',adj_manual:'شحن يدوي',adj_gift:'هدية',adj_adjustment:'تعديل رصيد',adj_ref_reward:'مكافأة إحالات',adj_ref_clawback:'خصم إحالة طلعت',adj_ref_refund:'رجوع إحالة',adj_deduct:'خصم',refunded:'مسترجع',g_tg:'تيليجرام',g_ex:'المنصات',g_cr:'محافظ الكريبتو',change:'تغيير',lastUsed:'آخر استخدام',mInstant:'فوري',mAuto:'يُضاف تلقائياً',minFrom:'من {min}',newBal:'الرصيد الجديد',uniqueNote:'ستحصل على مبلغ مميز بكسور إضافية، أرسله بالضبط.',prev:'السابق',next:'التالي',codesN:'{n} كود'},
+ ru:{api:'API',orderId:"Номер заказа",vipTier:"VIP-уровень",vipNone:"Пока без уровня",vipOff:"скидка {r}",vipNet:"Чистые пополнения",vipNext:"Пополните ещё на {p}, чтобы получить VIP {n} (скидка {r})",vipMax:"У вас максимальный уровень",vipAll:"Все уровни",vipTitle:"VIP-программа",vipHow1:"Чем больше пополнений, тем выше уровень и больше скидка на выбранные товары.",vipHow2:"Учитываются только реальные пополнения. Подарки не считаются, списания и возвраты вычитаются.",vipProducts:"Товаров со скидкой VIP: {n}",vipYou:"Вы",vipSave:"VIP {n} · −{p}%",pvTitle:"Только предпросмотр",pvShort:"— не подключён к вашему боту. Покупки, пополнения и API здесь имитируются, ничего не списывается.",pvHow:"Как подключить",pvSim:"Предпросмотр: это имитация — ничего не списано и настоящий код не отправлен. В боте всё по-настоящему.",pvHowT:"Это предпросмотр — как сделать по-настоящему",pvHere:"Здесь (предпросмотр)",pvBot:"В вашем боте (реально)",pvR1:"Покупка",pvR1a:"Имитация, без списания",pvR1b:"Списывает баланс и присылает код в чат",pvR2:"Пополнение",pvR2a:"Пример адреса",pvR2b:"Настоящие адреса и счета бота, подтверждение автоматически",pvR3:"API",pvR3a:"Пример ключа",pvR3b:"Ваш настоящий ключ к API бота",pvR4:"Канал логов",pvR4a:"Ничего не отправляется",pvR4b:"Каждый заказ с пометкой «Via: Mini App»",pvStepsT:"Шаги",pvS1:"Загрузите новый bot.py и папку webapp рядом с ним туда, где сейчас работает бот (GitHub → Render).",pvS2:"При запуске бот сам поставит кнопку «Store» во всех чатах и пришлёт вам сообщение с кнопкой магазина.",pvS3:"Откройте бота в Telegram и нажмите Store рядом с полем ввода.",pvS4:"Отправьте боту /miniapp — придёт полный отчёт проверки.",pvWarn:"Не вставляйте ссылку claude.ai в BotFather — это личный предпросмотр, доступный только вам, и он не подключён к боту.",linked:"Подключено к боту",notLinked:"Предпросмотр — не подключено",autoTr:'Переведено автоматически',emailInvite:'Ваш email для приглашения',emailHintManual:'Укажите email для приглашения — он сразу уйдёт администраторам вместе с заказом.',emailSent:'Ваш email отправлен администраторам:',addrPreview:'Ваш настоящий адрес появится здесь в боте',premiumId:'ID премиум-эмодзи',demoNoteEmoji:'Премиум-эмодзи появятся здесь после загрузки из Telegram.',demoNoteReal:'Ваши настоящие товары, цены и остатки из базы данных ({d}). Реальные покупки и пополнения — внутри бота.',demoNote:'Это демо-товары для предпросмотра дизайна. Ваши настоящие товары, цены и остатки появятся, когда вы откроете магазин из бота в Telegram.',store:'Магазин',orders:'Заказы',balance:'Баланс',profile:'Профиль',hello:'Привет, {n}',helloSub:'Что берём сегодня?',search:'Поиск товаров',all:'Все',other:'Другое',inStock:'В наличии',sortRec:'A → Z',sortLow:'Цена ↑',sortHigh:'Цена ↓',products:'Товаров: {n}',noMatch:'Ничего не найдено',srDym:'Возможно, вы имели в виду:',srFixed:'Нет результатов для «{q}» — показаны «{c}»',srNoStock:'Сейчас нет в наличии — отключите «В наличии», чтобы увидеть всё.',noMatchBody:'Попробуйте другое слово или сбросьте фильтры.',clear:'Сбросить фильтры',
+ outOfStock:'Нет в наличии',stockN:'В наличии: {n}',onlyLeft:'Осталось {n}',unlimited:'Без ограничений',seats:'Мест: {n}',instant:'Мгновенная выдача',manual:'Ручная выдача',invite:'Приглашение на email',from:'от',buyFor:'Купить · {p}',confirmFor:'Нажмите ещё раз · {p}',processing:'Обработка…',
+ about:'О товаре',tiers:'Скидка за количество',tierRow:'от {n} шт.',perPc:'/шт.',duration:'Выберите тариф',email:'Email аккаунта ChatGPT',emailHint:'Приглашение придёт на этот email. Он должен быть зарегистрирован на chatgpt.com.',qty:'Количество',unit:'Цена за шт.',total:'Итого',yourBal:'Ваш баланс',after:'После покупки',needMore:'Не хватает {p}',addFunds:'Пополнить',days:'{n} дн.',hiddenTag:'Скрыт',
+@@ -1439,7 +1439,7 @@
+ joinT:'Подпишитесь на каналы',joinB:'Подписка нужна, чтобы пользоваться магазином.',join:'Подписаться',joined:'Я подписался',notYet:'Вы подписались не на все каналы',channel:'Канал',
+ banned:'Аккаунт заблокирован',bannedB:'Напишите в поддержку, если считаете это ошибкой.',authT:'Сессия истекла',authB:'Закройте магазин и откройте его снова из бота.',close:'Закрыть',noTgT:'Откройте в Telegram',noTgB:'Магазин работает внутри Telegram. Откройте его из меню бота.',
+ activity:'Активность',noActivity:'Пока пусто',translate:'Перевести',original:'Оригинал',translating:'Перевод…',demo:'Демо',loading:'Загрузка…',retry:'Повторить',pcs:'шт.',
+-e_insufficient_balance:'Недостаточно средств. Не хватает {p}.',e_out_of_stock:'Товара нет в наличии.',e_not_enough_stock:'Доступно только {n}.',e_deposit_pending:'Сначала завершите или отмените текущую оплату.',e_busy:'Другая покупка ещё обрабатывается. Подождите.',e_must_join:'Сначала подпишитесь на каналы.',e_banned:'Аккаунт заблокирован.',e_bad_email:'Введите корректный email.',e_bad_duration:'Сначала выберите тариф.',e_invite_failed:'Не удалось отправить приглашение. Средства возвращены.',e_supplier_failed:'Поставщик отклонил заказ. Средства возвращены.',e_purchase_failed:'Покупка не прошла. Проверьте баланс и попробуйте снова.',e_rate_limited:'Слишком много запросов. Попробуйте через минуту.',e_auth:'Сессия истекла. Откройте магазин заново.',e_method_unavailable:'Этот способ оплаты недоступен.',e_amount_range:'Введите сумму от {min} до {max}.',e_busy_amount:'Сейчас нет свободной уникальной суммы. Попробуйте другую.',e_price_unavailable:'Не удалось получить курс. Попробуйте позже.',e_invoice_failed:'Не удалось создать счёт в звёздах.',e_server_error:'Что-то пошло не так. Попробуйте снова.',e_network:'Нет соединения. Проверьте интернет.',e_not_found:'Товар больше недоступен.',e_bad_qty:'Введите корректное количество.',e_bot_only:'Это настраивается только в боте.',vfT:"Активируйте аккаунт",vfB:"Два быстрых шага защищают магазин от фейковых аккаунтов.",vfS1:"Каналы и группы",vfS2:"Проверка",vfS3:"Готово",vfJoinT:"Вступите в наши каналы и группы",vfJoinB:"Осталось {n} из {t}. Вступите и нажмите «Проверить».",vfJoinAll:"Здесь всё готово. Нажмите «Проверить».",vfKindC:"Канал",vfKindG:"Группа",vfJoined:"Вы участник",vfJoin:"Вступить",vfOpened:"Открыто",vfCheck:"Проверить",vfChecking:"Проверяем…",vfLeft:"Ещё {n} — вы не вступили",vfHumT:"Подтвердите, что вы человек",vfHumB:"Нажмите на такой же эмодзи.",vfTap:"Нажмите",vfW1:"Проверяем устройство",vfW2:"Проверяем приложение Telegram",vfW3:"Активируем аккаунт",vfDoneT:"Всё готово",vfDoneB:"Аккаунт активен. Приятных покупок.",vfEnter:"В магазин",vfOpenP:"Открыть товар",vfOpening:"Открываем {p}…",deepGone:"Этот товар сейчас недоступен.",vfPriv:"Личные данные не собираются — только зашифрованный код устройства.",vfFail:"Не удалось проверить. Попробуйте ещё раз.",vfNoLink:"Спросите поддержку",pvVerify:"Экран активации реферала",poSub:"Коды и история покупок",dvT:"Последний шаг",dvB:"Нажмите нужный эмодзи, чтобы подтвердить устройство. Это защищает магазин от фейковых аккаунтов — личные данные не собираются.",dvTap:"Нажмите {e}",dvWrong:"Не тот — попробуйте ещё раз",dvWork:"Проверяем устройство…",dvOkT:"Готово",dvOkB:"Теперь можно пользоваться магазином.",dvEnter:"В магазин",dvFail:"Не удалось проверить. Попробуйте снова.",e_no_account:'Сначала запустите бота, затем откройте магазин.',e_deposit_failed:"Не удалось создать платёж. Попробуйте снова или выберите другой способ.",e_deposit_exists:"У вас уже есть незавершённый платёж. Завершите или отмените его.",e_unavailable:"Сейчас недоступно. Попробуйте чуть позже.",e_bad_request:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_too_large:"Слишком много текста за раз. Отправьте частями.",e_bad_json:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_expired:"Срок действия ссылки истёк. Попробуйте снова.",e_forbidden:"Недостаточно прав.",e_no_key:"Сначала создайте API-ключ.",e_no_webhook:"Сначала укажите URL вебхука.",e_bad_url:"Введите корректный http(s) URL.",e_private_url:"Используйте публичный адрес (не localhost и не частную сеть).",e_empty:"Ничего не введено.",e_bad_amount:"Введите корректную сумму.",e_bad_price:"Введите корректную цену.",e_bad_vip:"Неверная настройка VIP.",e_cannot_ban:"Этот аккаунт нельзя заблокировать.",e_bad_section:"Раздел недоступен.",e_open_failed:"Не удалось открыть раздел. Попробуйте снова.",h_all:'Все',h_deposit:'Пополнения',h_purchase:'Покупки',h_adjust:'Корректировки',opsN:'Операций: {n}',details:'Подробности',f_type:'Тип',f_method:'Способ',f_network:'Сеть',f_sent:'Отправлено',f_requested:'Запрошено',f_status:'Статус',completed:'Выполнено',f_date:'Дата',f_ref:'Номер',f_tx:'ID транзакции',f_product:'Товар',f_note:'Комментарий',f_after:'Баланс после',adj_compensation:'Компенсация',adj_manual:'Ручное пополнение',adj_gift:'Подарок',adj_adjustment:'Корректировка',adj_ref_reward:'Бонус за рефералов',adj_ref_clawback:'Списание за ушедшего реферала',adj_ref_refund:'Реферал вернулся',adj_deduct:'Списание',refunded:'Возврат',g_tg:'Telegram',g_ex:'Биржи',g_cr:'Криптокошельки',change:'Изменить',lastUsed:'Недавний',mInstant:'Мгновенно',mAuto:'Зачисляется автоматически',minFrom:'от {min}',newBal:'Новый баланс',uniqueNote:'Вы получите уникальную сумму с доп. знаками после запятой. Отправьте её точно.',prev:'Назад',next:'Далее',codesN:'Кодов: {n}'},
++e_insufficient_balance:'Недостаточно средств. Не хватает {p}.',e_out_of_stock:'Товара нет в наличии.',e_not_enough_stock:'Доступно только {n}.',e_deposit_pending:'Сначала завершите или отмените текущую оплату.',e_busy:'Другая покупка ещё обрабатывается. Подождите.',e_renewal_pending:'Продление проверяется. Не платите повторно; обратитесь в поддержку.',e_must_join:'Сначала подпишитесь на каналы.',e_banned:'Аккаунт заблокирован.',e_bad_email:'Введите корректный email.',e_bad_duration:'Сначала выберите тариф.',e_invite_failed:'Не удалось отправить приглашение. Средства возвращены.',e_supplier_failed:'Поставщик отклонил заказ. Средства возвращены.',e_purchase_failed:'Покупка не прошла. Проверьте баланс и попробуйте снова.',e_rate_limited:'Слишком много запросов. Попробуйте через минуту.',e_auth:'Сессия истекла. Откройте магазин заново.',e_method_unavailable:'Этот способ оплаты недоступен.',e_amount_range:'Введите сумму от {min} до {max}.',e_busy_amount:'Сейчас нет свободной уникальной суммы. Попробуйте другую.',e_price_unavailable:'Не удалось получить курс. Попробуйте позже.',e_invoice_failed:'Не удалось создать счёт в звёздах.',e_server_error:'Что-то пошло не так. Попробуйте снова.',e_network:'Нет соединения. Проверьте интернет.',e_not_found:'Товар больше недоступен.',e_bad_qty:'Введите корректное количество.',e_bot_only:'Это настраивается только в боте.',vfT:"Активируйте аккаунт",vfB:"Два быстрых шага защищают магазин от фейковых аккаунтов.",vfS1:"Каналы и группы",vfS2:"Проверка",vfS3:"Готово",vfJoinT:"Вступите в наши каналы и группы",vfJoinB:"Осталось {n} из {t}. Вступите и нажмите «Проверить».",vfJoinAll:"Здесь всё готово. Нажмите «Проверить».",vfKindC:"Канал",vfKindG:"Группа",vfJoined:"Вы участник",vfJoin:"Вступить",vfOpened:"Открыто",vfCheck:"Проверить",vfChecking:"Проверяем…",vfLeft:"Ещё {n} — вы не вступили",vfHumT:"Подтвердите, что вы человек",vfHumB:"Нажмите на такой же эмодзи.",vfTap:"Нажмите",vfW1:"Проверяем устройство",vfW2:"Проверяем приложение Telegram",vfW3:"Активируем аккаунт",vfDoneT:"Всё готово",vfDoneB:"Аккаунт активен. Приятных покупок.",vfEnter:"В магазин",vfOpenP:"Открыть товар",vfOpening:"Открываем {p}…",deepGone:"Этот товар сейчас недоступен.",vfPriv:"Личные данные не собираются — только зашифрованный код устройства.",vfFail:"Не удалось проверить. Попробуйте ещё раз.",vfNoLink:"Спросите поддержку",pvVerify:"Экран активации реферала",poSub:"Коды и история покупок",dvT:"Последний шаг",dvB:"Нажмите нужный эмодзи, чтобы подтвердить устройство. Это защищает магазин от фейковых аккаунтов — личные данные не собираются.",dvTap:"Нажмите {e}",dvWrong:"Не тот — попробуйте ещё раз",dvWork:"Проверяем устройство…",dvOkT:"Готово",dvOkB:"Теперь можно пользоваться магазином.",dvEnter:"В магазин",dvFail:"Не удалось проверить. Попробуйте снова.",e_no_account:'Сначала запустите бота, затем откройте магазин.',e_deposit_failed:"Не удалось создать платёж. Попробуйте снова или выберите другой способ.",e_deposit_exists:"У вас уже есть незавершённый платёж. Завершите или отмените его.",e_unavailable:"Сейчас недоступно. Попробуйте чуть позже.",e_bad_request:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_too_large:"Слишком много текста за раз. Отправьте частями.",e_bad_json:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_expired:"Срок действия ссылки истёк. Попробуйте снова.",e_forbidden:"Недостаточно прав.",e_no_key:"Сначала создайте API-ключ.",e_no_webhook:"Сначала укажите URL вебхука.",e_bad_url:"Введите корректный http(s) URL.",e_private_url:"Используйте публичный адрес (не localhost и не частную сеть).",e_empty:"Ничего не введено.",e_bad_amount:"Введите корректную сумму.",e_bad_price:"Введите корректную цену.",e_bad_vip:"Неверная настройка VIP.",e_cannot_ban:"Этот аккаунт нельзя заблокировать.",e_bad_section:"Раздел недоступен.",e_open_failed:"Не удалось открыть раздел. Попробуйте снова.",h_all:'Все',h_deposit:'Пополнения',h_purchase:'Покупки',h_adjust:'Корректировки',opsN:'Операций: {n}',details:'Подробности',f_type:'Тип',f_method:'Способ',f_network:'Сеть',f_sent:'Отправлено',f_requested:'Запрошено',f_status:'Статус',completed:'Выполнено',f_date:'Дата',f_ref:'Номер',f_tx:'ID транзакции',f_product:'Товар',f_note:'Комментарий',f_after:'Баланс после',adj_compensation:'Компенсация',adj_manual:'Ручное пополнение',adj_gift:'Подарок',adj_adjustment:'Корректировка',adj_ref_reward:'Бонус за рефералов',adj_ref_clawback:'Списание за ушедшего реферала',adj_ref_refund:'Реферал вернулся',adj_deduct:'Списание',refunded:'Возврат',g_tg:'Telegram',g_ex:'Биржи',g_cr:'Криптокошельки',change:'Изменить',lastUsed:'Недавний',mInstant:'Мгновенно',mAuto:'Зачисляется автоматически',minFrom:'от {min}',newBal:'Новый баланс',uniqueNote:'Вы получите уникальную сумму с доп. знаками после запятой. Отправьте её точно.',prev:'Назад',next:'Далее',codesN:'Кодов: {n}'},
+ zh:{api:'API',orderId:"订单号",vipTier:"VIP 等级",vipNone:"暂无等级",vipOff:"优惠 {r}",vipNet:"净充值",vipNext:"再充值 {p} 即可升至 VIP {n}（优惠 {r}）",vipMax:"你已达到最高等级",vipAll:"全部等级",vipTitle:"VIP 计划",vipHow1:"充值越多，等级越高，指定商品的折扣越大。",vipHow2:"只计算真实充值。赠送不计入，扣款或退款会被扣除。",vipProducts:"{n} 件商品享 VIP 折扣",vipYou:"你",vipSave:"VIP {n} · −{p}%",pvTitle:"仅为预览",pvShort:"——未连接你的机器人。这里的购买、充值和 API 都是模拟的，不会扣费。",pvHow:"如何连接",pvSim:"预览：这是模拟结果——没有扣费，也没有发送真实卡密。在你的机器人里是真实的。",pvHowT:"这是预览——如何变成真实的",pvHere:"这里（预览）",pvBot:"在你的机器人里（真实）",pvR1:"购买",pvR1a:"模拟，不扣费",pvR1b:"扣除余额并在聊天中发送卡密",pvR2:"充值",pvR2a:"示例地址",pvR2b:"机器人的真实地址和账单，自动确认",pvR3:"API",pvR3a:"示例密钥",pvR3b:"你在机器人 API 上的真实密钥",pvR4:"日志频道",pvR4a:"不发送任何内容",pvR4b:"每笔订单都会标注 “Via: Mini App”",pvStepsT:"步骤",pvS1:"把新的 bot.py 和旁边的 webapp 文件夹上传到机器人现在运行的地方（GitHub → Render）。",pvS2:"机器人启动后会在所有聊天中自动设置 “Store” 按钮，并给你发一条带打开商店按钮的消息。",pvS3:"在 Telegram 打开你的机器人，点输入框旁边的 Store。",pvS4:"给机器人发送 /miniapp，查看完整检查报告。",pvWarn:"不要把 claude.ai 链接填到 BotFather——那是只有你能打开的私人预览，并未连接你的机器人。",linked:"已连接你的机器人",notLinked:"预览——未连接",autoTr:'已自动翻译',emailInvite:'接收邀请的邮箱',emailHintManual:'填写接收邀请的邮箱——会随订单直接发送给管理员。',emailSent:'你的邮箱已发送给管理员：',addrPreview:'你的真实地址会在机器人内显示',premiumId:'高级表情 ID',demoNoteEmoji:'高级表情从 Telegram 获取后会显示在这里。',demoNoteReal:'来自你数据库的真实商品、价格和库存（{d}）。真实购买和充值在你的机器人内完成。',demoNote:'这些是用于预览设计的示例商品。在 Telegram 中从你的机器人打开商店时，会显示你真实的商品、价格和库存。',store:'商店',orders:'订单',balance:'余额',profile:'我的',hello:'你好，{n}',helloSub:'今天想买点什么？',search:'搜索商品',all:'全部',other:'其他',inStock:'有货',sortRec:'A → Z',sortLow:'价格 ↑',sortHigh:'价格 ↓',products:'{n} 件商品',noMatch:'没有找到相关商品',srDym:'你是不是要找：',srFixed:'没有找到“{q}”，显示“{c}”的结果',srNoStock:'目前没有该名称的有货商品 — 关闭“有货”查看全部。',noMatchBody:'换个关键词或清除筛选。',clear:'清除筛选',
+ outOfStock:'缺货',stockN:'库存 {n}',onlyLeft:'仅剩 {n}',unlimited:'不限量',seats:'{n} 个席位',instant:'即时发货',manual:'人工发货',invite:'邮箱邀请',from:'起',buyFor:'购买 · {p}',confirmFor:'再次点击确认 · {p}',processing:'处理中…',
+ about:'商品介绍',tiers:'批量折扣',tierRow:'{n} 件起',perPc:'/件',duration:'选择套餐',email:'ChatGPT 账号邮箱',emailHint:'邀请将发送到该邮箱，需已在 chatgpt.com 注册。',qty:'数量',unit:'单价',total:'合计',yourBal:'你的余额',after:'购买后',needMore:'还差 {p}',addFunds:'充值',days:'{n} 天',hiddenTag:'已隐藏',
+@@ -1454,7 +1454,7 @@
+ joinT:'请关注我们的频道',joinB:'关注后才能继续使用商店。',join:'关注',joined:'我已关注',notYet:'你还没有关注全部频道',channel:'频道',
+ banned:'账号已被封禁',bannedB:'如有疑问请联系客服。',authT:'会话已过期',authB:'请关闭商店并从机器人重新打开。',close:'关闭',noTgT:'请在 Telegram 中打开',noTgB:'本商店在 Telegram 内运行，请从机器人菜单打开。',
+ activity:'动态',noActivity:'暂无内容',translate:'翻译',original:'查看原文',translating:'翻译中…',demo:'演示',loading:'加载中…',retry:'重试',pcs:'件',
+-e_insufficient_balance:'余额不足，还差 {p}。',e_out_of_stock:'该商品已缺货。',e_not_enough_stock:'仅剩 {n} 件。',e_deposit_pending:'请先完成或取消当前支付。',e_busy:'另一笔购买正在处理，请稍候。',e_must_join:'请先关注指定频道。',e_banned:'账号已被封禁。',e_bad_email:'请输入有效的邮箱。',e_bad_duration:'请先选择套餐。',e_invite_failed:'邀请发送失败，余额已退回。',e_supplier_failed:'供应商拒绝了订单，余额已退回。',e_purchase_failed:'购买未完成，请检查余额后重试。',e_rate_limited:'请求过于频繁，请一分钟后再试。',e_auth:'会话已过期，请重新打开商店。',e_method_unavailable:'该支付方式不可用。',e_amount_range:'请输入 {min} 到 {max} 之间的金额。',e_busy_amount:'暂无可用的唯一金额，请换个金额。',e_price_unavailable:'无法获取币价，请稍后再试。',e_invoice_failed:'无法创建星星账单。',e_server_error:'出错了，请重试。',e_network:'网络连接失败，请检查网络。',e_not_found:'该商品已下架。',e_bad_qty:'请输入有效的数量。',e_bot_only:'此功能仅在机器人内使用。',vfT:"激活你的账号",vfB:"两步快速验证，保护商店免受虚假账号。",vfS1:"频道和群组",vfS2:"真人验证",vfS3:"完成",vfJoinT:"加入我们的频道和群组",vfJoinB:"还剩 {n}/{t} 个。加入后点“检查”。",vfJoinAll:"这里都好了，点“检查”继续。",vfKindC:"频道",vfKindG:"群组",vfJoined:"已加入",vfJoin:"加入",vfOpened:"已打开",vfCheck:"检查",vfChecking:"检查中…",vfLeft:"还有 {n} 个未加入",vfHumT:"确认你是真人",vfHumB:"点击相同的表情。",vfTap:"请点击",vfW1:"正在检查设备",vfW2:"正在确认 Telegram 应用",vfW3:"正在激活账号",vfDoneT:"一切就绪",vfDoneB:"账号已激活，祝购物愉快。",vfEnter:"进入商店",vfOpenP:"打开商品",vfOpening:"正在为你打开 {p}…",deepGone:"该商品暂时不可用。",vfPriv:"我们不收集个人信息，只保存加密的设备代码。",vfFail:"暂时无法检查，请重试。",vfNoLink:"联系客服获取链接",pvVerify:"查看推荐激活页面",poSub:"卡密和购买记录",dvT:"最后一步",dvB:"点击对应的表情来验证您的设备。这可以防止虚假账号，我们不会收集个人信息。",dvTap:"请点击 {e}",dvWrong:"不是这个，请再试一次",dvWork:"正在验证设备…",dvOkT:"验证成功",dvOkB:"现在可以使用商店了。",dvEnter:"进入商店",dvFail:"暂时无法验证，请重试。",e_no_account:'请先启动机器人，再打开商店。',e_deposit_failed:"无法创建支付，请重试或选择其他方式。",e_deposit_exists:"你有一笔支付正在进行，请先完成或取消。",e_unavailable:"暂时不可用，请稍后再试。",e_bad_request:"请求有误，请刷新后重试。",e_too_large:"内容太长，请分几次发送。",e_bad_json:"请求有误，请刷新后重试。",e_expired:"链接已过期，请重试。",e_forbidden:"你没有权限执行此操作。",e_no_key:"请先生成 API 密钥。",e_no_webhook:"请先设置 Webhook 地址。",e_bad_url:"请输入有效的 http(s) 地址。",e_private_url:"请使用公网地址（不能是 localhost 或内网）。",e_empty:"没有输入内容。",e_bad_amount:"请输入有效金额。",e_bad_price:"请输入有效价格。",e_bad_vip:"VIP 设置无效。",e_cannot_ban:"无法封禁此账号。",e_bad_section:"此栏目不可用。",e_open_failed:"无法打开此栏目，请重试。",h_all:'全部',h_deposit:'充值',h_purchase:'购买',h_adjust:'调整',opsN:'共 {n} 笔',details:'详情',f_type:'类型',f_method:'方式',f_network:'网络',f_sent:'实付金额',f_requested:'申请金额',f_status:'状态',completed:'已完成',f_date:'时间',f_ref:'编号',f_tx:'交易 ID',f_product:'商品',f_note:'备注',f_after:'变动后余额',adj_compensation:'补偿',adj_manual:'人工充值',adj_gift:'赠送',adj_adjustment:'余额调整',adj_ref_reward:'推荐奖励',adj_ref_clawback:'推荐用户退出扣回',adj_ref_refund:'推荐用户回归',adj_deduct:'扣除',refunded:'已退款',g_tg:'Telegram',g_ex:'交易所',g_cr:'加密钱包',change:'更换',lastUsed:'最近使用',mInstant:'即时到账',mAuto:'自动入账',minFrom:'{min} 起',newBal:'新余额',uniqueNote:'系统会生成带额外小数位的唯一金额，请准确转账。',prev:'上一页',next:'下一页',codesN:'{n} 个卡密'}
++e_insufficient_balance:'余额不足，还差 {p}。',e_out_of_stock:'该商品已缺货。',e_not_enough_stock:'仅剩 {n} 件。',e_deposit_pending:'请先完成或取消当前支付。',e_busy:'另一笔购买正在处理，请稍候。',e_renewal_pending:'续期正在核实。请勿再次付款，请联系支持。',e_must_join:'请先关注指定频道。',e_banned:'账号已被封禁。',e_bad_email:'请输入有效的邮箱。',e_bad_duration:'请先选择套餐。',e_invite_failed:'邀请发送失败，余额已退回。',e_supplier_failed:'供应商拒绝了订单，余额已退回。',e_purchase_failed:'购买未完成，请检查余额后重试。',e_rate_limited:'请求过于频繁，请一分钟后再试。',e_auth:'会话已过期，请重新打开商店。',e_method_unavailable:'该支付方式不可用。',e_amount_range:'请输入 {min} 到 {max} 之间的金额。',e_busy_amount:'暂无可用的唯一金额，请换个金额。',e_price_unavailable:'无法获取币价，请稍后再试。',e_invoice_failed:'无法创建星星账单。',e_server_error:'出错了，请重试。',e_network:'网络连接失败，请检查网络。',e_not_found:'该商品已下架。',e_bad_qty:'请输入有效的数量。',e_bot_only:'此功能仅在机器人内使用。',vfT:"激活你的账号",vfB:"两步快速验证，保护商店免受虚假账号。",vfS1:"频道和群组",vfS2:"真人验证",vfS3:"完成",vfJoinT:"加入我们的频道和群组",vfJoinB:"还剩 {n}/{t} 个。加入后点“检查”。",vfJoinAll:"这里都好了，点“检查”继续。",vfKindC:"频道",vfKindG:"群组",vfJoined:"已加入",vfJoin:"加入",vfOpened:"已打开",vfCheck:"检查",vfChecking:"检查中…",vfLeft:"还有 {n} 个未加入",vfHumT:"确认你是真人",vfHumB:"点击相同的表情。",vfTap:"请点击",vfW1:"正在检查设备",vfW2:"正在确认 Telegram 应用",vfW3:"正在激活账号",vfDoneT:"一切就绪",vfDoneB:"账号已激活，祝购物愉快。",vfEnter:"进入商店",vfOpenP:"打开商品",vfOpening:"正在为你打开 {p}…",deepGone:"该商品暂时不可用。",vfPriv:"我们不收集个人信息，只保存加密的设备代码。",vfFail:"暂时无法检查，请重试。",vfNoLink:"联系客服获取链接",pvVerify:"查看推荐激活页面",poSub:"卡密和购买记录",dvT:"最后一步",dvB:"点击对应的表情来验证您的设备。这可以防止虚假账号，我们不会收集个人信息。",dvTap:"请点击 {e}",dvWrong:"不是这个，请再试一次",dvWork:"正在验证设备…",dvOkT:"验证成功",dvOkB:"现在可以使用商店了。",dvEnter:"进入商店",dvFail:"暂时无法验证，请重试。",e_no_account:'请先启动机器人，再打开商店。',e_deposit_failed:"无法创建支付，请重试或选择其他方式。",e_deposit_exists:"你有一笔支付正在进行，请先完成或取消。",e_unavailable:"暂时不可用，请稍后再试。",e_bad_request:"请求有误，请刷新后重试。",e_too_large:"内容太长，请分几次发送。",e_bad_json:"请求有误，请刷新后重试。",e_expired:"链接已过期，请重试。",e_forbidden:"你没有权限执行此操作。",e_no_key:"请先生成 API 密钥。",e_no_webhook:"请先设置 Webhook 地址。",e_bad_url:"请输入有效的 http(s) 地址。",e_private_url:"请使用公网地址（不能是 localhost 或内网）。",e_empty:"没有输入内容。",e_bad_amount:"请输入有效金额。",e_bad_price:"请输入有效价格。",e_bad_vip:"VIP 设置无效。",e_cannot_ban:"无法封禁此账号。",e_bad_section:"此栏目不可用。",e_open_failed:"无法打开此栏目，请重试。",h_all:'全部',h_deposit:'充值',h_purchase:'购买',h_adjust:'调整',opsN:'共 {n} 笔',details:'详情',f_type:'类型',f_method:'方式',f_network:'网络',f_sent:'实付金额',f_requested:'申请金额',f_status:'状态',completed:'已完成',f_date:'时间',f_ref:'编号',f_tx:'交易 ID',f_product:'商品',f_note:'备注',f_after:'变动后余额',adj_compensation:'补偿',adj_manual:'人工充值',adj_gift:'赠送',adj_adjustment:'余额调整',adj_ref_reward:'推荐奖励',adj_ref_clawback:'推荐用户退出扣回',adj_ref_refund:'推荐用户回归',adj_deduct:'扣除',refunded:'已退款',g_tg:'Telegram',g_ex:'交易所',g_cr:'加密钱包',change:'更换',lastUsed:'最近使用',mInstant:'即时到账',mAuto:'自动入账',minFrom:'{min} 起',newBal:'新余额',uniqueNote:'系统会生成带额外小数位的唯一金额，请准确转账。',prev:'上一页',next:'下一页',codesN:'{n} 个卡密'}
+ };
+ const LANGS = [['ar','AR'],['en','EN'],['ru','RU'],['zh','中']];
+ let LANG = 'en';
+--- before/verification/harness.py
++++ after/verification/harness.py
+@@ -39,7 +39,8 @@
+          patch.object(threading.Thread,'start',return_value=None), \
+          patch.object(requests.sessions.Session,'request',side_effect=offline), \
+          patch.object(curl_cffi.requests,'get',side_effect=offline), \
+-         patch.object(curl_cffi.requests,'post',side_effect=offline):
++         patch.object(curl_cffi.requests,'post',side_effect=offline), \
++         patch.object(curl_cffi.requests,'delete',side_effect=offline):
+         spec.loader.exec_module(m)
+     m._API_READY.set()
+     m._VC_ORIG['send_message'] = reply
+--- before/verification/test_integration.py
++++ after/verification/test_integration.py
+@@ -45,6 +45,7 @@
+     monkeypatch.setattr(requests.sessions.Session,'request',offline)
+     monkeypatch.setattr(mod.cffi_requests,'get',offline)
+     monkeypatch.setattr(mod.cffi_requests,'post',offline)
++    monkeypatch.setattr(mod.cffi_requests,'delete',offline)
+     monkeypatch.setattr(mod,'get_ton_price_usd',lambda:5.)
+     monkeypatch.setattr(mod,'get_ltc_price_usd',lambda:100.)
+     monkeypatch.setattr(mod,'bybit_is_configured',lambda:True)
+--- before/verification/results.json
++++ after/verification/results.json
+@@ -1,14 +1,22 @@
+ {
+-  "date": "2026-10-19",
++  "revision": "20 + reliability fixes (round 21)",
++  "verified_at": "2026-10-19T19:59:11.685127+00:00",
+   "python": "3.12.14",
+-  "http_and_business_tests": {
+-    "passed": 183,
+-    "failed": 0
++  "tests": {
++    "total": 249,
++    "passed": 249,
++    "failed": 0,
++    "skipped": 0,
++    "by_module": {
++      "verification.test_integration": 183,
++      "verification.test_support": 31,
++      "verification.test_reliability": 35
++    }
+   },
+-  "webapp_post_routes": 45,
+-  "virtual_admin_sections": 20,
+   "python_compile": "passed",
++  "undefined_names": 0,
+   "javascript_syntax": "passed",
++  "images_validated": 34,
+   "frontend_dom_http_integration": "passed",
+   "frontend_languages": [
+     "ar",
+@@ -17,47 +25,17 @@
+     "zh"
+   ],
+   "frontend_javascript_errors": 0,
+-  "image_validation": "passed",
++  "preserved_original_definitions": 1052,
+   "old_functions_classes_and_methods_missing": [],
+   "external_live_services_tested": false,
+   "real_browser_render_tested": false,
+-  "frontend_test_note": "DOM and JS execution against an actual localhost API using test-signed Telegram identity; MongoDB/Telegram/payment/supplier integrations are mocked",
+-  "dependencies": {
+-    "pyTelegramBotAPI": "4.37.1",
+-    "python-binance": "1.0.37",
+-    "pymongo": "4.19.0",
+-    "deep-translator": "1.11.4",
+-    "requests": "2.34.2",
+-    "python-dotenv": "1.2.4",
+-    "telethon": "1.45.0",
+-    "cryptg": "0.6.0",
+-    "pillow": "12.3.0",
+-    "cryptography": "50.0.2",
+-    "curl_cffi": "0.16.3",
+-    "flask": "3.1.3",
+-    "werkzeug": "3.1.9"
+-  },
+-  "jsdom": "30.1.3",
+-  "bot_site_linkage": {
+-    "bot_buttons_static": 677,
+-    "bot_buttons_dynamic": 25,
+-    "buttons_without_handler": 0,
+-    "callback_handlers": 275,
+-    "commands": 22,
+-    "missing_bot_texts": 0,
+-    "site_server_calls": 43,
+-    "site_calls_without_route": 0,
+-    "site_actions": 122,
+-    "site_actions_without_code": 0,
+-    "site_texts": 540,
+-    "site_texts_missing_any_language": 0,
+-    "site_error_codes_without_message": 0,
+-    "shared_db_collections": "45/55",
+-    "live_sync_checks": 58,
+-    "live_sync_failed": 0
+-  },
+-  "notification_buttons_open_site": {
+-    "checks": 36,
+-    "failed": 0
+-  }
+-}+  "real_phones_tested": false,
++  "user_windows_machine_tested": false,
++  "test_isolation": "MongoDB in memory; Telegram/payment/supplier/ChatGPT calls mocked; no production credentials loaded",
++  "new_recovery_data": [
++    "stock_rollback_jobs collection",
++    "cgpt_invites_data.renewal_receipts",
++    "temporary user stock debit markers"
++  ],
++  "notes": "Local verification is not a guarantee of all external services or all physical devices."
++}
+--- before/README-AR.txt
++++ after/README-AR.txt
+@@ -1,3 +1,52 @@
++LARA STOCK — إصلاحات الاعتمادية بعد مراجعة التحديث 20
++تاريخ الفحص: 2026-10-19
++
++ما تغيّر
++1) النجوم: يعتمد منع تكرار إضافة الرصيد على معرّف دفعة Telegram الموثوق، وتختلف بصمة كل دفعة عن الأخرى حتى مع تساوي المبلغ والدقيقة. لا يُحظر عميلان بسبب دفعتين مستقلتين، ولا تُرفض دفعة ثانية مستقلة للعميل نفسه.
++2) الأكواد: لا تُعرض عملية الشراء كعملية تسليم ناجحة إذا فشل حفظ أي جزء من الطلب. تُلغى سجلات المحاولة نفسها فقط، ويُعاد المخزون والرصيد. سجل استرجاع دائم يعيد محاولة الاسترجاع غير المكتمل عند التشغيل وكل دقيقة، وعلامة الخصم تمنع إرجاع المبلغ مرتين. يشمل البوت والموقع وAPI الموزعين. لا يمسّ سجلات الطلبات القديمة التي تحمل نفس نص الكود.
++3) التشغيل: لا تُحذف تحديثات Telegram المعلقة، ومنها إشعارات الدفع، عند بدء البوت.
++4) ChatGPT: العضو المضاف خارج البوت لا يتسبب بإلغاء اشتراكات بقية العملاء؛ يُزال العضو غير المسجّل فقط ويُشعَر الأدمن. الاشتراك النشط المسجّل يُحمى حتى إذا نقصت قائمة allowed_emails القديمة.
++5) انتهاء الاشتراك: تُفحص العضوية المقبولة والدعوة المعلقة. لا يُسجل الإلغاء على أنه تم إذا فشل الاتصال أو الحذف أو كان رد الخدمة ناقصًا؛ يحتفظ البوت بالاشتراك لإعادة المتابعة ويُنبه الإدارة. بعد التأكد من الإلغاء تُرسل رسالة انتهاء للعميل وللإدارة، ونص العميل قابل للتعديل من تخصيص ChatGPT.
++6) الإخفاء: واجهات الموزعين لقائمة منتجات ChatGPT وتفاصيلها وشرائها تحترم إخفاء المنتج الرئيسي وروابط المتجر وإخفاء المنتج للموزّع.
++7) التجديد: يُحفظ إيصال التجديد مع زيادة المدة في عملية كتابة واحدة داخل مستند الاشتراك، ثم يُضاف إلى سجل الطلبات والمبيعات والأرباح مع تكلفة وقت التجديد ومصدره. إذا تعذر تحديث سجل الطلبات مؤقتًا، يبقى الإيصال محفوظًا لإعادة المحاولة دون تجديد أو خصم إضافي. التنظيف والتجديد والدعوات تستخدم قفل الحساب نفسه لحماية المدة من النسخ القديمة؛ لا يعطّل حسابٌ بقية الحسابات.
++8) الدعم: أُعيد زر الدعم كزر داخلي يرسل بطاقة فيها فتح مباشر داخل Telegram ورابط HTTPS واسم مستخدم قابل للنسخ. يعمل أثناء قفل الإيداع، ويحافظ على تخصيص الزر. عند غياب اسم الدعم يُستخدم رقم المالك. يلزم فتح /start للحصول على الأزرار الجديدة.
++
++تحسين محاسبي ملازم
++سجل بيع API يحفظ المبلغ المخصوم فعليًا من رصيد الموزّع، حتى إذا كان قد ضبط سعر بيع أعلى لعملائه؛ فلا يُحسب سعر إعادة البيع كإيراد للمتجر.
++
++نتائج الفحص
++- 249 اختبارًا: 183 اختبار تكامل سابقًا + 31 اختبار دعم + 35 اختبار اعتمادية.
++- python -m py_compile bot.py: ناجح.
++- لا توجد أسماء غير معرّفة وفق Pyflakes؛ بقيت ملاحظات التنظيف القديمة غير المؤثرة على هذه الإصلاحات.
++- اختبار DOM/JavaScript متصل بالخادم المحلي: شراء وعرض أكواد والتنقل بين الأقسام واللغات العربية والإنجليزية والروسية والصينية، دون أخطاء JavaScript.
++- صياغة JavaScript و34 ملف صورة: سليمة.
++- مقارنة 1052 اسم دالة وكلاس وطريقة من التحديث 20: جميعها موجودة، مع إعادة دوال إصلاح الدعم وإضافة دوال مساعدة.
++- لم تُغيّر بيانات التشغيل الموجودة داخل ملف الإعدادات المرفق، ولا ملفات المكتبات أو أصول الواجهة.
++
++المحتويات والفروق
++- changes/round21-reliability.diff: فروق الملفات المعدلة.
++- verification/test_reliability.py: اختبارات الأعطال المالية والاشتراكات والإخفاء والتحديثات المعلقة.
++- verification/test_support.py: اختبارات الدعم.
++- verification/results.json وverification/junit-results.xml: نتائج هذه الجولة.
++- verification/results-before-round21.json: تقرير الفحص السابق كما ورد في الحزمة.
++
++التشغيل
++أوقف النسخة الحالية، وفك المجلد كاملًا، واحتفظ بإعداداتك الحالية. على Windows شغّل START-BOT.cmd ثم افتح /start في البوت. إذا كان البوت يعمل في استضافة أخرى، أوقف تلك النسخة قبل تشغيل نسخة محلية بالتوكن نفسه. إعداد الموقع العام وHTTPS يبقى كما في README-LOCAL-AR.txt.
++
++حدود الفحص
++كل الاختبارات معزولة بقاعدة بيانات في الذاكرة وتوكنات ومستخدمين وهميين؛ لم تُجرَ مدفوعات أو رسائل Telegram أو عمليات ChatGPT حقيقية، ولم تُختبر أجهزة هواتف فعلية أو جهاز Windows الخاص بك. يظل تشغيل أكثر من نسخة من البوت نفسه، وتغيير واجهات الخدمات الخارجية، وفشل الخدمات الحية بحاجة إلى متابعة تشغيلية. الطلبات الخارجية المعلقة للتحقق من المورد تبقى وفق آلية النسخة السابقة.
++
++إعادة الفحص
++python -m pip install -r requirements-tested.txt -r verification/requirements-test.txt
++python -m pytest verification/test_integration.py verification/test_support.py verification/test_reliability.py -q
++node verification/test_ui.cjs
++يتطلب اختبار الواجهة تثبيت jsdom كما هو موضح في README-AR.txt.
++
++
++======================================================================
++تقارير وتعليمات التحديثات السابقة
++======================================================================
++
+ LARA STOCK — تحديث: زر الشراء في الإشعارات يفتح الموقع على المنتج
+ ====================================================================
+ الإشعارات اللي فيها زر شراء صارت تفتح الموقع (بدل البوت) على المنتج نفسه:

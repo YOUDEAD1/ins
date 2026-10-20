@@ -1,0 +1,258 @@
+--- bot-before.py
++++ bot.py
+@@ -496,7 +496,7 @@
+         h.send_header('Content-Type', 'application/json; charset=utf-8')
+         h.send_header('X-Bot-API-Revision', 'ext-purchase-v3')
+         h.send_header('Access-Control-Allow-Origin', '*')
+-        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key')
++        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data')
+         h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+         h.end_headers()
+         h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+@@ -1706,6 +1706,13 @@
+     product_id: للفلترة (اختياري)
+     """
+     try:
++        if str(event_type).startswith(('product.', 'stock.')):
++            invalidate = globals().get('_invalidate_products_cache')
++            if invalidate:
++                invalidate()
++            invalidate_webapp = globals().get('_wa_invalidate_catalog')
++            if invalidate_webapp:
++                invalidate_webapp()
+         import time as _t
+         now = _t.time()
+         evt = {
+@@ -2182,7 +2189,7 @@
+     def do_OPTIONS(self):
+         self.send_response(200)
+         self.send_header('Access-Control-Allow-Origin', '*')
+-        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key')
++        self.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data')
+         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+         self.end_headers()
+ 
+@@ -9815,7 +9822,7 @@
+         db.orders.insert_one({
+             'user_id': buyer_uid, 'product_id': f"cgpt_{pending['cgpt_pid']}",
+             'code_delivered': f"chatgpt_seat:{email}",
+-            'qty': 1, 'total_price': price, 'order_id': order_id,
++            'qty': 1, 'total_price': price, **_order_extra(order_id),
+             'cgpt_email': email, 'cgpt_expires_at': expires_iso, 'cgpt_minutes': minutes
+         })
+         _cgpt_queue_admin_purchase(buyer_uid, email, label, price, order_id, expires_iso)
+@@ -9898,7 +9905,7 @@
+             'user_id': buyer_uid, 'product_id': pending['pid'],
+             'code_delivered': f"chatgpt_seat:{email}",
+             'qty': 1, 'total_price': pending['total_price'],
+-            'order_id': pending['order_id'],
++            **_order_extra(pending['order_id']),
+             'cgpt_email': email, 'cgpt_expires_at': expires_iso,
+             'cgpt_minutes': pending['minutes']
+         })
+@@ -17618,6 +17625,12 @@
+ 
+ def _ext_api_post(store, path, body, idem_key=None):
+     """POST لمتجر API خارجي (طلب) — يستخdم الـ prefix المكتشف. يرجّع (ok, json|error_str)."""
++    if path.rstrip('/') == '/orders':
++        # A timeout can happen after the supplier has charged us. Never retry a
++        # paid POST on another URL or report it as a definite refundable failure.
++        return _api_external_supplier_order(
++            store, body.get('product_id'), int(body.get('quantity', 1)),
++            idem_key or ('tg_' + secrets.token_hex(16)))
+     if _ext_is_insight(store):
+         return _insight_request(store, 'POST', path, body, idem_key)
+     base = str(store.get('base_url', '')).rstrip('/')
+@@ -19009,6 +19022,13 @@
+ 
+     codes = _ext_extract_codes(resp)
+     _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
++    if not isinstance(_order_obj, dict):
++        _order_obj = {}
++    if not _ext_delivery_complete(resp, codes, qty):
++        order_rec['ext_order_id'] = str(_order_obj.get('id') or (resp.get('order_id') if isinstance(resp, dict) else '') or '')
++        order_rec['supplier_codes'] = codes
++        _ext_hold_uncertain_order(uid, order_rec, resp, l)
++        return
+     order_rec['status'] = 'success'
+     order_rec['ext_order_id'] = str(_order_obj.get('id', ''))
+     order_rec['codes'] = codes
+@@ -19132,8 +19152,8 @@
+     order_rec = {
+         'store_id': ep.get('store_id', ''), 'ext_product_id': epid,
+         'user_id': uid, 'product_name': ep.get('name', ''),
+-        'price': price, 'created_at': int(time.time()),
+-        'idempotency_key': idem,
++        'price': price, 'quantity': 1, 'created_at': int(time.time()),
++        'idempotency_key': idem, **_order_extra(new_order_id()),
+     }
+ 
+     if not ok and isinstance(resp, dict) and resp.get('uncertain'):
+@@ -19163,6 +19183,9 @@
+ 
+     # 3) استخراج الأكواد من الرد وتسليمها
+     codes = _ext_extract_codes(resp)
++    if not _ext_delivery_complete(resp, codes, 1):
++        _ext_hold_uncertain_order(uid, order_rec, resp, l)
++        return
+     order_rec['status'] = 'success'
+     _order_obj = resp.get('order', {}) if isinstance(resp, dict) else {}
+     order_rec['ext_order_id'] = str(_order_obj.get('id', resp.get('order_id', resp.get('id', '')))) if isinstance(resp, dict) else ''
+@@ -19192,6 +19215,19 @@
+     """يحوّل ext_id لرقم لو كان رقمياً (بعض APIs تتطلب int)."""
+     s = str(v)
+     return int(s) if s.isdigit() else s
++
++
++def _ext_delivery_complete(resp, codes, qty):
++    """Only actual, complete supplier delivery is a completed customer order."""
++    if not isinstance(resp, dict) or resp.get('success') is False or resp.get('error') or resp.get('uncertain') or resp.get('test'):
++        return False
++    order = resp.get('order') if isinstance(resp.get('order'), dict) else resp
++    if order.get('success') is False or order.get('test'):
++        return False
++    status = str(order.get('status') or resp.get('status') or '').lower()
++    if status in ('failed', 'cancelled', 'canceled', 'pending', 'processing', 'pending_verification'):
++        return False
++    return len(codes) >= qty and not any(str(c).startswith('TEST-') for c in codes)
+ 
+ 
+ def _ext_extract_codes(resp):
+@@ -29110,7 +29146,9 @@
+             parents[str(cp['_id'])] = cp
+     except Exception:
+         pass
+-    linked = set()
++    # Hidden store links must not reappear through the standalone-parent path.
++    linked = {str(p['cgpt_product_id']) for p in prods
++              if p.get('product_type') == 'cgpt_main' and p.get('cgpt_product_id')}
+ 
+     items = []
+     for p in prods:
+@@ -29137,6 +29175,9 @@
+         if ptype == 'cgpt_main' and p.get('cgpt_product_id'):
+             hexid = str(p['cgpt_product_id'])
+             parent = parents.get(hexid)
++            if parent and parent.get('is_hidden') and not include_hidden:
++                linked.add(hexid)
++                continue
+             if parent is not None:
+                 linked.add(hexid)
+             src = parent or {}
+@@ -29551,12 +29592,17 @@
+     bal = _wa_balance(uid)
+     if bal < total:
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+-    oid0 = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(seconds=2))
+-
+-    _do_purchase(uid, pid, qty, lang)   # ← نفس دالة الشراء في البوت
++    # Correlate this exact attempt; a previous order can be only milliseconds old.
++    request_id = secrets.token_hex(16)
++    previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
++    _LOG_SRC.wa_purchase_id = request_id
++    try:
++        _do_purchase(uid, pid, qty, lang)   # ← نفس دالة الشراء في البوت
++    finally:
++        _LOG_SRC.wa_purchase_id = previous_request
+ 
+     cands = list({pid, _wa_norm_id(raw), str(p.get('_id'))})
+-    docs = list(db.orders.find({'user_id': uid, '_id': {'$gte': oid0},
++    docs = list(db.orders.find({'user_id': uid, 'webapp_request_id': request_id,
+                                 'product_id': {'$in': cands}}).sort('_id', 1))
+     new_bal = _wa_balance(uid)
+     if not docs:
+@@ -29635,7 +29681,11 @@
+         parent = db.cgpt_products.find_one({'_id': ObjectId(hexid)})
+     except Exception:
+         parent = None
+-    if not parent:
++    if not parent or parent.get('is_hidden'):
++        return 404, {'error': 'not_found'}
++    links = list(db.products.find({'product_type': 'cgpt_main',
++        'cgpt_product_id': {'$in': [hexid, ObjectId(hexid)]}}, {'is_hidden': 1}))
++    if links and all(p.get('is_hidden') for p in links):
+         return 404, {'error': 'not_found'}
+     dur_id = str(body.get('dur_id') or '')
+     dur = next((d for d in parent.get('durations', []) if str(d.get('dur_id')) == dur_id), None)
+@@ -29697,11 +29747,15 @@
+     bal = _wa_balance(uid)
+     if bal < total:
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+-    t0 = int(time.time()) - 1
+-
+-    _ext_execute_buy(_WAMessage(uid, str(qty)), epid, lang)   # ← نفس دالة البوت
+-
+-    rec = db.ext_orders.find_one({'user_id': uid, 'ext_product_id': epid, 'created_at': {'$gte': t0}},
++    request_id = secrets.token_hex(16)
++    previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
++    _LOG_SRC.wa_purchase_id = request_id
++    try:
++        _ext_execute_buy(_WAMessage(uid, str(qty)), epid, lang)   # ← نفس دالة البوت
++    finally:
++        _LOG_SRC.wa_purchase_id = previous_request
++
++    rec = db.ext_orders.find_one({'user_id': uid, 'ext_product_id': epid, 'webapp_request_id': request_id},
+                                  sort=[('_id', -1)])
+     new_bal = _wa_balance(uid)
+     _wa_invalidate_catalog()
+@@ -29718,6 +29772,21 @@
+ 
+ 
+ # ─────────── الإيداع (نفس نظام المبلغ الفريد والفحص التلقائي في البوت) ───────────
++def _wa_deposit_guard(func):
++    """Serialize wallet changes with purchases for the same webapp user."""
++    @functools.wraps(func)
++    def guarded(identity, body):
++        lock = _wa_user_lock(identity['id'])
++        if not lock.acquire(blocking=False):
++            return 429, {'error': 'busy'}
++        try:
++            return func(identity, body)
++        finally:
++            lock.release()
++    return guarded
++
++
++@_wa_deposit_guard
+ def _wa_deposit_create(identity, body):
+     uid = identity['id']
+     u = db.users.find_one({'user_id': uid})
+@@ -29768,6 +29837,8 @@
+         coin = 'BINANCE'
+         address = get_setting('wallet_address')
+         unique = generate_unique_amount_for_user(amount, uid, coin)
++        if unique is None:
++            return 409, {'error': 'busy_amount'}
+         pay_amount, unit, note = f"{unique:.4f}", 'USDT', str(uid)
+     elif method == 'bybit':
+         coin = 'BYBIT_UID'
+@@ -29790,6 +29861,8 @@
+         if coin in ('TON', 'LTC') and not price:
+             return 503, {'error': 'price_unavailable'}
+         unique = generate_unique_amount_for_user(amount, uid, coin)
++        if unique is None:
++            return 409, {'error': 'busy_amount'}
+         if coin == 'TON':
+             pay_amount, unit = f"{unique / price:.6f}", 'TON'
+         elif coin == 'LTC':
+@@ -29839,6 +29912,7 @@
+                  'amount': _wa_fnum((rec or {}).get('base_amount_usd'))}
+ 
+ 
++@_wa_deposit_guard
+ def _wa_deposit_cancel(identity, body):
+     uid = identity['id']
+     db.pending_deposits.update_many({'user_id': uid, 'status': 'pending'}, {'$set': {'status': 'cancelled'}})
+@@ -30518,7 +30592,11 @@
+ 
+ def _order_extra(oid):
+     """حقول تنضاف لكل سجل طلب: رقم الطلب + من وين انشرى."""
+-    return {'order_id': oid, 'via': _log_src_get() or 'bot'}
++    fields = {'order_id': oid, 'via': _log_src_get() or 'bot'}
++    request_id = getattr(_LOG_SRC, 'wa_purchase_id', None)
++    if request_id:
++        fields['webapp_request_id'] = request_id
++    return fields
+ 
+ 
+ # ─────────── البحث عن طلب ───────────

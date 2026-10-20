@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-19",
+  "python": "3.12.14",
+  "http_and_business_tests": {
+    "passed": 183,
+    "failed": 0
+  },
+  "webapp_post_routes": 45,
+  "virtual_admin_sections": 20,
+  "python_compile": "passed",
+  "javascript_syntax": "passed",
+  "frontend_dom_http_integration": "passed",
+  "frontend_languages": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "frontend_javascript_errors": 0,
+  "image_validation": "passed",
+  "old_functions_classes_and_methods_missing": [],
+  "external_live_services_tested": false,
+  "real_browser_render_tested": false,
+  "frontend_test_note": "DOM and JS execution against an actual localhost API using test-signed Telegram identity; MongoDB/Telegram/payment/supplier integrations are mocked",
+  "dependencies": {
+    "pyTelegramBotAPI": "4.37.1",
+    "python-binance": "1.0.37",
+    "pymongo": "4.19.0",
+    "deep-translator": "1.11.4",
+    "requests": "2.34.2",
+    "python-dotenv": "1.2.4",
+    "telethon": "1.45.0",
+    "cryptg": "0.6.0",
+    "pillow": "12.3.0",
+    "cryptography": "50.0.2",
+    "curl_cffi": "0.16.3",
+    "flask": "3.1.3",
+    "werkzeug": "3.1.9"
+  },
+  "jsdom": "30.1.3",
+  "bot_site_linkage": {
+    "bot_buttons_static": 677,
+    "bot_buttons_dynamic": 25,
+    "buttons_without_handler": 0,
+    "callback_handlers": 275,
+    "commands": 22,
+    "missing_bot_texts": 0,
+    "site_server_calls": 43,
+    "site_calls_without_route": 0,
+    "site_actions": 122,
+    "site_actions_without_code": 0,
+    "site_texts": 540,
+    "site_texts_missing_any_language": 0,
+    "site_error_codes_without_message": 0,
+    "shared_db_collections": "45/55",
+    "live_sync_checks": 58,
+    "live_sync_failed": 0
+  },
+  "notification_buttons_open_site": {
+    "checks": 36,
+    "failed": 0
+  }
+}

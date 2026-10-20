@@ -1,0 +1,89 @@
+--- a/webapp/index.html	2026-10-19 17:50:38.929983395 +0000
++++ b/webapp/index.html	2026-10-19 17:50:38.935880134 +0000
+@@ -661,6 +661,9 @@
+ .order .end{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+ .order .end .price{font-size:14px}
+ .order-body{padding:0 12px 12px;display:flex;flex-direction:column;gap:8px}
++.creds-hid{display:flex;align-items:center;gap:10px;padding:4px 2px 12px;color:var(--fg-3);font-size:13px;line-height:1.5}
++.creds-hid span{font-size:20px;flex:none}.creds-hid svg{width:20px;height:20px}
++.creds-hid p{margin:0}
+ .txt-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+ .txt-row .btn{flex:1;min-width:120px;gap:6px}
+ .txt-row .btn svg{width:16px;height:16px}
+@@ -1956,6 +1959,7 @@
+ function setTab(k) {
+   if (S.tab === k) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+   const was = dockKey(S.tab);
++  if (S.tab === 'api' && S.apiUi) S.apiUi.reveal = false;   // بيانات الربط ترجع مخفية لما يطلع من تبويب الـ API
+   S.tab = k; hap('select');
+   const dk = dockKey(k);
+   const din = $('.dock-in'); if (din) din.style.setProperty('--i', Math.max(0, tabsList().findIndex(x => x[0] === dk)));
+@@ -2839,7 +2843,7 @@
+   en: { example: 'Example', linkT:"Linked to your bot @{b}",linkT0:"Linked to your bot",linkSub:"Same account (ID {id}) · same balance · same products and stock. Orders made through the API are recorded on this account and logged in your log channel as “Via: API”.",linkPvT:"Preview — not linked to a bot",linkPvSub:"Inside your bot this card shows your real account, and the test below sends a real request to your API.",ping:"Test the connection now",pingOk:"Your bot answered in {ms} ms — balance {b}, the same as your wallet.",pingDiff:"Your bot answered in {ms} ms — balance {b} (your wallet shows {w}; it changes while orders run).",pingFail:"Could not reach the API ({e}).",pingPv:"Preview: simulated answer. Inside your bot this is a real request to your API.",howT:"How it works",how1:"Your website or bot sends a request with your API key.",how2:"LARA STOCK checks the key and your balance — the same account you use in the bot.",how3:"It buys from the same stock and charges the same balance as buying in the bot.",how4:"It returns the codes right away, sends your webhook, and records the order in API orders here and in your log channel (“Via: API”).",tryBtn:"Try it now — real request",tryPv:"Try it (preview)",tryPost:"This request changes real data (for example, it charges your balance), so run it from your own code.",tryNoKey:"Generate a key first to try requests.",realReq:"Real request",preview:"Preview",noOrdersYet:"You have no API orders yet.",noProducts:"No products to try with.", tab: 'API', title: 'Developer API', sub: 'Sell this store’s products from your own bot or website — same products, same prices, live stock.',
+     gen: 'Generate API key', genNote: 'Free. API purchases use your store balance.', active: 'Active',
+     f1: 'Instant codes over HTTP', f2: 'Webhooks & live stock', f3: 'Your own prices & names', f4: 'Premium emoji in every product',
+-    creds: 'Credentials', key: 'API key', base: 'Base URL', conn: 'Connection code', connNote: 'One code that holds the base URL and the key — paste it into your bot or give it to an AI.',
++    creds: 'Credentials', showCreds: 'Show connection details', hideCreds: 'Hide', credsHidden: 'Your key, base URL and connection code are hidden so they don\'t show if you share your screen.', key: 'API key', base: 'Base URL', conn: 'Connection code', connNote: 'One code that holds the base URL and the key — paste it into your bot or give it to an AI.',
+     show: 'Show', hide: 'Hide', regen: 'Regenerate key', regenQ: 'Your current key stops working immediately and every integration must use the new one.',
+     disable: 'Disable API', disableQ: 'All requests with your key will be rejected until you generate a new one.', confirm: 'Yes, continue', cancel: 'Cancel',
+     quick: 'Quick start', useKey: 'Use my key in the examples', endpoints: 'Endpoints', auth: 'Authentication',
+@@ -2860,7 +2864,7 @@
+   ar: { example: 'مثال', linkT:"مربوط ببوتك @{b}",linkT0:"مربوط ببوتك",linkSub:"نفس حسابك (ID {id}) · نفس رصيدك · نفس المنتجات والمخزون. الطلبات اللي تسويها عبر الـ API تنسجل على هذا الحساب وتوصل قناة اللوق مكتوب فيها «عبر API».",linkPvT:"معاينة — غير مربوطة ببوت",linkPvSub:"داخل بوتك هذي البطاقة تعرض حسابك الحقيقي، والاختبار تحت يرسل طلب حقيقي للـ API حقك.",ping:"اختبر الاتصال الآن",pingOk:"البوت ردّ خلال {ms} ms — الرصيد {b}، نفس رصيد محفظتك.",pingDiff:"البوت ردّ خلال {ms} ms — الرصيد {b} (المحفظة تعرض {w}، يتغير مع الطلبات).",pingFail:"تعذّر الوصول للـ API ({e}).",pingPv:"معاينة: رد تجريبي. داخل بوتك هذا طلب حقيقي للـ API حقك.",howT:"كيف يشتغل؟",how1:"موقعك أو بوتك يرسل طلب ومعه مفتاح الـ API حقك.",how2:"LARA STOCK يتحقق من المفتاح ومن رصيدك — نفس حسابك اللي في البوت.",how3:"يشتري من نفس المخزون ويخصم من نفس الرصيد، تماماً مثل الشراء من البوت.",how4:"يرجّع الأكواد فوراً، ويرسل الـ Webhook، ويسجّل الطلب في طلبات الـ API هنا وفي قناة اللوق («عبر API»).",tryBtn:"جرّب الآن — طلب حقيقي",tryPv:"جرّب (معاينة)",tryPost:"هذا الطلب يغيّر بيانات حقيقية (مثلاً يخصم من رصيدك)، فجرّبه من الكود حقك.",tryNoKey:"سوّ مفتاح أول عشان تجرّب الطلبات.",realReq:"طلب حقيقي",preview:"معاينة",noOrdersYet:"ما عندك طلبات API للحين.",noProducts:"ما فيه منتجات للتجربة.", tab: 'API', title: 'API للمطوّرين', sub: 'بيع منتجات المتجر من بوتك أو موقعك — نفس المنتجات ونفس الأسعار والمخزون المباشر.',
+     gen: 'إنشاء مفتاح API', genNote: 'مجاني. مشتريات الـ API تُخصم من رصيدك في المتجر.', active: 'مفعّل',
+     f1: 'أكواد فورية عبر HTTP', f2: 'Webhooks ومخزون مباشر', f3: 'أسعارك وأسماؤك الخاصة', f4: 'إيموجي مميز لكل منتج',
+-    creds: 'بيانات الربط', key: 'مفتاح API', base: 'الرابط الأساسي', conn: 'كود الاتصال', connNote: 'كود واحد فيه الرابط والمفتاح — الصقه في بوتك أو أعطه لأي ذكاء اصطناعي.',
++    creds: 'بيانات الربط', showCreds: 'عرض بيانات الربط', hideCreds: 'إخفاء', credsHidden: 'المفتاح والرابط الأساسي وكود الاتصال مخفية — عشان ما تنكشف لو صوّرت الشاشة.', key: 'مفتاح API', base: 'الرابط الأساسي', conn: 'كود الاتصال', connNote: 'كود واحد فيه الرابط والمفتاح — الصقه في بوتك أو أعطه لأي ذكاء اصطناعي.',
+     show: 'إظهار', hide: 'إخفاء', regen: 'إعادة توليد المفتاح', regenQ: 'المفتاح الحالي يتوقف فوراً، وكل ربط لازم يستخدم المفتاح الجديد.',
+     disable: 'تعطيل الـ API', disableQ: 'كل الطلبات بمفتاحك تُرفض لين تنشئ مفتاحاً جديداً.', confirm: 'نعم، تابع', cancel: 'إلغاء',
+     quick: 'بداية سريعة', useKey: 'استخدم مفتاحي في الأمثلة', endpoints: 'نقاط الوصول', auth: 'المصادقة',
+@@ -2881,7 +2885,7 @@
+   ru: { example: 'Пример', linkT:"Подключено к боту @{b}",linkT0:"Подключено к вашему боту",linkSub:"Тот же аккаунт (ID {id}) · тот же баланс · те же товары и остатки. Заказы через API записываются на этот аккаунт и попадают в канал логов с пометкой «Via: API».",linkPvT:"Предпросмотр — бот не подключён",linkPvSub:"В боте здесь будет ваш настоящий аккаунт, а тест ниже отправит реальный запрос к вашему API.",ping:"Проверить подключение",pingOk:"Бот ответил за {ms} мс — баланс {b}, как в кошельке.",pingDiff:"Бот ответил за {ms} мс — баланс {b} (в кошельке {w}; меняется во время заказов).",pingFail:"Не удалось связаться с API ({e}).",pingPv:"Предпросмотр: имитация ответа. В боте это реальный запрос к вашему API.",howT:"Как это работает",how1:"Ваш сайт или бот отправляет запрос с вашим API-ключом.",how2:"LARA STOCK проверяет ключ и баланс — это тот же аккаунт, что в боте.",how3:"Покупка идёт из тех же остатков и списывается с того же баланса, как при покупке в боте.",how4:"Коды возвращаются сразу, отправляется вебхук, заказ записывается в заказы API здесь и в канал логов («Via: API»).",tryBtn:"Попробовать — реальный запрос",tryPv:"Попробовать (предпросмотр)",tryPost:"Этот запрос меняет реальные данные (например, списывает баланс) — запускайте его из своего кода.",tryNoKey:"Сначала создайте ключ.",realReq:"Реальный запрос",preview:"Предпросмотр",noOrdersYet:"Заказов через API пока нет.",noProducts:"Нет товаров для проверки.", tab: 'API', title: 'API для разработчиков', sub: 'Продавайте товары магазина в своём боте или на сайте — те же товары, цены и живой остаток.',
+     gen: 'Создать API-ключ', genNote: 'Бесплатно. Покупки через API списываются с баланса.', active: 'Активен',
+     f1: 'Мгновенные коды по HTTP', f2: 'Вебхуки и живой остаток', f3: 'Свои цены и названия', f4: 'Премиум-эмодзи у каждого товара',
+-    creds: 'Доступы', key: 'API-ключ', base: 'Базовый URL', conn: 'Код подключения', connNote: 'Один код с URL и ключом — вставьте в бота или отдайте ИИ.',
++    creds: 'Доступы', showCreds: 'Показать данные подключения', hideCreds: 'Скрыть', credsHidden: 'Ключ, базовый URL и код подключения скрыты, чтобы не попасть на скриншот.', key: 'API-ключ', base: 'Базовый URL', conn: 'Код подключения', connNote: 'Один код с URL и ключом — вставьте в бота или отдайте ИИ.',
+     show: 'Показать', hide: 'Скрыть', regen: 'Перевыпустить ключ', regenQ: 'Текущий ключ сразу перестанет работать.', disable: 'Отключить API',
+     disableQ: 'Все запросы с вашим ключом будут отклоняться.', confirm: 'Да, продолжить', cancel: 'Отмена', quick: 'Быстрый старт', useKey: 'Подставить мой ключ',
+     endpoints: 'Методы', auth: 'Аутентификация', authBody: 'Передавайте ключ в каждом запросе одним из заголовков:', webhooks: 'Вебхуки',
+@@ -2900,7 +2904,7 @@
+   zh: { example: '示例', linkT:"已连接你的机器人 @{b}",linkT0:"已连接你的机器人",linkSub:"同一个账户（ID {id}）· 同一余额 · 同样的商品和库存。通过 API 下的订单记录在这个账户上，并以 “Via: API” 发送到日志频道。",linkPvT:"预览——未连接机器人",linkPvSub:"在你的机器人里，这里会显示你的真实账户，下面的测试会向你的 API 发送真实请求。",ping:"立即测试连接",pingOk:"机器人在 {ms} 毫秒内响应——余额 {b}，与钱包一致。",pingDiff:"机器人在 {ms} 毫秒内响应——余额 {b}（钱包显示 {w}，下单时会变化）。",pingFail:"无法连接 API（{e}）。",pingPv:"预览：模拟响应。在你的机器人里这是对你 API 的真实请求。",howT:"工作原理",how1:"你的网站或机器人带着 API 密钥发送请求。",how2:"LARA STOCK 校验密钥和余额——就是你在机器人里的同一个账户。",how3:"从同一库存购买，从同一余额扣款，和在机器人里购买一样。",how4:"立即返回卡密，发送 Webhook，并把订单记录到这里的 API 订单和日志频道（“Via: API”）。",tryBtn:"立即试用——真实请求",tryPv:"试用（预览）",tryPost:"此请求会修改真实数据（例如扣除余额），请在你自己的代码中调用。",tryNoKey:"请先生成密钥。",realReq:"真实请求",preview:"预览",noOrdersYet:"你还没有 API 订单。",noProducts:"没有可用于测试的商品。", tab: 'API', title: '开发者 API', sub: '在你自己的机器人或网站上销售本店商品——同样的商品、价格和实时库存。',
+     gen: '生成 API 密钥', genNote: '免费。API 购买使用你的商店余额。', active: '已启用',
+     f1: 'HTTP 即时发码', f2: 'Webhook 与实时库存', f3: '自定义价格与名称', f4: '每个商品都有高级表情',
+-    creds: '凭证', key: 'API 密钥', base: '基础 URL', conn: '连接码', connNote: '一个包含 URL 和密钥的代码——粘贴到你的机器人或交给 AI。',
++    creds: '凭证', showCreds: '显示连接信息', hideCreds: '隐藏', credsHidden: '密钥、基础 URL 和连接码已隐藏，截图时不会泄露。', key: 'API 密钥', base: '基础 URL', conn: '连接码', connNote: '一个包含 URL 和密钥的代码——粘贴到你的机器人或交给 AI。',
+     show: '显示', hide: '隐藏', regen: '重新生成密钥', regenQ: '当前密钥会立即失效。', disable: '停用 API', disableQ: '使用你密钥的所有请求都将被拒绝。',
+     confirm: '确定继续', cancel: '取消', quick: '快速开始', useKey: '在示例中使用我的密钥', endpoints: '接口', auth: '认证', authBody: '每个请求都要携带密钥，任选以下请求头：',
+     webhooks: 'Webhook', whNone: '尚未设置 Webhook。库存变化或订单完成时立即收到事件。', whSet: '设置 Webhook', whEdit: '修改', whTest: '发送测试', whDel: '删除',
+@@ -2950,7 +2954,7 @@
+   { m: 'POST', p: '/test_webhook', d: EPD('Send a test event to your webhook.', 'إرسال حدث تجريبي للـ Webhook.', 'Отправить тестовое событие.', '向 Webhook 发送测试事件。'), res: { success: true, delivered: true, url: 'https://your-bot.com/webhook' } }
+ ];
+ const API_LANGS = [['curl', 'cURL'], ['py', 'Python'], ['js', 'Node.js'], ['php', 'PHP']];
+-function apiBase() { return (S.api && S.api.base_url) || 'https://YOUR-SERVER/YOUR-GATEWAY'; }
++function apiBase() { return (S.apiUi && S.apiUi.reveal && S.api && S.api.base_url) || 'https://YOUR-SERVER/YOUR-GATEWAY'; }   // الرابط الحقيقي يطلع بس بعد «عرض بيانات الربط»
+ function apiKeyShown() { return S.apiUi.useKey && S.api && S.api.key ? S.api.key : 'YOUR_API_KEY'; }
+ function phpVal(v) {     // JSON → مصفوفة PHP صحيحة (json_encode ما يقبل {...})
+   if (Array.isArray(v)) return '[' + v.map(phpVal).join(', ') + ']';
+@@ -3039,10 +3043,12 @@
+     <section class="api-sec">
+       <h2>${esc(at('creds'))}</h2>
+       <div class="api-card">
+-        ${credRow(at('key'), A.key, !ui.reveal, 'api-reveal')}
++        ${ui.reveal ? `${A.conn ? credRow(at('conn'), A.conn, false) : ''}
+         ${A.base_url ? credRow(at('base'), A.base_url, false) : ''}
+-        ${A.conn ? credRow(at('conn'), A.conn, !ui.reveal, 'api-reveal') : ''}
++        ${credRow(at('key'), A.key, false)}
+         <p class="api-muted">${esc(at('connNote'))}</p>
++        <button class="btn ghost sm full" data-act="api-reveal">${ic.eyeOff}${esc(at('hideCreds'))}</button>` : `<div class="creds-hid"><span>${ic.lock || '🔐'}</span><p>${esc(at('credsHidden'))}</p></div>
++        <button class="btn primary full" data-act="api-reveal">${ic.eye}${esc(at('showCreds'))}</button>`}
+         <div class="api-acts"><button class="btn ghost sm" data-act="api-regen">${ic.refresh}${esc(at('regen'))}</button><button class="btn sm danger-text" data-act="api-disable">${esc(at('disable'))}</button></div>
+         ${A.created_at ? `<p class="api-muted small">${esc(at('created'))}: <span dir="ltr">${esc(A.created_at)}</span></p>` : ''}
+       </div>
+@@ -3263,7 +3269,7 @@
+     } else html = esc(at('pingFail', { e: r.status ? 'HTTP ' + r.status + (j.error ? ' — ' + j.error : '') : (r.error || 'network') }));
+     S.apiUi.ping = { cls, html }; hap(cls === 'bad' ? 'error' : 'ok'); renderView(); return true;
+   }
+-  if (act === 'api-gen') { el.disabled = true; const r = await api('api/generate', {}); if (r.ok) { S.api = r; hap('ok'); renderView(); prefetchApiDocs(); } else { el.disabled = false; toast(errText(r), 'bad'); } return true; }
++  if (act === 'api-gen') { el.disabled = true; const r = await api('api/generate', {}); if (r.ok) { S.api = r; S.apiUi.reveal = true; hap('ok'); renderView(); prefetchApiDocs(); } else { el.disabled = false; toast(errText(r), 'bad'); } return true; }
+   if (act === 'api-reveal') { S.apiUi.reveal = !S.apiUi.reveal; hap('select'); renderView(); return true; }
+   if (act === 'api-usekey') { S.apiUi.useKey = el.checked; renderView(); return true; }
+   if (act === 'api-lang') { S.apiUi.lang = el.dataset.v; store.set('apiLang', S.apiUi.lang); hap('select'); renderView(); return true; }

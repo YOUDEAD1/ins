@@ -1,0 +1,255 @@
+--- bot.py (READY_9)	2026-10-19 14:32:42.420965811 +0000
++++ bot.py (READY_10)	2026-10-19 14:38:29.994106732 +0000
+@@ -4267,7 +4267,14 @@
+         
+         old_status = result.get('status', 'pending')
+         referrer_id = result['referrer_id']
+-        
++
++        # 💸 طلع من القناة / انرفض بعد ما انصرفت دفعته → نخصم قيمته بسعر دفعته · رجع → نرجّعها
++        if old_status == 'active' and new_status != 'active':
++            _ref_clawback(result)
++            _ms_reopen_check(referrer_id)      # دفعة ما انصرفت للحين نقصت → تنتظر لين تكمل
++        elif new_status == 'active' and old_status != 'active':
++            _ref_refund(result)
++
+         # تحديث رصيد المُحيل
+         update_referrer_balance(referrer_id)
+         
+@@ -4554,6 +4561,11 @@
+                     return
+                 if add:
+                     db.referrals_v2.update_many({'invited_id': {'$in': add}, 'referrer_id': rid}, {'$set': {'ms_batch': reo['batch_no']}})
++                # اللي طلعوا من هذي الدفعة قبل ما تنصرف ما يبقون محسوبين عليها (لو رجعوا ينحسبون من جديد)
++                gone = [int(x) for x in reo['members'] if int(x) not in have]
++                if gone:
++                    db.referrals_v2.update_many({'invited_id': {'$in': gone}, 'referrer_id': rid, 'ms_batch': reo['batch_no']},
++                                                {'$unset': {'ms_batch': ''}})
+                 members = have + [int(x) for x in add]
+             else:
+                 if db.referrals_v2.count_documents({'referrer_id': rid, 'status': 'active'}) < int(reo.get('active_count') or 0):
+@@ -4621,13 +4633,139 @@
+                 all_ids += d['ids'][:need]
+         for i in range(0, len(all_ids), 5000):
+             db.referrals_v2.update_many({'_id': {'$in': all_ids[i:i + 5000]}}, {'$set': {'ms_batch': 0}})
+-        db.settings.update_one({'key': 'ref_batches_v2'}, {'$set': {'value': 'done', 'at': int(time.time()), 'stamped': len(all_ids)}}, upsert=True)
++        db.settings.update_one({'key': 'ref_batches_v2'}, {'$set': {'value': 'done', 'at': int(time.time()), 'stamped': len(all_ids),
++                                                                  'legacy_unit': round(rw / th, 4)}}, upsert=True)
+         if all_ids:
+             logger.info(f"🤝 Referral batches: {len(all_ids)} referrals already counted before were locked to their old batches")
+     except Exception as e:
+         logger.warning(f"referral batches migration: {e}")
+ 
+ 
++
++# ─────────── 💸 خصم الإحالة اللي تطلع (بسعر دفعتها) + إرجاعه لو رجعت ───────────
++def _ref_legacy_unit():
++    """قيمة الإحالة الوحدة للإحالات اللي انحسبت قبل نظام الدفعات (محفوظة وقت التحديث)."""
++    try:
++        d = db.settings.find_one({'key': 'ref_batches_v2'}) or {}
++        if d.get('legacy_unit') is not None:
++            return float(d['legacy_unit'])
++        v = round(float(get_referral_reward()) / max(1, int(get_referral_threshold())), 4)
++        db.settings.update_one({'key': 'ref_batches_v2', 'legacy_unit': {'$exists': False}}, {'$set': {'legacy_unit': v}}, upsert=True)
++        return v
++    except Exception:
++        return 0.0
++
++
++def ref_unit_value(rec):
++    """(قيمة الإحالة بسعر دفعتها، رقم الدفعة). القيمة None = ما انصرف عليها شي (ما فيه خصم)."""
++    b = (rec or {}).get('ms_batch')
++    if b is None:
++        return None, None
++    if int(b) == 0:
++        return _ref_legacy_unit(), 0
++    ms = db.referral_milestones.find_one({'referrer_id': int(rec.get('referrer_id') or 0), 'batch_no': int(b)})
++    if not ms or ms.get('status') != 'paid':
++        return None, int(b)
++    th, rw = _ms_snap(ms)
++    amt = ms.get('paid_amount')
++    amt = float(amt) if amt is not None else rw
++    return round(amt / max(1, th), 4), int(b)
++
++
++def _ref_money(rid, delta, kind, note):
++    """يحرّك رصيد المحيل + «أرباح الإحالات» + سجل تعديلات الرصيد (يشوفه العميل)."""
++    u = db.users.find_one_and_update({'user_id': rid}, {'$inc': {'balance': delta}}, return_document=True)
++    if not u:
++        return None
++    try:
++        e = float(u.get('ref_v2_earned') or 0)
++    except Exception:
++        e = 0.0
++    db.users.update_one({'user_id': rid}, {'$set': {'ref_v2_earned': round(max(0.0, e + delta), 4)}})
++    try:
++        db.balance_logs.insert_one({'user_id': rid, 'type': kind, 'amount': round(delta, 4), 'note': note,
++                                    'date': datetime.datetime.utcnow(), 'new_balance': round(float(u.get('balance') or 0), 4)})
++    except Exception:
++        pass
++    try:
++        _invalidate_user_cache(rid)
++    except Exception:
++        pass
++    return u
++
++
++def _ref_clawback(rec, reason=None):
++    """إحالة كانت محسوبة في دفعة انصرفت ثم طلعت (أو انرفضت) → نخصم قيمتها بسعر دفعتها. مرة وحدة بس."""
++    try:
++        unit, b = ref_unit_value(rec)
++        if not unit or unit <= 0:
++            return 0.0
++        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
++        if not rid:
++            return 0.0
++        now = int(time.time())
++        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': False}},
++                                                {'$set': {'cb_amount': unit, 'cb_at': now}})
++        if r is None:
++            return 0.0                     # انخصمت قبل
++        reason = reason or ('rejected' if rec.get('dv') == 'rejected' else 'left')
++        bl = f"الدفعة #{b}" if b else "قبل نظام الدفعات"
++        _ref_money(rid, -unit, 'ref_clawback', f"إحالة {'انرفضت' if reason == 'rejected' else 'طلعت من القناة'} ({inv}) · {bl}")
++        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'batch_no': b, 'amount': unit,
++                                     'kind': 'clawback', 'reason': reason, 'open': True, 'at': now})
++        try:
++            lang = get_lang(rid)
++            if lang == 'en':
++                t = (f"⚠️ <b>Referral deducted</b>\n\nSomeone you invited {'was rejected after review' if reason == 'rejected' else 'left the channel'}, "
++                     f"so <b>${unit:.2f}</b> was deducted — the same value it had when it was counted for you.")
++                if reason != 'rejected':
++                    t += "\n💡 If they join again, it is refunded automatically."
++            else:
++                t = (f"⚠️ <b>خصم إحالة</b>\n\nواحد من الناس اللي دعيتهم {'انرفض بعد المراجعة' if reason == 'rejected' else 'طلع من القناة'}، "
++                     f"فانخصم <b>${unit:.2f}</b> من رصيدك — نفس قيمته لما انحسب لك.")
++                if reason != 'rejected':
++                    t += "\n💡 لو رجع اشترك، يرجع لك المبلغ تلقائياً."
++            bot.send_message(rid, t, parse_mode='HTML')
++        except Exception:
++            pass
++        return unit
++    except Exception as e:
++        logger.warning(f"referral clawback {rec.get('invited_id')}: {e}")
++        return 0.0
++
++
++def _ref_refund(rec):
++    """الإحالة اللي انخصمت رجعت نشطة → نرجّع نفس المبلغ اللي انخصم."""
++    try:
++        if not (rec or {}).get('cb_amount') or rec.get('dv') == 'rejected':
++            return 0.0
++        inv, rid = int(rec['invited_id']), int(rec.get('referrer_id') or 0)
++        r = db.referrals_v2.find_one_and_update({'invited_id': inv, 'cb_amount': {'$exists': True}},
++                                                {'$unset': {'cb_amount': '', 'cb_at': ''}})
++        if r is None or not r.get('cb_amount'):
++            return 0.0
++        amt = float(r['cb_amount'])
++        _ref_money(rid, amt, 'ref_refund', f"رجعت إحالة ({inv})")
++        db.ref_clawbacks.update_many({'invited_id': inv, 'kind': 'clawback', 'open': True}, {'$set': {'open': False, 'refunded_at': int(time.time())}})
++        db.ref_clawbacks.insert_one({'invited_id': inv, 'referrer_id': rid, 'amount': amt, 'kind': 'refund', 'at': int(time.time())})
++        try:
++            bot.send_message(rid, (f"✅ <b>Referral back</b>\n\nThe person who left joined again — <b>${amt:.2f}</b> refunded."
++                                   if get_lang(rid) == 'en' else
++                                   f"✅ <b>رجعت لك إحالة</b>\n\nالشخص اللي طلع رجع اشترك، فرجّعنا لك <b>${amt:.2f}</b>."), parse_mode='HTML')
++        except Exception:
++            pass
++        return amt
++    except Exception as e:
++        logger.warning(f"referral refund {rec.get('invited_id')}: {e}")
++        return 0.0
++
++
++try:
++    db.ref_clawbacks.create_index([('invited_id', 1), ('kind', 1)])
++except Exception:
++    pass
++
++
+ _ref_batches_migrate()
+ 
+ 
+@@ -4841,8 +4979,12 @@
+             _old = float(_u.get('ref_v2_earned') or 0)
+         except Exception:
+             _old = 0.0
+-        db.users.update_one({'user_id': referrer_id}, {'$set': {'ref_v2_earned': round(_old + reward, 2)}})
++        db.users.update_one({'user_id': referrer_id}, {'$set': {'ref_v2_earned': round(_old + reward, 4)}})
+         db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {'paid_amount': reward}})
++        _nb = (db.users.find_one({'user_id': referrer_id}, {'balance': 1}) or {}).get('balance')
++        db.balance_logs.insert_one({'user_id': referrer_id, 'type': 'ref_reward', 'amount': reward,
++                                    'note': f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", 'date': datetime.datetime.utcnow(),
++                                    'new_balance': round(float(_nb or 0), 4)})
+         _invalidate_user_cache(referrer_id)
+     except Exception:
+         pass
+@@ -5202,18 +5344,23 @@
+                         if left_checks >= LEFT_CONFIRM_NEEDED:
+                             # ✅ مؤكد غادر — ننقله للأرشيف
+                             referrer_id = r.get('referrer_id')
++                            _cb = _ref_clawback(r, 'left')          # 💸 بسعر دفعته
+                             db.referrals_archived.insert_one({
+                                 'invited_id': inv_uid,
+                                 'referrer_id': referrer_id,
+                                 'status': 'left',
+                                 'original_status': current_status,
++                                'ms_batch': r.get('ms_batch'),
++                                'cb_amount': _cb or None,
+                                 'archived_at': int(time.time())
+                             })
+                             # نحذفه من الأساسي
+                             db.referrals_v2.delete_one({'invited_id': inv_uid})
+                             # نحدّث رصيد المُحيل
+-                            try: update_referrer_balance(referrer_id)
+-                            except: pass
++                            try:
++                                _ms_reopen_check(referrer_id)
++                                update_referrer_balance(referrer_id)
++                            except Exception: pass
+                             logger.info(f"📤 Referral {inv_uid} archived as LEFT (confirmed {LEFT_CONFIRM_NEEDED}x)")
+                         else:
+                             db.referrals_v2.update_one(
+@@ -25824,7 +25971,7 @@
+         note = log.get('note', '')
+         date = log.get('date', '')
+         sign = "+" if amt >= 0 else ""
+-        type_label = "🔄 تعويض" if t == 'compensation' else "💰 إضافة عادية"
++        type_label = _BAL_LBL_AR.get(t) or ("🔄 تعويض" if t == 'compensation' else "💰 إضافة عادية")
+         date_str = date.strftime("%Y-%m-%d %H:%M") if hasattr(date, 'strftime') else str(date)[:16]
+         txt += f"{type_label}\n💵 <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+         if note:
+@@ -25843,6 +25990,10 @@
+     except:
+         bot.send_message(call.message.chat.id, txt, reply_markup=markup, parse_mode="HTML")
+ 
++_BAL_LBL_AR = {'ref_reward': '🎁 مكافأة إحالات', 'ref_clawback': '↩️ خصم إحالة طلعت', 'ref_refund': '🤝 رجوع إحالة'}
++_BAL_LBL_EN = {'ref_reward': '🎁 Referral reward', 'ref_clawback': '↩️ Referral deducted', 'ref_refund': '🤝 Referral back'}
++
++
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("my_ballogs_"))
+ def user_view_balance_logs(call):
+     """الزبون يشوف سجل التعديلات على رصيده"""
+@@ -25866,11 +26017,11 @@
+         sign = "+" if amt >= 0 else ""
+         date_str = date.strftime("%Y-%m-%d %H:%M") if hasattr(date, 'strftime') else str(date)[:16]
+         if l == 'ar':
+-            type_label = "🔄 تعويض" if t == 'compensation' else "💰 إضافة"
++            type_label = _BAL_LBL_AR.get(t) or ("🔄 تعويض" if t == 'compensation' else ("➖ خصم" if amt < 0 else "💰 إضافة"))
+             txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+             if note: txt += f"📝 <code>{note}</code>\n"
+         else:
+-            type_label = "🔄 Compensation" if t == 'compensation' else "💰 Manual Add"
++            type_label = _BAL_LBL_EN.get(t) or ("🔄 Compensation" if t == 'compensation' else ("➖ Deduction" if amt < 0 else "💰 Manual Add"))
+             txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
+             if note: txt += f"📝 <code>{note}</code>\n"
+         txt += "──────────\n"
+@@ -28482,7 +28633,8 @@
+             continue
+         docs.append({'_id': f"dep:{tx}", 'user_id': uid, 'delta_cents': _vip_to_cents(amt), 'source': 'dep',
+                      'ref': str(tx), 'note': m[:60], 'by_admin': None, 'created_at': now, 'backfill': True})
+-    for d in db.balance_logs.find({'amount': {'$lt': 0}}, {'user_id': 1, 'amount': 1, 'type': 1}):
++    for d in db.balance_logs.find({'amount': {'$lt': 0}, 'type': {'$nin': ['ref_clawback', 'ref_refund', 'ref_reward']}},
++                                  {'user_id': 1, 'amount': 1, 'type': 1}):
+         try:
+             amt = float(d.get('amount') or 0)
+         except Exception:

@@ -1,0 +1,1892 @@
+--- before/bot.py
++++ after/bot.py
+@@ -568,6 +568,11 @@
+ 
+ 
+ def _json_resp(h, code, data):
++    capture = globals().get('_error_capture')
++    context = globals().get('_ERROR_CONTEXT')
++    current = getattr(context, 'value', None) or {}
++    if capture and code >= 500 and not current.get('last_error'):
++        capture('HTTP operation failed: ' + str(data.get('error', 'server_error')) if isinstance(data, dict) else 'HTTP operation failed')
+     hook = getattr(h, '_idem_hook', None)
+     if hook:
+         h._idem_hook = None
+@@ -2322,7 +2327,16 @@
+                 key = alternative
+         if not key:
+             return None, None
+-        return _get_api_user(key)
++        doc, user = _get_api_user(key)
++        context = globals().get('_ERROR_CONTEXT')
++        current = getattr(context, 'value', None)
++        if doc and user and current is not None:
++            gateway = '/' + _get_api_gateway()
++            route = urllib.parse.urlparse(self.path).path
++            route = route[len(gateway):] if route.startswith(gateway + '/') else '/'
++            current.update(user_id=doc['user_id'], username=user.get('username', ''),
++                           source='api', operation=route[:160])
++        return doc, user
+ 
+     @_api_http_guard
+     def do_GET(self):
+@@ -7544,7 +7558,10 @@
+                     pass
+                 return
+             return func(message, *args, **kwargs)
+-        except AttributeError:
++        except AttributeError as exc:
++            capture = globals().get('_error_capture')
++            if capture:
++                capture('Next-step handler failed: ' + func.__name__, exc)
+             return
+     wrapper.__name__ = func.__name__
+     return wrapper
+@@ -11436,6 +11453,8 @@
+         _vq = vip_quote(uid, pid, vip_qty_unit(p, qty), qty, u)
+         discounted_unit = _vq['unit']
+         total_price = _vq['total']
++        if not _cart_guard_total(total_price):
++            return {'ok': False, 'error': 'price_changed'}
+ 
+         # 🛡 حجز الأكواد atomically
+         reserved_items = []
+@@ -20421,11 +20440,13 @@
+ 
+     price = vip_unit(uid, f"ext_{ep.get('_id')}", float(ep.get('sell_price', ep.get('base_price', 0))))[0]
+     stock = ep.get('stock', 0)
+-    if stock and qty > stock:
++    if not ep.get('unlimited') and stock and qty > stock:
+         bot.send_message(uid, (f"❌ المتوفر فقط {stock} قطعة!" if l != 'en'
+                                else f"❌ Only {stock} in stock!"))
+         return
+     total = round(price * qty, 2)
++    if not _cart_guard_total(total):
++        return {'ok': False, 'error': 'price_changed'}
+ 
+     # خصم الرصيد ذرّياً
+     updated = db.users.find_one_and_update(
+@@ -21108,6 +21129,8 @@
+         markup.add(InlineKeyboardButton("💹 Profit", callback_data="ad_profit"),
+                    InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
+         markup.add(InlineKeyboardButton("📋 Available products table", callback_data="ad_plist"))
++        markup.add(InlineKeyboardButton("🩺 Error monitor", callback_data="ad_errors"),
++                   InlineKeyboardButton("🛒 Website cart", callback_data="ad_cart_settings"))
+         markup.add(InlineKeyboardButton("👥 Referrals Settings", callback_data="ad_ref_settings"))
+         markup.add(InlineKeyboardButton("👑 VIP Tiers", callback_data="ad_vip"))
+         # 🛡 زر الحماية ضد سرقة الحوالات
+@@ -21135,6 +21158,8 @@
+         markup.add(InlineKeyboardButton("💹 الأرباح", callback_data="ad_profit"),
+                    InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
+         markup.add(InlineKeyboardButton("📋 جدول المنتجات المتوفرة (للنشر)", callback_data="ad_plist"))
++        markup.add(InlineKeyboardButton("🩺 مراقبة الأخطاء", callback_data="ad_errors"),
++                   InlineKeyboardButton("🛒 سلة الموقع", callback_data="ad_cart_settings"))
+         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
+         markup.add(InlineKeyboardButton("👑 نظام VIP", callback_data="ad_vip"))
+         # 🛡 زر الحماية ضد سرقة الحوالات
+@@ -31231,7 +31256,7 @@
+         'catalogs': cat['catalogs'], 'products': cat['products'],
+         'pending': _wa_pending_view(uid), 'locked': bool(locked),
+         'verify': ref_dv_pending_for(uid),
+-        'server_time': int(time.time()),
++        'server_time': int(time.time()), 'cart_enabled': _cart_enabled(),
+     }
+ 
+ 
+@@ -31367,7 +31392,7 @@
+     if bal < total:
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+     # Correlate this exact attempt; a previous order can be only milliseconds old.
+-    request_id = secrets.token_hex(16)
++    request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
+     previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
+     _LOG_SRC.wa_purchase_id = request_id
+     try:
+@@ -31473,6 +31498,8 @@
+         return 400, {'error': 'bad_email'}
+     _cq = vip_quote(uid, f'cgpt_{hexid}', _wa_fnum(dur.get('price')))
+     price = _cq['unit']
++    if not _cart_guard_total(price):
++        return 409, {'error': 'price_changed'}
+     minutes = int(_wa_fnum(dur.get('minutes'), 10080)) or 10080
+     label = dur.get('label_en') if lang == 'en' and dur.get('label_en') else dur.get('label', '')
+     if not str(label or '').strip():
+@@ -31516,15 +31543,15 @@
+     if not ep or ep.get('hidden'):
+         return 404, {'error': 'not_found'}
+     stock = int(_wa_fnum(ep.get('stock'), 0))
+-    if stock <= 0:
++    if stock <= 0 and not ep.get('unlimited'):
+         return 409, {'error': 'out_of_stock', 'available': 0}
+-    if qty > stock:
++    if qty > stock and not ep.get('unlimited'):
+         return 409, {'error': 'not_enough_stock', 'available': stock}
+     total = vip_quote(uid, f'ext_{epid}', _wa_fnum(ep.get('sell_price', ep.get('base_price', 0))), qty)['total']
+     bal = _wa_balance(uid)
+     if bal < total:
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+-    request_id = secrets.token_hex(16)
++    request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
+     previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
+     _LOG_SRC.wa_purchase_id = request_id
+     try:
+@@ -32497,6 +32524,9 @@
+     request_id = getattr(_LOG_SRC, 'wa_purchase_id', None)
+     if request_id:
+         fields['webapp_request_id'] = request_id
++    checkout = getattr(_CART_CONTEXT, 'checkout_id', None)
++    if checkout:
++        fields.update(cart_checkout_id=checkout, cart_line_index=_CART_CONTEXT.line_index)
+     return fields
+ 
+ 
+@@ -34252,15 +34282,18 @@
+     elif not _wa_rate_ok(f"{uid}:r", 150):
+         _json_resp(handler, 429, {'error': 'rate_limited'})
+         return True
++    previous_source = _log_src_get()
+     _LOG_SRC.v = 'webapp'
+     try:
+-        code, data = fn(identity, body)
+-    except Exception as exc:
+-        logger.exception('webapp %s failed: %s', p, type(exc).__name__)
+-        code, data = 500, {'error': 'server_error'}
++        with _error_user_scope(identity, p, 'webapp', body.get('product_id')):
++            try:
++                code, data = fn(identity, body)
++            except Exception as exc:
++                logger.exception('webapp %s failed: %s', p, type(exc).__name__)
++                code, data = 500, {'error': 'server_error'}
++            _json_resp(handler, code, data)
+     finally:
+-        _LOG_SRC.v = None
+-    _json_resp(handler, code, data)
++        _LOG_SRC.v = previous_source
+     return True
+ 
+ 
+@@ -36923,6 +36956,766 @@
+ 
+ 
+ # ============================================================
++# 🩺 مراقبة أخطاء البوت والموقع وAPI — سجل خاص بالإدارة
++# ============================================================
++import queue as _error_queue_module
++import traceback as _error_traceback
++from collections import deque as _error_deque
++from contextlib import contextmanager as _error_contextmanager
++
++_ERROR_CONTEXT = threading.local()
++_ERROR_LOCAL = threading.local()
++_ERROR_QUEUE = _error_queue_module.Queue(maxsize=1500)
++_ERROR_MEMORY = _error_deque(maxlen=1000)
++_ERROR_MEMORY_LOCK = threading.Lock()
++_ERROR_WORKER_STARTED = False
++_ERROR_WORKER_LOCK = threading.Lock()
++
++
++def _error_redact(value, limit=4000):
++    text = str(value or '')
++    for key in ('TOKEN', 'MONGO_URI', 'BINANCE_API_KEY', 'BINANCE_API_SECRET', 'BYBIT_API_KEY',
++                'BYBIT_API_SECRET', 'GITHUB_API_KEY', 'SESSION_ENCRYPTION_KEY'):
++        secret = os.getenv(key, '')
++        if secret and len(secret) >= 6:
++            text = text.replace(secret, '[hidden]')
++    text = re.sub(r'(?:mongodb(?:\+srv)?|https?)://[^\s<>\"]+',
++                  lambda m: re.sub(r'//[^/@\s]+:[^/@\s]+@', '//[hidden]@', m.group(0)).split('?')[0], text)
++    text = re.sub(r'\b\d{5,15}:[A-Za-z0-9_-]{20,}\b', '[hidden token]', text)
++    text = re.sub(r'(?im)\b(authorization|set-cookie|cookie|password|passwd|secret|token|api[_-]?key|initdata|code_line|code_delivered)\b[\"\x27]?\s*[:=]\s*[^\n]+',
++                  r'\1=[hidden]', text)
++    text = re.sub(r'(?i)\b(?:Bearer|Basic)\s+[^\s,;]+', '[hidden authorization]', text)
++    return text[:limit]
++
++
++@_error_contextmanager
++def _error_scope(**fields):
++    previous = getattr(_ERROR_CONTEXT, 'value', None)
++    current = dict(previous or {})
++    current.update({k: v for k, v in fields.items() if v is not None})
++    _ERROR_CONTEXT.value = current
++    try:
++        yield current
++    finally:
++        _ERROR_CONTEXT.value = previous
++
++
++def _error_user_scope(identity, operation='', source='webapp', product_id=None):
++    return _error_scope(user_id=identity.get('id'), username=identity.get('username', ''),
++                        source=source, operation=operation, product_id=product_id,
++                        request_id=secrets.token_hex(6), last_error=None)
++
++
++def _error_capture(message, exc=None, level='ERROR', source=None, location=None):
++    """Bounded, nonblocking capture; neither secrets nor request bodies enter records."""
++    if getattr(_ERROR_LOCAL, 'busy', False):
++        return None
++    _ERROR_LOCAL.busy = True
++    try:
++        if exc is not None and getattr(exc, '_lara_error_ref', None):
++            current = getattr(_ERROR_CONTEXT, 'value', None)
++            if current is not None:
++                current['last_error'] = exc._lara_error_ref
++            return exc._lara_error_ref
++        context = dict(getattr(_ERROR_CONTEXT, 'value', None) or {})
++        frames = _error_traceback.extract_tb(exc.__traceback__) if exc and exc.__traceback__ else []
++        trace = '\n'.join(f'{os.path.basename(f.filename)}:{f.lineno} in {f.name}' for f in frames[-20:])
++        loc = location or (f'{os.path.basename(frames[-1].filename)}:{frames[-1].lineno} in {frames[-1].name}' if frames else '')
++        msg = _error_redact(message, 2400)
++        cause = _error_redact(str(exc), 1200) if exc else msg
++        typ = type(exc).__name__ if exc else ('ClientError' if source == 'browser' else 'OperationError')
++        fingerprint_text = re.sub(r'\b(?:[0-9a-f]{16,}|\d{8,})\b', '#', msg, flags=re.I)
++        fingerprint = hashlib.sha256(f'{typ}|{fingerprint_text}|{loc}|{context.get("user_id")}|{context.get("operation", "")}'.encode()).hexdigest()[:32]
++        if exc is not None:
++            try:
++                exc._lara_error_ref = fingerprint
++            except Exception:
++                pass
++        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
++        record = {'_id': fingerprint, 'message': msg, 'cause': cause, 'exception': typ, 'level': level,
++                  'source': source or context.get('source') or _log_src_get() or 'background',
++                  'operation': _error_redact(context.get('operation', ''), 160), 'user_id': context.get('user_id'),
++                  'username': _error_redact(context.get('username', ''), 64),
++                  'product_id': _error_redact(context.get('product_id', ''), 120),
++                  'request_id': context.get('request_id', ''), 'location': _error_redact(loc, 240),
++                  'trace': _error_redact(trace, 3000), 'last_at': now}
++        with _ERROR_MEMORY_LOCK:
++            _ERROR_MEMORY.append(record)
++        try:
++            _ERROR_QUEUE.put_nowait(record)
++        except _error_queue_module.Full:
++            pass  # bounded memory fallback remains visible to the admin
++        current = getattr(_ERROR_CONTEXT, 'value', None)
++        if current is not None:
++            current['last_error'] = fingerprint
++        return fingerprint
++    except Exception:
++        return None
++    finally:
++        _ERROR_LOCAL.busy = False
++
++
++class _ErrorLogHandler(logging.Handler):
++    def emit(self, record):
++        try:
++            exc = record.exc_info[1] if record.exc_info else sys.exc_info()[1]
++            _error_capture(record.getMessage(), exc=exc, level=record.levelname,
++                           location=f'{os.path.basename(record.pathname)}:{record.lineno} in {record.funcName}')
++        except Exception:
++            pass
++
++
++def _error_html(value, limit=700):
++    raw = str(value or '')
++    size = 0
++    end = 0
++    for end, ch in enumerate(raw):
++        size += len(html.escape(ch))
++        if size > limit:
++            return html.escape(raw[:end]) + '…'
++    return html.escape(raw)
++
++
++def _error_notice(record):
++    who = f'<code>{record["user_id"]}</code>' if record.get('user_id') is not None else 'مهمة خلفية / غير مرتبط بمستخدم'
++    if record.get('username'):
++        who += ' @' + _error_html(record['username'], 80)
++    return (f'🚨 <b>خطأ في LARA STOCK</b>\n🧩 {_error_html(record.get("source", ""), 60)}\n'
++            f'👤 {who}\n⚙️ {_error_html(record.get("operation") or "—", 250)}\n'
++            f'❗ <b>{_error_html(record.get("exception", ""), 100)}</b>\n'
++            f'{_error_html(record.get("cause", ""), 800)}\n'
++            f'📍 <code>{_error_html(record.get("location", ""), 300)}</code>')
++
++
++def _error_drain(limit=40):
++    """Persist off the purchase path; retry database outages with a bounded queue."""
++    done = 0
++    while done < limit:
++        try:
++            rec = _ERROR_QUEUE.get_nowait()
++        except _error_queue_module.Empty:
++            break
++        retry = False
++        try:
++            if rec.get('_retry_at', 0) > time.time():
++                retry = True
++                break
++            now = rec['last_at']
++            data = {k: v for k, v in rec.items() if not k.startswith('_')}
++            data.update(resolved=False, expires_at=now + datetime.timedelta(days=30))
++            try:
++                db.system_errors.update_one({'_id': rec['_id']},
++                    {'$set': data, '$inc': {'count': 1}, '$setOnInsert': {'first_at': now}}, upsert=True)
++            except Exception:
++                rec['_retry_at'] = time.time() + 15
++                retry = True
++                break
++            try:
++                if rec['level'] in ('ERROR', 'CRITICAL') and str(get_setting('error_alerts_enabled', 'on')) != 'off':
++                    claim = db.system_errors.find_one_and_update({'_id': rec['_id'], '$or': [
++                        {'last_alert_at': {'$exists': False}}, {'last_alert_at': {'$lt': now - datetime.timedelta(minutes=10)}}]},
++                        {'$set': {'last_alert_at': now}}, return_document=True)
++                    if claim and _wa_rate_ok('error-monitor-alert', 15):
++                        mk = InlineKeyboardMarkup()
++                        mk.add(InlineKeyboardButton('🔎 تفاصيل الخطأ', callback_data='ad_error_' + rec['_id']))
++                        mk.add(InlineKeyboardButton('🩺 آخر الأخطاء', callback_data='ad_errors'))
++                        _ERROR_LOCAL.busy = True
++                        try:
++                            notify_admins(_error_notice(rec), buttons=mk)
++                        finally:
++                            _ERROR_LOCAL.busy = False
++            except Exception:
++                pass
++        finally:
++            if retry:
++                try:
++                    _ERROR_QUEUE.put_nowait(rec)
++                except _error_queue_module.Full:
++                    pass
++            _ERROR_QUEUE.task_done()
++            done += 1
++    return done
++
++def _error_worker():
++    while True:
++        _error_drain()
++        time.sleep(0.5)
++
++
++def _error_start_worker():
++    global _ERROR_WORKER_STARTED
++    with _ERROR_WORKER_LOCK:
++        if _ERROR_WORKER_STARTED:
++            return
++        try:
++            db.system_errors.create_index('expires_at', expireAfterSeconds=0)
++            db.system_errors.create_index([('resolved', 1), ('last_at', -1)])
++            db.cart_checkouts.create_index('expires_at', expireAfterSeconds=0)
++            db.cart_checkouts.create_index([('user_id', 1), ('created_at', -1)])
++        except Exception:
++            pass
++        threading.Thread(target=_error_worker, daemon=True, name='error-monitor').start()
++        _ERROR_WORKER_STARTED = True
++
++
++def _error_recent(page=0, unresolved=False):
++    query = {'resolved': {'$ne': True}} if unresolved else {}
++    try:
++        return list(db.system_errors.find(query).sort('last_at', -1).skip(max(0, page) * 8).limit(8))
++    except Exception:
++        with _ERROR_MEMORY_LOCK:
++            grouped = {r['_id']: r for r in _ERROR_MEMORY}
++        return list(reversed(list(grouped.values())))[max(0, page)*8:(max(0, page)+1)*8]
++
++
++def _error_detail(key):
++    try:
++        found = db.system_errors.find_one({'_id': key})
++        if found:
++            return found
++    except Exception:
++        pass
++    with _ERROR_MEMORY_LOCK:
++        return next((r for r in reversed(_ERROR_MEMORY) if r['_id'] == key), None)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_errors' or call.data.startswith('ad_errors_'))
++@admin_required
++def ad_errors_cb(call):
++    bot.answer_callback_query(call.id)
++    pieces = call.data.split('_')
++    unresolved = 'open' in pieces
++    try:
++        page = max(0, int(pieces[-1]))
++    except ValueError:
++        page = 0
++    rows = _error_recent(page, unresolved)
++    mk = InlineKeyboardMarkup(row_width=1)
++    for rec in rows:
++        mark = '✅' if rec.get('resolved') else ('🚨' if rec.get('level') in ('ERROR', 'CRITICAL') else '⚠️')
++        label = f'{mark} {str(rec.get("last_at", ""))[5:16]} · {rec.get("exception", "Error")} · ×{rec.get("count", 1)}'
++        mk.add(InlineKeyboardButton(label, callback_data='ad_error_' + rec['_id']))
++    mode = 'open' if unresolved else 'all'
++    nav = []
++    if page:
++        nav.append(InlineKeyboardButton('⬅️ السابق', callback_data=f'ad_errors_{mode}_{page-1}'))
++    if len(rows) == 8:
++        nav.append(InlineKeyboardButton('التالي ➡️', callback_data=f'ad_errors_{mode}_{page+1}'))
++    if nav:
++        mk.row(*nav)
++    mk.add(InlineKeyboardButton('🔄 تحديث', callback_data=f'ad_errors_{mode}_{page}'))
++    mk.add(InlineKeyboardButton('📋 جميع الأخطاء' if unresolved else '🔴 غير المعالجة',
++                               callback_data='ad_errors_all_0' if unresolved else 'ad_errors_open_0'))
++    enabled = str(get_setting('error_alerts_enabled', 'on')) != 'off'
++    mk.add(InlineKeyboardButton('🔔 التنبيهات مفعلة' if enabled else '🔕 التنبيهات متوقفة', callback_data='ad_error_alerts_toggle'))
++    mk.add(InlineKeyboardButton('🔙 لوحة الإدارة', callback_data='admin_panel_main'))
++    text = ('🩺 <b>مراقبة الأخطاء</b>\n\nالأخطاء التقنية والتحذيرات في البوت والموقع وAPI والمهام الخلفية.\n'
++            'افتح الخطأ لعرض السبب والمستخدم والعملية ومكان الخطأ. الأوقات UTC.\n'
++            'التنبيه الفوري للأخطاء المهمة؛ التكرار لنفس الخطأ له مهلة 10 دقائق.\n'
++            'السجل محفوظ 30 يوماً وتُخفى المفاتيح والكوكيز وكلمات المرور.\n\n')
++    text += f'الصفحة: {page+1}' if rows else 'لا توجد أخطاء مسجلة في هذا العرض.'
++    try:
++        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++    except Exception:
++        bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=mk)
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith(('ad_error_', 'ad_err_resolve_')))
++@admin_required
++def ad_error_detail_cb(call):
++    bot.answer_callback_query(call.id)
++    if call.data == 'ad_error_alerts_toggle':
++        enabled = str(get_setting('error_alerts_enabled', 'on')) != 'off'
++        db.settings.update_one({'key': 'error_alerts_enabled'}, {'$set': {'value': 'off' if enabled else 'on'}}, upsert=True)
++        call.data = 'ad_errors'
++        return ad_errors_cb(call)
++    if call.data.startswith('ad_err_resolve_'):
++        key = call.data[len('ad_err_resolve_'):]
++        db.system_errors.update_one({'_id': key}, {'$set': {'resolved': True, 'resolved_by': call.from_user.id,
++                                                          'resolved_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)}})
++    else:
++        key = call.data[len('ad_error_'):]
++    rec = _error_detail(key)
++    if not rec:
++        return bot.send_message(call.message.chat.id, 'انتهت مدة حفظ الخطأ أو لم يعد متاحاً.')
++    text = _error_notice(rec) + (f'\n\n🕒 أول ظهور: {rec.get("first_at", rec.get("last_at"))} UTC\n'
++            f'🕒 آخر ظهور: {rec.get("last_at")} UTC\n🔁 التكرار: {rec.get("count", 1)}\n'
++            f'🧾 مرجع التتبع: <code>{html.escape(str(rec.get("request_id") or "—"))}</code>\n'
++            f'📦 المنتج: <code>{_error_html(rec.get("product_id") or "—", 200)}</code>\n'
++            f'الحالة: {"✅ معالجة" if rec.get("resolved") else "🔴 غير معالجة"}')
++    if rec.get('trace'):
++        text += '\n\n<pre>' + _error_html(rec['trace'][-1500:], 1000) + '</pre>'
++    mk = InlineKeyboardMarkup(row_width=1)
++    if not rec.get('resolved'):
++        mk.add(InlineKeyboardButton('✅ وضع علامة تمت المعالجة', callback_data='ad_err_resolve_' + key))
++    if rec.get('user_id'):
++        mk.add(InlineKeyboardButton('👤 تفاصيل المستخدم', callback_data=f'ad_u_det_{rec["user_id"]}'))
++    mk.add(InlineKeyboardButton('🔙 آخر الأخطاء', callback_data='ad_errors'))
++    bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=mk)
++
++
++def _wa_client_error(identity, body):
++    if not _wa_rate_ok(f'client-error:{identity["id"]}', 12):
++        return 429, {'error': 'rate_limited'}
++    with _error_user_scope(identity, 'browser:' + _error_redact(body.get('operation', 'runtime'), 100), 'browser'):
++        ref = _error_capture(_error_redact(body.get('message', ''), 1200), source='browser',
++                             location=_error_redact(body.get('location', ''), 200))
++    return 200, {'ok': True, 'reference': ref}
++
++
++def _error_install():
++    handler = _ErrorLogHandler(level=logging.WARNING)
++    logging.getLogger().addHandler(handler)
++    def monitor_http(original):
++        @functools.wraps(original)
++        def handle(request):
++            with _error_scope(source='api', operation=original.__name__, request_id=secrets.token_hex(6), last_error=None):
++                return original(request)
++        return handle
++    APIHandler.do_GET = monitor_http(APIHandler.do_GET)
++    APIHandler.do_POST = monitor_http(APIHandler.do_POST)
++    original_dispatch = bot._run_middlewares_and_handler
++    @functools.wraps(original_dispatch)
++    def dispatch(item, *args, **kwargs):
++        user = getattr(item, 'from_user', None)
++        data = getattr(item, 'data', None)
++        operation = ('callback:' + str(data)) if data else ('command:' + str(getattr(item, 'text', '')).split()[0] if str(getattr(item, 'text', '')).startswith('/') else 'message')
++        with _error_scope(user_id=getattr(user, 'id', None), username=getattr(user, 'username', '') or '',
++                          source='webapp' if _vc_active(getattr(getattr(getattr(item, 'message', item), 'chat', None), 'id', 0)) else 'bot',
++                          operation=_error_redact(operation, 160), request_id=secrets.token_hex(6), last_error=None):
++            try:
++                return original_dispatch(item, *args, **kwargs)
++            except Exception as exc:
++                _error_capture('Bot handler failed', exc)
++                raise
++    bot._run_middlewares_and_handler = dispatch
++    original_task = bot._exec_task
++    def exec_task(task, *args, **kwargs):
++        @functools.wraps(task)
++        def monitored(*a, **k):
++            item = a[0] if a else None
++            user = getattr(item, 'from_user', None)
++            with _error_scope(user_id=getattr(user, 'id', None), username=getattr(user, 'username', '') or '',
++                              source='bot', operation=getattr(task, '__name__', 'task'), request_id=secrets.token_hex(6)):
++                try:
++                    return task(*a, **k)
++                except Exception as exc:
++                    if not (getattr(_ERROR_CONTEXT, 'value', None) or {}).get('last_error'):
++                        _error_capture('Bot task failed', exc)
++                    raise
++        return original_task(monitored, *args, **kwargs)
++    bot._exec_task = exec_task
++    previous_sys = sys.excepthook
++    def uncaught(kind, exc, tb):
++        _error_capture('Uncaught main-thread exception', exc, level='CRITICAL')
++        _error_drain()
++        previous_sys(kind, exc, tb)
++    sys.excepthook = uncaught
++    previous_thread = threading.excepthook
++    def thread_error(args):
++        with _error_scope(source='background', operation=getattr(args.thread, 'name', 'thread')):
++            _error_capture('Uncaught background exception', args.exc_value)
++        previous_thread(args)
++    threading.excepthook = thread_error
++    _error_start_worker()
++
++
++_WA_POST_ROUTES['/webapp/client/error'] = _wa_client_error
++_ADM_SECTIONS.append(('errors', '🩺', 'مراقبة الأخطاء', 'Error monitor', 'ad_errors'))
++_ADM_OPEN_OK.add('ad_errors')
++_error_install()
++
++
++# ============================================================
++# 🛒 سلة الموقع — عرض سعر موثّق ونتيجة شراء محفوظة لكل محاولة
++# ============================================================
++_CART_CONTEXT = threading.local()
++_CART_MAX_LINES = 20
++_CART_QUOTE_TTL = 900
++
++
++def _cart_enabled():
++    return str(get_setting('webapp_cart_enabled', 'on')) != 'off'
++
++
++def _cart_guard_total(total):
++    expected = getattr(_CART_CONTEXT, 'expected_total', None)
++    if expected is not None and round(float(total) * 100) != round(float(expected) * 100):
++        _CART_CONTEXT.price_changed = True
++        return False
++    return True
++
++
++def _cart_gate(identity):
++    uid = identity['id']
++    u = db.users.find_one({'user_id': uid})
++    if not u:
++        return 404, {'error': 'no_account'}
++    if u.get('is_banned') == 1:
++        return 403, {'error': 'banned'}
++    if check_forced_sub(uid) is False:
++        return 403, {'error': 'must_join', 'forced': _wa_forced_info(uid)}
++    if is_deposit_locked(uid):
++        return 409, {'error': 'deposit_pending', 'pending': _wa_pending_view(uid)}
++    return None
++
++
++def _cart_normalize(items):
++    if not isinstance(items, list) or not items or len(items) > _CART_MAX_LINES:
++        raise ValueError('bad_cart')
++    grouped = {}
++    for item in items:
++        if not isinstance(item, dict):
++            raise ValueError('bad_cart')
++        pid = str(item.get('product_id') or '').strip()
++        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', pid):
++            raise ValueError('bad_cart')
++        qty = item.get('qty', 1)
++        if isinstance(qty, bool) or not re.fullmatch(r'\d{1,4}', str(qty)) or not 1 <= int(qty) <= 500:
++            raise ValueError('bad_qty')
++        email = str(item.get('email') or '').strip().lower()[:254]
++        dur = str(item.get('dur_id') or '').strip()[:80]
++        key = (pid, dur, email)
++        if key not in grouped:
++            grouped[key] = {'product_id': pid, 'qty': 0, 'email': email, 'dur_id': dur}
++        grouped[key]['qty'] += int(qty)
++        if grouped[key]['qty'] > 500:
++            raise ValueError('bad_qty')
++    return list(grouped.values())
++
++
++def _cart_line(uid, item, user=None):
++    pid, qty = item['product_id'], item['qty']
++    parent, p, kind = None, None, 'reg'
++    if pid.startswith('ext_'):
++        try:
++            p = db.ext_products.find_one({'_id': ObjectId(pid[4:])})
++        except Exception:
++            pass
++        kind = 'ext'
++        if not p or p.get('hidden'):
++            return dict(item, error='not_found')
++        base = _wa_fnum(p.get('sell_price', p.get('base_price', 0)))
++        stock = None if p.get('unlimited') else int(_wa_fnum(p.get('stock'), 0))
++        name_en = name_ar = _wa_plain(p.get('name'), 160)
++        needs_email = False
++    else:
++        p = find_product(pid)
++        if not p or p.get('is_hidden'):
++            return dict(item, error='not_found')
++        if p.get('product_type') == 'cgpt_main':
++            hexid = str(p.get('cgpt_product_id') or pid.replace('cgpt_main_', '').replace('cgpt_', ''))
++            try:
++                parent = db.cgpt_products.find_one({'_id': ObjectId(hexid)})
++            except Exception:
++                pass
++            if not _cgpt_product_visible(parent):
++                return dict(item, error='not_found')
++            kind, pid = 'cgpt', f'cgpt_{hexid}'
++            dur = next((d for d in parent.get('durations', []) if str(d.get('dur_id')) == item['dur_id']), None)
++            if not dur:
++                return dict(item, error='bad_duration')
++            base = _wa_fnum(dur.get('price'))
++            stock = _cgpt_display_seats()
++            name_ar = _wa_plain(parent.get('name') or p.get('name_ar'), 160)
++            name_en = _wa_plain(parent.get('name_en') or parent.get('name') or p.get('name_en'), 160)
++            needs_email = True
++        else:
++            kind = 'seat' if p.get('product_type') == 'chatgpt_seat' else 'reg'
++            pid = str(p.get('id') if p.get('id') is not None else p['_id'])
++            base = _wa_fnum(p.get('price')) if kind == 'seat' else _wa_unit_price(p, qty)
++            stock = None if p.get('is_manual') and kind != 'seat' else get_product_stock_count(pid)
++            name_ar = _wa_plain(p.get('name_ar') or p.get('name_en'), 160)
++            name_en = _wa_plain(p.get('name_en') or p.get('name_ar'), 160)
++            needs_email = kind == 'seat' or _wa_needs_email(p)
++    if kind in ('seat', 'cgpt') and qty != 1:
++        return dict(item, error='bad_qty')
++    if needs_email and not _WA_EMAIL_RE.fullmatch(item['email']):
++        return dict(item, error='bad_email')
++    if base < 0:
++        return dict(item, error='unavailable')
++    fresh_user = dict(user if user is not None else (db.users.find_one({'user_id': uid}) or {}))
++    fresh_user.setdefault('vip_cents', 0)
++    q = vip_quote(uid, pid, base, qty, fresh_user)
++    if q['total'] < 0:
++        return dict(item, error='unavailable')
++    retail = float(parent and base or (p.get('sell_price', p.get('base_price', 0)) if kind == 'ext' else p.get('price') or base))
++    line = dict(item, product_id=pid, kind=kind, name_ar=name_ar, name_en=name_en,
++                unit=q['unit'], total=q['total'], subtotal=round(retail * qty, 2),
++                savings=round(max(0, retail * qty - q['total']), 2), stock=stock,
++                manual=bool(p.get('is_manual')) and kind == 'reg', needs_email=needs_email,
++                emoji_id=(parent or p).get('custom_emoji_id') or p.get('emoji_id'),
++                image=_wa_img_path(pid, parent or p), label_ar='', label_en='')
++    if parent:
++        line['label_ar'] = _wa_plain(dur.get('label'), 80)
++        line['label_en'] = _wa_plain(dur.get('label_en') or _wa_dur_label(int(dur.get('minutes') or 0), 'en'), 80)
++    if stock is not None and stock < qty:
++        line['error'] = 'out_of_stock' if stock <= 0 else 'not_enough_stock'
++    return line
++
++
++def _cart_quote_lines(uid, items):
++    user = db.users.find_one({'user_id': uid}) or {}
++    lines = [_cart_line(uid, item, user) for item in items]
++    totals = {}
++    cgpt_count, cgpt_seats = 0, None
++    for line in lines:
++        if line.get('error'):
++            continue
++        pid = line['product_id']
++        totals[pid] = totals.get(pid, 0) + line['qty']
++        if line['kind'] == 'cgpt':
++            cgpt_count += 1
++            cgpt_seats = line['stock']
++    for line in lines:
++        if line.get('error'):
++            continue
++        if line['stock'] is not None and totals[line['product_id']] > line['stock']:
++            line['error'] = 'not_enough_stock'
++        if line['kind'] == 'cgpt' and cgpt_seats is not None and cgpt_count > cgpt_seats:
++            line['error'] = 'not_enough_stock'
++    return lines
++
++
++def _wa_cart_quote(identity, body):
++    if not _cart_enabled():
++        return 409, {'error': 'cart_disabled'}
++    gate = _cart_gate(identity)
++    if gate:
++        return gate
++    try:
++        items = _cart_normalize(body.get('items'))
++    except ValueError as exc:
++        return 400, {'error': str(exc)}
++    uid = identity['id']
++    lines = _cart_quote_lines(uid, items)
++    valid = all(not line.get('error') for line in lines)
++    total = round(sum(line.get('total', 0) for line in lines), 2)
++    subtotal = round(sum(line.get('subtotal', 0) for line in lines), 2)
++    balance = _wa_balance(uid)
++    now = int(time.time())
++    key = secrets.token_hex(20) if valid else None
++    if key:
++        db.cart_checkouts.insert_one({'_id': key, 'user_id': uid, 'status': 'quoted', 'lines': lines,
++            'total': total, 'subtotal': subtotal, 'created_at': now, 'quote_expires': now + _CART_QUOTE_TTL,
++            'expires_at': datetime.datetime.utcnow() + datetime.timedelta(days=30)})
++    return 200, {'ok': True, 'quote_id': key, 'lines': lines, 'total': total, 'subtotal': subtotal,
++        'savings': round(max(0, subtotal-total), 2), 'balance': balance, 'valid': valid,
++        'can_checkout': valid and balance >= total, 'expires': now + _CART_QUOTE_TTL}
++
++
++def _cart_line_request(line):
++    return {k: line[k] for k in ('product_id', 'qty', 'email', 'dur_id')}
++
++
++def _cart_recover(rec):
++    """Recover a stored order after a lost response, without issuing another purchase."""
++    changed = False
++    for i, line in enumerate(rec['lines']):
++        result = line.get('result') or {}
++        if line.get('state') != 'processing' and not result.get('requires_review'):
++            continue
++        query = {'user_id': rec['user_id'], 'cart_checkout_id': rec['_id'], 'cart_line_index': i}
++        recovered = None
++        if line['kind'] == 'ext':
++            order = db.ext_orders.find_one(query, sort=[('_id', -1)])
++            if order and order.get('status') in ('success', 'pending_verification'):
++                recovered = {'ok': True, 'status': 'delivered' if order['status'] == 'success' else 'verifying',
++                    'codes': order.get('codes') or [], 'qty': line['qty'], 'total': line['total'],
++                    'ref': order.get('ext_order_id') or order.get('idempotency_key', '')}
++        else:
++            orders = list(db.orders.find(query))
++            order_ids = [o.get('order_id') for o in orders]
++            rolling_back = db.stock_rollback_jobs.find_one({'user_id': rec['user_id'], 'order_id': {'$in': order_ids}}) if order_ids else None
++            enough = bool(orders) and (line.get('manual') or line['kind'] in ('cgpt', 'seat') or len(orders) >= line['qty'])
++            if enough and not rolling_back:
++                recovered = {'ok': True, 'qty': line['qty'], 'total': line['total'],
++                    'order_id': orders[-1].get('order_id'), 'ref': orders[-1].get('order_id')}
++                if line['kind'] in ('cgpt', 'seat'):
++                    recovered.update(status='chatgpt', email=line['email'], expires=orders[-1].get('cgpt_expires_at'))
++                elif line.get('manual'):
++                    recovered.update(status='manual', email=line.get('email'),
++                        ref=str(orders[-1].get('code_delivered', '')).split(':')[-1].strip())
++                else:
++                    recovered.update(status='delivered', codes=[str(o.get('code_delivered', '')) for o in orders])
++        if recovered:
++            db.cart_checkouts.update_one({'_id': rec['_id'], 'user_id': rec['user_id']},
++                {'$set': {f'lines.{i}.result': recovered, f'lines.{i}.state': 'accepted'}})
++            line.update(result=recovered, state='accepted')
++            changed = True
++    if changed and all((line.get('result') or {}).get('ok') for line in rec['lines']):
++        status = 'verifying' if any(line['result'].get('status') == 'verifying' for line in rec['lines']) else 'completed'
++        db.cart_checkouts.update_one({'_id': rec['_id']}, {'$set': {'status': status, 'requires_review': False}})
++        rec.update(status=status, requires_review=False)
++    return rec
++
++
++def _cart_receipt(rec):
++    try:
++        rec = _cart_recover(rec)
++    except Exception as exc:
++        _error_capture('Cart receipt recovery failed', exc)
++    lines = []
++    spent = 0
++    accepted = 0
++    for i, line in enumerate(rec['lines']):
++        row = {k: v for k, v in line.items() if k not in ('attempt_at',)}
++        result = row.get('result') or {}
++        if result.get('ok'):
++            accepted += 1
++            spent += float(result.get('total', 0))
++        row['index'] = i
++        lines.append(row)
++    return {'ok': True, 'checkout_id': rec['_id'], 'status': rec['status'], 'lines': lines,
++        'total': rec['total'], 'spent': round(spent, 2), 'accepted': accepted,
++        'balance': _wa_balance(rec['user_id']), 'error': rec.get('error'),
++        'requires_review': bool(rec.get('requires_review')) or (rec['status'] == 'processing' and int(time.time())-rec.get('started_at', 0) > 600)}
++
++
++def _cart_execute(uid, line, lang):
++    _invalidate_user_cache(uid)
++    _VIP_STATE_CACHE.pop(uid, None)
++    pid, qty = line['product_id'], line['qty']
++    body = _cart_line_request(line)
++    if line['kind'] == 'ext':
++        return _wa_buy_ext(uid, pid[4:], qty, lang)
++    if line['kind'] == 'cgpt':
++        return _wa_buy_cgpt(uid, pid[5:], body, lang)
++    p = find_product(pid)
++    if not p or p.get('is_hidden'):
++        return 404, {'error': 'not_found'}
++    if line['kind'] == 'seat':
++        return _wa_buy_seat(uid, p, body, lang)
++    return _wa_buy_standard(uid, p, qty, lang, body)
++
++
++def _wa_cart_checkout(identity, body):
++    uid = identity['id']
++    key = str(body.get('quote_id') or '')
++    rec = db.cart_checkouts.find_one({'_id': key, 'user_id': uid})
++    if not rec:
++        return 404, {'error': 'not_found'}
++    if rec['status'] != 'quoted':
++        return (202 if rec['status'] == 'processing' else 200), _cart_receipt(rec)
++    if not _cart_enabled():
++        return 409, {'error': 'cart_disabled'}
++    gate = _cart_gate(identity)
++    if gate:
++        return gate
++    lock = _wa_user_lock(uid)
++    if not lock.acquire(blocking=False):
++        return 429, {'error': 'busy'}
++    try:
++        rec = db.cart_checkouts.find_one({'_id': key, 'user_id': uid})
++        if rec['status'] != 'quoted':
++            return (202 if rec['status'] == 'processing' else 200), _cart_receipt(rec)
++        if rec['quote_expires'] < int(time.time()):
++            return 409, {'error': 'quote_expired'}
++        with _purchase_locks_master:
++            active = _purchase_locks.get(uid)
++        if active and int(time.time())-active < PURCHASE_LOCK_TIMEOUT or _cgpt_pending.get(uid):
++            return 429, {'error': 'busy'}
++        latest = _cart_quote_lines(uid, [_cart_line_request(line) for line in rec['lines']])
++        if any(line.get('error') for line in latest):
++            return 409, {'error': 'cart_changed', 'lines': latest}
++        if any(round(a['total']*100) != round(b['total']*100) for a, b in zip(latest, rec['lines'])):
++            return 409, {'error': 'price_changed', 'lines': latest}
++        balance = _wa_balance(uid)
++        if balance < rec['total']:
++            return 402, {'error': 'insufficient_balance', 'required': rec['total'], 'balance': balance}
++        claimed = db.cart_checkouts.find_one_and_update({'_id': key, 'user_id': uid, 'status': 'quoted'},
++            {'$set': {'status': 'processing', 'started_at': int(time.time())}}, return_document=True)
++        if not claimed:
++            rec = db.cart_checkouts.find_one({'_id': key, 'user_id': uid})
++            return 202, _cart_receipt(rec)
++        lang = _wa_lang_of(db.users.find_one({'user_id': uid}) or {})
++        final_status, final_error, review = 'completed', None, False
++        for i, line in enumerate(claimed['lines']):
++            request_id = hashlib.sha256(f'{key}:{i}'.encode()).hexdigest()[:32]
++            db.cart_checkouts.update_one({'_id': key}, {'$set': {f'lines.{i}.state': 'processing',
++                f'lines.{i}.attempt_at': int(time.time()), f'lines.{i}.request_id': request_id}})
++            previous = vars(_CART_CONTEXT).copy()
++            _CART_CONTEXT.checkout_id, _CART_CONTEXT.line_index = key, i
++            _CART_CONTEXT.request_id, _CART_CONTEXT.expected_total = request_id, line['total']
++            _CART_CONTEXT.price_changed = False
++            try:
++                gate = _cart_gate(identity)
++                current = _cart_line(uid, _cart_line_request(line))
++                if gate:
++                    status, result = gate
++                elif current.get('error'):
++                    status, result = 409, {'error': current['error']}
++                elif round(current['total']*100) != round(line['total']*100):
++                    status, result = 409, {'error': 'price_changed'}
++                else:
++                    with _error_scope(operation=f'cart:{key}:{i}', product_id=line['product_id']):
++                        status, result = _cart_execute(uid, line, lang)
++                if _CART_CONTEXT.price_changed:
++                    status, result = 409, {'error': 'price_changed'}
++                if status >= 500:
++                    with _error_scope(operation=f'cart:{key}:{i}', product_id=line['product_id']):
++                        _error_capture('Cart item could not be completed: ' + str(result.get('error', 'purchase_failed')))
++            except Exception as exc:
++                with _error_scope(operation=f'cart:{key}:{i}', product_id=line['product_id']):
++                    _error_capture('Cart purchase interrupted', exc)
++                status, result = 500, {'error': 'purchase_uncertain', 'requires_review': True}
++            finally:
++                vars(_CART_CONTEXT).clear()
++                vars(_CART_CONTEXT).update(previous)
++            # A durable line result is saved before the next purchase may start.
++            db.cart_checkouts.update_one({'_id': key}, {'$set': {f'lines.{i}.result': result,
++                f'lines.{i}.http_status': status, f'lines.{i}.state': 'accepted' if result.get('ok') else 'failed'}})
++            if not result.get('ok') or result.get('status') == 'verifying':
++                final_error = result.get('error')
++                review = bool(result.get('requires_review')) or (status >= 500 and not result.get('refunded'))
++                final_status = 'verifying' if result.get('status') == 'verifying' else ('partial' if i else 'failed')
++                break
++        db.cart_checkouts.update_one({'_id': key}, {'$set': {'status': final_status, 'error': final_error,
++            'requires_review': review, 'finished_at': int(time.time())}})
++        return 200, _cart_receipt(db.cart_checkouts.find_one({'_id': key, 'user_id': uid}))
++    finally:
++        lock.release()
++
++
++def _wa_cart_status(identity, body):
++    rec = db.cart_checkouts.find_one({'_id': str(body.get('checkout_id') or ''), 'user_id': identity['id']})
++    if not rec:
++        return 404, {'error': 'not_found'}
++    return 200, _cart_receipt(rec)
++
++
++def _wa_cart_cancel(identity, body):
++    key = str(body.get('checkout_id') or '')
++    db.cart_checkouts.update_one({'_id': key, 'user_id': identity['id'], 'status': 'quoted'},
++                                {'$set': {'status': 'cancelled'}})
++    return _wa_cart_status(identity, {'checkout_id': key})
++
++
++@bot.callback_query_handler(func=lambda call: call.data in ('ad_cart_settings', 'ad_cart_toggle'))
++@admin_required
++def ad_cart_settings_cb(call):
++    bot.answer_callback_query(call.id)
++    if call.data == 'ad_cart_toggle':
++        db.settings.update_one({'key': 'webapp_cart_enabled'}, {'$set': {'value': 'off' if _cart_enabled() else 'on'}}, upsert=True)
++    mk = InlineKeyboardMarkup()
++    mk.add(InlineKeyboardButton('🟢 سلة الموقع مفعلة' if _cart_enabled() else '⚪ سلة الموقع متوقفة', callback_data='ad_cart_toggle'))
++    mk.add(InlineKeyboardButton('🔙 لوحة الإدارة', callback_data='admin_panel_main'))
++    bot.send_message(call.message.chat.id,
++        '🛒 <b>سلة مشتريات الموقع</b>\nتجمع المنتجات وتراجع السعر والخصومات قبل التأكيد.\n'
++        'تُحفظ نتيجة كل محاولة لمنع تكرار الشراء عند انقطاع الاتصال.\n'
++        'إذا تعثر منتج، تظهر المنتجات المنفذة والمبلغ المدفوع، وتتوقف بقية السلة للمراجعة.\n'
++        'تتوفر السلة في الموقع فقط. الشراء المباشر في البوت والموقع مستمر.', parse_mode='HTML', reply_markup=mk)
++
++
++_WA_POST_ROUTES.update({'/webapp/cart/quote': _wa_cart_quote,
++    '/webapp/cart/checkout': _wa_cart_checkout, '/webapp/cart/status': _wa_cart_status,
++    '/webapp/cart/cancel': _wa_cart_cancel})
++_WA_HEAVY.update({'/webapp/cart/quote': 30, '/webapp/cart/checkout': 15, '/webapp/cart/status': 90})
++_ADM_SECTIONS.append(('cart', '🛒', 'إعدادات سلة الموقع', 'Website cart settings', 'ad_cart_settings'))
++_ADM_OPEN_OK.add('ad_cart_settings')
++
++
++# ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================
+ def run_bot():
+--- before/webapp/index.html
++++ after/webapp/index.html
+@@ -1354,6 +1354,29 @@
+ .ds-live{margin-top:12px;white-space:normal;height:auto;min-height:46px;line-height:1.35}
+ .ds-live-sub{display:block;margin-top:6px;font-size:12px;color:var(--fg-3);text-align:center}
+ @media (prefers-reduced-motion: reduce){.ap-work .spin{animation:none}}
++#cart-teaser:not(:empty){height:80px}
++.cart-email-edit{display:flex;align-items:center;gap:7px;margin-top:9px;color:var(--fg-3)}.cart-email-edit svg{width:13px;height:13px}.cart-email-edit input,.cart-plan-edit select{width:100%;min-width:0;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--fg-2);padding:7px 8px;font:10px var(--f-body);outline-offset:2px}.cart-email-edit input[aria-invalid="true"]{border-color:var(--bad)}.cart-plan-edit{display:block;margin-top:9px}.cart-plan-edit select{font-size:10px}
++/* Shopping cart · blue glass, generous spacing, and a focused order review. */
++.cart-launch{position:relative;display:grid;place-items:center;width:48px;height:48px;flex:none;border-radius:17px;color:var(--accent-2);background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 4px 20px color-mix(in srgb,var(--accent) 9%,transparent);transition:transform .2s}
++.cart-launch>svg{width:24px;height:24px}.cart-badge{position:absolute;inset-block-start:-5px;inset-inline-end:-5px;border-radius:20px;min-width:21px;height:21px;padding-inline:5px;display:grid;place-items:center;background:var(--accent);color:#fff;font-size:10px;font-weight:700;border:2px solid var(--bg)}
++.product-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:10px}.product-actions .btn{font-size:13px;min-width:0;padding-inline:10px}.product-actions .cart-add{border:1px solid color-mix(in srgb,var(--accent) 24%,transparent);background:var(--accent-soft);color:var(--accent-2)}
++.cart-teaser{position:fixed;z-index:19;inset-inline:16px;bottom:calc(var(--dock-h) + 24px + env(safe-area-inset-bottom,0px));max-width:560px;margin:auto;display:flex;align-items:center;gap:12px;padding:12px 15px;border:1px solid rgba(147,204,255,.36);border-radius:20px;background:linear-gradient(115deg,#1457c2,#2278e0);color:white;box-shadow:0 12px 35px rgba(0,55,150,.30);animation:cart-in .35s ease-out}
++.cart-teaser>span:nth-child(2){display:flex;flex-direction:column;align-items:flex-start;gap:2px}.cart-teaser b{font-size:13px}.cart-teaser small{font-size:10px;opacity:.75}.cart-teaser>strong{margin-inline-start:auto;font-size:19px;letter-spacing:-.5px}.ct-icon{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:rgba(255,255,255,.14);position:relative}.ct-icon>svg{width:23px;height:23px}.ct-icon>b{position:absolute;inset-block-start:-5px;inset-inline-end:-4px;border-radius:9px;min-width:16px;background:white;color:#1b6dff;font-size:9px;line-height:17px}
++.cart-sheet{--cart-border:color-mix(in srgb,var(--fg) 9%,transparent);max-width:900px;max-height:94dvh;background:var(--sheet);border:1px solid var(--line-2);border-bottom:0;box-shadow:0 -20px 90px rgba(0,0,0,.18)}
++.cart-sheet .sh-head{padding:12px 28px 16px}.cart-sheet .sh-head h3{font-size:17px;font-weight:500;letter-spacing:-.3px}.cart-sheet .sh-body{padding:4px 28px 28px}.cart-sheet .sh-foot{padding:16px 28px calc(18px + env(safe-area-inset-bottom,0px));background:color-mix(in srgb,var(--sheet) 96%,var(--accent) 4%)}
++.cart-steps{display:flex;align-items:center;gap:0;list-style:none;margin:0 0 30px;padding:0;color:var(--fg-3);font-size:11px}.cart-steps li{display:flex;gap:7px;align-items:center;white-space:nowrap}.cart-steps li+li:before{content:'';display:block;width:40px;height:1px;background:var(--line-2);margin-inline:12px}.cart-steps li>span{width:23px;height:23px;border:1px solid var(--cart-border);border-radius:50%;display:grid;place-items:center;font-size:10px}.cart-steps .active{color:var(--accent-2);font-weight:600}.cart-steps .active>span{background:var(--accent);color:white;border-color:transparent;box-shadow:0 0 0 4px var(--accent-soft)}.cart-steps .passed{color:var(--ok)}.cart-steps li>span svg{width:12px;height:12px}
++.cart-eyebrow{display:block;font-size:10px;font-weight:600;letter-spacing:1.8px;text-transform:uppercase;color:var(--accent-2);margin-bottom:8px}.cart-intro{margin-bottom:26px}.cart-intro h2{font-size:31px;font-weight:500;line-height:1.25;letter-spacing:-1px;margin:0 0 8px;text-wrap:balance}.cart-intro p{margin:0;color:var(--fg-3);font-size:12px}.cart-layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(260px,1fr);gap:28px;align-items:start}.cart-items{min-width:0}.cart-section-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:14px;border-bottom:1px solid var(--cart-border);font-size:11px;color:var(--fg-3)}.cart-section-head button{display:flex;align-items:center;gap:4px;color:var(--accent-2);font-size:10px}.cart-section-head svg{width:12px;height:12px}
++.cart-item{display:flex;gap:14px;padding:22px 0;border-bottom:1px solid var(--cart-border);animation:cart-in .25s ease-out}.cart-thumb{width:68px;height:74px;border-radius:18px;display:grid;place-items:center;flex:none;background:radial-gradient(ellipse at 30% 10%,color-mix(in srgb,var(--accent) 14%,var(--surface-2)),var(--surface-2));overflow:hidden;border:1px solid var(--line);position:relative}.cart-thumb>img{width:100%;height:100%;object-fit:cover}.cart-thumb .vis{width:48px;height:48px}.cart-thumb .ce,.cart-thumb .ae{width:45px;height:45px}.cart-thumb .brand-tile{width:48px;height:48px}.cart-thumb.missing{color:var(--fg-3)}.cart-item-main{flex:1;min-width:0}.cart-item-top{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}.cart-item h3{margin:1px 0 5px;font-weight:500;font-size:13px;line-height:1.5;overflow-wrap:anywhere}.cart-remove{display:grid;place-items:center;flex:none;width:25px;height:25px;color:var(--fg-3);border-radius:8px}.cart-remove svg{width:16px;height:16px}.cart-remove:hover{color:var(--bad);background:var(--bad-soft)}.cart-meta{display:flex;gap:7px;flex-wrap:wrap;font-size:10px;color:var(--fg-3)}.cart-meta>span+span:before{content:'·';margin-inline-end:7px}.cart-email{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--fg-2);margin-block:7px;overflow-wrap:anywhere}.cart-email svg{width:12px;height:12px}.cart-item-bottom{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:15px}.cart-qty{display:flex;align-items:center;gap:0;border:1px solid var(--line-2);border-radius:10px;overflow:hidden;height:32px;background:var(--surface)}.cart-qty button{width:30px;height:30px;display:grid;place-items:center;color:var(--fg-2)}.cart-qty button svg{width:12px;height:12px}.cart-qty button:disabled{opacity:.25;cursor:default}.cart-qty span{min-width:24px;text-align:center;font-size:11px;font-weight:500}.cart-qty button:hover:not(:disabled){background:var(--accent-soft);color:var(--accent-2)}.cart-line-price{display:flex;align-items:baseline;gap:7px}.cart-line-price b{font-size:16px;font-weight:500;letter-spacing:-.3px}.cart-line-price s{font-size:10px;color:var(--fg-3)}.cart-unit{font-size:11px;color:var(--fg-2)}
++.cart-summary{background:linear-gradient(140deg,color-mix(in srgb,var(--accent) 5%,var(--surface)),var(--surface));border:1px solid var(--cart-border);border-radius:22px;padding:22px}.cart-summary-label{font-size:12px;font-weight:500;margin-bottom:18px}.cart-wallet{display:flex;align-items:center;gap:10px;padding:12px;border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);background:var(--accent-soft);border-radius:13px;margin-bottom:22px}.cart-wallet>svg{width:20px;height:20px;color:var(--accent-2)}.cart-wallet>.ce{width:22px;height:22px;font-size:20px;flex:none;color:var(--accent-2)}.cart-wallet>div{display:flex;flex-direction:column;gap:3px}.cart-wallet small{font-size:9px;color:var(--fg-2)}.cart-wallet strong{font-weight:500;font-size:17px}.cart-wallet-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);margin-inline-start:auto;box-shadow:0 0 0 4px var(--ok-soft)}.cart-math>div{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:var(--fg-2);margin-bottom:14px}.cart-math b{font-weight:500;color:var(--fg)}.cart-math .saved,.cart-math .saved b{color:var(--ok)}.cart-math .cart-grand{padding-top:18px;margin-top:18px;border-top:1px dashed var(--line-2);font-size:12px;color:var(--fg)}.cart-grand strong{font-weight:500;font-size:27px;letter-spacing:-.8px}.cart-math .cart-after{font-size:10px;color:var(--fg-3);margin-bottom:0}.cart-after b{font-size:11px;color:var(--fg-2)}.cart-math .is-short,.cart-math .is-short b{color:var(--warn)}.cart-trust{display:flex;align-items:flex-start;gap:7px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line);color:var(--fg-3)}.cart-trust>svg{width:13px;height:13px;margin-top:1px}.cart-trust p{font-size:10px;line-height:1.7;margin:0}.cart-saving{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--ok);margin-top:12px}.cart-saving svg{width:12px;height:12px}
++.cart-footer{display:flex;gap:18px;align-items:center;justify-content:space-between}.cart-footer>div:first-child{display:flex;flex-direction:column;gap:3px}.cart-footer small{font-size:10px;color:var(--fg-3)}.cart-footer b{font-size:22px;font-weight:500;letter-spacing:-.6px}.cart-footer-buttons{display:flex;gap:8px;align-items:center;min-width:220px}.cart-footer .btn{height:48px;border-radius:14px;font-size:12px;white-space:nowrap}.cart-footer .btn.primary{box-shadow:0 6px 20px color-mix(in srgb,var(--accent) 23%,transparent)}.cart-footer .btn>svg{width:17px;height:17px}.cart-footer button:disabled{opacity:.5;cursor:default}.cart-banner{display:flex;align-items:center;gap:9px;background:var(--accent-soft);color:var(--accent-2);padding:12px;border-radius:13px;font-size:11px;line-height:1.6;margin-block:12px}.cart-banner>svg{width:16px;height:16px}.cart-banner button{margin-inline-start:auto;padding:4px}.cart-banner.bad,.cart-line-error{color:var(--bad);background:var(--bad-soft)}.cart-line-error{display:flex;align-items:center;gap:6px;border-radius:9px;padding:7px;font-size:10px;margin-top:10px}.cart-line-error svg{width:13px;height:13px}
++.cart-empty{padding:20px 20px 60px;display:flex;flex-direction:column;align-items:center;text-align:center}.cart-empty-art{position:relative;display:grid;place-items:center;width:180px;height:170px;margin:15px 0 20px;color:var(--accent-2)}.cart-empty-art>span{position:absolute;inset:12px;border-radius:50%;background:radial-gradient(circle,var(--accent-soft),transparent 70%);box-shadow:inset 0 0 0 1px var(--line)}.cart-empty-art>svg{width:65px;height:65px;stroke-width:1.15;transform:rotate(-9deg);filter:drop-shadow(0 12px 16px var(--glow))}.cart-empty-art>i{position:absolute;width:10px;height:10px;transform:rotate(45deg);top:30px;right:30px;background:var(--accent-2);border-radius:2px;box-shadow:-115px 65px 0 -2px var(--accent),-65px 115px 0 -3px var(--accent-2)}.cart-empty h2{font-size:29px;letter-spacing:-.7px;font-weight:500;margin:4px 0 12px}.cart-empty p{font-size:13px;color:var(--fg-3);line-height:1.8;max-width:300px;margin:0 0 25px}.cart-empty .btn{padding-inline:25px;font-size:12px;border-radius:14px;height:45px}.cart-last{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--fg-2);margin-top:22px}.cart-last svg{width:12px;height:12px}
++.cart-receipt-hero{text-align:center;padding:10px 15px 22px}.cart-receipt-hero>span{display:grid;place-items:center;width:60px;height:60px;margin:0 auto 18px;border-radius:20px;background:var(--accent-soft);color:var(--accent-2)}.cart-receipt-hero>span svg{width:28px;height:28px}.cart-receipt-hero.complete>span{background:var(--ok-soft);color:var(--ok)}.cart-receipt-hero h2{font-size:26px;font-weight:500;letter-spacing:-.5px;margin:0 0 10px}.cart-receipt-hero p{font-size:12px;line-height:1.8;color:var(--fg-3);max-width:420px;margin:auto}.cart-receipt-totals{display:flex;justify-content:center;gap:35px;padding:18px;background:var(--surface);border:1px solid var(--line-2);border-radius:16px;margin-bottom:12px}.cart-receipt-totals>span{display:flex;flex-direction:column;gap:4px;font-size:10px;color:var(--fg-3)}.cart-receipt-totals b{font-size:19px;font-weight:500;color:var(--fg)}.cart-receipt-item{padding:18px 0;border-bottom:1px solid var(--line-2)}.cart-receipt-line{display:flex;align-items:center;gap:10px}.cart-receipt-line>div{flex:1;min-width:0}.cart-receipt-line h3{font-size:13px;font-weight:500;margin:0 0 3px;overflow-wrap:anywhere}.cart-receipt-line small{font-size:10px;color:var(--fg-3)}.cart-receipt-line>b{font-size:14px;font-weight:500}.cart-state{width:30px;height:30px;display:grid;place-items:center;border-radius:10px;color:var(--accent-2);background:var(--accent-soft);flex:none}.cart-state svg{width:15px;height:15px}.cart-state.ok{color:var(--ok);background:var(--ok-soft)}.cart-state.bad{color:var(--bad);background:var(--bad-soft)}.cart-ref{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:10px;color:var(--fg-3)}.cart-ref b{font-weight:400;color:var(--fg-2)}.cart-ref svg{width:12px;height:12px}.cart-receipt-id{display:flex;justify-content:space-between;gap:12px;font-size:9px;color:var(--fg-3);padding:18px 0 0;overflow-wrap:anywhere}.cart-receipt-id code{font-size:9px;max-width:65%;word-break:break-all}.cart-result-actions{display:flex;gap:10px}.cart-result-actions .btn{flex:1;font-size:12px;height:46px;border-radius:13px}.cart-receipt-item .codes{margin-top:12px}
++@keyframes cart-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
++@media(min-width:960px){.cart-sheet{bottom:32px;border-radius:28px;border-bottom:1px solid var(--line-2);max-height:calc(100dvh - 64px)}.cart-sheet .grab{padding-top:14px}}
++@media(max-width:680px){.cart-sheet .sh-head{padding:10px 20px 15px}.cart-sheet .sh-body{padding:4px 20px 22px}.cart-sheet .sh-foot{padding:13px 20px calc(16px + env(safe-area-inset-bottom,0px))}.cart-layout{grid-template-columns:1fr;gap:24px}.cart-intro h2{font-size:28px}.cart-summary{border-radius:20px;padding:20px}.cart-summary-label{margin-bottom:14px}.cart-wallet{margin-bottom:16px}.cart-wallet strong{font-size:16px}.cart-trust{margin-top:16px}.cart-steps{margin-bottom:25px;font-size:10px;justify-content:center}.cart-steps li+li:before{width:23px;margin-inline:9px}.cart-item{padding:20px 0}.cart-footer{gap:12px}.cart-footer-buttons{min-width:0;flex:1;justify-content:flex-end}.cart-footer-buttons>.btn.primary{width:auto;min-width:150px;flex:1}.cart-footer b{font-size:20px}.cart-footer-buttons>.btn.ghost{padding-inline:11px}.cart-thumb{width:62px;height:68px}.cart-item h3{font-size:13px}.cart-teaser{inset-inline:14px;bottom:calc(var(--dock-h) + 20px + env(safe-area-inset-bottom,0px))}.cart-teaser>strong{font-size:17px}.cart-empty{padding-inline:0}.cart-intro{margin-bottom:22px}}
++@media(max-width:360px){.cart-sheet .sh-body{padding-inline:15px}.cart-sheet .sh-foot{padding-inline:15px}.cart-steps li+li:before{width:12px;margin-inline:7px}.cart-item{gap:11px}.cart-thumb{width:52px;height:60px}.cart-footer b{font-size:18px}.cart-footer-buttons>.btn.primary{min-width:120px;font-size:11px}.cart-footer-buttons{gap:4px}.cart-footer-buttons>.btn.ghost{font-size:10px;padding-inline:6px}}
++@media(prefers-reduced-motion:reduce){.cart-teaser,.cart-item{animation:none}}
++
+ </style>
+ </head>
+ <body>
+@@ -1395,7 +1418,7 @@
+ 
+ /* ───────────────────────── i18n ───────────────────────── */
+ const I = {
+-en:{api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
++en:{cartAdd:'Add to bag',cartTitle:"Your bag",cartReady:"Your picks, ready to go",cartItems:"{n} items in your bag",cartResume:"A checkout is saved. Check its result before starting another.",cartAlready:"This plan is already in your bag.",cartLimit:"Your bag can hold up to 20 different items.",cartAdded:"Added to your bag",cartSteps:"Checkout steps",cartBagStep:"Your bag",cartReviewStep:"Review",cartDoneStep:"Complete",cartLess:"Decrease quantity",cartMore:"Increase quantity",cartRemove:"Remove item",cartSummary:"Order summary",cartSubtotal:"Subtotal",cartDiscounts:"Your discounts",cartMissing:"Balance to add",cartReviewNote:"Items are purchased one by one from your balance. If an item needs attention, the rest stop and you see what was charged.",cartQuoteNote:"Final prices, bulk discounts and VIP savings are checked again at review.",cartSaved:"You save {p} on this order",cartEmpty:"Make room for something good.",cartEmptyBody:"Your bag is waiting for your next favorite. Explore the store and add what you like.",cartLast:"View your last checkout",cartReviewEyebrow:"ONE LAST LOOK",cartEyebrow:"PICKED BY YOU",cartReviewTitle:"Everything look right?",cartHeading:"Good choices. All together.",cartReviewSub:"Review the items, quantities and invitation emails before you pay.",cartProducts:"YOUR ITEMS",cartContinue:"Keep shopping",cartFix:"Some items need attention. Update your bag before continuing.",cartPay:"Confirm & pay · {p}",cartReviewButton:"Review order",cartEdit:"Edit bag",cartSuccess:"All yours.",cartWorking:"Your order is in motion.",cartVerifying:"One item is being verified.",cartPartial:"Here is your order update.",cartSuccessSub:"Your items are listed below. Your purchases are also saved in My orders.",cartWorkingSub:"We are checking your saved checkout. Please wait for the result.",cartUncertainSub:"One result needs checking. Contact support with this checkout reference before buying again.",cartPartialSub:"Completed items are listed below. The remaining items were not purchased.",cartWaiting:"Waiting for its turn",cartNotPurchased:"Not purchased",cartPaid:"Amount paid",cartReference:"CHECKOUT REFERENCE",cartCheck:"Check result",cartRemaining:"Back to remaining items",e_cart_changed:"Stock or availability changed. Review your bag again.",e_cart_disabled:"The shopping bag is temporarily unavailable. Direct buying is still available.",e_price_changed:"A price changed. Review the updated total before paying.",e_purchase_uncertain:"This purchase needs checking. Open My orders or contact support before trying again.",e_quote_expired:"Your price review expired. Review your order again.",e_bad_cart:"Add between 1 and 20 valid items to your bag.",api:'API',orderId:"Order ID",vipTier:"VIP tier",vipNone:"No tier yet",vipOff:"{r} off",vipNet:"Net top-ups",vipNext:"Top up {p} more to reach VIP {n} ({r} off)",vipMax:"You reached the top tier",vipAll:"All tiers",vipTitle:"VIP program",vipHow1:"The more you top up, the higher your tier and the bigger your discount on selected products.",vipHow2:"Only real top-ups count. Gifts are not counted, and deductions or refunds are subtracted.",vipProducts:"{n} products have a VIP discount",vipYou:"You",vipSave:"VIP {n} · −{p}%",pvTitle:"Preview only",pvShort:"— not linked to your bot. Buying, top-ups and the API here are simulated; nothing is charged.",pvHow:"How to link it",pvSim:"Preview: this is a simulated result — nothing was charged and no real code was sent. Inside your bot it is real.",pvHowT:"This is a preview — how to make it real",pvHere:"Here (preview)",pvBot:"Inside your bot (real)",pvR1:"Buying",pvR1a:"Simulated, nothing is charged",pvR1b:"Charges the balance and sends the code in the chat",pvR2:"Top-ups",pvR2a:"Sample address",pvR2b:"Your bot’s real addresses and invoices, confirmed automatically",pvR3:"API",pvR3a:"Sample key",pvR3b:"Your real key on the bot’s own API",pvR4:"Log channel",pvR4a:"Nothing is sent",pvR4b:"Every order is logged with “Via: Mini App”",pvStepsT:"Steps",pvS1:"Upload the new bot.py with the webapp folder next to it, where your bot runs now (GitHub → Render).",pvS2:"When the bot starts, it sets the “Store” button in every chat and sends you a message with an Open store button.",pvS3:"Open your bot in Telegram and tap Store next to the message box.",pvS4:"Send /miniapp to the bot to get a full check report.",pvWarn:"Do not put the claude.ai link in BotFather — it is a private preview only you can open, and it is not linked to your bot.",linked:"Linked to your bot",notLinked:"Preview — not linked",autoTr:'Translated automatically',emailInvite:'Your email for the invitation',emailHintManual:'Type the email you want the invitation on — it goes straight to the admins with your order.',emailSent:'Your email was sent to the admins:',addrPreview:'Your real address appears here in the bot',premiumId:'Premium emoji ID',demoNoteEmoji:'Premium emoji appear here once they are fetched from Telegram.',demoNoteReal:'Your real products, prices and stock from your database ({d}). Real buying and top-ups happen inside your bot.',demoNote:'Sample products for previewing the design. Your real products, prices and stock appear when you open the store from your bot in Telegram.',store:'Store',orders:'Orders',balance:'Balance',profile:'Profile',hello:'Hi, {n}',helloSub:'What are we getting today?',search:'Search products',all:'All',other:'Other',inStock:'In stock',sortRec:'A → Z',sortLow:'Price ↑',sortHigh:'Price ↓',products:'{n} products',noMatch:'Nothing matches your search',srDym:'Did you mean:',srFixed:'No results for “{q}” — showing “{c}”',srNoStock:'Nothing in stock with that name right now — turn off “In stock” to see all.',noMatchBody:'Try another word or clear the filters.',clear:'Clear filters',
+ outOfStock:'Out of stock',stockN:'{n} in stock',onlyLeft:'Only {n} left',unlimited:'Unlimited',seats:'{n} seats',instant:'Instant delivery',manual:'Manual delivery',invite:'Invite by email',from:'from',buyFor:'Buy · {p}',confirmFor:'Tap to confirm · {p}',processing:'Processing…',
+ about:'About',tiers:'Bulk discount',tierRow:'{n}+ pcs',perPc:'/pc',duration:'Choose a plan',email:'ChatGPT account email',emailHint:'The invite is sent to this email. It must be registered on chatgpt.com.',qty:'Quantity',unit:'Unit price',total:'Total',yourBal:'Your balance',after:'After purchase',needMore:'You need {p} more',addFunds:'Add funds',days:'{n} days',hiddenTag:'Hidden',
+ okTitle:'Purchase complete',okCodes:'Your codes',dlTxt:'Download TXT',dlAll:"Download all purchases",cgSubs:"ChatGPT subscriptions",cgSubsSub:"{n} active · next one ends in {d} days",cgLeft:"{d} days {h} h left",cgEnds:"Ends {d}",cgRenew:"Renew / add time",cgPick:"Pick a plan to add to this email",cgAddQ:"Add {l} (+{n} days) to {e} for {p}?",cgAdded:"Added {n} days — now {t} days left",cgNone:"No active ChatGPT subscriptions.",toChat:'📩 To chat',txtSent:'Sent the file to your bot chat',txtCancel:'Download cancelled',pvTxt:'Preview: in your bot this downloads a TXT file with the codes',copyAll:'Copy all',copied:'Copied',sentChat:'A copy was also sent to your chat with the bot.',manualTitle:'Order placed',manualBody:'This product is delivered manually. Your order number is {ref}. Support will contact you.',gptTitle:'Invite sent',gptBody:'Open {email} and accept the invite to activate your seat.',expires:'Expires {d}',verTitle:'Order being verified',verBody:"Don't repeat the purchase. You'll get the result in the bot chat.",done:'Done',myOrders:'My orders',
+@@ -1410,7 +1433,7 @@
+ banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
+ activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
+ e_insufficient_balance:'Not enough balance. You need {p} more.',e_out_of_stock:'This product is out of stock.',e_not_enough_stock:'Only {n} available.',e_deposit_pending:'Finish or cancel your pending payment first.',e_busy:'Another purchase is in progress. Wait a moment.',e_renewal_pending:'Renewal is being verified. Do not pay again; contact support.',e_must_join:'Join the required channels first.',e_banned:'Your account is blocked.',e_bad_email:'Enter a valid email address.',e_bad_duration:'Choose a plan first.',e_invite_failed:"The invite couldn't be sent. Your balance was refunded.",e_supplier_failed:'The supplier rejected the order. Your balance was refunded.',e_purchase_failed:"The purchase didn't go through. Check your balance and try again.",e_rate_limited:'Too many requests. Try again in a minute.',e_auth:'Session expired. Reopen the store.',e_method_unavailable:"This payment method isn't available.",e_amount_range:'Enter an amount between {min} and {max}.',e_busy_amount:'No unique amount is free right now. Try another amount.',e_price_unavailable:"Couldn't get the coin price. Try again shortly.",e_invoice_failed:"Couldn't create the Stars invoice.",e_server_error:'Something went wrong. Try again.',e_network:'No connection. Check your internet and try again.',e_not_found:'This product is no longer available.',e_bad_qty:'Enter a valid quantity.',e_bot_only:'This is managed from the bot only.',vfT:"Activate your account",vfB:"Two quick steps that keep the store safe from fake accounts.",vfS1:"Channels & groups",vfS2:"Human check",vfS3:"Ready",vfJoinT:"Join our channels and groups",vfJoinB:"{n} of {t} left. Join them, then tap “Check”.",vfJoinAll:"All set here. Tap “Check” to continue.",vfKindC:"Channel",vfKindG:"Group",vfJoined:"Joined",vfJoin:"Join",vfOpened:"Opened",vfCheck:"Check",vfChecking:"Checking…",vfLeft:"{n} still not joined",vfHumT:"Show us you’re human",vfHumB:"Tap the emoji that matches.",vfTap:"Tap",vfW1:"Checking your device",vfW2:"Confirming the Telegram app",vfW3:"Activating your account",vfDoneT:"You’re all set",vfDoneB:"Your account is active. Enjoy the store.",vfEnter:"Enter the store",vfOpenP:"Open the product",vfOpening:"Opening {p} for you…",deepGone:"This product isn't available right now.",vfPriv:"No personal data is collected, only an encrypted device code.",vfFail:"Couldn't check right now. Try again.",vfNoLink:"Ask support",pvVerify:"Preview the referral activation screen",poSub:"Your codes and order history",dvT:"One last step",dvB:"Tap the matching emoji to verify your device. It keeps the store safe from fake accounts — no personal data is collected.",dvTap:"Tap {e}",dvWrong:"Not that one — try again",dvWork:"Checking your device…",dvOkT:"Verified",dvOkB:"You can use the store now.",dvEnter:"Enter the store",dvFail:"Couldn't verify right now. Try again.",e_no_account:'Start the bot first, then reopen the store.',e_deposit_failed:"Couldn't create the payment. Try again or pick another method.",e_deposit_exists:"You already have a payment in progress. Finish or cancel it first.",e_unavailable:"This isn't available right now. Try again shortly.",e_bad_request:"Something in the request was wrong. Refresh and try again.",e_too_large:"That's too much text at once. Send it in smaller parts.",e_bad_json:"Something in the request was wrong. Refresh and try again.",e_expired:"This link expired. Try again.",e_forbidden:"You don't have permission for this.",e_no_key:"Generate an API key first.",e_no_webhook:"Set a webhook URL first.",e_bad_url:"Enter a valid http(s) URL.",e_private_url:"Use a public internet address (not localhost or a private network).",e_empty:"Nothing was entered.",e_bad_amount:"Enter a valid amount.",e_bad_price:"Enter a valid price.",e_bad_vip:"Invalid VIP setting.",e_cannot_ban:"This account can't be banned.",e_bad_section:"This section isn't available.",e_open_failed:"Couldn't open this section. Try again.",h_all:'All',h_deposit:'Deposits',h_purchase:'Purchases',h_adjust:'Adjustments',opsN:'{n} operations',details:'Details',f_type:'Type',f_method:'Method',f_network:'Network',f_sent:'Amount sent',f_requested:'Requested',f_status:'Status',completed:'Completed',f_date:'Date',f_ref:'Reference',f_tx:'Transaction ID',f_product:'Product',f_note:'Note',f_after:'Balance after',adj_compensation:'Compensation',adj_manual:'Manual top-up',adj_gift:'Gift',adj_adjustment:'Balance adjustment',adj_ref_reward:'Referral reward',adj_ref_clawback:'Referral deducted (left)',adj_ref_refund:'Referral back',adj_deduct:'Deduction',refunded:'Refunded',g_tg:'Telegram',g_ex:'Exchanges',g_cr:'Crypto wallets',change:'Change',lastUsed:'Last used',mInstant:'Instant',mAuto:'Credited automatically',minFrom:'from {min}',newBal:'New balance',uniqueNote:"You'll get a unique amount with extra decimals. Send exactly that amount.",prev:'Previous',next:'Next',codesN:'{n} codes'},
+-ar:{api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
++ar:{cartAdd:'أضف إلى السلة',cartTitle:"سلة مشترياتك",cartReady:"اختياراتك جاهزة للشراء",cartItems:"{n} قطعة في سلتك",cartResume:"توجد محاولة شراء محفوظة. تحقق من نتيجتها قبل بدء محاولة أخرى.",cartAlready:"هذه الباقة موجودة في سلتك.",cartLimit:"تستوعب السلة 20 منتجًا مختلفًا كحد أقصى.",cartAdded:"تمت الإضافة إلى سلتك",cartSteps:"مراحل إتمام الطلب",cartBagStep:"السلة",cartReviewStep:"المراجعة",cartDoneStep:"الإتمام",cartLess:"تقليل الكمية",cartMore:"زيادة الكمية",cartRemove:"إزالة المنتج",cartSummary:"ملخص الطلب",cartSubtotal:"قيمة المنتجات",cartDiscounts:"خصوماتك",cartMissing:"الرصيد المطلوب إضافته",cartReviewNote:"نشتري المنتجات بالتتابع من رصيدك. إذا تعثر منتج نتوقف، وتظهر نتيجة كل منتج والمبلغ المدفوع.",cartQuoteNote:"نتحقق من الأسعار وخصومات الكمية وVIP مجددًا عند مراجعة الطلب.",cartSaved:"توفّر {p} في هذا الطلب",cartEmpty:"سلتك تنتظر اختياراتك.",cartEmptyBody:"اكتشف المنتجات وأضف ما يعجبك. اجمع اختياراتك هنا وراجعها براحتك.",cartLast:"عرض آخر محاولة شراء",cartReviewEyebrow:"قبل التأكيد",cartEyebrow:"على ذوقك",cartReviewTitle:"كل شيء مثل ما تحب؟",cartHeading:"اختياراتك الحلوة، في مكان واحد.",cartReviewSub:"راجع المنتجات والكميات وإيميلات الدعوات قبل الدفع.",cartProducts:"منتجاتك",cartContinue:"متابعة التسوق",cartFix:"بعض المنتجات تحتاج مراجعة. حدّث سلتك قبل المتابعة.",cartPay:"تأكيد ودفع · {p}",cartReviewButton:"مراجعة الطلب",cartEdit:"تعديل السلة",cartSuccess:"صارت لك.",cartWorking:"نعمل على طلبك.",cartVerifying:"أحد المنتجات قيد التحقق.",cartPartial:"هذا آخر تحديث لطلبك.",cartSuccessSub:"تفاصيل منتجاتك بالأسفل، ومشترياتك محفوظة أيضًا في «طلباتي».",cartWorkingSub:"نتحقق من نتيجة الشراء المحفوظة. انتظر حتى تظهر النتيجة.",cartUncertainSub:"نتيجة أحد المنتجات تحتاج تحققًا. تواصل مع الدعم بمرجع السلة قبل إعادة الشراء.",cartPartialSub:"المنتجات المكتملة موضحة بالأسفل. بقية المنتجات لم تُشترَ.",cartWaiting:"بانتظار دوره",cartNotPurchased:"لم يتم الشراء",cartPaid:"المبلغ المدفوع",cartReference:"مرجع عملية السلة",cartCheck:"التحقق من النتيجة",cartRemaining:"الرجوع للمنتجات المتبقية",e_cart_changed:"تغير المخزون أو التوفر. راجع السلة مرة أخرى.",e_cart_disabled:"السلة متوقفة مؤقتًا. يمكنك الشراء المباشر.",e_price_changed:"تغير أحد الأسعار. راجع الإجمالي المحدّث قبل الدفع.",e_purchase_uncertain:"نتيجة الشراء تحتاج تحققًا. افتح طلباتي أو تواصل مع الدعم قبل تكرار الشراء.",e_quote_expired:"انتهت صلاحية مراجعة السعر. راجع الطلب مجددًا.",e_bad_cart:"أضف من منتج واحد إلى 20 منتجًا صحيحًا للسلة.",api:'API',orderId:"رقم الطلب",vipTier:"رتبة VIP",vipNone:"بدون رتبة للحين",vipOff:"خصم {r}",vipNet:"صافي الشحن",vipNext:"باقي {p} شحن لتوصل VIP {n} (خصم {r})",vipMax:"وصلت أعلى رتبة",vipAll:"كل الرتب",vipTitle:"نظام VIP",vipHow1:"كل ما تشحن أكثر ترتفع رتبتك ويزيد خصمك على المنتجات المختارة.",vipHow2:"ينحسب الشحن الحقيقي بس. الهدايا ما تنحسب، والخصومات والمبالغ المسترجعة تنقص منه.",vipProducts:"{n} منتج عليه خصم VIP",vipYou:"أنت",vipSave:"VIP {n} · −{p}%",pvTitle:"معاينة فقط",pvShort:"— مو مربوطة ببوتك. الشراء والشحن والـ API هنا تجربة وما ينخصم شي.",pvHow:"كيف أربطها؟",pvSim:"معاينة: هذي نتيجة تجريبية — ما انخصم شي وما انرسل كود حقيقي. داخل بوتك تكون حقيقية.",pvHowT:"هذي معاينة — كيف أخليها حقيقية؟",pvHere:"هنا (معاينة)",pvBot:"داخل بوتك (حقيقي)",pvR1:"الشراء",pvR1a:"تجربة، ما ينخصم شي",pvR1b:"يخصم من الرصيد ويرسل الكود في المحادثة",pvR2:"الشحن",pvR2a:"عنوان تجريبي",pvR2b:"عناوين وفواتير بوتك الحقيقية، والتأكيد تلقائي",pvR3:"الـ API",pvR3a:"مفتاح تجريبي",pvR3b:"مفتاحك الحقيقي على نفس API البوت",pvR4:"قناة اللوق",pvR4a:"ما يوصل شي",pvR4b:"كل طلب يوصل مكتوب فيه «عبر الموقع (Mini App)»",pvStepsT:"الخطوات",pvS1:"ارفع bot.py الجديد ومجلد webapp بجانبه، في نفس مكان بوتك الحالي (GitHub ← Render).",pvS2:"لما يشتغل البوت يضبط زر «Store» في كل المحادثات تلقائياً، ويرسل لك رسالة فيها زر فتح المتجر.",pvS3:"افتح بوتك في تيليجرام واضغط Store جنب مكان الكتابة.",pvS4:"أرسل /miniapp للبوت عشان يطلع لك تقرير فحص كامل.",pvWarn:"لا تحط رابط claude.ai في BotFather — هذا رابط معاينة خاص فيك بس، ومو مربوط ببوتك.",linked:"مربوط ببوتك",notLinked:"معاينة — غير مربوطة",autoTr:'مترجم تلقائياً',emailInvite:'إيميلك لاستلام الدعوة',emailHintManual:'اكتب الإيميل اللي تبي توصلك عليه الدعوة — يوصل للإدارة مباشرة مع طلبك.',emailSent:'تم إرسال إيميلك للإدارة:',addrPreview:'عنوانك الحقيقي يظهر هنا داخل البوت',premiumId:'معرّف الإيموجي المميز',demoNoteEmoji:'الإيموجيات المميزة تظهر هنا بعد جلبها من تيليجرام.',demoNoteReal:'منتجاتك وأسعارك ومخزونك الحقيقي من قاعدة بياناتك ({d}). الشراء والشحن الفعلي يتم من داخل بوتك.',demoNote:'هذه منتجات تجريبية لمعاينة التصميم فقط. منتجاتك الحقيقية وأسعارها ومخزونها تظهر لما تفتح المتجر من داخل بوتك في تيليجرام.',store:'المتجر',orders:'طلباتي',balance:'الرصيد',profile:'حسابي',hello:'أهلاً {n}',helloSub:'شو حاب تشتري اليوم؟',search:'ابحث عن منتج',all:'الكل',other:'أخرى',inStock:'المتوفر',sortRec:'A → Z',sortLow:'السعر ↑',sortHigh:'السعر ↓',products:'{n} منتج',noMatch:'لا توجد نتائج',srDym:'هل تقصد:',srFixed:'ما لقيت «{q}» — هذي نتائج «{c}»',srNoStock:'ما فيه منتج متوفر بهذا الاسم الحين — طفّ «المتوفر» عشان تشوف الكل.',noMatchBody:'جرّب كلمة أخرى أو امسح الفلاتر.',clear:'مسح الفلاتر',
+ outOfStock:'غير متوفر',stockN:'{n} متوفر',onlyLeft:'باقي {n} فقط',unlimited:'غير محدود',seats:'{n} مقعد',instant:'تسليم فوري',manual:'تسليم يدوي',invite:'دعوة على الإيميل',from:'يبدأ من',buyFor:'شراء · {p}',confirmFor:'اضغط للتأكيد · {p}',processing:'جاري التنفيذ…',
+ about:'عن المنتج',tiers:'خصم الكمية',tierRow:'{n}+ قطعة',perPc:'/قطعة',duration:'اختر المدة',email:'إيميل حساب ChatGPT',emailHint:'تُرسل الدعوة لهذا الإيميل، ويجب أن يكون مسجلاً على chatgpt.com.',qty:'الكمية',unit:'سعر القطعة',total:'الإجمالي',yourBal:'رصيدك',after:'بعد الشراء',needMore:'ينقصك {p}',addFunds:'شحن الرصيد',days:'{n} يوم',hiddenTag:'مخفي',
+ okTitle:'تم الشراء بنجاح',okCodes:'أكوادك',dlTxt:'تحميل TXT',dlAll:"تحميل كل المشتريات",cgSubs:"اشتراكات ChatGPT",cgSubsSub:"{n} نشط · أقربها ينتهي بعد {d} يوم",cgLeft:"باقي {d} يوم و {h} ساعة",cgEnds:"ينتهي {d}",cgRenew:"تجديد / إضافة مدة",cgPick:"اختر الباقة اللي تنضاف لهذا الإيميل",cgAddQ:"إضافة {l} (+{n} يوم) إلى {e} بسعر {p}؟",cgAdded:"تمت إضافة {n} يوم — الحين باقي {t} يوم",cgNone:"ما عندك اشتراكات ChatGPT نشطة.",toChat:'📩 للمحادثة',txtSent:'أرسلت لك الملف في محادثة البوت',txtCancel:'انلغى التحميل',pvTxt:'معاينة: في بوتك يتحمّل ملف TXT فيه الأكواد',copyAll:'نسخ الكل',copied:'تم النسخ',sentChat:'وصلتك نسخة أيضاً في محادثة البوت.',manualTitle:'تم تسجيل طلبك',manualBody:'هذا المنتج يُسلَّم يدوياً. رقم طلبك {ref}، وسيتواصل معك الدعم.',gptTitle:'تم إرسال الدعوة',gptBody:'افتح {email} واقبل الدعوة لتفعيل مقعدك.',expires:'ينتهي {d}',verTitle:'طلبك قيد التحقق',verBody:'لا تكرر الشراء، ستصلك النتيجة في محادثة البوت.',done:'تم',myOrders:'طلباتي',
+@@ -1425,7 +1448,7 @@
+ banned:'حسابك محظور',bannedB:'تواصل مع الدعم إذا كنت تعتقد أن هذا خطأ.',authT:'انتهت الجلسة',authB:'أغلق المتجر وافتحه من جديد من البوت.',close:'إغلاق',noTgT:'افتحه من تيليجرام',noTgB:'هذا المتجر يعمل داخل تيليجرام. افتحه من قائمة البوت.',
+ activity:'النشاط',noActivity:'لا يوجد شيء بعد',translate:'ترجمة',original:'عرض الأصل',translating:'جاري الترجمة…',demo:'معاينة',loading:'جاري التحميل…',retry:'إعادة المحاولة',pcs:'قطعة',
+ e_insufficient_balance:'رصيدك غير كافٍ، ينقصك {p}.',e_out_of_stock:'هذا المنتج غير متوفر حالياً.',e_not_enough_stock:'المتوفر {n} فقط.',e_deposit_pending:'أكمل عملية الدفع الحالية أو ألغها أولاً.',e_busy:'يوجد طلب شراء قيد التنفيذ، انتظر قليلاً.',e_renewal_pending:'نتيجة التجديد قيد التحقق. لا تكرر الدفع، وتواصل مع الدعم.',e_must_join:'اشترك في القنوات المطلوبة أولاً.',e_banned:'حسابك محظور.',e_bad_email:'اكتب إيميلاً صحيحاً.',e_bad_duration:'اختر المدة أولاً.',e_invite_failed:'تعذّر إرسال الدعوة وتم إرجاع رصيدك.',e_supplier_failed:'رفض المورّد الطلب وتم إرجاع رصيدك.',e_purchase_failed:'لم تكتمل عملية الشراء، تحقق من رصيدك وحاول مجدداً.',e_rate_limited:'طلبات كثيرة، حاول بعد دقيقة.',e_auth:'انتهت الجلسة، أعد فتح المتجر.',e_method_unavailable:'طريقة الدفع هذه غير متاحة.',e_amount_range:'اكتب مبلغاً بين {min} و {max}.',e_busy_amount:'لا يوجد مبلغ مميز متاح الآن، جرّب مبلغاً آخر.',e_price_unavailable:'تعذّر جلب سعر العملة، حاول بعد قليل.',e_invoice_failed:'تعذّر إنشاء فاتورة النجوم.',e_server_error:'حدث خطأ، حاول مجدداً.',e_network:'لا يوجد اتصال، تحقق من الإنترنت وحاول مجدداً.',e_not_found:'هذا المنتج لم يعد متاحاً.',e_bad_qty:'اكتب كمية صحيحة.',e_bot_only:'هذا من البوت فقط.',vfT:"فعّل حسابك",vfB:"خطوتين سريعة تحمي المتجر من الحسابات الوهمية.",vfS1:"القنوات والجروبات",vfS2:"تأكيد إنك إنسان",vfS3:"جاهز",vfJoinT:"انضم لقنواتنا وجروباتنا",vfJoinB:"باقي {n} من {t}. انضم لها وبعدين اضغط «تحقق».",vfJoinAll:"كل شي تمام هنا. اضغط «تحقق» وكمّل.",vfKindC:"قناة",vfKindG:"جروب",vfJoined:"منضم",vfJoin:"انضم",vfOpened:"فتحتها",vfCheck:"تحقق",vfChecking:"نتحقق…",vfLeft:"باقي {n} ما انضميت لها",vfHumT:"أكّد إنك إنسان",vfHumB:"اضغط على الإيموجي المطابق.",vfTap:"اضغط على",vfW1:"نفحص الجهاز",vfW2:"نتأكد من تطبيق تيليجرام",vfW3:"نفعّل حسابك",vfDoneT:"كل شي جاهز",vfDoneB:"حسابك مفعّل. تسوّق براحتك.",vfEnter:"ادخل المتجر",vfOpenP:"افتح المنتج",vfOpening:"نفتح لك {p}…",deepGone:"هذا المنتج غير متاح حالياً.",vfPriv:"ما نجمع بيانات شخصية، بس رمز مشفّر للجهاز.",vfFail:"تعذّر التحقق الحين، جرّب مرة ثانية.",vfNoLink:"اطلب الرابط من الدعم",pvVerify:"شوف شاشة تفعيل الإحالة",poSub:"أكوادك وسجل مشترياتك",dvT:"خطوة أخيرة",dvB:"اضغط على الإيموجي المطلوب عشان نتحقق من جهازك. هذا يحمي المتجر من الحسابات الوهمية، وما نجمع أي بيانات شخصية.",dvTap:"اضغط على {e}",dvWrong:"مو هذا — جرّب مرة ثانية",dvWork:"نتحقق من جهازك…",dvOkT:"تم التحقق",dvOkB:"تقدر الحين تستخدم المتجر.",dvEnter:"ادخل المتجر",dvFail:"تعذّر التحقق الحين، حاول مرة ثانية.",e_no_account:'ابدأ البوت أولاً ثم افتح المتجر.',e_deposit_failed:"تعذّر إنشاء عملية الدفع، حاول مجدداً أو اختر طريقة أخرى.",e_deposit_exists:"لديك عملية دفع قيد التنفيذ، أكملها أو ألغها أولاً.",e_unavailable:"غير متاح حالياً، حاول بعد قليل.",e_bad_request:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_too_large:"النص طويل جداً، أرسله على أجزاء.",e_bad_json:"في الطلب خطأ، حدّث الصفحة وحاول مجدداً.",e_expired:"انتهت صلاحية الرابط، حاول مجدداً.",e_forbidden:"ليست لديك صلاحية لهذا.",e_no_key:"أنشئ مفتاح API أولاً.",e_no_webhook:"أضف رابط Webhook أولاً.",e_bad_url:"اكتب رابط http(s) صحيح.",e_private_url:"استخدم رابطاً عاماً على الإنترنت (ليس localhost ولا شبكة خاصة).",e_empty:"لم يتم إدخال شيء.",e_bad_amount:"اكتب مبلغاً صحيحاً.",e_bad_price:"اكتب سعراً صحيحاً.",e_bad_vip:"إعداد VIP غير صحيح.",e_cannot_ban:"لا يمكن حظر هذا الحساب.",e_bad_section:"هذا القسم غير متاح.",e_open_failed:"تعذّر فتح هذا القسم، حاول مجدداً.",h_all:'الكل',h_deposit:'الإيداعات',h_purchase:'المشتريات',h_adjust:'التعديلات',opsN:'{n} عملية',details:'التفاصيل',f_type:'النوع',f_method:'الطريقة',f_network:'الشبكة',f_sent:'المبلغ المرسل',f_requested:'المبلغ المطلوب',f_status:'الحالة',completed:'مكتمل',f_date:'التاريخ',f_ref:'المرجع',f_tx:'رقم العملية',f_product:'المنتج',f_note:'ملاحظة',f_after:'الرصيد بعدها',adj_compensation:'تعويض',adj_manual:'شحن يدوي',adj_gift:'هدية',adj_adjustment:'تعديل رصيد',adj_ref_reward:'مكافأة إحالات',adj_ref_clawback:'خصم إحالة طلعت',adj_ref_refund:'رجوع إحالة',adj_deduct:'خصم',refunded:'مسترجع',g_tg:'تيليجرام',g_ex:'المنصات',g_cr:'محافظ الكريبتو',change:'تغيير',lastUsed:'آخر استخدام',mInstant:'فوري',mAuto:'يُضاف تلقائياً',minFrom:'من {min}',newBal:'الرصيد الجديد',uniqueNote:'ستحصل على مبلغ مميز بكسور إضافية، أرسله بالضبط.',prev:'السابق',next:'التالي',codesN:'{n} كود'},
+-ru:{api:'API',orderId:"Номер заказа",vipTier:"VIP-уровень",vipNone:"Пока без уровня",vipOff:"скидка {r}",vipNet:"Чистые пополнения",vipNext:"Пополните ещё на {p}, чтобы получить VIP {n} (скидка {r})",vipMax:"У вас максимальный уровень",vipAll:"Все уровни",vipTitle:"VIP-программа",vipHow1:"Чем больше пополнений, тем выше уровень и больше скидка на выбранные товары.",vipHow2:"Учитываются только реальные пополнения. Подарки не считаются, списания и возвраты вычитаются.",vipProducts:"Товаров со скидкой VIP: {n}",vipYou:"Вы",vipSave:"VIP {n} · −{p}%",pvTitle:"Только предпросмотр",pvShort:"— не подключён к вашему боту. Покупки, пополнения и API здесь имитируются, ничего не списывается.",pvHow:"Как подключить",pvSim:"Предпросмотр: это имитация — ничего не списано и настоящий код не отправлен. В боте всё по-настоящему.",pvHowT:"Это предпросмотр — как сделать по-настоящему",pvHere:"Здесь (предпросмотр)",pvBot:"В вашем боте (реально)",pvR1:"Покупка",pvR1a:"Имитация, без списания",pvR1b:"Списывает баланс и присылает код в чат",pvR2:"Пополнение",pvR2a:"Пример адреса",pvR2b:"Настоящие адреса и счета бота, подтверждение автоматически",pvR3:"API",pvR3a:"Пример ключа",pvR3b:"Ваш настоящий ключ к API бота",pvR4:"Канал логов",pvR4a:"Ничего не отправляется",pvR4b:"Каждый заказ с пометкой «Via: Mini App»",pvStepsT:"Шаги",pvS1:"Загрузите новый bot.py и папку webapp рядом с ним туда, где сейчас работает бот (GitHub → Render).",pvS2:"При запуске бот сам поставит кнопку «Store» во всех чатах и пришлёт вам сообщение с кнопкой магазина.",pvS3:"Откройте бота в Telegram и нажмите Store рядом с полем ввода.",pvS4:"Отправьте боту /miniapp — придёт полный отчёт проверки.",pvWarn:"Не вставляйте ссылку claude.ai в BotFather — это личный предпросмотр, доступный только вам, и он не подключён к боту.",linked:"Подключено к боту",notLinked:"Предпросмотр — не подключено",autoTr:'Переведено автоматически',emailInvite:'Ваш email для приглашения',emailHintManual:'Укажите email для приглашения — он сразу уйдёт администраторам вместе с заказом.',emailSent:'Ваш email отправлен администраторам:',addrPreview:'Ваш настоящий адрес появится здесь в боте',premiumId:'ID премиум-эмодзи',demoNoteEmoji:'Премиум-эмодзи появятся здесь после загрузки из Telegram.',demoNoteReal:'Ваши настоящие товары, цены и остатки из базы данных ({d}). Реальные покупки и пополнения — внутри бота.',demoNote:'Это демо-товары для предпросмотра дизайна. Ваши настоящие товары, цены и остатки появятся, когда вы откроете магазин из бота в Telegram.',store:'Магазин',orders:'Заказы',balance:'Баланс',profile:'Профиль',hello:'Привет, {n}',helloSub:'Что берём сегодня?',search:'Поиск товаров',all:'Все',other:'Другое',inStock:'В наличии',sortRec:'A → Z',sortLow:'Цена ↑',sortHigh:'Цена ↓',products:'Товаров: {n}',noMatch:'Ничего не найдено',srDym:'Возможно, вы имели в виду:',srFixed:'Нет результатов для «{q}» — показаны «{c}»',srNoStock:'Сейчас нет в наличии — отключите «В наличии», чтобы увидеть всё.',noMatchBody:'Попробуйте другое слово или сбросьте фильтры.',clear:'Сбросить фильтры',
++ru:{cartAdd:'В корзину',cartTitle:"Ваша корзина",cartReady:"Всё готово к покупке",cartItems:"Товаров в корзине: {n}",cartResume:"Оформление сохранено. Проверьте результат перед новой покупкой.",cartAlready:"Этот тариф уже в корзине.",cartLimit:"В корзине может быть до 20 разных товаров.",cartAdded:"Добавлено в корзину",cartSteps:"Этапы оформления",cartBagStep:"Корзина",cartReviewStep:"Проверка",cartDoneStep:"Готово",cartLess:"Уменьшить количество",cartMore:"Увеличить количество",cartRemove:"Удалить товар",cartSummary:"Ваш заказ",cartSubtotal:"Стоимость товаров",cartDiscounts:"Ваши скидки",cartMissing:"Нужно пополнить",cartReviewNote:"Товары покупаются по очереди с баланса. При проблеме остальные позиции останавливаются, а оплаченные суммы видны в результате.",cartQuoteNote:"Цены, оптовые скидки и VIP проверяются перед подтверждением.",cartSaved:"Экономия в этом заказе: {p}",cartEmpty:"Здесь будут ваши находки.",cartEmptyBody:"Посмотрите товары в магазине и добавьте понравившиеся в корзину.",cartLast:"Последнее оформление",cartReviewEyebrow:"ПОСЛЕДНИЙ ВЗГЛЯД",cartEyebrow:"ВАШ ВЫБОР",cartReviewTitle:"Всё верно?",cartHeading:"Ваш выбор. Всё вместе.",cartReviewSub:"Проверьте товары, количество и почту для приглашений перед оплатой.",cartProducts:"ВАШИ ТОВАРЫ",cartContinue:"Продолжить покупки",cartFix:"Некоторые товары требуют внимания. Обновите корзину.",cartPay:"Подтвердить · {p}",cartReviewButton:"Проверить заказ",cartEdit:"Изменить",cartSuccess:"Теперь ваше.",cartWorking:"Оформляем ваш заказ.",cartVerifying:"Один товар проверяется.",cartPartial:"Обновление вашего заказа.",cartSuccessSub:"Ваши товары ниже. Покупки также сохранены в разделе заказов.",cartWorkingSub:"Проверяем сохранённый результат оформления. Подождите.",cartUncertainSub:"Результат требует проверки. Перед новой покупкой передайте поддержке номер оформления.",cartPartialSub:"Выполненные позиции указаны ниже. Остальные товары не были куплены.",cartWaiting:"Ожидает очереди",cartNotPurchased:"Не куплено",cartPaid:"Оплачено",cartReference:"НОМЕР ОФОРМЛЕНИЯ",cartCheck:"Проверить результат",cartRemaining:"Оставшиеся товары",e_cart_changed:"Наличие изменилось. Проверьте корзину заново.",e_cart_disabled:"Корзина временно недоступна. Прямая покупка работает.",e_price_changed:"Цена изменилась. Проверьте новую сумму.",e_purchase_uncertain:"Результат требует проверки. Посмотрите заказы или обратитесь в поддержку.",e_quote_expired:"Срок проверки цены истёк. Проверьте заказ заново.",e_bad_cart:"Добавьте от 1 до 20 корректных товаров.",api:'API',orderId:"Номер заказа",vipTier:"VIP-уровень",vipNone:"Пока без уровня",vipOff:"скидка {r}",vipNet:"Чистые пополнения",vipNext:"Пополните ещё на {p}, чтобы получить VIP {n} (скидка {r})",vipMax:"У вас максимальный уровень",vipAll:"Все уровни",vipTitle:"VIP-программа",vipHow1:"Чем больше пополнений, тем выше уровень и больше скидка на выбранные товары.",vipHow2:"Учитываются только реальные пополнения. Подарки не считаются, списания и возвраты вычитаются.",vipProducts:"Товаров со скидкой VIP: {n}",vipYou:"Вы",vipSave:"VIP {n} · −{p}%",pvTitle:"Только предпросмотр",pvShort:"— не подключён к вашему боту. Покупки, пополнения и API здесь имитируются, ничего не списывается.",pvHow:"Как подключить",pvSim:"Предпросмотр: это имитация — ничего не списано и настоящий код не отправлен. В боте всё по-настоящему.",pvHowT:"Это предпросмотр — как сделать по-настоящему",pvHere:"Здесь (предпросмотр)",pvBot:"В вашем боте (реально)",pvR1:"Покупка",pvR1a:"Имитация, без списания",pvR1b:"Списывает баланс и присылает код в чат",pvR2:"Пополнение",pvR2a:"Пример адреса",pvR2b:"Настоящие адреса и счета бота, подтверждение автоматически",pvR3:"API",pvR3a:"Пример ключа",pvR3b:"Ваш настоящий ключ к API бота",pvR4:"Канал логов",pvR4a:"Ничего не отправляется",pvR4b:"Каждый заказ с пометкой «Via: Mini App»",pvStepsT:"Шаги",pvS1:"Загрузите новый bot.py и папку webapp рядом с ним туда, где сейчас работает бот (GitHub → Render).",pvS2:"При запуске бот сам поставит кнопку «Store» во всех чатах и пришлёт вам сообщение с кнопкой магазина.",pvS3:"Откройте бота в Telegram и нажмите Store рядом с полем ввода.",pvS4:"Отправьте боту /miniapp — придёт полный отчёт проверки.",pvWarn:"Не вставляйте ссылку claude.ai в BotFather — это личный предпросмотр, доступный только вам, и он не подключён к боту.",linked:"Подключено к боту",notLinked:"Предпросмотр — не подключено",autoTr:'Переведено автоматически',emailInvite:'Ваш email для приглашения',emailHintManual:'Укажите email для приглашения — он сразу уйдёт администраторам вместе с заказом.',emailSent:'Ваш email отправлен администраторам:',addrPreview:'Ваш настоящий адрес появится здесь в боте',premiumId:'ID премиум-эмодзи',demoNoteEmoji:'Премиум-эмодзи появятся здесь после загрузки из Telegram.',demoNoteReal:'Ваши настоящие товары, цены и остатки из базы данных ({d}). Реальные покупки и пополнения — внутри бота.',demoNote:'Это демо-товары для предпросмотра дизайна. Ваши настоящие товары, цены и остатки появятся, когда вы откроете магазин из бота в Telegram.',store:'Магазин',orders:'Заказы',balance:'Баланс',profile:'Профиль',hello:'Привет, {n}',helloSub:'Что берём сегодня?',search:'Поиск товаров',all:'Все',other:'Другое',inStock:'В наличии',sortRec:'A → Z',sortLow:'Цена ↑',sortHigh:'Цена ↓',products:'Товаров: {n}',noMatch:'Ничего не найдено',srDym:'Возможно, вы имели в виду:',srFixed:'Нет результатов для «{q}» — показаны «{c}»',srNoStock:'Сейчас нет в наличии — отключите «В наличии», чтобы увидеть всё.',noMatchBody:'Попробуйте другое слово или сбросьте фильтры.',clear:'Сбросить фильтры',
+ outOfStock:'Нет в наличии',stockN:'В наличии: {n}',onlyLeft:'Осталось {n}',unlimited:'Без ограничений',seats:'Мест: {n}',instant:'Мгновенная выдача',manual:'Ручная выдача',invite:'Приглашение на email',from:'от',buyFor:'Купить · {p}',confirmFor:'Нажмите ещё раз · {p}',processing:'Обработка…',
+ about:'О товаре',tiers:'Скидка за количество',tierRow:'от {n} шт.',perPc:'/шт.',duration:'Выберите тариф',email:'Email аккаунта ChatGPT',emailHint:'Приглашение придёт на этот email. Он должен быть зарегистрирован на chatgpt.com.',qty:'Количество',unit:'Цена за шт.',total:'Итого',yourBal:'Ваш баланс',after:'После покупки',needMore:'Не хватает {p}',addFunds:'Пополнить',days:'{n} дн.',hiddenTag:'Скрыт',
+ okTitle:'Покупка завершена',okCodes:'Ваши коды',dlTxt:'Скачать TXT',dlAll:"Скачать все покупки",cgSubs:"Подписки ChatGPT",cgSubsSub:"активных: {n} · ближайшая закончится через {d} дн.",cgLeft:"осталось {d} дн. {h} ч",cgEnds:"До {d}",cgRenew:"Продлить / добавить время",cgPick:"Выберите тариф для этого email",cgAddQ:"Добавить {l} (+{n} дн.) к {e} за {p}?",cgAdded:"Добавлено {n} дн. — теперь осталось {t} дн.",cgNone:"Нет активных подписок ChatGPT.",toChat:'📩 В чат',txtSent:'Файл отправлен в чат с ботом',txtCancel:'Загрузка отменена',pvTxt:'Предпросмотр: в боте скачается TXT с кодами',copyAll:'Скопировать все',copied:'Скопировано',sentChat:'Копия также отправлена в чат с ботом.',manualTitle:'Заказ оформлен',manualBody:'Этот товар выдаётся вручную. Номер заказа {ref}. Поддержка свяжется с вами.',gptTitle:'Приглашение отправлено',gptBody:'Откройте {email} и примите приглашение, чтобы активировать место.',expires:'До {d}',verTitle:'Заказ на проверке',verBody:'Не повторяйте покупку. Результат придёт в чат с ботом.',done:'Готово',myOrders:'Мои заказы',
+@@ -1440,7 +1463,7 @@
+ banned:'Аккаунт заблокирован',bannedB:'Напишите в поддержку, если считаете это ошибкой.',authT:'Сессия истекла',authB:'Закройте магазин и откройте его снова из бота.',close:'Закрыть',noTgT:'Откройте в Telegram',noTgB:'Магазин работает внутри Telegram. Откройте его из меню бота.',
+ activity:'Активность',noActivity:'Пока пусто',translate:'Перевести',original:'Оригинал',translating:'Перевод…',demo:'Демо',loading:'Загрузка…',retry:'Повторить',pcs:'шт.',
+ e_insufficient_balance:'Недостаточно средств. Не хватает {p}.',e_out_of_stock:'Товара нет в наличии.',e_not_enough_stock:'Доступно только {n}.',e_deposit_pending:'Сначала завершите или отмените текущую оплату.',e_busy:'Другая покупка ещё обрабатывается. Подождите.',e_renewal_pending:'Продление проверяется. Не платите повторно; обратитесь в поддержку.',e_must_join:'Сначала подпишитесь на каналы.',e_banned:'Аккаунт заблокирован.',e_bad_email:'Введите корректный email.',e_bad_duration:'Сначала выберите тариф.',e_invite_failed:'Не удалось отправить приглашение. Средства возвращены.',e_supplier_failed:'Поставщик отклонил заказ. Средства возвращены.',e_purchase_failed:'Покупка не прошла. Проверьте баланс и попробуйте снова.',e_rate_limited:'Слишком много запросов. Попробуйте через минуту.',e_auth:'Сессия истекла. Откройте магазин заново.',e_method_unavailable:'Этот способ оплаты недоступен.',e_amount_range:'Введите сумму от {min} до {max}.',e_busy_amount:'Сейчас нет свободной уникальной суммы. Попробуйте другую.',e_price_unavailable:'Не удалось получить курс. Попробуйте позже.',e_invoice_failed:'Не удалось создать счёт в звёздах.',e_server_error:'Что-то пошло не так. Попробуйте снова.',e_network:'Нет соединения. Проверьте интернет.',e_not_found:'Товар больше недоступен.',e_bad_qty:'Введите корректное количество.',e_bot_only:'Это настраивается только в боте.',vfT:"Активируйте аккаунт",vfB:"Два быстрых шага защищают магазин от фейковых аккаунтов.",vfS1:"Каналы и группы",vfS2:"Проверка",vfS3:"Готово",vfJoinT:"Вступите в наши каналы и группы",vfJoinB:"Осталось {n} из {t}. Вступите и нажмите «Проверить».",vfJoinAll:"Здесь всё готово. Нажмите «Проверить».",vfKindC:"Канал",vfKindG:"Группа",vfJoined:"Вы участник",vfJoin:"Вступить",vfOpened:"Открыто",vfCheck:"Проверить",vfChecking:"Проверяем…",vfLeft:"Ещё {n} — вы не вступили",vfHumT:"Подтвердите, что вы человек",vfHumB:"Нажмите на такой же эмодзи.",vfTap:"Нажмите",vfW1:"Проверяем устройство",vfW2:"Проверяем приложение Telegram",vfW3:"Активируем аккаунт",vfDoneT:"Всё готово",vfDoneB:"Аккаунт активен. Приятных покупок.",vfEnter:"В магазин",vfOpenP:"Открыть товар",vfOpening:"Открываем {p}…",deepGone:"Этот товар сейчас недоступен.",vfPriv:"Личные данные не собираются — только зашифрованный код устройства.",vfFail:"Не удалось проверить. Попробуйте ещё раз.",vfNoLink:"Спросите поддержку",pvVerify:"Экран активации реферала",poSub:"Коды и история покупок",dvT:"Последний шаг",dvB:"Нажмите нужный эмодзи, чтобы подтвердить устройство. Это защищает магазин от фейковых аккаунтов — личные данные не собираются.",dvTap:"Нажмите {e}",dvWrong:"Не тот — попробуйте ещё раз",dvWork:"Проверяем устройство…",dvOkT:"Готово",dvOkB:"Теперь можно пользоваться магазином.",dvEnter:"В магазин",dvFail:"Не удалось проверить. Попробуйте снова.",e_no_account:'Сначала запустите бота, затем откройте магазин.',e_deposit_failed:"Не удалось создать платёж. Попробуйте снова или выберите другой способ.",e_deposit_exists:"У вас уже есть незавершённый платёж. Завершите или отмените его.",e_unavailable:"Сейчас недоступно. Попробуйте чуть позже.",e_bad_request:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_too_large:"Слишком много текста за раз. Отправьте частями.",e_bad_json:"Ошибка в запросе. Обновите страницу и попробуйте снова.",e_expired:"Срок действия ссылки истёк. Попробуйте снова.",e_forbidden:"Недостаточно прав.",e_no_key:"Сначала создайте API-ключ.",e_no_webhook:"Сначала укажите URL вебхука.",e_bad_url:"Введите корректный http(s) URL.",e_private_url:"Используйте публичный адрес (не localhost и не частную сеть).",e_empty:"Ничего не введено.",e_bad_amount:"Введите корректную сумму.",e_bad_price:"Введите корректную цену.",e_bad_vip:"Неверная настройка VIP.",e_cannot_ban:"Этот аккаунт нельзя заблокировать.",e_bad_section:"Раздел недоступен.",e_open_failed:"Не удалось открыть раздел. Попробуйте снова.",h_all:'Все',h_deposit:'Пополнения',h_purchase:'Покупки',h_adjust:'Корректировки',opsN:'Операций: {n}',details:'Подробности',f_type:'Тип',f_method:'Способ',f_network:'Сеть',f_sent:'Отправлено',f_requested:'Запрошено',f_status:'Статус',completed:'Выполнено',f_date:'Дата',f_ref:'Номер',f_tx:'ID транзакции',f_product:'Товар',f_note:'Комментарий',f_after:'Баланс после',adj_compensation:'Компенсация',adj_manual:'Ручное пополнение',adj_gift:'Подарок',adj_adjustment:'Корректировка',adj_ref_reward:'Бонус за рефералов',adj_ref_clawback:'Списание за ушедшего реферала',adj_ref_refund:'Реферал вернулся',adj_deduct:'Списание',refunded:'Возврат',g_tg:'Telegram',g_ex:'Биржи',g_cr:'Криптокошельки',change:'Изменить',lastUsed:'Недавний',mInstant:'Мгновенно',mAuto:'Зачисляется автоматически',minFrom:'от {min}',newBal:'Новый баланс',uniqueNote:'Вы получите уникальную сумму с доп. знаками после запятой. Отправьте её точно.',prev:'Назад',next:'Далее',codesN:'Кодов: {n}'},
+-zh:{api:'API',orderId:"订单号",vipTier:"VIP 等级",vipNone:"暂无等级",vipOff:"优惠 {r}",vipNet:"净充值",vipNext:"再充值 {p} 即可升至 VIP {n}（优惠 {r}）",vipMax:"你已达到最高等级",vipAll:"全部等级",vipTitle:"VIP 计划",vipHow1:"充值越多，等级越高，指定商品的折扣越大。",vipHow2:"只计算真实充值。赠送不计入，扣款或退款会被扣除。",vipProducts:"{n} 件商品享 VIP 折扣",vipYou:"你",vipSave:"VIP {n} · −{p}%",pvTitle:"仅为预览",pvShort:"——未连接你的机器人。这里的购买、充值和 API 都是模拟的，不会扣费。",pvHow:"如何连接",pvSim:"预览：这是模拟结果——没有扣费，也没有发送真实卡密。在你的机器人里是真实的。",pvHowT:"这是预览——如何变成真实的",pvHere:"这里（预览）",pvBot:"在你的机器人里（真实）",pvR1:"购买",pvR1a:"模拟，不扣费",pvR1b:"扣除余额并在聊天中发送卡密",pvR2:"充值",pvR2a:"示例地址",pvR2b:"机器人的真实地址和账单，自动确认",pvR3:"API",pvR3a:"示例密钥",pvR3b:"你在机器人 API 上的真实密钥",pvR4:"日志频道",pvR4a:"不发送任何内容",pvR4b:"每笔订单都会标注 “Via: Mini App”",pvStepsT:"步骤",pvS1:"把新的 bot.py 和旁边的 webapp 文件夹上传到机器人现在运行的地方（GitHub → Render）。",pvS2:"机器人启动后会在所有聊天中自动设置 “Store” 按钮，并给你发一条带打开商店按钮的消息。",pvS3:"在 Telegram 打开你的机器人，点输入框旁边的 Store。",pvS4:"给机器人发送 /miniapp，查看完整检查报告。",pvWarn:"不要把 claude.ai 链接填到 BotFather——那是只有你能打开的私人预览，并未连接你的机器人。",linked:"已连接你的机器人",notLinked:"预览——未连接",autoTr:'已自动翻译',emailInvite:'接收邀请的邮箱',emailHintManual:'填写接收邀请的邮箱——会随订单直接发送给管理员。',emailSent:'你的邮箱已发送给管理员：',addrPreview:'你的真实地址会在机器人内显示',premiumId:'高级表情 ID',demoNoteEmoji:'高级表情从 Telegram 获取后会显示在这里。',demoNoteReal:'来自你数据库的真实商品、价格和库存（{d}）。真实购买和充值在你的机器人内完成。',demoNote:'这些是用于预览设计的示例商品。在 Telegram 中从你的机器人打开商店时，会显示你真实的商品、价格和库存。',store:'商店',orders:'订单',balance:'余额',profile:'我的',hello:'你好，{n}',helloSub:'今天想买点什么？',search:'搜索商品',all:'全部',other:'其他',inStock:'有货',sortRec:'A → Z',sortLow:'价格 ↑',sortHigh:'价格 ↓',products:'{n} 件商品',noMatch:'没有找到相关商品',srDym:'你是不是要找：',srFixed:'没有找到“{q}”，显示“{c}”的结果',srNoStock:'目前没有该名称的有货商品 — 关闭“有货”查看全部。',noMatchBody:'换个关键词或清除筛选。',clear:'清除筛选',
++zh:{cartAdd:'加入购物袋',cartTitle:"你的购物袋",cartReady:"心选好物，准备就绪",cartItems:"购物袋中有 {n} 件商品",cartResume:"有一笔已保存的结账。请先查询结果再开始新购买。",cartAlready:"此套餐已在购物袋中。",cartLimit:"购物袋最多可放 20 种商品。",cartAdded:"已加入购物袋",cartSteps:"结账步骤",cartBagStep:"购物袋",cartReviewStep:"确认",cartDoneStep:"完成",cartLess:"减少数量",cartMore:"增加数量",cartRemove:"移除商品",cartSummary:"订单摘要",cartSubtotal:"商品金额",cartDiscounts:"你的优惠",cartMissing:"需要充值",cartReviewNote:"商品逐件从余额购买。如果某件需要处理，其余商品会暂停，并显示已支付金额。",cartQuoteNote:"确认订单时会重新核对价格、批量优惠和 VIP 折扣。",cartSaved:"本单节省 {p}",cartEmpty:"好物即将入袋。",cartEmptyBody:"浏览商店，将喜欢的商品加入这里，随时查看和确认。",cartLast:"查看上次结账",cartReviewEyebrow:"最后确认",cartEyebrow:"你的心选",cartReviewTitle:"都符合你的心意吗？",cartHeading:"心选好物，一袋收齐。",cartReviewSub:"付款前请核对商品、数量和邀请邮箱。",cartProducts:"你的商品",cartContinue:"继续购物",cartFix:"部分商品需要处理，请更新购物袋。",cartPay:"确认支付 · {p}",cartReviewButton:"确认订单",cartEdit:"编辑",cartSuccess:"现在属于你。",cartWorking:"正在处理你的订单。",cartVerifying:"有一件商品正在核实。",cartPartial:"订单进度已更新。",cartSuccessSub:"商品详情见下方，购买记录也已保存在我的订单中。",cartWorkingSub:"正在查询已保存的结账结果，请稍候。",cartUncertainSub:"有一笔结果需要核实。再次购买前请向客服提供结账编号。",cartPartialSub:"已完成的商品列于下方，其余商品尚未购买。",cartWaiting:"排队处理中",cartNotPurchased:"尚未购买",cartPaid:"已付款",cartReference:"结账编号",cartCheck:"查询结果",cartRemaining:"返回剩余商品",e_cart_changed:"库存或可用状态已变化，请重新确认购物袋。",e_cart_disabled:"购物袋暂时不可用，仍可直接购买。",e_price_changed:"价格已变化，请确认更新后的金额。",e_purchase_uncertain:"购买结果需要核实，请先查看订单或联系客服。",e_quote_expired:"价格确认已过期，请重新确认订单。",e_bad_cart:"请添加 1 到 20 件有效商品。",api:'API',orderId:"订单号",vipTier:"VIP 等级",vipNone:"暂无等级",vipOff:"优惠 {r}",vipNet:"净充值",vipNext:"再充值 {p} 即可升至 VIP {n}（优惠 {r}）",vipMax:"你已达到最高等级",vipAll:"全部等级",vipTitle:"VIP 计划",vipHow1:"充值越多，等级越高，指定商品的折扣越大。",vipHow2:"只计算真实充值。赠送不计入，扣款或退款会被扣除。",vipProducts:"{n} 件商品享 VIP 折扣",vipYou:"你",vipSave:"VIP {n} · −{p}%",pvTitle:"仅为预览",pvShort:"——未连接你的机器人。这里的购买、充值和 API 都是模拟的，不会扣费。",pvHow:"如何连接",pvSim:"预览：这是模拟结果——没有扣费，也没有发送真实卡密。在你的机器人里是真实的。",pvHowT:"这是预览——如何变成真实的",pvHere:"这里（预览）",pvBot:"在你的机器人里（真实）",pvR1:"购买",pvR1a:"模拟，不扣费",pvR1b:"扣除余额并在聊天中发送卡密",pvR2:"充值",pvR2a:"示例地址",pvR2b:"机器人的真实地址和账单，自动确认",pvR3:"API",pvR3a:"示例密钥",pvR3b:"你在机器人 API 上的真实密钥",pvR4:"日志频道",pvR4a:"不发送任何内容",pvR4b:"每笔订单都会标注 “Via: Mini App”",pvStepsT:"步骤",pvS1:"把新的 bot.py 和旁边的 webapp 文件夹上传到机器人现在运行的地方（GitHub → Render）。",pvS2:"机器人启动后会在所有聊天中自动设置 “Store” 按钮，并给你发一条带打开商店按钮的消息。",pvS3:"在 Telegram 打开你的机器人，点输入框旁边的 Store。",pvS4:"给机器人发送 /miniapp，查看完整检查报告。",pvWarn:"不要把 claude.ai 链接填到 BotFather——那是只有你能打开的私人预览，并未连接你的机器人。",linked:"已连接你的机器人",notLinked:"预览——未连接",autoTr:'已自动翻译',emailInvite:'接收邀请的邮箱',emailHintManual:'填写接收邀请的邮箱——会随订单直接发送给管理员。',emailSent:'你的邮箱已发送给管理员：',addrPreview:'你的真实地址会在机器人内显示',premiumId:'高级表情 ID',demoNoteEmoji:'高级表情从 Telegram 获取后会显示在这里。',demoNoteReal:'来自你数据库的真实商品、价格和库存（{d}）。真实购买和充值在你的机器人内完成。',demoNote:'这些是用于预览设计的示例商品。在 Telegram 中从你的机器人打开商店时，会显示你真实的商品、价格和库存。',store:'商店',orders:'订单',balance:'余额',profile:'我的',hello:'你好，{n}',helloSub:'今天想买点什么？',search:'搜索商品',all:'全部',other:'其他',inStock:'有货',sortRec:'A → Z',sortLow:'价格 ↑',sortHigh:'价格 ↓',products:'{n} 件商品',noMatch:'没有找到相关商品',srDym:'你是不是要找：',srFixed:'没有找到“{q}”，显示“{c}”的结果',srNoStock:'目前没有该名称的有货商品 — 关闭“有货”查看全部。',noMatchBody:'换个关键词或清除筛选。',clear:'清除筛选',
+ outOfStock:'缺货',stockN:'库存 {n}',onlyLeft:'仅剩 {n}',unlimited:'不限量',seats:'{n} 个席位',instant:'即时发货',manual:'人工发货',invite:'邮箱邀请',from:'起',buyFor:'购买 · {p}',confirmFor:'再次点击确认 · {p}',processing:'处理中…',
+ about:'商品介绍',tiers:'批量折扣',tierRow:'{n} 件起',perPc:'/件',duration:'选择套餐',email:'ChatGPT 账号邮箱',emailHint:'邀请将发送到该邮箱，需已在 chatgpt.com 注册。',qty:'数量',unit:'单价',total:'合计',yourBal:'你的余额',after:'购买后',needMore:'还差 {p}',addFunds:'充值',days:'{n} 天',hiddenTag:'已隐藏',
+ okTitle:'购买成功',okCodes:'你的卡密',dlTxt:'下载 TXT',dlAll:"下载全部购买记录",cgSubs:"ChatGPT 订阅",cgSubsSub:"{n} 个有效 · 最近一个 {d} 天后到期",cgLeft:"剩余 {d} 天 {h} 小时",cgEnds:"到期 {d}",cgRenew:"续费 / 增加时长",cgPick:"选择要为此邮箱增加的套餐",cgAddQ:"为 {e} 增加 {l}（+{n} 天），价格 {p}？",cgAdded:"已增加 {n} 天 — 现在剩余 {t} 天",cgNone:"没有有效的 ChatGPT 订阅。",toChat:'📩 发到聊天',txtSent:'文件已发送到机器人聊天',txtCancel:'已取消下载',pvTxt:'预览：在机器人中会下载含卡密的 TXT 文件',copyAll:'全部复制',copied:'已复制',sentChat:'副本也已发送到机器人聊天中。',manualTitle:'订单已提交',manualBody:'该商品为人工发货，订单号 {ref}，客服会与你联系。',gptTitle:'邀请已发送',gptBody:'打开 {email} 并接受邀请以激活席位。',expires:'到期 {d}',verTitle:'订单核验中',verBody:'请勿重复购买，结果将发送到机器人聊天中。',done:'完成',myOrders:'我的订单',
+@@ -1538,6 +1561,7 @@
+ 
+ /* ───────────────────────── state ───────────────────────── */
+ const S = {
++  cart: [], cartPending: null, cartLast: null, cartEnabled: true, cartUid: null,
+   ready: false, screen: 'loading', tab: 'store', user: null, store: {}, deposit: { methods: [] }, nav: {}, forced: null,
+   catalogs: [], products: [], pending: null, locked: false, offset: 0,
+   cat: 'all', q: '', onlyStock: false, sort: 'rec',
+@@ -1546,9 +1570,11 @@
+ 
+ /* ───────────────────────── api ───────────────────────── */
+ async function api(path, body) {
+-  if (DEMO) { const d = await Demo.call(path, body || {}); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
++  if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
++  const controller = path.startsWith('cart/') && typeof AbortController !== 'undefined' ? new AbortController() : null;
++  const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
+   try {
+-    const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}) });
++    const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
+     let data = {};
+     try { data = await res.json(); } catch (e) {}
+     if (!res.ok && !data.error) data.error = res.status === 401 ? 'auth' : 'server_error';
+@@ -1557,7 +1583,8 @@
+     if (data && data.vip) S.vip = data.vip;
+     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
+     return data;
+-  } catch (e) { return { error: 'network' }; }
++  } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
++  finally { if (timer) clearTimeout(timer); }
+ }
+ function errText(r) {
+   const e = (r && r.error) || 'server_error';
+@@ -1972,6 +1999,7 @@
+ function updateHeader() {
+   const b = $('#hbal'); if (b && S.user) b.textContent = usdShort(S.user.balance);
+   const d = $('#hdot'); if (d) d.hidden = !S.pending;
++  updateCartBadge();
+ }
+ function setTab(k) {
+   if (S.tab === k) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+@@ -2189,14 +2217,14 @@
+   const u = S.user || {};
+   const sortLbl = { rec: t('sortRec'), low: t('sortLow'), high: t('sortHigh') }[S.sort];
+   return `
+-    <div class="hello"><div><p>${esc(t('hello', { n: u.first_name || '' }))}</p><h1>${esc(t('helloSub'))}</h1></div>${DEMO && !window.LARA_DATA ? `<span class="demo-tag">${esc(t('demo'))}</span>` : ''}</div>
++    <div class="hello"><div><p>${esc(t('hello', { n: u.first_name || '' }))}</p><h1>${esc(t('helloSub'))}</h1></div>${cartLauncher()}${DEMO && !window.LARA_DATA ? `<span class="demo-tag">${esc(t('demo'))}</span>` : ''}</div>
+     <div class="toolbar">
+       <label class="search">${navIc('search', ic.search)}<input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="${esc(t('search'))}" value="${esc(S.q)}" data-in="q" aria-label="${esc(t('search'))}"></label>
+       <button class="tool-btn ${S.onlyStock ? 'on' : ''}" id="stockbtn" data-act="stockonly" aria-pressed="${S.onlyStock}">${navIc('avail', ic.box)}<span>${esc(t('inStock'))}</span></button>
+       <button class="tool-btn" data-act="sort" aria-label="${esc(sortLbl)}" title="${esc(sortLbl)}">${ic.sort}</button>
+     </div>
+     <div class="chips-w"><button class="chip-nav prev" data-act="chips-nav" data-v="-1" aria-label="‹">${ic.chev}</button><div class="chips" id="chips">${chipsHtml()}</div><button class="chip-nav next" data-act="chips-nav" data-v="1" aria-label="›">${ic.chev}</button></div>
+-    <div id="results">${resultsHtml()}</div>`;
++    <div id="results">${resultsHtml()}</div><div id="cart-teaser">${cartTeaser()}</div>`;
+ }
+ function updateStore(quiet) {
+   const res = $('#results');
+@@ -2354,9 +2382,11 @@
+   else if (st.busy) foot = `<button class="btn primary full" disabled><span class="spin"></span>${esc(t('processing'))}</button>`;
+   else if (lack) foot = `<button class="btn primary full" data-act="funds-need" data-v="${Math.ceil(lack)}">${bem('funds', ic.plus)}${esc(t('addFunds'))} · ${usd(lack)}</button>`;
+   else foot = `<button class="btn ${st.arm ? 'confirm' : 'primary'} full" data-act="buy">${bem(st.arm ? 'verify' : 'buy', ae(st.arm ? 'check' : 'cart'))}${esc(st.arm ? t('confirmFor', { p: usd(total) }) : t('buyFor', { p: usd(total) }))}</button>`;
++  if (!oos && S.cartEnabled !== false && !st.busy) foot = `<div class="product-actions"><button class="btn cart-add" data-act="cart-add">${CART_ICON}${esc(t('cartAdd'))}</button>${foot}</div>`;
+   sh.foot(foot);
+ }
+ async function productAction(sh, p, st, act, el) {
++  if (act === 'cart-add') { cartAdd(p, st); return true; }
+   if (act === 'qty-' || act === 'qty+' || act === 'qtyset') {
+     st.qty = act === 'qtyset' ? +el.dataset.v : Math.max(1, Math.min(maxQty(p), st.qty + (act === 'qty+' ? 1 : -1)));
+     st.arm = false; hap('select'); renderProduct(sh, p, st, true); return true;
+@@ -2430,6 +2460,259 @@
+   h += pvNote();
+   sh.title(nm(p)).body(h).foot(`<div style="display:flex;gap:8px"><button class="btn ghost" style="flex:1" data-act="to-orders">${esc(t('myOrders'))}</button><button class="btn primary" style="flex:1" data-act="done">${esc(t('done'))}</button></div>`);
+ }
++
++/* ───────────────────────── website shopping cart ───────────────────────── */
++const CART_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7.5h14l1.1 12H3.9L5 7.5Z"/><path d="M8 8V6a4 4 0 0 1 8 0v2"/></svg>';
++const CART_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/></svg>';
++function cartScope() { return String(S.user && S.user.id || 'preview'); }
++function cartKey(x) { return [x.product_id, x.dur_id || '', String(x.email || '').trim().toLowerCase()].join('|'); }
++function cartLoad() {
++  const uid = cartScope(); if (S.cartUid === uid) return;
++  S.cartUid = uid;
++  const raw = store.get('cart:v1:' + uid, []);
++  S.cart = Array.isArray(raw) ? raw.filter(x => x && /^[\w-]{1,100}$/.test(x.product_id) && Number.isInteger(x.qty) && x.qty > 0 && x.qty <= 500).slice(0, 20) : [];
++  S.cartPending = store.get('cart:pending:' + uid, null);
++  S.cartLast = store.get('cart:last:' + uid, null);
++}
++function cartSave() {
++  store.set('cart:v1:' + cartScope(), S.cart || []);
++  store.set('cart:pending:' + cartScope(), S.cartPending || null);
++  store.set('cart:last:' + cartScope(), S.cartLast || null);
++  updateCartBadge();
++}
++function cartCount() { return (S.cart || []).reduce((n, x) => n + x.qty, 0); }
++function cartValue() { return (S.cart || []).reduce((n, x) => { const p = findP(x.product_id); return n + (p ? priceOf(p, {qty:x.qty, dur:x.dur_id}) * x.qty : 0); }, 0); }
++function cartLauncher() {
++  if (S.cartEnabled === false) return '';
++  return `<button class="cart-launch" data-act="cart-open" aria-label="${esc(t('cartTitle'))}">${CART_ICON}<span class="cart-badge" ${cartCount() ? '' : 'hidden'}>${Math.min(cartCount(), 999)}</span></button>`;
++}
++function updateCartBadge() {
++  document.querySelectorAll('.cart-badge').forEach(e => { e.textContent = Math.min(cartCount(),999); e.hidden = !cartCount(); });
++  const bar = $('#cart-teaser'); if (bar) bar.innerHTML = cartTeaser();
++}
++function cartTeaser() {
++  if (!cartCount() || S.cartEnabled === false || S.tab !== 'store') return '';
++  return `<button class="cart-teaser" data-act="cart-open"><span class="ct-icon">${CART_ICON}<b class="num">${cartCount()}</b></span><span><b>${esc(t('cartReady'))}</b><small>${esc(t('cartItems',{n:cartCount()}))}</small></span><strong class="num">${usd(cartValue())}</strong>${ic.chev}</button>`;
++}
++function cartAdd(p, st) {
++  if (S.cartPending) { toast(t('cartResume')); openCart(); return; }
++  if (!p.in_stock || S.cartEnabled === false) return;
++  const needMail = p.kind === 'cgpt' || p.kind === 'seat' || p.needs_email;
++  if (needMail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(st.email)) { toast(t('e_bad_email'),'bad'); return; }
++  if (p.kind === 'cgpt' && !st.dur) { toast(t('e_bad_duration'),'bad'); return; }
++  const item = {product_id:p.id, qty:st.qty, dur_id:p.kind === 'cgpt' ? st.dur : '', email:needMail ? st.email.toLowerCase() : '', name:nm(p)};
++  const old = (S.cart || []).find(x => cartKey(x) === cartKey(item));
++  if (old) {
++    if (p.kind === 'cgpt' || p.kind === 'seat') { toast(t('cartAlready')); return; }
++    if (old.qty + item.qty > maxQty(p)) { toast(t('e_not_enough_stock',{n:p.stock}),'bad'); return; }
++    old.qty += item.qty;
++  } else {
++    if ((S.cart || []).length >= 20) { toast(t('cartLimit'),'bad'); return; }
++    (S.cart || (S.cart=[])).push(item);
++  }
++  cartSave(); hap('ok'); toast(t('cartAdded'),'ok');
++  const b = $('.cart-launch'); if (b && b.animate) b.animate([{transform:'scale(1)'},{transform:'scale(1.16)'},{transform:'scale(1)'}],{duration:380});
++}
++function cartRows(st) {
++  return (S.cart || []).map((item, i) => {
++    const p = findP(item.product_id);
++    const quoted = st.quote && (st.quote.lines || []).find(x => cartKey(x) === cartKey(item));
++    return {item, i, p, quoted, error:quoted && quoted.error || (!p ? 'not_found' : !p.in_stock ? 'out_of_stock' : p.stock != null && !p.manual && !p.unlimited && item.qty > p.stock ? 'not_enough_stock' : '')};
++  });
++}
++function cartSteps(stage) {
++  const n = stage === 'review' ? 1 : stage === 'receipt' ? 2 : 0;
++  return `<ol class="cart-steps" aria-label="${esc(t('cartSteps'))}">${['cartBagStep','cartReviewStep','cartDoneStep'].map((k,i) => `<li class="${i===n?'active':i<n?'passed':''}" ${i===n?'aria-current="step"':''}><span>${i<n?ic.check:i+1}</span>${esc(t(k))}</li>`).join('')}</ol>`;
++}
++function cartItemHtml(row, st) {
++  const {item, i, p, quoted, error} = row;
++  const review = st.stage === 'review';
++  const unit = quoted && quoted.unit != null ? quoted.unit : p ? priceOf(p,{qty:item.qty,dur:item.dur_id}) : 0;
++  const total = quoted && quoted.total != null ? quoted.total : unit * item.qty;
++  const base = quoted && quoted.subtotal != null ? quoted.subtotal : p ? (p.kind==='cgpt'?((p.durations||[]).find(d=>d.id===item.dur_id)||{}).price:p.price)*item.qty : total;
++  const duration = p && p.kind === 'cgpt' ? (p.durations||[]).find(d=>d.id===item.dur_id) : null;
++  const pic = p ? `<span class="cart-thumb${ecCls(p.emoji_id)}"${ecAttrs(p.emoji_id,`--h:${brandHue(p)}`)}>${p.image?`<img src="${esc(imgSrc(p))}" alt="" loading="lazy">`:visualInner(p,true)}</span>` : `<span class="cart-thumb missing">${CART_ICON}</span>`;
++  const name = p ? nm(p) : item.name || item.product_id;
++  const delivery = p && (p.kind === 'cgpt' || p.kind === 'seat') ? t('invite') : p && p.manual ? t('manual') : t('instant');
++  const qty = review ? `<span class="cart-unit num">${usd(unit)} × ${item.qty}</span>` : `<div class="cart-qty"><button data-act="cart-minus" data-v="${i}" ${item.qty<=1||S.cartPending?'disabled':''} aria-label="${esc(t('cartLess'))}">${ic.minus}</button><span class="num" aria-live="polite">${item.qty}</span><button data-act="cart-plus" data-v="${i}" ${!p||S.cartPending||item.qty>=maxQty(p)?'disabled':''} aria-label="${esc(t('cartMore'))}">${ic.plus}</button></div>`;
++  return `<article class="cart-item ${error?'has-error':''}">${pic}<div class="cart-item-main"><div class="cart-item-top"><h3 dir="auto">${esc(name)}</h3>${review?'':`<button class="cart-remove" data-act="cart-remove" data-v="${i}" ${S.cartPending?'disabled':''} aria-label="${esc(t('cartRemove'))}">${CART_TRASH}</button>`}</div>
++    <div class="cart-meta"><span>${esc(delivery)}</span>${duration?`<span>${esc(isAr()?duration.label_ar:duration.label_en)}</span>`:''}</div>
++    ${item.email || p && (p.kind==='cgpt'||p.kind==='seat'||p.needs_email) ? review || S.cartPending ? `<span class="cart-email" dir="ltr">${ic.mail}${esc(item.email)}</span>` : `<label class="cart-email-edit">${ic.mail}<input type="email" dir="ltr" aria-label="${esc(t('email'))}" value="${esc(item.email)}" data-in="cart-email" data-v="${i}" autocomplete="email"></label>` : ''}
++    ${duration&&!review&&!S.cartPending?`<label class="cart-plan-edit"><select data-in="cart-duration" data-v="${i}" aria-label="${esc(t('duration'))}">${p.durations.map(d=>`<option value="${esc(d.id)}" ${d.id===item.dur_id?'selected':''}>${esc(isAr()?d.label_ar:d.label_en)} · ${usd(vipUnit(p,d.price))}</option>`).join('')}</select></label>`:''}
++    <div class="cart-item-bottom">${qty}<div class="cart-line-price num">${base>total+.005?`<s>${usd(base)}</s>`:''}<b>${usd(total)}</b></div></div>
++    ${error?`<div class="cart-line-error">${ic.warn}${esc(errText({error,available:quoted&&quoted.stock}))}</div>`:''}</div></article>`;
++}
++function cartSummary(st, total, subtotal) {
++  const balance = S.user ? S.user.balance : 0, saving=Math.max(0,subtotal-total), lack=Math.max(0,total-balance);
++  return `<aside class="cart-summary"><div class="cart-summary-label">${esc(t('cartSummary'))}</div>
++    <div class="cart-wallet">${slotH('balance',CART_ICON)}<div><small>${esc(t('yourBal'))}</small><strong class="num">${usd(balance)}</strong></div><span class="cart-wallet-dot"></span></div>
++    <div class="cart-math"><div><span>${esc(t('cartSubtotal'))}</span><b class="num">${usd(subtotal)}</b></div>
++    ${saving>.005?`<div class="saved"><span>${esc(t('cartDiscounts'))}</span><b class="num">−${usd(saving)}</b></div>`:''}
++    <div class="cart-grand"><span>${esc(t('total'))}</span><strong class="num">${usd(total)}</strong></div>
++    <div class="cart-after ${lack?'is-short':''}"><span>${esc(lack?t('cartMissing'):t('after'))}</span><b class="num">${usd(lack||balance-total)}</b></div></div>
++    <div class="cart-trust">${ic.info}<p>${esc(st.stage==='review'?t('cartReviewNote'):t('cartQuoteNote'))}</p></div>
++    ${saving>.005?`<div class="cart-saving">${ic.check}<span>${esc(t('cartSaved',{p:usd(saving)}))}</span></div>`:''}</aside>`;
++}
++function renderCart(sh, st) {
++  if (st.stage === 'receipt') return renderCartReceipt(sh,st);
++  const rows = cartRows(st), review = st.stage === 'review';
++  sh.title(t('cartTitle'));
++  if (!rows.length) {
++    sh.body(`${cartSteps('cart')}<div class="cart-empty"><div class="cart-empty-art"><span></span>${CART_ICON}<i></i></div><span class="cart-eyebrow">LARA STOCK</span><h2>${esc(t('cartEmpty'))}</h2><p>${esc(t('cartEmptyBody'))}</p><button class="btn primary" data-act="cart-browse">${esc(t('browse'))}${ic.chev}</button>${S.cartLast?`<button class="cart-last" data-act="cart-last">${esc(t('cartLast'))}${ic.chev}</button>`:''}</div>`).foot('');
++    return;
++  }
++  const total = review && st.quote ? st.quote.total : rows.reduce((n,r)=>n+(r.p?priceOf(r.p,{qty:r.item.qty,dur:r.item.dur_id})*r.item.qty:0),0);
++  const subtotal = review && st.quote ? st.quote.subtotal : rows.reduce((n,r)=>n+(r.p?(r.p.kind==='cgpt'?((r.p.durations||[]).find(d=>d.id===r.item.dur_id)||{}).price||0:r.p.price)*r.item.qty:0),0);
++  const invalid = rows.some(r=>r.error), lack=Math.max(0,total-(S.user?S.user.balance:0));
++  sh.body(`${cartSteps(st.stage)}<header class="cart-intro"><span class="cart-eyebrow">${esc(review?t('cartReviewEyebrow'):t('cartEyebrow'))}</span><h2>${esc(review?t('cartReviewTitle'):t('cartHeading'))}</h2><p>${esc(review?t('cartReviewSub'):t('cartItems',{n:cartCount()}))}</p></header>
++    ${S.cartPending?`<div class="cart-banner">${ic.info}<span>${esc(t('cartResume'))}</span></div>`:''}
++    <div class="cart-layout"><div class="cart-items"><div class="cart-section-head"><span>${esc(t('cartProducts'))}</span>${review?'':`<button data-act="cart-browse">${ic.plus}${esc(t('cartContinue'))}</button>`}</div>${rows.map(r=>cartItemHtml(r,st)).join('')}
++    ${invalid?`<div class="cart-banner bad">${ic.warn}<span>${esc(t('cartFix'))}</span><button data-act="cart-refresh">${ic.refresh}</button></div>`:''}</div>${cartSummary(st,total,subtotal)}</div>`);
++  const main = st.busy ? `<button class="btn primary full" disabled><span class="spin"></span>${esc(t('processing'))}</button>` :
++    review ? `<button class="btn primary full" data-act="${lack?'cart-funds':'cart-pay'}" data-v="${Math.ceil(lack)}">${lack?ic.plus:CART_ICON}${esc(lack?t('addFunds')+' · '+usd(lack):t('cartPay',{p:usd(total)}))}</button>` :
++    `<button class="btn primary full" data-act="cart-review" ${invalid?'disabled':''}>${esc(t('cartReviewButton'))}${ic.chev}</button>`;
++  sh.foot(`<div class="cart-footer"><div><small>${esc(t('total'))}</small><b class="num">${usd(total)}</b></div><div class="cart-footer-buttons">${review?`<button class="btn ghost" data-act="cart-edit" ${st.busy?'disabled':''}>${esc(t('cartEdit'))}</button>`:''}${main}</div></div>`);
++}
++function cartApplyReceipt(r) {
++  const pending = S.cartPending;
++  if (!pending || pending.id !== r.checkout_id) return;
++  pending.applied = pending.applied || [];
++  for (const row of r.lines || []) {
++    if (!row.result || !row.result.ok || pending.applied.includes(row.index)) continue;
++    const original = (pending.items || [])[row.index] || row;
++    const key = cartKey(original), item = (S.cart || []).find(x=>cartKey(x)===key);
++    if (item) { item.qty -= original.qty; if (item.qty <= 0) S.cart.splice(S.cart.indexOf(item),1); }
++    pending.applied.push(row.index);
++  }
++  if (r.status !== 'processing' && r.status !== 'quoted' && !r.requires_review) {
++    if (r.status !== 'cancelled') S.cartLast = r.checkout_id;
++    S.cartPending = null;
++  }
++  cartSave(); S.orders=null; S.hist.data=null;
++}
++function renderCartReceipt(sh, st) {
++  const r=st.receipt, processing=r.status==='processing', review=!!r.requires_review;
++  const completed=r.status==='completed', quoted=r.status==='quoted';
++  if (quoted) { st.quote={...r,quote_id:r.checkout_id}; st.stage='review'; return renderCart(sh,st); }
++  const title=completed?t('cartSuccess'):processing?t('cartWorking'):r.status==='verifying'?t('cartVerifying'):t('cartPartial');
++  const desc=completed?t('cartSuccessSub'):processing?t('cartWorkingSub'):review?t('cartUncertainSub'):t('cartPartialSub');
++  const rows=(r.lines||[]).map(row=>{
++    const a=row.result, ok=a&&a.ok, pending=a&&a.status==='verifying';
++    return `<article class="cart-receipt-item"><div class="cart-receipt-line"><span class="cart-state ${ok&&!pending?'ok':a&&!ok?'bad':''}">${ok&&!pending?ic.check:pending||processing?ic.info:ic.box}</span><div><h3>${esc(row.name_en||row.name_ar||row.product_id)}</h3><small>${esc(ok?(pending?t('verTitle'):a.status==='manual'?t('manualTitle'):a.status==='chatgpt'?t('gptTitle'):t('st_delivered')):a?errText(a):processing?t('cartWaiting'):t('cartNotPurchased'))} · ×${row.qty}</small></div><b class="num">${ok?usd(a.total):'—'}</b></div>
++    ${a&&(a.order_id||a.ref)?`<div class="cart-ref">${esc(t('orderId'))} <b dir="ltr">${esc(a.order_id||a.ref)}</b></div>`:''}
++    ${ok&&(a.codes||[]).length?`<div class="codes">${a.codes.map(c=>`<div class="code"><span>${esc(c)}</span><button class="copy" data-act="copy" data-v="${esc(c)}" aria-label="${esc(t('copyAll'))}">${ic.copy}</button></div>`).join('')}</div>`:''}
++    ${ok&&a.email?`<div class="cart-ref" dir="ltr">${ic.mail}${esc(a.email)}</div>`:''}</article>`;
++  }).join('');
++  sh.title(t('cartTitle')).body(`${cartSteps('receipt')}<div class="cart-receipt-hero ${completed?'complete':''}"><span>${completed?ic.check:processing?'<i class="spin"></i>':ic.info}</span><h2>${esc(title)}</h2><p>${esc(desc)}</p></div><div class="cart-receipt-totals"><span>${esc(t('cartPaid'))}<b class="num">${usd(r.spent||0)}</b></span><span>${esc(t('yourBal'))}<b class="num">${usd(r.balance||0)}</b></span></div>${rows}<div class="cart-receipt-id">${esc(t('cartReference'))}<code dir="ltr">${esc(r.checkout_id)}</code></div>`)
++    .foot(`<div class="cart-result-actions">${processing||review?`<button class="btn primary" data-act="cart-status" ${st.busy?'disabled':''}>${ic.refresh}${esc(t('cartCheck'))}</button><button class="btn ghost" data-act="support">${esc(t('support'))}</button>`:`<button class="btn primary" data-act="cart-orders">${esc(t('myOrders'))}</button><button class="btn ghost" data-act="${cartCount()?'cart-remaining':'cart-browse'}">${esc(cartCount()?t('cartRemaining'):t('done'))}</button>`}</div>`);
++}
++async function cartStatus(sh, st, id) {
++  st.busy=true;
++  const r=await api('cart/status',{checkout_id:id});
++  st.busy=false;
++  if (!r.ok) { toast(errText(r),'bad'); if (sh.el.isConnected && st.receipt) renderCartReceipt(sh,st); return; }
++  cartApplyReceipt(r); st.receipt=r; st.stage='receipt';
++  if (sh.el.isConnected) {
++    renderCartReceipt(sh,st);
++    if (r.status==='processing' && (st.polls||0)<20) { st.polls=(st.polls||0)+1; clearTimeout(st.pollTimer); st.pollTimer=setTimeout(()=>{if(sh.el.isConnected)cartStatus(sh,st,id);},3000); }
++  }
++}
++function openCart() {
++  cartLoad();
++  const active=Sheets.find(x=>x.el.classList.contains('cart-sheet')&&!x.el.classList.contains('closing'));
++  if (active) return;
++  const st={stage:'cart',quote:null,busy:false,receipt:null};
++  const sh=openSheet({title:t('cartTitle'),cls:'cart-sheet',data:st,
++    onAction:(a,e)=>cartAction(sh,st,a,e),
++    onInput:(key,el)=>{
++      if(S.cartPending||!['cart-email','cart-duration'].includes(key))return;
++      const index=+el.dataset.v,item=(S.cart||[])[index];if(!item)return;
++      const field=key==='cart-email'?'email':'dur_id',value=key==='cart-email'?el.value.trim().toLowerCase():el.value;
++      const changed={...item,[field]:value};
++      if(S.cart.some((x,i)=>i!==index&&cartKey(x)===cartKey(changed))){el.value=item[field];toast(t('cartAlready'));return;}
++      item[field]=value;st.quote=null;cartSave();
++      if(key==='cart-duration')renderCart(sh,st);
++      else{el.setAttribute('aria-invalid',String(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)));const issue=el.closest('.cart-item').querySelector('.cart-line-error');if(issue)issue.remove();const btn=sh.el.querySelector('[data-act="cart-review"]');if(btn)btn.disabled=cartRows(st).some(x=>x.error);}
++    },onClose:()=>clearTimeout(st.pollTimer)});
++  renderCart(sh,st);
++  if (S.cartPending) cartStatus(sh,st,S.cartPending.id);
++}
++async function cartAction(sh,st,act,el) {
++  if (!act.startsWith('cart-')) return false;
++  if (st.busy) return true;
++  if (act==='cart-browse') { closeAllSheets(); setTab('store'); return true; }
++  if (act==='cart-orders') { closeAllSheets(); setTab('orders'); return true; }
++  if (act==='cart-last') { if(S.cartLast)await cartStatus(sh,st,S.cartLast);return true; }
++  if (act==='cart-status') { await cartStatus(sh,st,st.receipt.checkout_id);return true; }
++  if (act==='cart-funds') { openFunds(Math.max(1,+el.dataset.v||1));return true; }
++  if (act==='cart-edit'||act==='cart-remaining') {
++    if(S.cartPending) {
++      const r=await api('cart/cancel',{checkout_id:S.cartPending.id});
++      if(!r.ok){toast(errText(r),'bad');return true;}
++      if(r.status!=='cancelled'){cartApplyReceipt(r);st.receipt=r;st.stage='receipt';renderCart(sh,st);return true;}
++      cartApplyReceipt(r);
++    }
++    st.stage='cart';st.quote=null;st.receipt=null;renderCart(sh,st);return true;
++  }
++  if (act==='cart-refresh') { await refreshCatalog();st.quote=null;renderCart(sh,st);return true; }
++  if (['cart-minus','cart-plus','cart-remove'].includes(act)) {
++    if(S.cartPending)return true;
++    const i=+el.dataset.v,item=(S.cart||[])[i];if(!item)return true;
++    if(act==='cart-remove')S.cart.splice(i,1);
++    else{const p=findP(item.product_id);item.qty=Math.max(1,Math.min(p?maxQty(p):500,item.qty+(act==='cart-plus'?1:-1)));}
++    st.quote=null;cartSave();hap('select');renderCart(sh,st);return true;
++  }
++  if (act==='cart-review') {
++    st.busy=true;renderCart(sh,st);
++    const r=await api('cart/quote',{items:S.cart.map(x=>({product_id:x.product_id,qty:x.qty,email:x.email||'',dur_id:x.dur_id||''}))});
++    st.busy=false;
++    if(r.ok){st.quote=r;st.stage=r.valid?'review':'cart';if(!r.valid)toast(t('cartFix'),'bad');}
++    else{toast(errText(r),'bad');if(r.error==='deposit_pending'&&r.pending)openPayment(r.pending);}
++    if(sh.el.isConnected)renderCart(sh,st);return true;
++  }
++  if (act==='cart-pay') {
++    if(!st.quote||!st.quote.quote_id)return true;
++    const id=st.quote.quote_id;
++    S.cartPending={id,items:(S.cart||[]).map(x=>({...x})),applied:[]};cartSave();
++    st.busy=true;renderCart(sh,st);
++    const r=await api('cart/checkout',{quote_id:id});
++    st.busy=false;
++    if(r.ok){cartApplyReceipt(r);st.receipt=r;st.stage='receipt';refreshCatalog();if(sh.el.isConnected)renderCart(sh,st);if(r.status==='processing')cartStatus(sh,st,id);}
++    else if(r.error==='network'||r._s>=500){toast(t('cartResume'));await cartStatus(sh,st,id);}
++    else{S.cartPending=null;cartSave();toast(errText(r),'bad');st.stage='cart';st.quote=null;if(sh.el.isConnected)renderCart(sh,st);}
++    return true;
++  }
++  return false;
++}
++
++/* Frontend runtime errors are authenticated and rate-limited server-side. */
++let clientErrorAt=0;
++function reportClientError(message,locationText,operation) {
++  if(DEMO||!INIT||Date.now()-clientErrorAt<5000)return;
++  clientErrorAt=Date.now();
++  fetch(API+'/webapp/client/error',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':INIT},
++    body:JSON.stringify({message:String(message||'Browser error').slice(0,1200),location:String(locationText||'').split('?')[0].slice(0,200),operation:operation||'runtime'})}).catch(()=>{});
++}
++window.addEventListener('error',e=>{if(e.error||e.message)reportClientError(e.message,(e.filename||'')+':'+(e.lineno||0),'runtime');});
++window.addEventListener('unhandledrejection',e=>reportClientError(e.reason instanceof Error?e.reason.message:'Unhandled promise rejection','browser','promise'));
++async function cartDemo(path, body) {
++  Demo.carts=Demo.carts||{};
++  if(path==='cart/quote'){
++    const lines=(body.items||[]).map((x,index)=>{const p=findP(x.product_id),unit=p?priceOf(p,{qty:x.qty,dur:x.dur_id}):0;const subtotal=p?(p.kind==='cgpt'?((p.durations||[]).find(d=>d.id===x.dur_id)||{}).price||0:p.price)*x.qty:0;
++      return {...x,index,name_en:p&&p.name_en||x.product_id,name_ar:p&&p.name_ar||x.product_id,unit,total:Math.round(unit*x.qty*100)/100,subtotal,error:!p?'not_found':!p.in_stock?'out_of_stock':null};});
++    const total=lines.reduce((n,x)=>n+x.total,0),id='demo-cart-'+Date.now();
++    const r={ok:true,quote_id:id,checkout_id:id,status:'quoted',lines,total,subtotal:lines.reduce((n,x)=>n+x.subtotal,0),balance:Demo.bal,valid:lines.every(x=>!x.error),can_checkout:Demo.bal>=total};Demo.carts[id]=r;return r;
++  }
++  const r=Demo.carts[body.quote_id||body.checkout_id];if(!r)return {error:'not_found'};
++  if(path==='cart/cancel'&&r.status==='quoted')r.status='cancelled';
++  if(path==='cart/checkout'&&r.status==='quoted'){
++    r.status='processing';
++    for(const [index,x]of r.lines.entries()){x.index=index;x.result=await Demo.call('buy',x);if(!x.result.ok){r.status=index?'partial':'failed';break;}}
++    if(r.status==='processing')r.status='completed';
++  }
++  return {...r,balance:Demo.bal,spent:r.lines.reduce((n,x)=>n+(x.result&&x.result.ok?x.result.total:0),0)};
++}
++
+ 
+ /* ───────────────────────── orders ───────────────────────── */
+ async function loadOrders() {
+@@ -3455,7 +3738,7 @@
+   ['store', '#3d8bff', ['prod', '@stock', 'plist', 'ext', 'cgpt', 'act']],
+   ['people', '#19c3a3', ['users', 'find', 'gift', 'ban', 'vip', 'ref']],
+   ['money', '#f2b33d', ['profit', '@orders', '@deps', 'logs', 'reports', 'tx', '@prot']],
+-  ['sys', '#8ea2c4', ['settings', 'baseurl', 'fsub', 'promote', 'panel']]];   // التخصيص والبرودكاست: من البوت فقط
++  ['sys', '#8ea2c4', ['errors', 'cart', 'shop_cms', 'settings', 'baseurl', 'fsub', 'promote', 'panel']]];   // التخصيص والبرودكاست: من البوت فقط
+ const ADM_NATIVE = { stock: ['🏷️', 'adm-prods', 'all'], orders: ['🧾', 'adm-feed', 'orders'], deps: ['💳', 'adm-feed', 'deposits'], prot: ['🛡', 'adm-prot', ''] };
+ function adtOr(k, fb) { const v = adt(k); return v === k ? fb : v; }
+ function admHue(cb) {
+@@ -4369,6 +4652,7 @@
+   if (act.startsWith('api-') && await apiAction(act, el)) return;
+   if (act.startsWith('adm-') && await admAction(act, el)) return;
+   switch (act) {
++    case 'cart-open': openCart(); break;
+     case 'tab': closeAllSheets(); setTab(el.dataset.v); break;
+     case 'lang': setLang(el.dataset.v); break;
+     case 'pv-how': openPvHow(); break;
+@@ -4605,7 +4889,7 @@
+     S.screen = r.error === 'banned' ? 'banned' : r.error === 'auth' ? 'auth' : r.error === 'network' ? 'error' : 'error';
+     renderAll(); return;
+   }
+-  S.user = r.user; S.vip = r.vip || null; S.store = r.store || {}; S.deposit = r.deposit || { methods: [] }; S.nav = r.nav || {}; S.texts = r.texts || {}; S.forced = r.forced;
++  S.user = r.user; S.cartEnabled = r.cart_enabled !== false; cartLoad(); S.vip = r.vip || null; S.store = r.store || {}; S.deposit = r.deposit || { methods: [] }; S.nav = r.nav || {}; S.texts = r.texts || {}; S.forced = r.forced;
+   S.catalogs = r.catalogs || []; S.products = r.products || []; S.pending = r.pending; S.locked = r.locked;
+   S.offset = r.server_time ? r.server_time - Date.now() / 1000 : 0;
+   lastCat = Date.now();
+--- before/verification/harness.py
++++ after/verification/harness.py
+@@ -18,6 +18,7 @@
+ TOKEN = '123456789:LOCAL_TEST_TOKEN_DO_NOT_USE'
+ MESSAGES = []
+ client = mongomock.MongoClient()
++_loaded_app = None
+ 
+ def offline(*args, **kwargs):
+     raise RuntimeError('External network is disabled in the integration harness')
+@@ -29,6 +30,11 @@
+         'text': str(text)})
+ 
+ def load():
++    global _loaded_app
++    # All imported session fixtures and the HTTP server must use the same app.
++    # Multiple module imports would otherwise install duplicate global hooks.
++    if _loaded_app is not None:
++        return _loaded_app
+     spec = importlib.util.spec_from_file_location('lara_test_bot', APP/'bot.py')
+     m = importlib.util.module_from_spec(spec)
+     env = {'TOKEN':TOKEN,'OWNER_ID':'9001','OWNER_USER':'local_test_support','MONGO_URI':'mongodb://localhost/test',
+@@ -57,6 +63,7 @@
+     m._cgpt_display_seats = lambda: 8
+     m._cgpt_get_seats_cached = lambda:8
+     m._wa_prefetch_emoji = lambda ids:None
++    _loaded_app = m
+     return m
+ 
+ if __name__=='__main__':
+--- /dev/null
++++ after/verification/test_cart.py
+@@ -0,0 +1,193 @@
++"""Cart regressions: in-memory DB and mocked Telegram/suppliers only."""
++from concurrent.futures import ThreadPoolExecutor
++from unittest.mock import Mock
++import pytest
++from test_integration import mod, isolate, server, product, request
++from harness import MESSAGES
++
++
++def quote(server,items,uid=1001):
++    s,d,_=request(server,'/webapp/cart/quote',{'items':items},uid=uid)
++    assert s==200,d
++    return d
++
++
++def checkout(server,q,uid=1001):
++    return request(server,'/webapp/cart/checkout',{'quote_id':q['quote_id']},uid=uid)[:2]
++
++
++def test_cart_delivers_multiple_products_through_original_bot(mod,server):
++    product(mod,stock=5);product(mod,'102',price=3,stock=4)
++    q=quote(server,[{'product_id':'101','qty':2},{'product_id':'102','qty':3}])
++    assert q['total']==19 and mod._wa_balance(1001)==100 and not mod.db.orders.count_documents({})
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='completed' and r['spent']==19 and r['balance']==81
++    assert len([c for x in r['lines'] for c in x['result']['codes']])==5
++    assert mod.db.orders.count_documents({'cart_checkout_id':q['quote_id']})==5
++    assert mod.db.product_stock.count_documents({'is_sold':False})==4
++    assert any(uid==1001 and text=='[document]' for uid,text,kw in MESSAGES)
++
++
++def test_duplicate_lines_bulk_discount_and_vip(mod,server):
++    product(mod,stock=10,discount_tiers=[{'min_qty':3,'price':4}])
++    mod.db.users.update_one({'user_id':1001},{'$set':{'vip_cents':30000}});mod.vip_set_class('101','high')
++    q=quote(server,[{'product_id':'101','qty':1},{'product_id':'101','qty':2}])
++    expected=mod.vip_quote(1001,'101',4,3)['total']
++    assert len(q['lines'])==1 and q['total']==expected and q['subtotal']==15
++    assert checkout(server,q)[1]['spent']==expected and mod._wa_balance(1001)==100-expected
++
++
++@pytest.mark.parametrize('change',['price','tier','vip','stock','hidden'])
++def test_quote_changes_require_new_confirmation(mod,server,change):
++    product(mod,stock=6);q=quote(server,[{'product_id':'101','qty':3}])
++    if change=='price':mod.db.products.update_one({'id':'101'},{'$set':{'price':9}})
++    if change=='tier':mod.db.products.update_one({'id':'101'},{'$set':{'discount_tiers':[{'min_qty':3,'price':4}]}})
++    if change=='vip':
++        mod.db.users.update_one({'user_id':1001},{'$set':{'vip_cents':30000}});mod._invalidate_user_cache(1001);mod.vip_set_class('101','high')
++    if change=='stock':mod.db.product_stock.update_many({},{'$set':{'is_sold':True}})
++    if change=='hidden':mod.db.products.update_one({'id':'101'},{'$set':{'is_hidden':True}})
++    mod._invalidate_products_cache()
++    s,r=checkout(server,q)
++    assert s==409 and r['error'] in ('price_changed','cart_changed')
++    assert mod._wa_balance(1001)==100 and not mod.db.orders.count_documents({})
++
++
++def test_last_moment_price_change_does_not_debit(mod,server,monkeypatch):
++    product(mod);q=quote(server,[{'product_id':'101','qty':1}]);original=mod._cart_execute
++    def execute(uid,line,lang):
++        mod.db.products.update_one({'id':'101'},{'$set':{'price':40}})
++        return original(uid,line,lang)
++    monkeypatch.setattr(mod,'_cart_execute',execute)
++    s,r=checkout(server,q)
++    assert s==200 and r['lines'][0]['result']['error']=='price_changed'
++    assert r['spent']==0 and mod._wa_balance(1001)==100
++    assert mod.db.product_stock.count_documents({'is_sold':False})==3
++
++
++def test_parallel_and_repeated_confirmation_charge_once(mod,server):
++    product(mod,stock=5);q=quote(server,[{'product_id':'101','qty':2}])
++    with ThreadPoolExecutor(max_workers=3) as pool:results=list(pool.map(lambda _:checkout(server,q),range(3)))
++    assert all(s in (200,202,429) for s,r in results)
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='completed' and r['spent']==10
++    assert mod._wa_balance(1001)==90 and mod.db.orders.count_documents({})==2
++
++
++def test_entire_cart_balance_checked_before_first_purchase(mod,server):
++    product(mod,price=60);product(mod,'102',price=60)
++    q=quote(server,[{'product_id':'101','qty':1},{'product_id':'102','qty':1}])
++    assert q['valid'] and not q['can_checkout']
++    assert checkout(server,q)[0]==402 and mod._wa_balance(1001)==100
++    assert not mod.db.orders.count_documents({})
++
++
++@pytest.mark.parametrize('items',[[],None,{},[None],[{'product_id':'101','qty':True}],
++    [{'product_id':'101','qty':1.5}],[{'product_id':'101','qty':0}],[{'product_id':'101','qty':501}],
++    [{'product_id':'../101','qty':1}],[{'product_id':'101','qty':1}]*21])
++def test_bad_cart_input_never_changes_balance(mod,server,items):
++    product(mod);s,d,_=request(server,'/webapp/cart/quote',{'items':items})
++    assert s==400 and mod._wa_balance(1001)==100
++
++
++@pytest.mark.parametrize('gate',['banned','forced','deposit','disabled'])
++def test_checkout_access_gates(mod,server,monkeypatch,gate):
++    product(mod);q=quote(server,[{'product_id':'101','qty':1}])
++    if gate=='banned':mod.db.users.update_one({'user_id':1001},{'$set':{'is_banned':1}})
++    if gate=='forced':monkeypatch.setattr(mod,'check_forced_sub',lambda uid:False)
++    if gate=='deposit':mod.db.users.update_one({'user_id':1001},{'$set':{'deposit_locked':True,'deposit_lock_expires':int(mod.time.time())+600}})
++    if gate=='disabled':mod.db.settings.update_one({'key':'webapp_cart_enabled'},{'$set':{'value':'off'}},upsert=True)
++    assert checkout(server,q)[0] in (403,409)
++    assert mod._wa_balance(1001)==100 and not mod.db.orders.count_documents({})
++
++
++def test_quote_ownership_expiry_and_cancel(mod,server):
++    product(mod);q=quote(server,[{'product_id':'101','qty':1}])
++    assert checkout(server,q,1002)[0]==404
++    assert request(server,'/webapp/cart/status',{'checkout_id':q['quote_id']},uid=1002)[0]==404
++    mod.db.cart_checkouts.update_one({'_id':q['quote_id']},{'$set':{'quote_expires':0}})
++    assert checkout(server,q)[1]['error']=='quote_expired'
++    q=quote(server,[{'product_id':'101','qty':1}])
++    assert request(server,'/webapp/cart/cancel',{'checkout_id':q['quote_id']})[1]['status']=='cancelled'
++    assert checkout(server,q)[1]['status']=='cancelled' and mod._wa_balance(1001)==100
++
++
++def test_manual_email_and_chatgpt_invitation(mod,server,monkeypatch):
++    product(mod,stock=0,manual=True,requires_email=True)
++    pid=mod.db.cgpt_products.insert_one({'name':'ChatGPT','durations':[{'dur_id':'w','minutes':10080,'price':7,'label':'Week'}]}).inserted_id
++    mgr=Mock();mgr.invite_user.return_value={'ok':True,'expires_at':'2026-11-01T00:00:00'}
++    monkeypatch.setattr(mod,'_cgpt_find_available_account',lambda:{'mgr':mgr})
++    q=quote(server,[{'product_id':'101','qty':2,'email':'customer@example.test'},
++        {'product_id':f'cgpt_{pid}','qty':1,'email':'invite@example.test','dur_id':'w'}])
++    assert q['valid'] and q['total']==17
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='completed' and r['spent']==17
++    assert [x['result']['status'] for x in r['lines']]==['manual','chatgpt']
++    assert mod.db.orders.find_one({'buyer_email':'customer@example.test'})
++    mgr.invite_user.assert_called_once_with('invite@example.test',10080)
++
++
++@pytest.mark.parametrize('email,qty,dur',[('bad',1,'w'),('ok@example.test',2,'w'),('ok@example.test',1,'bad')])
++def test_chatgpt_configuration_validation(mod,server,email,qty,dur):
++    pid=mod.db.cgpt_products.insert_one({'name':'GPT','durations':[{'dur_id':'w','minutes':10080,'price':7}]}).inserted_id
++    q=quote(server,[{'product_id':f'cgpt_{pid}','qty':qty,'email':email,'dur_id':dur}])
++    assert not q['valid'] and not q['quote_id'] and mod._wa_balance(1001)==100
++
++
++def test_hidden_parent_and_combined_seat_demand(mod,server,monkeypatch):
++    pid=mod.db.cgpt_products.insert_one({'name':'GPT','is_hidden':True,'durations':[{'dur_id':'w','minutes':10080,'price':7}]}).inserted_id
++    items=[{'product_id':f'cgpt_{pid}','qty':1,'email':e,'dur_id':'w'} for e in ['a@example.test','b@example.test']]
++    assert not quote(server,items[:1])['valid']
++    mod.db.cgpt_products.update_one({'_id':pid},{'$set':{'is_hidden':False}});monkeypatch.setattr(mod,'_cgpt_display_seats',lambda:1)
++    assert all(x['error']=='not_enough_stock' for x in quote(server,items)['lines'])
++
++
++def test_partial_checkout_keeps_exact_charge_and_stops_remaining_items(mod,server,monkeypatch):
++    for pid in ('101','102','103'):product(mod,pid)
++    q=quote(server,[{'product_id':p,'qty':1} for p in ('101','102','103')]);original=mod._cart_execute
++    monkeypatch.setattr(mod,'_cart_execute',lambda uid,line,lang:(502,{'error':'supplier_failed','refunded':True}) if line['product_id']=='102' else original(uid,line,lang))
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='partial' and r['spent']==5 and r['balance']==95
++    assert r['lines'][0]['result']['ok'] and 'result' not in r['lines'][2]
++    checkout(server,q)
++    assert mod._wa_balance(1001)==95 and mod.db.orders.count_documents({})==1
++
++
++def test_supplier_uncertain_result_stops_and_is_not_repeated(mod,server,monkeypatch):
++    sid=mod.db.ext_stores.insert_one({'base_url':'https://supplier.example','api_key':'fake-only'}).inserted_id
++    eid=mod.db.ext_products.insert_one({'store_id':str(sid),'ext_id':'p1','name':'Remote','stock':5,'sell_price':4,'base_price':2}).inserted_id
++    product(mod,'102');calls=Mock(return_value=(False,{'uncertain':True,'error':'timeout'}));monkeypatch.setattr(mod,'_ext_api_post',calls)
++    q=quote(server,[{'product_id':f'ext_{eid}','qty':1},{'product_id':'102','qty':1}])
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='verifying' and r['spent']==4 and r['balance']==96
++    assert 'result' not in r['lines'][1]
++    checkout(server,q);assert calls.call_count==1 and mod._wa_balance(1001)==96
++
++
++def test_receipt_write_failure_recovers_real_orders_without_rebuy(mod,server,monkeypatch):
++    product(mod);q=quote(server,[{'product_id':'101','qty':2}]);original=mod.db.cart_checkouts.update_one
++    def fail(query,update,*a,**k):
++        if 'lines.0.result' in update.get('$set',{}):raise RuntimeError('receipt write interruption')
++        return original(query,update,*a,**k)
++    monkeypatch.setattr(mod.db.cart_checkouts,'update_one',fail)
++    assert checkout(server,q)[0]==500 and mod._wa_balance(1001)==90
++    monkeypatch.setattr(mod.db.cart_checkouts,'update_one',original)
++    s,r,_=request(server,'/webapp/cart/status',{'checkout_id':q['quote_id']})
++    assert s==200 and r['status']=='completed' and len(r['lines'][0]['result']['codes'])==2
++    checkout(server,q);assert mod._wa_balance(1001)==90 and mod.db.orders.count_documents({})==2
++
++
++def test_client_price_and_owner_fields_are_ignored(mod,server):
++    product(mod);q=quote(server,[{'product_id':'101','qty':2,'price':0,'total':0}]);assert q['total']==10
++    s,r,_=request(server,'/webapp/cart/checkout',{'quote_id':q['quote_id'],'total':0,'user_id':1002})
++    assert s==200 and r['spent']==10 and mod._wa_balance(1001)==90 and mod._wa_balance(1002)==50
++
++
++def test_unlimited_supplier_product_can_be_added_and_delivered(mod,server,monkeypatch):
++    sid=mod.db.ext_stores.insert_one({'base_url':'https://supplier.example','api_key':'fake-only'}).inserted_id
++    eid=mod.db.ext_products.insert_one({'store_id':str(sid),'ext_id':'unlimited','name':'Remote unlimited','stock':0,'unlimited':True,'sell_price':4,'base_price':2}).inserted_id
++    monkeypatch.setattr(mod,'_ext_api_post',lambda *a,**k:(True,{'success':True,'codes':['LOCAL-REMOTE-1','LOCAL-REMOTE-2'],'order':{'id':'fake-order'}}))
++    q=quote(server,[{'product_id':f'ext_{eid}','qty':2}])
++    assert q['valid'] and q['lines'][0]['stock'] is None
++    s,r=checkout(server,q)
++    assert s==200 and r['status']=='completed' and r['spent']==8
++    assert r['lines'][0]['result']['codes']==['LOCAL-REMOTE-1','LOCAL-REMOTE-2'] and mod._wa_balance(1001)==92
+--- /dev/null
++++ after/verification/test_error_monitor.py
+@@ -0,0 +1,153 @@
++"""Private error records and alerts; all identities, DB and delivery are mocked."""
++import json
++import logging
++from unittest.mock import Mock
++import pytest
++from harness import MESSAGES
++from test_integration import mod, isolate, server, request, product, _api
++from test_products_menu import dispatch, buttons
++
++
++@pytest.fixture(autouse=True)
++def empty_monitor(mod,isolate):
++    while True:
++        try:mod._ERROR_QUEUE.get_nowait();mod._ERROR_QUEUE.task_done()
++        except mod._error_queue_module.Empty:break
++    mod._ERROR_MEMORY.clear()
++    yield
++
++
++def test_errors_include_cause_user_product_operation_and_stack(mod,server,monkeypatch):
++    def broken(identity,body):raise ValueError('Supplier returned a malformed response')
++    monkeypatch.setitem(mod._WA_POST_ROUTES,'/webapp/test/error',broken)
++    s,r,_=request(server,'/webapp/test/error',{'product_id':'101'})
++    assert s==500 and r=={'error':'server_error'}
++    mod._error_drain()
++    rec=mod.db.system_errors.find_one({})
++    assert rec['user_id']==1001 and rec['product_id']=='101' and rec['source']=='webapp'
++    assert rec['operation']=='/webapp/test/error' and rec['exception']=='ValueError'
++    assert 'malformed response' in rec['cause'] and 'broken' in rec['trace']
++    assert rec['request_id'] and rec['expires_at']>rec['last_at']
++
++
++def test_auth_api_errors_have_authenticated_user_without_secret_gateway(mod,server,monkeypatch):
++    key='sk_'+'f'*48
++    mod.db.api_keys.insert_one({'user_id':1001,'api_key':key,'is_active':True})
++    monkeypatch.setattr(mod.db.products,'find',Mock(side_effect=RuntimeError('catalog failed')))
++    s,r=_api(server,'GET','/'+mod._get_api_gateway()+'/products',key)
++    assert s==503
++    mod._error_drain();rec=mod.db.system_errors.find_one({})
++    assert rec and rec['user_id']==1001 and rec['source']=='api'
++    raw=json.dumps(rec,default=str)
++    assert key not in raw and mod._get_api_gateway() not in raw
++
++
++def test_callback_exception_is_captured_with_customer_identity(mod,monkeypatch):
++    from test_products_menu import callback
++    call=callback(mod,'deliberate-test',1001)
++    def broken(call):raise RuntimeError('callback failed')
++    handler={'function':broken,'pass_bot':False,'filters':{'func':lambda c:True}}
++    with pytest.raises(RuntimeError):
++        mod.bot._run_middlewares_and_handler(call,handlers=[handler],middlewares=None,update_type='callback_query')
++    mod._error_drain();rec=mod.db.system_errors.find_one({})
++    assert rec['user_id']==1001 and rec['source']=='bot' and 'deliberate-test' in rec['operation']
++    assert rec['exception']=='RuntimeError' and 'broken' in rec['trace']
++
++
++def test_warning_and_error_are_saved_and_only_errors_alert(mod,monkeypatch):
++    notices=Mock();monkeypatch.setattr(mod,'notify_admins',notices)
++    with mod._error_scope(user_id=1001,source='bot',operation='test'):
++        mod.logger.warning('A recoverable issue')
++        mod.logger.error('A technical failure')
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({})==2 and notices.call_count==1
++    assert 'technical failure' in notices.call_args.args[0]
++    assert 'ad_error_' in json.dumps(notices.call_args.kwargs['buttons'].to_dict())
++
++
++def test_repeat_errors_increment_count_and_deduplicate_alerts_persistently(mod,monkeypatch):
++    notices=Mock();monkeypatch.setattr(mod,'notify_admins',notices)
++    with mod._error_scope(user_id=1001,operation='same'):
++        a=mod._error_capture('Same failure');b=mod._error_capture('Same failure')
++    mod._error_drain()
++    assert a==b and mod.db.system_errors.find_one({'_id':a})['count']==2 and notices.call_count==1
++    mod._error_capture('Same failure')
++    mod._error_drain()
++    # Different users/background contexts remain distinct records.
++    assert mod.db.system_errors.count_documents({})==2
++
++
++def test_secrets_are_redacted_before_memory_database_and_notifications(mod,monkeypatch):
++    secret='FAKE_PRIVATE_TOKEN_123456789'
++    monkeypatch.setenv('TOKEN',secret)
++    notices=Mock();monkeypatch.setattr(mod,'notify_admins',notices)
++    with mod._error_scope(user_id=1001):
++        mod._error_capture('Problem '+secret+' mongodb+srv://tester:PRIVATE_PASS@cluster.example/db?auth=PRIVATE_QUERY\nCookie=FAKE_COOKIE\nAuthorization: Bearer FAKE_HEADER\napi_key=FAKE_KEY')
++    mod._error_drain()
++    raw=json.dumps(list(mod._ERROR_MEMORY),default=str)+json.dumps(list(mod.db.system_errors.find()),default=str)+str(notices.call_args)
++    assert not any(x in raw for x in [secret,'PRIVATE_PASS','PRIVATE_QUERY','FAKE_COOKIE','FAKE_HEADER','FAKE_KEY'])
++    assert '[hidden]' in raw
++
++
++def test_alert_switch_does_not_stop_recording(mod,monkeypatch):
++    mod.db.settings.insert_one({'key':'error_alerts_enabled','value':'off'})
++    notices=Mock();monkeypatch.setattr(mod,'notify_admins',notices)
++    mod._error_capture('Failure while alerts disabled');mod._error_drain()
++    assert mod.db.system_errors.count_documents({})==1 and not notices.called
++
++
++def test_browser_reports_are_authenticated_and_cannot_spoof_owner(mod,server):
++    s,r,_=request(server,'/webapp/client/error',{'message':'Runtime failed','operation':'cart-review','user_id':9001},auth=False)
++    assert s==401
++    s,r,_=request(server,'/webapp/client/error',{'message':'Runtime failed','operation':'cart-review','user_id':9001})
++    assert s==200 and r['reference']
++    mod._error_drain();rec=mod.db.system_errors.find_one({})
++    assert rec['user_id']==1001 and rec['source']=='browser' and rec['operation']=='browser:cart-review'
++    results=[request(server,'/webapp/client/error',{'message':'repeat'})[0] for _ in range(12)]
++    assert 429 in results
++
++
++@pytest.mark.parametrize('data',['ad_errors','ad_errors_all_0','ad_error_alerts_toggle','ad_error_'+'a'*32,'ad_err_resolve_'+'a'*32])
++def test_customer_cannot_read_or_change_error_center(mod,data):
++    dispatch(mod,data,1001)
++    assert not MESSAGES and mod.db.settings.find_one({'key':'error_alerts_enabled'}) is None
++
++
++def test_admin_reads_resolves_error_and_new_occurrence_reopens_it(mod,monkeypatch):
++    monkeypatch.setitem(mod._VC_ORIG,'edit_message_text',lambda text,*a,**kw:mod.bot.send_message(9001,text,**kw))
++    with mod._error_scope(user_id=1001,username='customer',operation='purchase',product_id='101'):
++        key=mod._error_capture('Unavailable supplier')
++    mod._error_drain();MESSAGES.clear()
++    dispatch(mod,'ad_errors',9001)
++    assert any(b.get('callback_data')=='ad_error_'+key for row in buttons(MESSAGES[-1]) for b in row)
++    dispatch(mod,'ad_error_'+key,9001)
++    assert '1001' in MESSAGES[-1][1] and 'customer' in MESSAGES[-1][1] and 'Unavailable supplier' in MESSAGES[-1][1]
++    dispatch(mod,'ad_err_resolve_'+key,9001)
++    assert mod.db.system_errors.find_one({'_id':key})['resolved']
++    with mod._error_scope(user_id=1001,username='customer',operation='purchase',product_id='101'):
++        assert mod._error_capture('Unavailable supplier')==key
++    mod._error_drain();assert not mod.db.system_errors.find_one({'_id':key})['resolved']
++
++
++def test_monitor_failure_does_not_interrupt_caller_and_memory_fallback_is_visible(mod,monkeypatch):
++    key=mod._error_capture('Database is temporarily down')
++    original=mod.db.system_errors.update_one
++    original_find=mod.db.system_errors.find
++    monkeypatch.setattr(mod.db.system_errors,'update_one',Mock(side_effect=RuntimeError('DB unavailable')))
++    assert mod._error_drain()==1
++    monkeypatch.setattr(mod.db.system_errors,'find',Mock(side_effect=RuntimeError('DB unavailable')))
++    assert mod._error_recent()[0]['_id']==key
++    monkeypatch.setattr(mod.db.system_errors,'update_one',original)
++    monkeypatch.setattr(mod.db.system_errors,'find',original_find)
++    queued=mod._ERROR_QUEUE.get_nowait();mod._ERROR_QUEUE.task_done()
++    queued['_retry_at']=0;mod._ERROR_QUEUE.put_nowait(queued)
++    mod._error_drain()
++    assert mod.db.system_errors.find_one({'_id':key})['count']==1
++
++
++def test_error_text_with_html_metacharacters_has_safe_bounded_format(mod):
++    key=mod._error_capture('<>&'*1000)
++    mod._error_drain()
++    record=mod._error_detail(key)
++    rendered=mod._error_notice(record)
++    assert len(rendered)<3000 and '<>&' not in rendered and '&lt;' in rendered
+--- /dev/null
++++ after/verification/serve_cart_test.py
+@@ -0,0 +1,56 @@
++"""Local cart UI fixture: fake identity, memory-only DB, no real integrations."""
++import json, os, socket
++from http.server import ThreadingHTTPServer
++from harness import load, APP, TOKEN, offline
++from test_integration import signed
++m=load()
++assert m.bot.token == TOKEN and m.MONGO_URI == 'mongodb://localhost/test'
++# Permanent isolation after import, for the entire lifetime of this test server.
++# Incoming localhost HTTP remains available; all outbound integrations are disabled.
++m.requests.sessions.Session.request = offline
++m.telebot.apihelper._make_request = offline
++m.cffi_requests.get = offline
++m.cffi_requests.post = offline
++m.cffi_requests.delete = offline
++_connect = socket.socket.connect
++_connect_ex = socket.socket.connect_ex
++def local_only_connect(sock, address):
++ if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
++  raise RuntimeError('Non-local network is forbidden in this test server')
++ return _connect(sock, address)
++def local_only_connect_ex(sock, address):
++ if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
++  raise RuntimeError('Non-local network is forbidden in this test server')
++ return _connect_ex(sock, address)
++socket.socket.connect = local_only_connect
++socket.socket.connect_ex = local_only_connect_ex
++if os.getenv('LARA_TEST_NETWORK_PROOF') == '1':
++ blocked = 0
++ with socket.socket() as probe:
++  for fn,args in [(m.telebot.apihelper._make_request,(TOKEN,'getMe')),
++                  (m.requests.get,('https://example.invalid',)),
++                  (probe.connect,(('203.0.113.1',443),))]:
++   try:fn(*args)
++   except RuntimeError:blocked += 1
++ assert blocked == 3
++ print('PASS: fake credentials asserted; Telegram, HTTP integrations and external sockets blocked')
++ raise SystemExit(0)
++m.db.users.insert_one({'user_id':1001,'name':'Integration Test','username':'local_test','balance':100.,'lang':'en','is_admin':0,'is_banned':0})
++for pid,name,price,stock in [('101','Netflix Premium · 1 Month',5.,20),('102','Spotify Premium · 1 Month',3.,20)]:
++ m.db.products.insert_one({'id':pid,'name_en':name,'name_ar':name,'price':price,'is_manual':False,
++    'discount_tiers':[{'min_qty':3,'price':4.}] if pid=='101' else []})
++ for i in range(stock):m.db.product_stock.insert_one({'product_id':pid,'is_sold':False,'code_line':f'LOCAL-CART-{pid}-{i}'})
++m.db.products.insert_one({'id':'103','name_en':'Canva Pro · Invitation','name_ar':'Canva Pro · Invitation','price':2.,'is_manual':True,'requires_email':True})
++script="<script>window.Telegram={WebApp:{colorScheme:'light',initData:"+json.dumps(signed())+",initDataUnsafe:{user:{id:1001,language_code:'en'}},ready(){},expand(){},onEvent(){},offEvent(){},setHeaderColor(){},setBackgroundColor(){},enableClosingConfirmation(){},isVersionAtLeast(){return false;},BackButton:{show(){},hide(){},onClick(){},offClick(){}},HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}}}};</script>"
++class Handler(m.APIHandler):
++ def do_GET(self):
++  path=self.path.split('?')[0]
++  if path=='/__cart_test__/':
++   content=(APP/'webapp/index.html').read_text().replace('<head>','<head><base href="/app/">'+script,1)
++   return m._wa_send(self,200,content,'text/html; charset=utf-8')
++  if path=='/__cart_test__/state':
++   return m._wa_send(self,200,json.dumps({'balance':m._wa_balance(1001),'orders':m.db.orders.count_documents({}),
++      'checkouts':m.db.cart_checkouts.count_documents({'status':'completed'}),'errors':m.db.system_errors.count_documents({})}),'application/json')
++  return super().do_GET()
++print('LOCAL CART SERVER',flush=True)
++ThreadingHTTPServer(('127.0.0.1',int(os.getenv('LARA_TEST_PORT','8769'))),Handler).serve_forever()
+--- /dev/null
++++ after/verification/test_cart_browser.cjs
+@@ -0,0 +1,91 @@
++/* Real Chromium + signed local HTTP + in-memory bot. Optional: npm install playwright. */
++const {spawn}=require('child_process');
++const fs=require('fs'),path=require('path'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const importedProvider=process.env.LARA_TEST_CHROMIUM_PROVIDER?require(process.env.LARA_TEST_CHROMIUM_PROVIDER):null;
++const provider=importedProvider&&(importedProvider.default||importedProvider);
++const BASE='http://127.0.0.1:8769',shots=process.env.LARA_TEST_SCREENSHOTS||'';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{env:{...process.env,LARA_TEST_PORT:'8769'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(d.toString().includes('LOCAL CART SERVER'))resolve();});server.stderr.on('data',()=>{});server.once('exit',code=>reject(Error('Local fixture exited '+code)));});
++const snap=async(p,name)=>{if(shots){fs.mkdirSync(shots,{recursive:true});await p.screenshot({path:path.join(shots,name+'.png'),fullPage:false,animations:'disabled',timeout:45000});}};
++(async()=>{
++ await ready; console.log('UI fixture ready');
++ const localArgs=['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking','--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu'];
++ const browser=await chromium.launch({headless:true,args:localArgs,...(provider?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE||await provider.executablePath()}:{})});
++ try{
++ const context=await browser.newContext({viewport:{width:1360,height:960},colorScheme:'light',reducedMotion:'reduce'});
++ const page=await context.newPage(),errors=[]; page.setDefaultTimeout(30000);page.on('pageerror',e=>errors.push(e.message));
++ await page.route('**/*',route=>route.request().url().startsWith(BASE)?route.continue():route.abort());
++ await page.goto(BASE+'/__cart_test__/',{waitUntil:'domcontentloaded'});
++ await page.locator('[data-act="product"][data-v="101"]').waitFor();
++ const cart=()=>page.locator('.cart-sheet:not(.closing)');
++ await page.locator('[data-act="cart-open"]').first().click();
++ await cart().locator('.cart-empty').waitFor();await snap(page,'cart-empty-desktop'); console.log('UI empty cart rendered');
++ await cart().locator('[data-act="cart-browse"]').click();
++ console.log('UI returned to store');
++ for(const pid of ['101','102']){
++  await page.locator('[data-act="product"][data-v="'+pid+'"]').click();
++  const product=page.locator('.psheet:not(.closing)').last();
++  await product.locator('[data-act="cart-add"]').click();
++  await product.locator('[data-act="sheet-close"]').click(); console.log('UI added product',pid);
++ }
++ await page.locator('[data-act="cart-open"]').first().click();
++ await cart().locator('.cart-item').nth(1).waitFor();
++ await cart().locator('[data-act="cart-plus"][data-v="0"]').click();
++ await cart().locator('[data-act="cart-plus"][data-v="0"]').click();
++ await cart().locator('[data-act="cart-plus"][data-v="1"]').click();
++ assert((await cart().innerText()).includes('$18.00'));
++ assert(await cart().locator('.cart-wallet').evaluate(el=>el.getBoundingClientRect().height<95));
++ await snap(page,'cart-filled-desktop-light'); console.log('UI filled desktop rendered');
++ await page.setViewportSize({width:390,height:844});await snap(page,'cart-filled-mobile-light');
++ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
++ await page.evaluate(()=>document.documentElement.dataset.theme='dark');await snap(page,'cart-filled-mobile-dark');
++ await cart().locator('[data-act="sheet-close"]').click();
++ await page.locator('[data-act="lang"][data-v="ar"]').click();
++ await page.locator('[data-act="cart-open"]').first().click();
++ await page.waitForFunction(()=>document.documentElement.dir==='rtl');
++ await snap(page,'cart-filled-mobile-arabic');
++ await cart().locator('[data-act="cart-review"]').click();
++ await cart().locator('[data-act="cart-pay"]').waitFor();
++ assert((await cart().locator('.cart-grand').innerText()).includes('$18.00'));
++ await snap(page,'cart-review-mobile-arabic');console.log('UI mobile RTL review rendered');
++ // Complete the purchase server-side, then lose the response. UI must recover it.
++ let checkoutRequests=0;
++ await page.route('**/webapp/cart/checkout',async route=>{checkoutRequests++;await route.fetch();await route.abort('failed');});
++ await cart().locator('[data-act="cart-pay"]').click();
++ await cart().locator('.cart-receipt-hero.complete').waitFor({timeout:20000});
++ assert.equal(await cart().locator('.code').count(),5);
++ let state=await (await page.request.get(BASE+'/__cart_test__/state')).json();
++ assert.deepEqual({balance:state.balance,orders:state.orders},{balance:82,orders:5});
++ assert.equal(checkoutRequests,1);await snap(page,'cart-receipt-mobile-arabic');console.log('UI lost response recovered');
++ await page.reload({waitUntil:'domcontentloaded'});
++ await page.locator('[data-act="cart-open"]').first().click();
++ await cart().locator('.cart-empty').waitFor();
++ await cart().locator('[data-act="cart-last"]').click();
++ await cart().locator('.cart-receipt-hero.complete').waitFor();assert.equal(await cart().locator('.code').count(),5);
++ assert.equal(checkoutRequests,1);
++ await cart().locator('[data-act="sheet-close"]').click();
++ // A request lost before reaching the server can be safely cancelled by quote ID.
++ await page.unroute('**/webapp/cart/checkout');
++ await page.locator('[data-act="product"][data-v="101"]').click();
++ await page.locator('.psheet:not(.closing)').last().locator('[data-act="cart-add"]').click();
++ await page.locator('.psheet:not(.closing)').last().locator('[data-act="sheet-close"]').click();
++ await page.locator('[data-act="cart-open"]').first().click();await cart().locator('[data-act="cart-review"]').click();
++ await cart().locator('[data-act="cart-pay"]').waitFor();
++ await page.route('**/webapp/cart/checkout',route=>route.abort('failed'));
++ await cart().locator('[data-act="cart-pay"]').click();
++ await cart().locator('.cart-banner').waitFor();await cart().locator('[data-act="cart-edit"]').click();
++ await cart().locator('[data-act="cart-review"]').waitFor();
++ state=await (await page.request.get(BASE+'/__cart_test__/state')).json();assert.equal(state.balance,82);assert.equal(state.orders,5);
++ // Product invitation details are editable inside the cart.
++ await cart().locator('[data-act="cart-browse"]').click();
++ await page.locator('[data-act="product"][data-v="103"]').click();
++ const product=page.locator('.psheet:not(.closing)').last();
++ await product.locator('#pemail').fill('first@example.test');await product.locator('[data-act="cart-add"]').click();await product.locator('[data-act="sheet-close"]').click();
++ await page.locator('[data-act="cart-open"]').first().click();await cart().locator('[data-in="cart-email"]').fill('updated@example.test');
++ await cart().locator('[data-act="cart-review"]').click();await cart().locator('[data-act="cart-pay"]').waitFor();
++ assert((await cart().innerText()).includes('updated@example.test'));
++ assert.deepEqual(errors,[]);console.log('PASS real Chromium: desktop/mobile light/dark/RTL; quantities and bulk discount; lost-response recovery; reload receipt; safe cancellation; editable invitation email; zero JS exceptions');
++ await context.close();
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

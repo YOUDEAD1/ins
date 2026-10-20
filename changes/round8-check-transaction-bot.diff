@@ -1,0 +1,232 @@
+--- bot.py (READY_7)	2026-10-19 14:05:13.902359497 +0000
++++ bot.py (READY_8)	2026-10-19 14:16:01.575741990 +0000
+@@ -31304,7 +31304,17 @@
+         for c in r.get('codes') or []:
+             if rx.search(str(c)):
+                 add_sale(acc(str(c), f"ext_{r.get('ext_product_id', '')}", _wa_plain(r.get('product_name'), 120) or None), dict(sale))
+-    # 5) المستخدمين
++    # 5) الإيداعات: هاش / Order ID / رقم العملية (نفس قاعدة بيانات «🔍 فحص معاملة»)
++    deposits = []
++    try:
++        for t in _ds_find(db.used_transactions, {'$or': [{'transaction_id': rx}, {'remark': rx}]}, limit=12, sort=('_id', -1)):
++            ts = int(t.get('created_at') or 0) or _doc_ts(t)
++            deposits.append({'tx': str(t.get('transaction_id') or ''), 'amount': round(_wa_fnum(t.get('amount')), 2),
++                             'method': _wa_plain(t.get('method'), 60), 'ts': ts,
++                             'user': _ds_user(t.get('user_id'), ucache) if t.get('user_id') is not None else None})
++    except Exception:
++        pass
++    # 6) المستخدمين
+     users = []
+     try:
+         flt = {'$or': [{'username': rx}, {'name': rx}]}
+@@ -31348,8 +31358,21 @@
+         a['exact'] = a['line'].strip().lower() == low
+         out.append(a)
+     out.sort(key=lambda a: (not a['exact'], -(a['last'] or 0)))
+-    return {'q': s_, 'accounts': out[:limit], 'orders': others[:20], 'users': users,
+-            'more': len(out) > limit}
++    return {'q': s_, 'accounts': out[:limit], 'orders': others[:20], 'users': users, 'deposits': deposits,
++            'txlike': _looks_like_tx(s_), 'more': len(out) > limit}
++
++
++def _looks_like_tx(q):
++    """شكل هاش بلوكشين / Order ID بينانس — نعرض زر «فحص مباشر» مثل زر 🔍 فحص معاملة في البوت."""
++    q = str(q or '').strip()
++    if '@' in q or ' ' in q or len(q) < 12:
++        return False
++    h = q[2:] if q.lower().startswith('0x') else q
++    if re.fullmatch(r'[0-9a-fA-F]{40,80}', h):
++        return True
++    if re.fullmatch(r'\d{12,24}', q):
++        return True
++    return bool(re.fullmatch(r'[A-Za-z0-9_\-+/=]{20,100}', q)) and any(c.isdigit() for c in q)
+ 
+ 
+ def admin_deep_search_text(r):
+@@ -31377,6 +31400,11 @@
+         lines.append("")
+     if len(r['accounts']) > 8 or r.get('more'):
+         lines.append("… فيه نتائج أكثر — افتح «🔎 البحث» في تبويب الإدارة بالموقع عشان تشوفها كلها.")
++    for t in (r.get('deposits') or [])[:5]:
++        u = t.get('user') or {}
++        when = datetime.datetime.utcfromtimestamp(t['ts']).strftime('%Y-%m-%d %H:%M') if t.get('ts') else '—'
++        lines.append(f"💳 <b>إيداع مسجّل</b> ${t['amount']:.2f} · {html.escape(t['method'] or '')} · {when}")
++        lines.append(f"   🆔 <code>{html.escape(t['tx'][:90])}</code>" + (f" · 👤 <code>{u['id']}</code>" if u else ''))
+     for o in r['orders'][:5]:
+         u = o.get('user') or {}
+         lines.append(f"✉️ {html.escape(str(o.get('email') or o.get('buyer_info') or ''))} → 🧾 <code>{html.escape(o['order_id'])}</code>"
+@@ -31474,7 +31502,7 @@
+             return _order(c)
+     uid = admin_find_user(q)
+     r = admin_deep_search(q)
+-    hits = bool(r and (r['accounts'] or r['orders']))
++    hits = bool(r and (r['accounts'] or r['orders'] or r.get('deposits')))
+     if uid and not hits:
+         show_user_admin_profile(chat_id, uid)
+         return True
+@@ -31729,7 +31757,7 @@
+             return 200, {'ok': True, 'kind': 'order', 'order': c}
+     target = admin_find_user(q)
+     deep = admin_deep_search(q)
+-    hits = bool(deep and (deep['accounts'] or deep['orders']))
++    hits = bool(deep and (deep['accounts'] or deep['orders'] or deep['deposits']))
+     if target and not hits:
+         return 200, {'ok': True, 'kind': 'user', 'user': admin_user_brief(target)}
+     if hits or (deep and deep['users']):
+@@ -31737,6 +31765,8 @@
+     c = admin_find_order(q)
+     if c:
+         return 200, {'ok': True, 'kind': 'order', 'order': c}
++    if deep and deep.get('txlike'):
++        return 200, dict(deep, ok=True, kind='deep')
+     # بحث جزئي بالاسم / اليوزر
+     users = []
+     try:
+@@ -32228,6 +32258,9 @@
+     def __init__(self, uid, identity):
+         self.uid = uid
+         self.lock = threading.Lock()
++        self.mx = threading.RLock()      # يحمي الرسائل لما الأمر شغّال بالخلفية
++        self.job = None
++        self.job_t = 0
+         self.msgs = _VcOD()
+         self.next_id = 700000000 + secrets.randbelow(90000000)
+         self.step = None
+@@ -32271,7 +32304,15 @@
+             if m.get('doc'):
+                 self.docs.pop(m['doc']['id'], None)
+ 
++    def busy(self):
++        j = self.job
++        return bool(j is not None and j.is_alive() and time.time() - self.job_t < _VC_JOB_MAX)
++
+     def add(self, text, parse_mode=None, markup=None, doc=None, me=False):
++        with self.mx:
++            return self._add(text, parse_mode, markup, doc, me)
++
++    def _add(self, text, parse_mode=None, markup=None, doc=None, me=False):
+         mid = self._nid()
+         rows, allowed = _vc_buttons(markup)
+         self.msgs[mid] = {'id': mid, 'from': 'me' if me else 'bot', 'html': _vc_html(text, parse_mode if not me else None),
+@@ -32281,6 +32322,10 @@
+         return self.msg_obj(mid)
+ 
+     def edit(self, mid, text=None, parse_mode=None, markup=None, keep_text=False, keep_markup=False):
++        with self.mx:
++            return self._edit(mid, text, parse_mode, markup, keep_text, keep_markup)
++
++    def _edit(self, mid, text=None, parse_mode=None, markup=None, keep_text=False, keep_markup=False):
+         try:
+             mid = int(mid)
+         except Exception:
+@@ -32289,7 +32334,7 @@
+         if not m:
+             if keep_text:
+                 return True
+-            return self.add(text, parse_mode, markup)
++            return self._add(text, parse_mode, markup)
+         if not keep_text:
+             m['html'] = _vc_html(text, parse_mode)
+             m['raw']['text'] = _vc_plain(text) or ' '
+@@ -32307,6 +32352,10 @@
+         return self.msg_obj(mid)
+ 
+     def delete(self, mid):
++        with self.mx:
++            return self._delete(mid)
++
++    def _delete(self, mid):
+         try:
+             m = self.msgs.pop(int(mid), None)
+             if m and m.get('doc'):
+@@ -32316,9 +32365,10 @@
+         return True
+ 
+     def view(self):
+-        toasts, self.toasts = self.toasts[-5:], []
+-        return {'ok': True, 'msgs': [{k: m[k] for k in ('id', 'from', 'html', 'buttons', 'doc', 'ts')} for m in self.msgs.values()],
+-                'step': self.step is not None, 'toasts': toasts}
++        with self.mx:
++            toasts, self.toasts = self.toasts[-5:], []
++            return {'ok': True, 'msgs': [{k: m[k] for k in ('id', 'from', 'html', 'buttons', 'doc', 'ts')} for m in list(self.msgs.values())],
++                    'step': self.step is not None, 'toasts': toasts, 'busy': self.busy()}
+ 
+ 
+ def _vc_session(identity, reset=False):
+@@ -32487,6 +32537,26 @@
+                                                         middlewares=None, update_type='callback_query'))
+ 
+ 
++_VC_WAIT = 8.0        # نستنى الأمر كذا ثانية؛ لو طوّل (فحص بينانس/TON…) يكمل بالخلفية والموقع يتابع
++_VC_JOB_MAX = 300
++
++
++def _vc_job(s, fn):
++    _LOG_SRC.v = 'webapp'
++    try:
++        _vc_run(s, fn)
++    finally:
++        _LOG_SRC.v = None
++
++
++def _vc_start(s, fn, wait=None):
++    """يشغّل أمر البوت بخيط منفصل: الأوامر السريعة ترجع نتيجتها فوراً، والطويلة تكمل والموقع يسحب الرسائل أول بأول."""
++    t = threading.Thread(target=_vc_job, args=(s, fn), daemon=True, name='webapp-vc')
++    s.job, s.job_t = t, time.time()
++    t.start()
++    t.join(_VC_WAIT if wait is None else wait)
++
++
+ def _wa_admin_vc(identity, body):
+     uid, err = _wa_admin(identity)
+     if err:
+@@ -32496,6 +32566,8 @@
+     with s.lock:
+         if action in ('state', 'reset'):
+             return 200, s.view()
++        if action in ('open', 'press', 'send') and s.busy():
++            return 409, dict(s.view(), error='busy')
+         if action == 'open':
+             cb = str(body.get('cb') or 'admin_panel_main')
+             if _wa_bot_only(cb):
+@@ -32504,10 +32576,13 @@
+                 return 400, {'error': 'bad_section'}
+             ph = s.add('⏳', 'HTML')
+             s.step = None
+-            _vc_press(s, ph.message_id, cb)
+-            m = s.msgs.get(ph.message_id)
+-            if m and m['html'] == '⏳':
+-                s.delete(ph.message_id)
++
++            def _open(ph_id=ph.message_id):
++                _vc_press(s, ph_id, cb)
++                m = s.msgs.get(ph_id)
++                if m and m['html'] == '⏳':
++                    s.delete(ph_id)
++            _vc_start(s, _open)
+             _adm_audit(uid, 'panel_open', cb)
+             return 200, s.view()
+         if action == 'press':
+@@ -32521,7 +32596,7 @@
+             m = s.msgs.get(mid)
+             if not m or data not in m.get('allowed', set()):
+                 return 409, dict(s.view(), error='stale_button')
+-            _vc_press(s, mid, data)
++            _vc_start(s, lambda: _vc_press(s, mid, data))
+             return 200, s.view()
+         if action == 'send':
+             text = str(body.get('text') or '').strip()[:4000]
+@@ -32532,10 +32607,10 @@
+             step, s.step = s.step, None
+             if step:
+                 fn, a, k = step
+-                _vc_run(s, lambda: fn(msg, *a, **k))
++                _vc_start(s, lambda: fn(msg, *a, **k))
+             else:
+-                _vc_run(s, lambda: bot._run_middlewares_and_handler(msg, handlers=bot.message_handlers,
+-                                                                    middlewares=None, update_type='message'))
++                _vc_start(s, lambda: bot._run_middlewares_and_handler(msg, handlers=bot.message_handlers,
++                                                                      middlewares=None, update_type='message'))
+             return 200, s.view()
+         if action == 'cancel':
+             s.step = None

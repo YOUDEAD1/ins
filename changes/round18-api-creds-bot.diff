@@ -1,0 +1,102 @@
+--- a/bot.py	2026-10-19 17:50:38.921983394 +0000
++++ b/bot.py	2026-10-19 17:50:38.928930419 +0000
+@@ -28069,14 +28069,11 @@
+         txt += f"📦 Products: <b>{active_count}/{total_prods}</b>\n"
+         txt += f"📊 Orders: <b>{total_orders}</b> | Spent: <b>${total_spent:.2f}</b>\n"
+         txt += f"━━━━━━━━━━━━━━━━━━━\n"
+-        if conn_code:
+-            txt += f"🔗 <code>{conn_code}</code>"
+-            txt += (f"\n\n🌐 API Base URL:\n<code>{html.escape(_get_server_url() + '/' + gw)}</code>"
+-                    f"\n🔑 API Key:\n<code>{html.escape(existing['api_key'])}</code>")
+-        else:
+-            txt += f"🔑 <code>{existing['api_key']}</code>"
++        txt += ("🔐 Connection details are hidden — tap «🔑 Show connection details»." if l == 'en'
++                else "🔐 بيانات الربط مخفية — اضغط «🔑 عرض بيانات الربط».")
+ 
+         markup = InlineKeyboardMarkup(row_width=1)
++        markup.add(InlineKeyboardButton("🔑 Show connection details" if l == 'en' else "🔑 عرض بيانات الربط", callback_data="api_creds"))
+         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
+         markup.add(InlineKeyboardButton("🤖 برومبت جاهز للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "🤖 AI Build Prompt", callback_data="api_ai_prompt"))
+         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
+@@ -36151,6 +36148,81 @@
+     _wa_send(handler, 200, content, 'text/plain; charset=utf-8', 'no-store', extra={'Content-Disposition': disp})
+ 
+ 
++
++# ============================================================
++# 🔑 بيانات ربط الـ API تطلع بس لما يضغط الزر (وتنمسح بعد 5 دقايق)
++# ============================================================
++_CREDS_TTL = 300
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'api_creds')
++def api_creds_cb(call):
++    uid = call.from_user.id
++    if is_user_banned(uid):
++        return
++    l = get_lang(uid)
++    k = db.api_keys.find_one({'user_id': uid, 'is_active': True})
++    if not k:
++        try:
++            bot.answer_callback_query(call.id, "No active API key." if l == 'en' else "ما عندك مفتاح API نشط.", show_alert=True)
++        except Exception:
++            pass
++        return
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    base = _get_server_url()
++    gw = _get_api_gateway()
++    conn = _generate_connection_code(k['api_key'])
++    full = f"{base}/{gw}" if base else None
++    if l == 'en':
++        txt = ["🔑 <b>Your API connection details</b>", "<i>Don't share them — anyone with the key can buy with your balance.</i>", ""]
++        if conn:
++            txt += ["🔗 Connection code (all in one):", f"<code>{conn}</code>", ""]
++        if full:
++            txt += ["🌐 Base URL:", f"<code>{html.escape(full)}</code>", ""]
++        txt += ["🔑 API key:", f"<code>{html.escape(k['api_key'])}</code>", "", f"<i>⏱ This message deletes itself in {_CREDS_TTL // 60} minutes.</i>"]
++    else:
++        txt = ["🔑 <b>بيانات ربط الـ API</b>", "<i>لا تعطيها أحد — اللي عنده المفتاح يقدر يشتري من رصيدك.</i>", ""]
++        if conn:
++            txt += ["🔗 كود الاتصال (كل شي فيه):", f"<code>{conn}</code>", ""]
++        if full:
++            txt += ["🌐 الرابط الأساسي:", f"<code>{html.escape(full)}</code>", ""]
++        txt += ["🔑 مفتاح API:", f"<code>{html.escape(k['api_key'])}</code>", "", f"<i>⏱ الرسالة تنمسح لحالها بعد {_CREDS_TTL // 60} دقايق.</i>"]
++    mk = InlineKeyboardMarkup(row_width=1)
++    if conn:
++        mk.add(_copy_button("📋 Copy connection code" if l == 'en' else "📋 نسخ كود الاتصال", conn))
++    if full:
++        mk.add(_copy_button("📋 Copy base URL" if l == 'en' else "📋 نسخ الرابط الأساسي", full))
++    mk.add(_copy_button("📋 Copy API key" if l == 'en' else "📋 نسخ المفتاح", k['api_key']))
++    mk.add(InlineKeyboardButton("🙈 Hide" if l == 'en' else "🙈 إخفاء", callback_data="api_creds_hide"))
++    m = bot.send_message(call.message.chat.id, '\n'.join(txt), parse_mode='HTML', reply_markup=mk, disable_web_page_preview=True)
++    try:
++        mid = getattr(m, 'message_id', None)
++        if mid and not _vc_active(call.message.chat.id):
++            t = threading.Timer(_CREDS_TTL, lambda: bot.delete_message(call.message.chat.id, mid))
++            t.daemon = True
++            t.start()
++    except Exception:
++        pass
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'api_creds_hide')
++def api_creds_hide_cb(call):
++    try:
++        bot.answer_callback_query(call.id)
++    except Exception:
++        pass
++    try:
++        bot.delete_message(call.message.chat.id, call.message.message_id)
++    except Exception:
++        try:
++            bot.edit_message_text("🙈", call.message.chat.id, call.message.message_id)
++        except Exception:
++            pass
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================

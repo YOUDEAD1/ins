@@ -1,0 +1,142 @@
+{
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25)",
+  "verified_at": "2026-10-19T22:01:36.332429+00:00",
+  "python": "3.12.14",
+  "tests": {
+    "total": 415,
+    "passed": 415,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_integration": 183,
+      "verification.test_support": 31,
+      "verification.test_reliability": 35,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_products_menu": 27,
+      "verification.test_cart": 35,
+      "verification.test_error_monitor": 16,
+      "verification.test_channel_broadcast": 59
+    }
+  },
+  "python_compile": "passed",
+  "undefined_names": 0,
+  "javascript_syntax": "passed",
+  "images_validated": 34,
+  "frontend_dom_http_integration": "passed",
+  "frontend_languages": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "frontend_javascript_errors": 0,
+  "preserved_original_definitions": 1052,
+  "old_functions_classes_and_methods_missing": [],
+  "external_live_services_tested": false,
+  "real_browser_render_tested": true,
+  "real_phones_tested": false,
+  "user_windows_machine_tested": false,
+  "test_isolation": "Fake credentials; MongoDB in memory; Telegram/payment/supplier/ChatGPT mocked. Browser server permanently blocks external HTTP integrations and outbound non-local sockets.",
+  "new_recovery_data": [
+    "stock_rollback_jobs collection",
+    "cgpt_invites_data.renewal_receipts",
+    "temporary user stock debit markers"
+  ],
+  "notes": "Local verification is not a guarantee of all external services or all physical devices.",
+  "deposit_copy_controls": {
+    "binance_amount_and_pay_id_first_row": true,
+    "shared_custom_copy_emoji": true,
+    "crypto_amount_copy_buttons": 1,
+    "crypto_amount_uses_native_currency": true,
+    "usdt_unique_precision": 6,
+    "bot_pending_quote_shared_with_site": true,
+    "telegram_note_id_copy_preserved": true
+  },
+  "products_menu": {
+    "search_above_available": true,
+    "full_width_rows": true,
+    "languages": [
+      "ar",
+      "en"
+    ],
+    "neutral_default_style": true,
+    "custom_styles_preserved": true,
+    "public_linked_table": true,
+    "quantity_discounts": true,
+    "hidden_products_excluded": true,
+    "text_fallback_preserves_links": true,
+    "old_available_browser_preserved": true,
+    "authenticated_admin_console_cms": true,
+    "premium_emoji_and_messages_editable": true,
+    "console_cms_roundtrip_tested": true
+  },
+  "preserved_immediately_previous_definitions": 1101,
+  "frontend_cart_chromium_integration": "passed",
+  "frontend_viewports": [
+    "1360x960",
+    "390x844"
+  ],
+  "frontend_themes": [
+    "light",
+    "dark"
+  ],
+  "frontend_rtl_tested": true,
+  "frontend_browser_lost_response_recovery": "passed",
+  "frontend_browser_safe_quote_cancel": "passed",
+  "frontend_browser_email_edit": "passed",
+  "error_monitor": {
+    "private_admin_records": true,
+    "redact_before_storage": true,
+    "repeat_count": true,
+    "important_error_alerts": true,
+    "alert_cooldown_seconds": 600,
+    "retention_days": 30,
+    "authenticated_browser_reporting": true,
+    "nonblocking_bounded_queue": true,
+    "db_failure_retry": true
+  },
+  "website_cart": {
+    "website_only": true,
+    "max_lines": 20,
+    "server_price_quote": true,
+    "quantity_and_vip_discounts": true,
+    "auth_and_visibility_enforced": true,
+    "stable_checkout_id": true,
+    "per_item_durable_result": true,
+    "repeat_confirmation_safe": true,
+    "lost_receipt_recovery": true,
+    "partial_fulfillment_explicit": true,
+    "unknown_outcomes_not_retried": true,
+    "old_direct_buy_preserved": true
+  },
+  "new_collections_round24": [
+    "system_errors",
+    "cart_checkouts"
+  ],
+  "current_definitions": 1123,
+  "frontend_channel_deep_links_chromium": "passed",
+  "frontend_channel_deep_links_cases": 4,
+  "channel_publication_live_tested": false,
+  "channel_publishing": {
+    "username_only": true,
+    "separate_from_forced_subscription": true,
+    "bot_and_admin_publish_rights_required": true,
+    "native_content_copy": true,
+    "private_preview_before_confirmation": true,
+    "frozen_reviewed_message": true,
+    "stale_confirmation_rejected": true,
+    "single_atomic_publish_claim": true,
+    "uncertain_delivery_not_retried": true,
+    "persisted_receipts": true,
+    "snapshot_table_english": true,
+    "product_names_link_to_website": true,
+    "customizable_green_buttons": true,
+    "dual_destinations": true,
+    "private_user_language": true,
+    "channel_language_selection": true,
+    "cms_in_bot_and_site_console": true
+  },
+  "new_collections_round25": [
+    "channel_broadcasts"
+  ]
+}

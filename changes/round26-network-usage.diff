@@ -1,0 +1,1790 @@
+--- a/bot.py
++++ b/bot.py
+@@ -581,14 +581,32 @@
+         except Exception as e:
+             logger.warning(f"idempotency save failed: {e}")
+     try:
++        import gzip
++        raw = getattr(h, '_net_json_payload', None)
++        if hasattr(h, '_net_json_payload'):
++            del h._net_json_payload
++        if raw is None:
++            raw = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
++        compressed = code != 304 and len(raw) > 1024 and _net_accepts_gzip(getattr(h, 'headers', {}))
++        payload = gzip.compress(raw, compresslevel=5, mtime=0) if compressed else raw
+         h.send_response(code)
+         h.send_header('Content-Type', 'application/json; charset=utf-8')
+         h.send_header('X-Bot-API-Revision', 'ext-purchase-v3')
+         h.send_header('Access-Control-Allow-Origin', '*')
+-        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data')
++        h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data, If-None-Match')
+         h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
++        h.send_header('Access-Control-Expose-Headers', 'ETag')
++        h.send_header('Cache-Control', 'private, no-cache' if getattr(h, '_net_etag', None) else 'no-store')
++        h.send_header('Vary', 'Accept-Encoding')
++        if getattr(h, '_net_etag', None):
++            h.send_header('ETag', h._net_etag)
++        if code != 304:
++            h.send_header('Content-Length', str(len(payload)))
++            if compressed:
++                h.send_header('Content-Encoding', 'gzip')
+         h.end_headers()
+-        h.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
++        if code != 304:
++            h.wfile.write(payload)
+     except (BrokenPipeError, ConnectionResetError):
+         # العميل قطع الاتصال قبل اكتمال الإرسال — غير ضار، نتجاهله بهدوء
+         pass
+@@ -2070,7 +2088,7 @@
+ def _admin_notification_worker():
+     """Deliver durable admin notices promptly and drain bursts without minute-long polling gaps."""
+     while True:
+-        _ADMIN_NOTICE_WAKE.wait(timeout=3)
++        _ADMIN_NOTICE_WAKE.wait(timeout=30)
+         _ADMIN_NOTICE_WAKE.clear()
+         try:
+             # Continue in bounded chunks while work is immediately available.
+@@ -2140,6 +2158,7 @@
+         'stock_checked_at': int(time.time())}})
+     global _PRODUCTS_CACHE
+     _PRODUCTS_CACHE = None
++    _invalidate_products_cache()
+     if not fields['available'] or (not current['unlimited'] and current['stock'] < qty):
+         logger.info('Reseller external stock insufficient: product=%s quantity=%s available=%s',
+                     ep['_id'], qty, current['stock'])
+@@ -2290,6 +2309,7 @@
+                     {'$inc': {'stock': -qty}})
+             global _PRODUCTS_CACHE
+             _PRODUCTS_CACHE = None
++            _invalidate_products_cache()
+     except Exception:
+         logger.warning('External reseller receipt saved; auxiliary update failed: %s', reference)
+     try:
+@@ -2373,191 +2393,7 @@
+                 'user_id': uid, 'endpoints': ['/products', '/balance', '/orders', '/purchase']})
+ 
+         if route == '/products':
+-            # ⚡ cache 30 ثانية — لو عدة عملاء يطلبون بسرعة، نبني الرد مرة واحدة
+-            #    (يقلّل استعلامات MongoDB الصادرة بشدة — سبب رئيسي لاستهلاك النطاق)
+-            _now = time.time()
+-            global _PRODUCTS_CACHE
+-            try:
+-                _pc = _PRODUCTS_CACHE
+-            except NameError:
+-                _pc = None
+-            if _pc and _pc.get('exp', 0) > _now and _pc.get('uid') == uid:
+-                return _json_resp(self, 200, {'success': True, 'products': _pc['data']})
+-            # is_hidden=True من الأدمن = محجوب من الجميع بلا استثناء
+-            prods = list(db.products.find({'is_hidden': {'$ne': True}}))
+-            # api_hidden = المطور أخفى المنتج من متجره هو فقط
+-            hidden_pids = set()
+-            for h in db.api_hidden.find({'api_user_id': uid}):
+-                hidden_pids.add(h['product_id'])
+-            # جلب أسعار المطوّر المخصصة
+-            custom_prices = {}
+-            for cp in db.api_pricing.find({'api_user_id': uid}):
+-                custom_prices[cp['product_id']] = cp
+-            result = []
+-            for pr in prods:
+-                pid = str(pr.get('id', str(pr.get('_id', ''))))
+-                if pid in hidden_pids:
+-                    continue
+-                manual = pr.get('is_manual', False)
+-                base_price = float(pr.get('price', 0))
+-                cp = custom_prices.get(pid, {})
+-                # 🌟 دعم Premium Emoji
+-                custom_emoji_id = pr.get('custom_emoji_id')
+-                p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
+-                p_name_en = cp.get('name_en') or pr.get('name_en', '')
+-                p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
+-                p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
+-                # your_price: من sell_price المقفول، أو null لو لم يُضبط بعد
+-                your_price = cp.get('sell_price')
+-                item = {
+-                    'id': pid,
+-                    'name_ar': p_name_ar,
+-                    'name_en': p_name_en,
+-                    'desc_ar': p_desc_ar,
+-                    'desc_en': p_desc_en,
+-                    'store_price': base_price,         # سعر المتجر الحالي (يتغير)
+-                    'your_price': your_price,          # سعرك المقفول (لا يتغير بتغيير المتجر)
+-                    'price_locked': your_price is not None,
+-                    # 🔔 تنبيه: سعر المتجر تغيّر بعد ما قفل المطوّر سعره
+-                    # (بدونه يبيع بسعر قديم وقد يبيع بخسارة لأن الخصم يتم بسعر المتجر الحالي)
+-                    'price_alert': (
+-                        {
+-                            'type': 'below_cost' if your_price < base_price else 'store_price_changed',
+-                            'message': (
+-                                'Your selling price is now BELOW the store price — you would sell at a loss. Update it.'
+-                                if your_price < base_price else
+-                                'Store price changed since you locked your price. Review your price.'
+-                            ),
+-                            'old_store_price': float(cp.get('base_price_snapshot')),
+-                            'new_store_price': base_price,
+-                            'your_price': your_price,
+-                        }
+-                        if (your_price is not None
+-                            and cp.get('base_price_snapshot') is not None
+-                            and float(cp.get('base_price_snapshot')) != base_price)
+-                        else None
+-                    ),
+-                    'stock': 'unlimited' if manual else get_product_stock_count(pid),
+-                    'is_manual': manual,
+-                    'discount_tiers': pr.get('discount_tiers', []),
+-                    # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
+-                    'custom_emoji_id': custom_emoji_id,
+-                    'has_premium_emoji': bool(custom_emoji_id),
+-                    'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
+-                    'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
+-                }
+-                # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
+-                emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
+-                item.update(emoji_fields)
+-                # دليل الاستخدام الكامل للمطورين
+-                item['emoji_guide'] = {
+-                    'parse_mode': 'HTML',
+-                    'name_ar_html': item.get('name_ar_html', p_name_ar),
+-                    'name_en_html': item.get('name_en_html', p_name_en),
+-                    'desc_ar_html': item.get('desc_ar_html', p_desc_ar),
+-                    'desc_en_html': item.get('desc_en_html', p_desc_en),
+-                    'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
+-                }
+-                result.append(item)
+-
+-            # 🔌 نضيف منتجات متاجر API الخارجية (الظاهرة فقط) — تظهر للعملاء
+-            #    الذين أخذوا API من بوتك، تماماً مثل منتجاتك العادية.
+-            try:
+-                for ep in db.ext_products.find({'hidden': {'$ne': True}}):
+-                    epid = f"ext_{ep['_id']}"
+-                    if epid in hidden_pids:
+-                        continue
+-                    ep_name = str(ep.get('name', ''))
+-                    ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
+-                    ep_emoji_id = ep.get('emoji_id')
+-                    ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
+-                    cp = custom_prices.get(epid, {})
+-                    your_price = cp.get('sell_price')
+-                    ext_item = {
+-                        'id': epid,
+-                        'name_ar': ep_name, 'name_en': ep_name,
+-                        'desc_ar': _ext_description_for_lang(ep, 'ar'), 'desc_en': _ext_description_for_lang(ep, 'en'),
+-                        'store_price': ep_price,
+-                        'your_price': your_price,
+-                        'price_locked': your_price is not None,
+-                        'price_alert': None,
+-                        'stock': ep.get('stock', 0),
+-                        'is_manual': False,
+-                        'discount_tiers': [],
+-                        'custom_emoji_id': ep_emoji_id,
+-                        'has_premium_emoji': bool(ep_emoji_id),
+-                        'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+-                        'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+-                        'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
+-                        'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
+-                        'source': 'external_api',
+-                    }
+-                    ext_item['emoji_guide'] = {
+-                        'parse_mode': 'HTML',
+-                        'name_ar_html': ext_item['name_ar_html'],
+-                        'name_en_html': ext_item['name_en_html'],
+-                        'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
+-                        'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
+-                        'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
+-                    }
+-                    result.append(ext_item)
+-            except Exception as _ext_e:
+-                logger.debug(f"ext products in API err: {_ext_e}")
+-
+-            # 🤖 منتجات ChatGPT Business — كل مدة تظهر كمنتج منفصل بسعرها
+-            try:
+-                for cg in db.cgpt_products.find():
+-                    if not _cgpt_product_visible(cg, uid):
+-                        continue
+-                    cg_id = str(cg['_id'])
+-                    cg_name = cg.get('name', 'ChatGPT Business')
+-                    cg_desc = cg.get('desc', '')
+-                    cg_emoji = cg.get('custom_emoji_id')
+-                    # نحسب المقاعd المتاحة (المخزون)
+-                    try:
+-                        cg_seats = _cgpt_get_seats_cached()
+-                    except Exception:
+-                        cg_seats = None
+-                    for dur in cg.get('durations', []):
+-                        dur_id = dur.get('dur_id', '')
+-                        dur_price = float(dur.get('price', 0))
+-                        dur_label = dur.get('label', '')
+-                        dur_mins = int(dur.get('minutes', 0))
+-                        dur_days = round(dur_mins / 1440, 1) if dur_mins else 0
+-                        full_name = f"{cg_name} — {dur_label}" if dur_label else cg_name
+-                        cgid = f"cgpt_{cg_id}_{dur_id}"
+-                        if not _cgpt_product_visible(cg, uid, cgid):
+-                            continue
+-                        cg_item = {
+-                            'id': cgid,
+-                            'name_ar': full_name, 'name_en': full_name,
+-                            'desc_ar': cg_desc, 'desc_en': cg_desc,
+-                            'store_price': dur_price,
+-                            'your_price': None,
+-                            'price_locked': False,
+-                            'price_alert': None,
+-                            'stock': cg_seats if cg_seats is not None else 9999,
+-                            'is_manual': False,
+-                            'duration_label': dur_label,
+-                            'duration_minutes': dur_mins,
+-                            'duration_days': dur_days,
+-                            'custom_emoji_id': cg_emoji,
+-                            'has_premium_emoji': bool(cg_emoji),
+-                            'name_ar_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+-                            'name_en_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+-                            'desc_ar_html': cg_desc, 'desc_en_html': cg_desc,
+-                            'source': 'chatgpt_business',
+-                            'product_type': 'cgpt_main',
+-                        }
+-                        result.append(cg_item)
+-            except Exception as _cg_e:
+-                logger.debug(f"cgpt products in API err: {_cg_e}")
+-
+-            try:
+-                _PRODUCTS_CACHE = {'data': result, 'exp': time.time() + 30, 'uid': uid}
+-            except Exception:
+-                pass
+-            return _json_resp(self, 200, {'success': True, 'products': result})
++            return _net_api_products_response(self, uid)
+ 
+         if route.startswith('/product/'):
+             pid = route.split('/product/')[1]
+@@ -3650,9 +3486,231 @@
+     wrapper.__name__ = func.__name__
+     return wrapper
+ 
++# 📡 Network accounting contains sizes and counters only; never URLs, headers or payloads.
++from pymongo import monitoring as _net_mongo_monitoring
++from bson import BSON as _net_BSON
++
++
++class _NetworkMeter:
++    def __init__(self):
++        self.lock = threading.RLock()
++        self.started = time.monotonic()
++        self.rows = {}
++
++    def record(self, group, label, sent=0, received=0, count=1, errors=0):
++        try:
++            key = (str(group)[:24], str(label)[:90])
++            with self.lock:
++                if key not in self.rows and len(self.rows) >= 96:
++                    key = (str(group)[:24], 'other')
++                row = self.rows.setdefault(key, {'requests': 0, 'sent': 0, 'received': 0, 'errors': 0})
++                for field, value in [('requests', count), ('sent', sent), ('received', received), ('errors', errors)]:
++                    row[field] += max(0, int(value or 0))
++        except Exception:
++            pass
++
++    def snapshot(self):
++        with self.lock:
++            return {'seconds': max(0, time.monotonic() - self.started), 'rows': [
++                dict(group=key[0], label=key[1], **row) for key, row in self.rows.items()]}
++
++
++_NET_METER = _NetworkMeter()
++
++
++class _NetworkMongoListener(_net_mongo_monitoring.CommandListener):
++    def started(self, event):
++        try:
++            _NET_METER.record('mongo', event.command_name, sent=len(_net_BSON.encode(event.command)))
++        except Exception:
++            pass
++
++    def succeeded(self, event):
++        try:
++            _NET_METER.record('mongo', event.command_name, received=len(_net_BSON.encode(event.reply)), count=0)
++        except Exception:
++            pass
++
++    def failed(self, event):
++        _NET_METER.record('mongo', event.command_name, count=0, errors=1)
++
++
++_NET_MONGO_LISTENER = _NetworkMongoListener()
++
++
++def _net_host(url):
++    try:
++        host = (urllib.parse.urlsplit(str(url)).hostname or '').lower()
++        return host[:90] if re.fullmatch(r'[a-z0-9.-]+', host) else 'other'
++    except Exception:
++        return 'other'
++
++
++def _net_accepts_gzip(headers):
++    wildcard = False
++    for item in str(headers.get('Accept-Encoding', '')).split(','):
++        bits = [x.strip().lower() for x in item.split(';')]
++        quality = 1.0
++        for part in bits[1:]:
++            if part.startswith('q='):
++                try: quality = float(part[2:])
++                except ValueError: quality = 0.0
++        if bits[0] == 'gzip':
++            return quality > 0
++        if bits[0] == '*':
++            wildcard = quality > 0
++    return wildcard
++
++
++def _net_payload_size(value):
++    if isinstance(value, bytes):
++        return len(value)
++    if isinstance(value, str):
++        return len(value.encode('utf-8'))
++    return 0  # Do not consume streams/files to measure them.
++
++
++def _net_received_size(response):
++    try:
++        length = str(response.headers.get('Content-Length', ''))
++        if length.isdigit():
++            return int(length)
++        return _net_payload_size(getattr(response, '_content', None))
++    except Exception:
++        return 0
++
++
++def _net_request_size(request):
++    try:
++        body = _net_payload_size(request.body)
++        return body + sum(len(str(k).encode()) + len(str(v).encode()) + 4 for k, v in request.headers.items())
++    except Exception:
++        return 0
++
++
++def _net_install_clients():
++    adapter = requests.adapters.HTTPAdapter
++    if not getattr(adapter.send, '_lara_network_meter', False):
++        original = adapter.send
++        @functools.wraps(original)
++        def measured_send(self, request, *args, **kwargs):
++            response, error = None, 0
++            try:
++                response = original(self, request, *args, **kwargs)
++                return response
++            except Exception:
++                error = 1
++                raise
++            finally:
++                try:
++                    _NET_METER.record('http_client', _net_host(request.url), sent=_net_request_size(request),
++                        received=_net_received_size(response) if response is not None else 0,
++                        errors=error or int(getattr(response, 'status_code', 0) >= 400))
++                except Exception:
++                    pass
++        measured_send._lara_network_meter = True
++        adapter.send = measured_send
++    if CFFI_AVAILABLE and not getattr(cffi_requests.Session.request, '_lara_network_meter', False):
++        old_curl = cffi_requests.Session.request
++        @functools.wraps(old_curl)
++        def measured_curl(self, method, url, *args, **kwargs):
++            response, error = None, 0
++            try:
++                response = old_curl(self, method, url, *args, **kwargs)
++                return response
++            except Exception:
++                error = 1
++                raise
++            finally:
++                try:
++                    request_size = _net_payload_size(kwargs.get('data'))
++                    if kwargs.get('json') is not None:
++                        try:
++                            request_size += len(json.dumps(kwargs['json']).encode())
++                        except Exception:
++                            pass
++                    headers = kwargs.get('headers') or {}
++                    request_size += sum(len(str(k)) + len(str(v)) + 4 for k, v in headers.items())
++                    received = _net_received_size(response) if response is not None else 0
++                    if not received and response is not None and not kwargs.get('stream'):
++                        received = _net_payload_size(getattr(response, 'content', None))
++                    _NET_METER.record('curl_client', _net_host(url), sent=request_size, received=received,
++                        errors=error or int(getattr(response, 'status_code', 0) >= 400))
++                except Exception:
++                    pass
++        measured_curl._lara_network_meter = True
++        cffi_requests.Session.request = measured_curl
++
++
++class _NetworkWriter:
++    def __init__(self, wrapped, handler):
++        self.wrapped, self.handler = wrapped, handler
++
++    def write(self, data):
++        result = self.wrapped.write(data)
++        self.handler._net_written += len(data) if result is None else int(result)
++        return result
++
++    def __getattr__(self, name):
++        return getattr(self.wrapped, name)
++
++
++def _net_server_route(path):
++    try:
++        parts = urllib.parse.urlsplit(path).path.strip('/').split('/')
++        if not parts[0]:
++            return '/'
++        if parts[0] == 'app':
++            return '/app/' + ('emoji' if len(parts) > 1 and parts[1] == 'emoji' else 'assets')
++        if parts[0] == 'webapp':
++            return '/webapp/' + (parts[1] if len(parts) > 1 and re.fullmatch('[a-z_-]{1,35}', parts[1]) else 'other')
++        if parts[0] == '__lara':
++            return '/health'
++        allowed = {'products', 'product', 'balance', 'orders', 'order', 'changes', 'purchase', 'health'}
++        return '/api/' + (parts[1] if len(parts) > 1 and parts[1] in allowed else 'other')
++    except Exception:
++        return '/other'
++
++
++def _net_install_server():
++    if getattr(APIHandler, '_network_meter_installed', False):
++        return
++    setup, send_response = APIHandler.setup, APIHandler.send_response
++    def network_setup(self):
++        setup(self)
++        self._net_written = 0
++        self.wfile = _NetworkWriter(self.wfile, self)
++    def network_response(self, code, *args, **kwargs):
++        self._net_status = code
++        return send_response(self, code, *args, **kwargs)
++    APIHandler.setup = network_setup
++    APIHandler.send_response = network_response
++    def wrap(original):
++        @functools.wraps(original)
++        def measured(self, *args, **kwargs):
++            before = getattr(self, '_net_written', 0)
++            self._net_status = 0
++            self._net_etag = None
++            if hasattr(self, '_net_json_payload'):
++                del self._net_json_payload
++            try:
++                return original(self, *args, **kwargs)
++            finally:
++                _NET_METER.record('http_server', _net_server_route(getattr(self, 'path', '')),
++                    sent=max(0, getattr(self, '_net_written', before) - before),
++                    errors=int(getattr(self, '_net_status', 0) >= 400))
++        return measured
++    for method in ('do_GET', 'do_POST', 'do_OPTIONS'):
++        if hasattr(APIHandler, method):
++            setattr(APIHandler, method, wrap(getattr(APIHandler, method)))
++    APIHandler._network_meter_installed = True
++
++_NET_PRODUCTS_EPOCH = 0
++_NET_CACHE_LOCK = threading.RLock()
++
+ logger.info("⏳ جاري الاتصال بقاعدة البيانات MongoDB...")
+ try:
+-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
++    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, compressors='zlib', zlibCompressionLevel=3, event_listeners=[_NET_MONGO_LISTENER])
+     mongo_client.server_info()
+     db = mongo_client[MONGO_DB_NAME] 
+     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح!")
+@@ -5488,10 +5546,11 @@
+                 
+                 # None = خطأ اتصال — نحافظ على الحالة + نصفّر العداد
+                 if is_subbed is None:
+-                    db.referrals_v2.update_one(
+-                        {'invited_id': inv_uid},
+-                        {'$set': {'left_checks': 0}}
+-                    )
++                    if r.get('left_checks', 0) != 0:
++                        db.referrals_v2.update_one(
++                            {'invited_id': inv_uid},
++                            {'$set': {'left_checks': 0}}
++                        )
+                     time.sleep(DELAY_BETWEEN_CHECKS)
+                     continue
+                 
+@@ -5503,10 +5562,11 @@
+                         elif r.get('dv') is None:
+                             _ref_dv_prompt(int(inv_uid))      # 🛡 نرسل له زر التحقق مرة وحدة
+                     # نصفّر عداد المغادرة
+-                    db.referrals_v2.update_one(
+-                        {'invited_id': inv_uid},
+-                        {'$set': {'left_checks': 0}}
+-                    )
++                    if r.get('left_checks', 0) != 0:
++                        db.referrals_v2.update_one(
++                            {'invited_id': inv_uid},
++                            {'$set': {'left_checks': 0}}
++                        )
+                 else:
+                     # مو مشترك — نزيد العداد
+                     if current_status == 'active':
+@@ -7318,6 +7378,10 @@
+ 
+ def _invalidate_products_cache():
+     """يمسح cache المنتجات (بعد أي إضافة/تعديل/حذف)."""
++    global _PRODUCTS_CACHE, _NET_PRODUCTS_EPOCH
++    with _NET_CACHE_LOCK:
++        _PRODUCTS_CACHE = None
++        _NET_PRODUCTS_EPOCH += 1
+     _PRODUCTS_LIST_CACHE['data'] = None
+     _PRODUCTS_LIST_CACHE['exp'] = 0
+     _PRODUCTS_BY_ID_CACHE['map'] = {}
+@@ -15877,11 +15941,15 @@
+         return
+     for store in stores:
+         sid = str(store['_id'])
+-        data = _ext_api_get(store, '/products')
++        data = _net_sync_fetch(store)
+         prods = _ext_parse_products(data)
+         # لو الرد فشل (None) نتخطّى المتجر — لا نصفّر بالخطأ
+         if not _ext_valid_catalog(data):
+             continue
++        existing_by_id = {str(ep.get('ext_id')): ep for ep in
++            db.ext_products.find({'store_id': sid}, dict(_EXT_LIGHT_PROJ, raw=0))}
++        pending_ids = {str(ep.get('ext_id')) for ep in
++            db.ext_pending_new.find({'store_id': sid}, {'ext_id': 1})}
+         seen_ext_ids = set()
+         for p in prods:
+             _f = _ext_extract_fields(p)
+@@ -15889,7 +15957,7 @@
+             if not ext_id:
+                 continue
+             seen_ext_ids.add(ext_id)
+-            existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
++            existing = existing_by_id.get(str(ext_id))
+             # Skip the original write/read path when an available product is unchanged.
+             if (existing and _f['stock'] > 0 and _f['available'] is not False
+                     and existing.get('_supplier_available') is True
+@@ -15913,7 +15981,7 @@
+             if not existing:
+                 if new_stock <= 0:
+                     continue
+-                already = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
++                already = str(ext_id) in pending_ids
+                 if already:
+                     continue
+                 try:
+@@ -15921,6 +15989,7 @@
+                         'store_id': sid, 'ext_id': ext_id, 'name': p_name,
+                         'raw': p, 'created_at': int(time.time())
+                     })
++                    pending_ids.add(str(ext_id))
+                     _notify_admins_new_ext_product(store, sid, ext_id, p_name, new_stock)
+                 except Exception as _ne:
+                     logger.debug(f"notify new ext product err: {_ne}")
+@@ -15975,7 +16044,7 @@
+         # 🔴 المنتجات المضافة عندك لكن غير موجودة في رد المتجر = نفدت (out of stock)
+         #    حسب الدوكس: المنتجات النافدة تُحذف من /products. فنصفّر ستوكها.
+         try:
+-            for ep in db.ext_products.find({'store_id': sid}):
++            for ep in existing_by_id.values():
+                 if str(ep.get('ext_id', '')) not in seen_ext_ids:
+                     _ext_mark_missing(ep)
+         except Exception as _ze:
+@@ -16020,7 +16089,11 @@
+             check_func()
+         except Exception as e:
+             logger.error(f"[{name}] check error: {e}")
+-        time.sleep(interval)
++        waiter = globals().get('_net_wait')
++        if waiter:
++            waiter(check_func, interval)
++        else:
++            time.sleep(interval)
+ 
+ 
+ def auto_deposit_monitor_thread():
+@@ -18929,7 +19002,7 @@
+ 
+ def _insight_request(store, method, path, body=None, idem_key=None, test=False):
+     """Insight Store v1 contract (docs reviewed 2026-09-19)."""
+-    headers = _ext_api_headers(store)
++    headers = _net_catalog_headers(store, path) if method == 'GET' else _ext_api_headers(store)
+     payload = dict(body or {})
+     if test:
+         headers['X-Test-Mode'] = 'true'
+@@ -18953,6 +19026,9 @@
+         if method == 'GET' and path == '/products':
+             logger.info('[EXT_SYNC] catalog response bytes=%d status=%d',
+                         len(response.content), response.status_code)
++        if response.status_code == 304 and method == 'GET':
++            cached = _net_catalog_304(store, path)
++            return (cached is not None), cached
+         data = response.json()
+         if not isinstance(data, dict):
+             raise ValueError('unexpected response format')
+@@ -18962,6 +19038,8 @@
+                         not isinstance(item, dict) or 'id' not in item
+                         for item in data['products']):
+                     raise ValueError('invalid catalog response')
++            if method == 'GET':
++                _net_catalog_remember(store, path, response, data)
+             if purchase:
+                 order = data.get('order', {})
+                 if (not isinstance(order, dict) or order.get('test')
+@@ -19073,8 +19151,8 @@
+     # المسارات المحتملة للـ prefix
+     if '/api/v1' in base or '/shop-api/v1' in base:
+         prefixes = ['']  # المستخدم كتبه كاملاً
+-    elif store.get('api_prefix'):
+-        prefixes = [store['api_prefix']]  # مكتشف مسبقاً
++    elif store.get('api_prefix') or store.get('api_prefix_known'):
++        prefixes = [store.get('api_prefix', '')]  # مكتشف مسبقاً
+     else:
+         # نجرّب كل المسارات الشائعة للـ prefix
+         prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api',
+@@ -19082,24 +19160,31 @@
+     for prefix in prefixes:
+         url = f"{base}{prefix}{path}"
+         try:
+-            r = requests.get(url, headers=_ext_api_headers(store), timeout=15)
++            r = requests.get(url, headers=_net_catalog_headers(store, path), timeout=15)
+             if path == '/products':
+                 logger.info('[EXT_SYNC] catalog response bytes=%d status=%d',
+                             len(r.content), r.status_code)
++            if r.status_code == 304:
++                return _net_catalog_304(store, path)
+             if r.status_code == 200:
+-                # نحفظ الـ prefix الناجح للمرات القادمة
+-                if prefix and not store.get('api_prefix'):
++                # Remember root-prefix success so the next sync does not probe eight routes.
++                if not store.get('api_prefix_known'):
+                     try:
+                         db.ext_stores.update_one({'_id': store['_id']},
+-                                                 {'$set': {'api_prefix': prefix}})
++                                                 {'$set': {'api_prefix': prefix, 'api_prefix_known': True}})
+                         store['api_prefix'] = prefix
++                        store['api_prefix_known'] = True
+                     except Exception:
+                         pass
+-                return r.json()
++                data = r.json()
++                _net_catalog_remember(store, path, r, data)
++                return data
+             if r.status_code != 404:
+                 logger.warning(f"[EXT_API] GET {path} → {r.status_code}")
++                return None  # Auth, rate limits and outages are not prefix-discovery failures.
+         except Exception as e:
+             logger.debug(f"[EXT_API] GET err: {e}")
++            return None
+     return None
+ 
+ 
+@@ -19116,8 +19201,8 @@
+     base = str(store.get('base_url', '')).rstrip('/')
+     if '/api/v1' in base or '/shop-api/v1' in base:
+         prefixes = ['']
+-    elif store.get('api_prefix'):
+-        prefixes = [store['api_prefix']]
++    elif store.get('api_prefix') or store.get('api_prefix_known'):
++        prefixes = [store.get('api_prefix', '')]
+     else:
+         prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api',
+                     '/store-api/v1', '/reseller/v1', '']
+@@ -21155,6 +21240,7 @@
+         markup.add(InlineKeyboardButton("💹 الأرباح", callback_data="ad_profit"),
+                    InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
+         markup.add(InlineKeyboardButton("📋 جدول المنتجات المتوفرة (للنشر)", callback_data="ad_plist"))
++        markup.add(InlineKeyboardButton("📡 استهلاك الشبكة", callback_data="ad_network"))
+         markup.add(InlineKeyboardButton("🩺 مراقبة الأخطاء", callback_data="ad_errors"),
+                    InlineKeyboardButton("🛒 سلة الموقع", callback_data="ad_cart_settings"))
+         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
+@@ -30814,6 +30900,8 @@
+                     try:
+                         if self.name in _CATALOG_COLLS:
+                             _catalog_changed()
++                        elif self.name in ('api_pricing', 'api_hidden'):
++                            _invalidate_products_cache()
+                     except Exception:
+                         pass
+                     return res
+@@ -31252,6 +31340,7 @@
+         'nav': nav, 'texts': _wa_texts(), 'vip': _wa_vip_view(uid, u),
+         'forced': _wa_forced_info(uid),
+         'catalogs': cat['catalogs'], 'products': cat['products'],
++        'catalog_version': _net_catalog_version(cat),
+         'pending': _wa_pending_view(uid), 'locked': bool(locked),
+         'verify': ref_dv_pending_for(uid),
+         'server_time': int(time.time()), 'cart_enabled': _cart_enabled(),
+@@ -31261,8 +31350,13 @@
+ def _wa_catalog_ep(identity, body):
+     uid = identity['id']
+     cat = _wa_build_catalog(include_hidden=False)
+-    return 200, {'ok': True, 'catalogs': cat['catalogs'], 'products': cat['products'],
+-                 'balance': _wa_balance(uid), 'vip': _wa_vip_view(uid)}
++    version = _net_catalog_version(cat)
++    data = {'ok': True, 'catalog_version': version, 'balance': _wa_balance(uid), 'vip': _wa_vip_view(uid)}
++    if body.get('catalog_version') == version:
++        data['not_modified'] = True
++    else:
++        data.update(catalogs=cat['catalogs'], products=cat['products'])
++    return 200, data
+ 
+ 
+ def _wa_me(identity, body):
+@@ -34313,7 +34407,7 @@
+             data = data.encode('utf-8')
+         gz = False
+         if (mime.startswith('text/') or mime in ('application/javascript', 'application/json', 'image/svg+xml')) \
+-                and len(data) > 1024 and 'gzip' in (handler.headers.get('Accept-Encoding') or ''):
++                and len(data) > 1024 and _net_accepts_gzip(handler.headers):
+             data, gz = _wa_gzip.compress(data, 6), True
+         handler.send_response(code)
+         handler.send_header('Content-Type', mime)
+@@ -38169,6 +38263,419 @@
+                      reply_markup=_notice_pair(call.from_user.id, pid))
+ 
+ 
++def _net_api_products_payload(uid):
++    with _NET_PRODUCT_LOCKS[int(uid) % len(_NET_PRODUCT_LOCKS)]:
++        cached = _net_products_get(uid)
++        if cached is not None:
++            return {'success': True, 'products': cached}
++        generation = _NET_PRODUCTS_EPOCH
++        prods = list(db.products.find({'is_hidden': {'$ne': True}}))
++        stock_counts = _net_stock_counts(prods)
++        # api_hidden = المطور أخفى المنتج من متجره هو فقط
++        hidden_pids = set()
++        for h in db.api_hidden.find({'api_user_id': uid}):
++            hidden_pids.add(h['product_id'])
++        # جلب أسعار المطوّر المخصصة
++        custom_prices = {}
++        for cp in db.api_pricing.find({'api_user_id': uid}):
++            custom_prices[cp['product_id']] = cp
++        result = []
++        for pr in prods:
++            pid = str(pr.get('id', str(pr.get('_id', ''))))
++            if pid in hidden_pids:
++                continue
++            manual = pr.get('is_manual', False)
++            base_price = float(pr.get('price', 0))
++            cp = custom_prices.get(pid, {})
++            # 🌟 دعم Premium Emoji
++            custom_emoji_id = pr.get('custom_emoji_id')
++            p_name_ar = cp.get('name_ar') or pr.get('name_ar', '')
++            p_name_en = cp.get('name_en') or pr.get('name_en', '')
++            p_desc_ar = cp.get('desc_ar') or pr.get('desc_ar', '')
++            p_desc_en = cp.get('desc_en') or pr.get('desc_en', '')
++            # your_price: من sell_price المقفول، أو null لو لم يُضبط بعد
++            your_price = cp.get('sell_price')
++            item = {
++                'id': pid,
++                'name_ar': p_name_ar,
++                'name_en': p_name_en,
++                'desc_ar': p_desc_ar,
++                'desc_en': p_desc_en,
++                'store_price': base_price,         # سعر المتجر الحالي (يتغير)
++                'your_price': your_price,          # سعرك المقفول (لا يتغير بتغيير المتجر)
++                'price_locked': your_price is not None,
++                # 🔔 تنبيه: سعر المتجر تغيّر بعد ما قفل المطوّر سعره
++                # (بدونه يبيع بسعر قديم وقد يبيع بخسارة لأن الخصم يتم بسعر المتجر الحالي)
++                'price_alert': (
++                    {
++                        'type': 'below_cost' if your_price < base_price else 'store_price_changed',
++                        'message': (
++                            'Your selling price is now BELOW the store price — you would sell at a loss. Update it.'
++                            if your_price < base_price else
++                            'Store price changed since you locked your price. Review your price.'
++                        ),
++                        'old_store_price': float(cp.get('base_price_snapshot')),
++                        'new_store_price': base_price,
++                        'your_price': your_price,
++                    }
++                    if (your_price is not None
++                        and cp.get('base_price_snapshot') is not None
++                        and float(cp.get('base_price_snapshot')) != base_price)
++                    else None
++                ),
++                'stock': 'unlimited' if manual else (stock_counts.get(pid, 0) if stock_counts is not None else get_product_stock_count(pid)),
++                'is_manual': manual,
++                'discount_tiers': pr.get('discount_tiers', []),
++                # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
++                'custom_emoji_id': custom_emoji_id,
++                'has_premium_emoji': bool(custom_emoji_id),
++                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
++                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
++            }
++            # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
++            emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
++            item.update(emoji_fields)
++            # دليل الاستخدام الكامل للمطورين
++            item['emoji_guide'] = {
++                'parse_mode': 'HTML',
++                'name_ar_html': item.get('name_ar_html', p_name_ar),
++                'name_en_html': item.get('name_en_html', p_name_en),
++                'desc_ar_html': item.get('desc_ar_html', p_desc_ar),
++                'desc_en_html': item.get('desc_en_html', p_desc_en),
++                'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
++            }
++            result.append(item)
++
++        # 🔌 نضيف منتجات متاجر API الخارجية (الظاهرة فقط) — تظهر للعملاء
++        #    الذين أخذوا API من بوتك، تماماً مثل منتجاتك العادية.
++        try:
++            for ep in db.ext_products.find({'hidden': {'$ne': True}}):
++                epid = f"ext_{ep['_id']}"
++                if epid in hidden_pids:
++                    continue
++                ep_name = str(ep.get('name', ''))
++                ep_desc = str(ep.get('desc', '') or ep.get('desc_text', ''))
++                ep_emoji_id = ep.get('emoji_id')
++                ep_price = float(ep.get('sell_price', ep.get('base_price', 0)))
++                cp = custom_prices.get(epid, {})
++                your_price = cp.get('sell_price')
++                ext_item = {
++                    'id': epid,
++                    'name_ar': ep_name, 'name_en': ep_name,
++                    'desc_ar': _ext_description_for_lang(ep, 'ar'), 'desc_en': _ext_description_for_lang(ep, 'en'),
++                    'store_price': ep_price,
++                    'your_price': your_price,
++                    'price_locked': your_price is not None,
++                    'price_alert': None,
++                    'stock': ep.get('stock', 0),
++                    'is_manual': False,
++                    'discount_tiers': [],
++                    'custom_emoji_id': ep_emoji_id,
++                    'has_premium_emoji': bool(ep_emoji_id),
++                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
++                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
++                    'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
++                    'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
++                    'source': 'external_api',
++                }
++                ext_item['emoji_guide'] = {
++                    'parse_mode': 'HTML',
++                    'name_ar_html': ext_item['name_ar_html'],
++                    'name_en_html': ext_item['name_en_html'],
++                    'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
++                    'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
++                    'note': 'All _html fields are ready to send directly via Telegram with parse_mode=HTML'
++                }
++                result.append(ext_item)
++        except Exception as _ext_e:
++            logger.debug(f"ext products in API err: {_ext_e}")
++
++        # 🤖 منتجات ChatGPT Business — كل مدة تظهر كمنتج منفصل بسعرها
++        try:
++            for cg in db.cgpt_products.find():
++                if not _cgpt_product_visible(cg, uid):
++                    continue
++                cg_id = str(cg['_id'])
++                cg_name = cg.get('name', 'ChatGPT Business')
++                cg_desc = cg.get('desc', '')
++                cg_emoji = cg.get('custom_emoji_id')
++                # نحسب المقاعd المتاحة (المخزون)
++                try:
++                    cg_seats = _cgpt_get_seats_cached()
++                except Exception:
++                    cg_seats = None
++                for dur in cg.get('durations', []):
++                    dur_id = dur.get('dur_id', '')
++                    dur_price = float(dur.get('price', 0))
++                    dur_label = dur.get('label', '')
++                    dur_mins = int(dur.get('minutes', 0))
++                    dur_days = round(dur_mins / 1440, 1) if dur_mins else 0
++                    full_name = f"{cg_name} — {dur_label}" if dur_label else cg_name
++                    cgid = f"cgpt_{cg_id}_{dur_id}"
++                    if not _cgpt_product_visible(cg, uid, cgid):
++                        continue
++                    cg_item = {
++                        'id': cgid,
++                        'name_ar': full_name, 'name_en': full_name,
++                        'desc_ar': cg_desc, 'desc_en': cg_desc,
++                        'store_price': dur_price,
++                        'your_price': None,
++                        'price_locked': False,
++                        'price_alert': None,
++                        'stock': cg_seats if cg_seats is not None else 9999,
++                        'is_manual': False,
++                        'duration_label': dur_label,
++                        'duration_minutes': dur_mins,
++                        'duration_days': dur_days,
++                        'custom_emoji_id': cg_emoji,
++                        'has_premium_emoji': bool(cg_emoji),
++                        'name_ar_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
++                        'name_en_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
++                        'desc_ar_html': cg_desc, 'desc_en_html': cg_desc,
++                        'source': 'chatgpt_business',
++                        'product_type': 'cgpt_main',
++                    }
++                    result.append(cg_item)
++        except Exception as _cg_e:
++            logger.debug(f"cgpt products in API err: {_cg_e}")
++
++        _net_products_put(uid, result, generation)
++        return {'success': True, 'products': result}
++
++# 📡 26. Bounded caches, conditional reads and a private network report.
++_NET_PRODUCT_LOCKS = [threading.RLock() for _ in range(16)]
++_NET_REMOTE_LOCK = threading.RLock()
++_NET_REMOTE = {}
++_NET_SYNC_STATE = {}
++_NET_SYNC_CONTEXT = threading.local()
++_NET_PAY_LOCK = threading.Lock()
++_NET_PAY_CACHE = {'expires': 0, 'active': True, 'generation': 0}
++_NET_PAY_EVENTS = {name: threading.Event() for name in ('check_ltc_blockchain_auto',
++    'check_ton_blockchain_auto', 'check_usdt_blockchain_auto', 'check_binance_pay_auto', 'check_bybit_auto')}
++
++
++def _net_stock_counts(products):
++    """One stock aggregation preserves string, integer and numeric legacy aliases."""
++    aliases, values = {}, set()
++    for product in products:
++        if product.get('is_manual'):
++            continue
++        pid = str(product.get('id', product.get('_id', '')))
++        keys = {('s', pid)}
++        values.add(pid)
++        try:
++            number = float(pid)
++            if __import__('math').isfinite(number):
++                values.add(number)
++                keys.add(('n', number))
++        except (ValueError, OverflowError):
++            pass
++        aliases[pid] = keys
++    if not values:
++        return {}
++    try:
++        counts = {}
++        for row in db.product_stock.aggregate([{'$match': {'product_id': {'$in': list(values)}, 'is_sold': False}},
++                {'$group': {'_id': '$product_id', 'n': {'$sum': 1}}}]):
++            value = row['_id']
++            key = ('s', value) if isinstance(value, str) else ('n', float(value))
++            counts[key] = counts.get(key, 0) + row['n']
++        return {pid: sum(counts.get(key, 0) for key in keys) for pid, keys in aliases.items()}
++    except Exception:
++        return None
++
++
++def _net_products_get(uid):
++    with _NET_CACHE_LOCK:
++        cache = _PRODUCTS_CACHE if isinstance(_PRODUCTS_CACHE, dict) else {}
++        entry = cache.get('_users', {}).get(uid)
++        return entry['data'] if entry and entry['expires'] > time.time() else None
++
++
++def _net_products_put(uid, data, generation):
++    global _PRODUCTS_CACHE
++    size = len(json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode())
++    with _NET_CACHE_LOCK:
++        if generation != _NET_PRODUCTS_EPOCH or size > 2 * 1024 * 1024:
++            return
++        if not isinstance(_PRODUCTS_CACHE, dict) or '_users' not in _PRODUCTS_CACHE:
++            _PRODUCTS_CACHE = {'_users': {}}
++        entries = _PRODUCTS_CACHE['_users']
++        now = time.time()
++        for key in list(entries):
++            if entries[key]['expires'] <= now or key == uid:
++                entries.pop(key, None)
++        while entries and (len(entries) >= 16 or sum(e['bytes'] for e in entries.values()) + size > 8 * 1024 * 1024):
++            entries.pop(next(iter(entries)))
++        entries[uid] = {'data': data, 'expires': now + 30, 'bytes': size}
++
++
++def _net_api_products_response(handler, uid):
++    result = _net_api_products_payload(uid)
++    encoded = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()
++    tag = 'W/"' + hashlib.sha256(str(uid).encode() + b':' + encoded).hexdigest()[:40] + '"'
++    handler._net_etag = tag
++    values = [v.strip() for v in str(handler.headers.get('If-None-Match', '')).split(',')]
++    if tag in values or '*' in values:
++        return _json_resp(handler, 304, None)
++    handler._net_json_payload = encoded
++    return _json_resp(handler, 200, result)
++
++
++def _net_catalog_version(cat):
++    return hashlib.sha256(json.dumps(cat, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:32]
++
++
++def _net_store_key(store):
++    values = [str(store.get(k, '')) for k in ('_id', 'base_url', 'api_prefix', 'api_key')]
++    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
++
++
++def _net_catalog_headers(store, path):
++    headers = _ext_api_headers(store)
++    if path == '/products' and getattr(_NET_SYNC_CONTEXT, 'active', False):
++        with _NET_REMOTE_LOCK:
++            entry = _NET_REMOTE.get(_net_store_key(store)) or {}
++            if entry.get('etag'):
++                headers['If-None-Match'] = entry['etag']
++            if entry.get('modified'):
++                headers['If-Modified-Since'] = entry['modified']
++    return headers
++
++
++def _net_catalog_304(store, path):
++    if path == '/products' and getattr(_NET_SYNC_CONTEXT, 'active', False):
++        with _NET_REMOTE_LOCK:
++            return (_NET_REMOTE.get(_net_store_key(store)) or {}).get('data')
++    return None
++
++
++def _net_catalog_remember(store, path, response, data):
++    if path != '/products' or not getattr(_NET_SYNC_CONTEXT, 'active', False) or not _ext_valid_catalog(data):
++        return
++    headers = getattr(response, 'headers', {}) or {}
++    etag, modified = str(headers.get('ETag', ''))[:250], str(headers.get('Last-Modified', ''))[:150]
++    size = len(json.dumps(data, ensure_ascii=False).encode())
++    if not (etag or modified) or size > 512 * 1024:
++        return
++    with _NET_REMOTE_LOCK:
++        key = _net_store_key(store)
++        _NET_REMOTE.pop(key, None)
++        while _NET_REMOTE and (len(_NET_REMOTE) >= 16 or sum(e['bytes'] for e in _NET_REMOTE.values()) + size > 2 * 1024 * 1024):
++            _NET_REMOTE.pop(next(iter(_NET_REMOTE)))
++        _NET_REMOTE[key] = {'data': data, 'etag': etag, 'modified': modified, 'bytes': size}
++
++
++def _net_sync_fetch(store):
++    """Backoff applies only to unattended catalog sync, never to a purchase."""
++    key = _net_store_key(store)
++    now = time.time()
++    with _NET_REMOTE_LOCK:
++        state = _NET_SYNC_STATE.get(key, {})
++        if state.get('retry_at', 0) > now:
++            return None
++    previous = getattr(_NET_SYNC_CONTEXT, 'active', False)
++    _NET_SYNC_CONTEXT.active = True
++    try:
++        data = _ext_api_get(store, '/products')
++    except Exception:
++        logger.warning('Background supplier catalog read failed')
++        data = None
++    finally:
++        _NET_SYNC_CONTEXT.active = previous
++    with _NET_REMOTE_LOCK:
++        if len(_NET_SYNC_STATE) >= 64 and key not in _NET_SYNC_STATE:
++            _NET_SYNC_STATE.pop(next(iter(_NET_SYNC_STATE)))
++        if _ext_valid_catalog(data):
++            _NET_SYNC_STATE[key] = {'failures': 0, 'retry_at': 0}
++        else:
++            failures = min(5, state.get('failures', 0) + 1)
++            _NET_SYNC_STATE[key] = {'failures': failures, 'retry_at': now + min(1800, 120 * 2 ** (failures - 1))}
++    return data
++
++
++def _net_wake_payments():
++    _NET_PAY_CACHE['generation'] += 1
++    _NET_PAY_CACHE['expires'] = 0
++    for event in _NET_PAY_EVENTS.values():
++        event.set()
++
++
++def _net_payment_interval(interval):
++    now = time.time()
++    with _NET_PAY_LOCK:
++        if _NET_PAY_CACHE['expires'] <= now:
++            generation = _NET_PAY_CACHE['generation']
++            try:
++                active = db.pending_deposits.find_one({'status': 'pending', '$or': [
++                    {'expires_at': {'$gt': int(now)}}, {'expires_at': {'$exists': False}}]}, {'_id': 1}) is not None
++            except Exception:
++                active = True  # Never slow financial recovery because a DB read failed.
++            _NET_PAY_CACHE.update(active=active,
++                expires=now + 5 if generation == _NET_PAY_CACHE['generation'] else 0)
++        return interval if _NET_PAY_CACHE['active'] else max(interval, 60)
++
++
++def _net_wrap_pending(original):
++    @functools.wraps(original)
++    def wrapped(*args, **kwargs):
++        result = original(*args, **kwargs)
++        if result:
++            _net_wake_payments()
++        return result
++    return wrapped
++
++
++def _net_wait(check_func, interval):
++    event = _NET_PAY_EVENTS.get(getattr(check_func, '__name__', ''))
++    if event is None:
++        time.sleep(interval)
++    else:
++        event.wait(_net_payment_interval(interval))
++        event.clear()
++
++
++def _net_size_text(value):
++    value = float(value or 0)
++    if value >= 1024 ** 3:
++        return f'{value / 1024 ** 3:.3f} GiB'
++    if value >= 1024 ** 2:
++        return f'{value / 1024 ** 2:.2f} MiB'
++    return f'{value / 1024:.1f} KiB'
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_network')
++@admin_required
++def ad_network(call):
++    bot.answer_callback_query(call.id)
++    data = _NET_METER.snapshot()
++    groups = [('http_server', 'ردود الموقع وAPI'), ('http_client', 'طلبات HTTP الصادرة'),
++              ('curl_client', 'اتصالات ChatGPT'), ('mongo', 'أوامر MongoDB')]
++    lines = ['📡 <b>استهلاك الشبكة</b>', f'الفترة منذ تشغيل هذه النسخة: {data["seconds"] / 3600:.2f} ساعة.', '']
++    for group, title in groups:
++        rows = [r for r in data['rows'] if r['group'] == group]
++        lines += [f'<b>{title}</b>: {sum(r["requests"] for r in rows):,} طلب',
++            f'إرسال: {_net_size_text(sum(r["sent"] for r in rows))} | استقبال: {_net_size_text(sum(r["received"] for r in rows))}']
++        for row in sorted(rows, key=lambda r: r['sent'], reverse=True)[:4]:
++            lines.append(f'• <code>{html.escape(row["label"])}</code>: {row["requests"]:,} طلب، {_net_size_text(row["sent"])} إرسال')
++        lines.append('')
++    lines += ['هذه أحجام تقريبية داخل التطبيق، وليست فاتورة Render. بعض الاستقبال قد لا يتوفر قياسه.',
++        'قياس MongoDB قبل ضغط الاتصال، ولا يشمل هذا التقرير تكاليف TLS أو حركة الخدمات الأخرى.',
++        'القياس في الذاكرة فقط؛ لا توجد كتابة لقاعدة البيانات لكل طلب، ويبدأ من جديد بعد إعادة التشغيل.',
++        'الرقم الشهري الدقيق: Render ← الخدمة ← Metrics ← Outbound Bandwidth، والإجمالي في Billing.']
++    mk = InlineKeyboardMarkup()
++    mk.add(InlineKeyboardButton('🔄 تحديث القياس', callback_data='ad_network'))
++    mk.add(InlineKeyboardButton('🔙 لوحة الإدارة', callback_data='admin_panel_main'))
++    bot.send_message(call.message.chat.id, '\n'.join(lines), parse_mode='HTML', reply_markup=mk)
++
++
++_ADM_SECTIONS.append(('network', '📡', 'استهلاك الشبكة', 'Network usage', 'ad_network'))
++_ADM_OPEN_OK.add('ad_network')
++register_pending_deposit = _net_wrap_pending(register_pending_deposit)
++_net_install_clients()
++_net_install_server()
++
++
+ # 🚀 15. التشغيل
+ # ============================================================
+ def run_bot():
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -1571,7 +1571,7 @@
+ /* ───────────────────────── api ───────────────────────── */
+ async function api(path, body) {
+   if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
+-  const controller = path.startsWith('cart/') && typeof AbortController !== 'undefined' ? new AbortController() : null;
++  const controller = (path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
+   const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
+   try {
+     const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
+@@ -2011,6 +2011,7 @@
+   document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.v === dk; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); if (on && was !== dk) { b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); } });
+   window.scrollTo({ top: 0 });
+   renderView(); syncBack();
++  if (k === 'store' && S.screen === 'app' && Date.now() - lastCat > 60000) refreshCatalog();
+ }
+ function renderAll() { renderShell(); renderView(); }
+ function pvNote() { return DEMO ? `<div class="pv-note">${ic.info}<span>${esc(t('pvSim'))}</span></div>` : ''; }
+@@ -3738,7 +3739,7 @@
+   ['store', '#3d8bff', ['prod', '@stock', 'plist', 'ext', 'cgpt', 'act']],
+   ['people', '#19c3a3', ['users', 'find', 'gift', 'ban', 'vip', 'ref']],
+   ['money', '#f2b33d', ['profit', '@orders', '@deps', 'logs', 'reports', 'tx', '@prot']],
+-  ['sys', '#8ea2c4', ['errors', 'cart', 'shop_cms', 'notice_cms', 'settings', 'baseurl', 'fsub', 'promote', 'panel']]];   // التخصيص والبرودكاست: من البوت فقط
++  ['sys', '#8ea2c4', ['errors', 'network', 'cart', 'shop_cms', 'notice_cms', 'settings', 'baseurl', 'fsub', 'promote', 'panel']]];   // التخصيص والبرودكاست: من البوت فقط
+ const ADM_NATIVE = { stock: ['🏷️', 'adm-prods', 'all'], orders: ['🧾', 'adm-feed', 'orders'], deps: ['💳', 'adm-feed', 'deposits'], prot: ['🛡', 'adm-prot', ''] };
+ function adtOr(k, fb) { const v = adt(k); return v === k ? fb : v; }
+ function admHue(cb) {
+@@ -4710,19 +4711,27 @@
+ }
+ 
+ /* ───────────────────────── refresh ───────────────────────── */
+-let lastCat = 0;
+-async function refreshCatalog() {
++let lastCat = 0, catalogFlight = null;
++function refreshCatalog() {
++  if (catalogFlight) return catalogFlight;
+   lastCat = Date.now();
+-  const r = await api('catalog');
+-  if (r.ok) { S.products = r.products || []; S.catalogs = r.catalogs || []; if (S.tab === 'store') updateStore(true); }
+-  return r;
++  catalogFlight = (async () => {
++    const r = await api('catalog', {catalog_version: S.catalogVersion || ''});
++    if (r.ok) {
++      S.catalogVersion = r.catalog_version || '';
++      if (!r.not_modified) { S.products = r.products || []; S.catalogs = r.catalogs || []; }
++      if (S.tab === 'store') updateStore(true);
++    }
++    return r;
++  })().finally(() => { catalogFlight = null; });
++  return catalogFlight;
+ }
+ async function refreshMe() {
+   const r = await api('me');
+   if (r.ok) { S.pending = r.pending; S.locked = r.locked; if (r.banned) { S.screen = 'banned'; renderAll(); } updateHeader(); }
+ }
+-document.addEventListener('visibilitychange', () => { if (!document.hidden && S.screen === 'app') { refreshMe(); if (Date.now() - lastCat > 30000) refreshCatalog(); } });
+-setInterval(() => { if (!document.hidden && S.screen === 'app' && Date.now() - lastCat > 60000) refreshCatalog(); }, 15000);
++document.addEventListener('visibilitychange', () => { if (!document.hidden && S.screen === 'app') { refreshMe(); if (S.tab === 'store' && Date.now() - lastCat > 30000) refreshCatalog(); } });
++setInterval(() => { if (!document.hidden && S.screen === 'app' && S.tab === 'store' && Date.now() - lastCat > 60000) refreshCatalog(); }, 15000);
+ 
+ 
+ /* ───────── تحقق جهاز الإحالات: اختبار إنسان + بصمة جهاز (رمز مشفّر بس) ───────── */
+@@ -4890,7 +4899,7 @@
+     renderAll(); return;
+   }
+   S.user = r.user; S.cartEnabled = r.cart_enabled !== false; cartLoad(); S.vip = r.vip || null; S.store = r.store || {}; S.deposit = r.deposit || { methods: [] }; S.nav = r.nav || {}; S.texts = r.texts || {}; S.forced = r.forced;
+-  S.catalogs = r.catalogs || []; S.products = r.products || []; S.pending = r.pending; S.locked = r.locked;
++  S.catalogVersion = r.catalog_version || ''; S.catalogs = r.catalogs || []; S.products = r.products || []; S.pending = r.pending; S.locked = r.locked;
+   S.offset = r.server_time ? r.server_time - Date.now() / 1000 : 0;
+   lastCat = Date.now();
+   const saved = store.get('lang', null);
+--- a/verification/test_channel_broadcast.py
++++ b/verification/test_channel_broadcast.py
+@@ -269,7 +269,7 @@
+     assert '?start=p_' not in texts and '?start=vext_' not in texts
+     assert not public(telegram)
+     # Price edits after the snapshot do not silently change the approved report.
+-    mod.db.products.update_one({'id': 101}, {'$set': {'price': 500}})
++    mod.db.products.update_one({'id': '101'}, {'$set': {'price': 500}})
+     dispatch(mod, 'chbc_table_' + d['_id'], 9001)
+     mod._chbc_receive(message(mod, '@news_store'), d['_id'], 'channel')
+     preview = mod.db.channel_broadcasts.find_one({'_id': d['_id']})
+--- /dev/null
++++ b/verification/test_network.py
+@@ -0,0 +1,312 @@
++"""Network regressions and before/after measurements. All providers and DBs are fake."""
++import ast,gzip,http.client,io,json,time,types
++from pathlib import Path
++from concurrent.futures import ThreadPoolExecutor
++from unittest.mock import Mock
++import pytest
++from harness import APP,MESSAGES
++from test_integration import mod,isolate,server,product,request
++from test_products_menu import dispatch
++
++BENCH=APP.parent/'network-benchmarks.json'
++
++def metric(key,value):
++    data=json.loads(BENCH.read_text()) if BENCH.exists() else {}
++    data[key]=value;BENCH.write_text(json.dumps(data,indent=2))
++
++@pytest.fixture(autouse=True)
++def network_state(mod,monkeypatch):
++    monkeypatch.setattr(mod,'_NET_METER',mod._NetworkMeter())
++    mod._NET_REMOTE.clear();mod._NET_SYNC_STATE.clear()
++    mod._NET_SYNC_CONTEXT.active=False
++    mod._NET_PAY_CACHE.update(expires=0,active=True,generation=0)
++    for e in mod._NET_PAY_EVENTS.values():e.clear()
++
++def response(code=200,data=None,headers=None):
++    encoded=json.dumps(data or {}).encode()
++    return types.SimpleNamespace(status_code=code,content=encoded,_content=encoded,
++        headers=headers or {},json=lambda:data)
++
++def supplier(mod,**extra):
++    doc={'base_url':'https://supplier.example','api_key':'FAKE-SUPPLIER-KEY',**extra}
++    doc['_id']=mod.db.ext_stores.insert_one(dict(doc)).inserted_id
++    return doc
++
++def original_function(mod,name):
++    source=(APP/'verification/network_baseline.py').read_text()
++    node=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name==name)
++    scope=dict(mod.__dict__);exec(compile(ast.Module(body=[node],type_ignores=[]),'<baseline>','exec'),scope)
++    return scope[name]
++
++class Handler:
++    def __init__(self,encoding=''):
++        self.headers={'Accept-Encoding':encoding};self.wfile=io.BytesIO();self.sent={};self.events=[]
++    def send_response(self,code):self.code=code;self.events.append('response')
++    def send_header(self,k,v):self.sent[k]=v
++    def end_headers(self):pass
++
++@pytest.mark.parametrize('value,expected',[('',False),('identity',False),('gzip',True),
++    ('br, gzip',True),('gzip;q=0',False),('gzip;q=0.5',True),('*;q=0.8',True),
++    ('gzip;q=0, *;q=1',False),('gzip;q=bad',False)])
++def test_gzip_negotiation_respects_explicit_refusal(mod,value,expected):
++    assert mod._net_accepts_gzip({'Accept-Encoding':value}) is expected
++
++def test_json_compression_keeps_all_fields_and_records_idempotency_before_write(mod):
++    data={'success':True,'products':[{'id':str(i),'name':'منتج Premium ✨','description':'Description & وصف '*100} for i in range(40)]}
++    h=Handler('gzip');seen=[]
++    h._idem_hook=lambda code,value:(seen.append((code,value)),h.events.append('idempotency'))
++    mod._json_resp(h,200,data)
++    encoded=h.wfile.getvalue()
++    assert json.loads(gzip.decompress(encoded))==data
++    assert seen==[(200,data)] and h.events[0]=='idempotency'
++    assert h.sent['Content-Encoding']=='gzip' and int(h.sent['Content-Length'])==len(encoded)
++    raw=json.dumps(data,ensure_ascii=False,separators=(',',':')).encode()
++    assert len(encoded)<len(raw)*.3
++    metric('sample_api_json',{'uncompressed_bytes':len(raw),'gzip_bytes':len(encoded),
++        'saved_percent':round(100*(1-len(encoded)/len(raw)),2),'representative':'repeated bilingual test descriptions'})
++
++@pytest.mark.parametrize('encoding',['','gzip;q=0'])
++def test_uncompressed_clients_receive_identical_json(mod,encoding):
++    h=Handler(encoding);data={'text':'data '*1000}
++    mod._json_resp(h,200,data)
++    assert 'Content-Encoding' not in h.sent and json.loads(h.wfile.getvalue())==data
++
++def test_304_has_no_body_and_does_not_reuse_an_encoded_payload(mod):
++    h=Handler('gzip');h._net_etag='W/"tag"'
++    mod._json_resp(h,304,None)
++    assert h.wfile.getvalue()==b'' and 'Content-Length' not in h.sent
++    assert h.sent['ETag']=='W/"tag"'
++
++def api_raw(mod,server,uid=1001,headers=None):
++    key='sk_'+str(uid)+'k'*44
++    mod.db.api_keys.update_one({'api_key':key},{'$set':{'user_id':uid,'is_active':True}},upsert=True)
++    c=http.client.HTTPConnection(*server,timeout=8)
++    c.request('GET','/'+mod._get_api_gateway()+'/products',headers={'Authorization':'Bearer '+key,**(headers or {})})
++    r=c.getresponse();data=r.read();result=(r.status,dict(r.getheaders()),data);c.close();return result
++
++def test_api_compression_etag_auth_and_invalidation_over_real_local_http(mod,server):
++    product(mod,desc_en='A real long description '*300)
++    st,headers,body=api_raw(mod,server,headers={'Accept-Encoding':'gzip'})
++    assert st==200 and headers['Content-Encoding']=='gzip'
++    data=json.loads(gzip.decompress(body));assert data['products'][0]['id']=='101'
++    tag=headers['ETag']
++    st,headers,body=api_raw(mod,server,headers={'If-None-Match':tag})
++    assert st==304 and body==b''
++    # Another API account never reuses the first account's representation.
++    mod.db.api_hidden.insert_one({'api_user_id':1002,'product_id':'101'})
++    st,headers,body=api_raw(mod,server,uid=1002,headers={'If-None-Match':tag})
++    assert st==200 and headers['ETag']!=tag and json.loads(body)['products']==[]
++    mod.db.products.update_one({'id':'101'},{'$set':{'price':7}})
++    mod._invalidate_products_cache()
++    st,headers,body=api_raw(mod,server,headers={'If-None-Match':tag})
++    assert st==200 and headers['ETag']!=tag and json.loads(body)['products'][0]['store_price']==7
++    c=http.client.HTTPConnection(*server,timeout=5)
++    c.request('GET','/'+mod._get_api_gateway()+'/products',headers={'If-None-Match':headers['ETag']})
++    r=c.getresponse();r.read();assert r.status==401;c.close()
++
++def test_multiple_api_users_keep_their_own_cached_prices(mod,monkeypatch):
++    product(mod)
++    mod.db.api_pricing.insert_one({'api_user_id':1001,'product_id':'101','name_en':'First private name','sell_price':9})
++    mod.db.api_pricing.insert_one({'api_user_id':1002,'product_id':'101','name_en':'Second private name','sell_price':11})
++    find=Mock(wraps=mod.db.products.find);monkeypatch.setattr(mod.db.products,'find',find)
++    one=mod._net_api_products_payload(1001);two=mod._net_api_products_payload(1002)
++    again=mod._net_api_products_payload(1001)
++    assert one==again and find.call_count==2
++    assert one['products'][0]['your_price']==9 and two['products'][0]['your_price']==11
++    assert one['products'][0]['name_en']=='First private name' and two['products'][0]['name_en']=='Second private name'
++
++def test_simultaneous_catalog_misses_build_once(mod,monkeypatch):
++    product(mod)
++    find=Mock(wraps=mod.db.products.find);monkeypatch.setattr(mod.db.products,'find',find)
++    with ThreadPoolExecutor(max_workers=6) as pool:
++        results=list(pool.map(lambda _:mod._net_api_products_payload(1001),range(6)))
++    assert all(v==results[0] for v in results) and find.call_count==1
++
++@pytest.mark.parametrize('change',['pricing','hidden'])
++def test_private_api_profile_changes_invalidate_only_authorized_catalog_results(mod,change):
++    product(mod)
++    assert mod._net_api_products_payload(1001)['products']
++    if change=='pricing':
++        mod.db.api_pricing.insert_one({'api_user_id':1001,'product_id':'101','sell_price':8})
++        assert mod._net_api_products_payload(1001)['products'][0]['your_price']==8
++        assert mod._net_api_products_payload(1002)['products'][0]['your_price'] is None
++    else:
++        mod.db.api_hidden.insert_one({'api_user_id':1001,'product_id':'101'})
++        assert not mod._net_api_products_payload(1001)['products']
++        assert mod._net_api_products_payload(1002)['products']
++
++def test_api_cache_ttl_memory_bounds_and_generation_guard(mod,monkeypatch):
++    now=[time.time()];monkeypatch.setattr(mod.time,'time',lambda:now[0])
++    generation=mod._NET_PRODUCTS_EPOCH
++    for uid in range(20):mod._net_products_put(uid,[{'data':'x'*100000}],generation)
++    assert len(mod._PRODUCTS_CACHE['_users'])<=16
++    assert sum(v['bytes'] for v in mod._PRODUCTS_CACHE['_users'].values())<=8*1024**2
++    assert mod._net_products_get(19) is not None
++    now[0]+=31;assert mod._net_products_get(19) is None
++    mod._invalidate_products_cache()
++    mod._net_products_put(19,[{'stale':True}],generation)
++    assert mod._net_products_get(19) is None
++
++def test_batch_stock_counts_preserve_numeric_string_and_float_aliases(mod,monkeypatch):
++    product(mod,stock=1);product(mod,'102',stock=2)
++    mod.db.product_stock.insert_many([{'product_id':101,'is_sold':False},
++        {'product_id':101.0,'is_sold':False},{'product_id':'101','is_sold':True}])
++    prods=list(mod.db.products.find())
++    expected={str(p['id']):mod.get_product_stock_count(p['id']) for p in prods}
++    aggregate=Mock(wraps=mod.db.product_stock.aggregate);monkeypatch.setattr(mod.db.product_stock,'aggregate',aggregate)
++    assert mod._net_stock_counts(prods)==expected and aggregate.call_count==1
++
++def test_catalog_version_acknowledges_unchanged_content_and_fresh_stock_changes(mod):
++    product(mod,desc_en='Description '*300)
++    s,first=mod._wa_catalog_ep({'id':1001},{})
++    assert s==200 and first['products']
++    s,unchanged=mod._wa_catalog_ep({'id':1001},{'catalog_version':first['catalog_version']})
++    assert s==200 and unchanged['not_modified'] and 'products' not in unchanged and 'vip' in unchanged
++    metric('sample_unchanged_catalog',{'full_bytes':len(json.dumps(first).encode()),
++        'unchanged_bytes':len(json.dumps(unchanged).encode())})
++    mod.db.product_stock.insert_one({'product_id':'101','is_sold':False,'code_line':'LOCAL-ONLY-ADDED'})
++    mod._wa_invalidate_catalog()
++    s,changed=mod._wa_catalog_ep({'id':1001},{'catalog_version':first['catalog_version']})
++    assert not changed.get('not_modified') and changed['catalog_version']!=first['catalog_version']
++    assert changed['products'][0]['stock']==first['products'][0]['stock']+1
++
++def test_root_prefix_success_is_persisted_and_stops_rediscovery(mod,monkeypatch):
++    store=supplier(mod);data={'products':[{'id':'1','stock':2,'price':1}]};calls=[]
++    def get(url,**kwargs):
++        calls.append(url)
++        return response(200,data) if url=='https://supplier.example/products' else response(404,{})
++    monkeypatch.setattr(mod.requests,'get',get)
++    baseline=original_function(mod,'_ext_api_get')
++    baseline(dict(store),'/products');baseline(dict(store),'/products')
++    assert len(calls)==16
++    calls.clear();mod._ext_api_get(store,'/products');first=len(calls)
++    reloaded=mod.db.ext_stores.find_one({'_id':store['_id']})
++    assert reloaded['api_prefix']=='' and reloaded['api_prefix_known'] is True
++    mod._ext_api_get(reloaded,'/products')
++    assert first==8 and len(calls)==9
++    metric('root_prefix_steady_sync_requests',{'before':8,'after':1,'reduction_percent':87.5})
++
++@pytest.mark.parametrize('status',[401,403,429,500,503])
++def test_auth_rate_limits_and_outages_are_not_retried_on_eight_prefixes(mod,monkeypatch,status):
++    store=supplier(mod);get=Mock(return_value=response(status,{}));monkeypatch.setattr(mod.requests,'get',get)
++    assert mod._ext_api_get(store,'/products') is None and get.call_count==1
++
++def test_unattended_failure_backoff_bypasses_manual_requests_and_resets_after_key_change(mod,monkeypatch):
++    store=supplier(mod);now=[time.time()];monkeypatch.setattr(mod.time,'time',lambda:now[0])
++    get=Mock(return_value=response(503,{}));monkeypatch.setattr(mod.requests,'get',get)
++    assert mod._net_sync_fetch(store) is None and get.call_count==1
++    now[0]+=1;assert mod._net_sync_fetch(store) is None and get.call_count==1
++    assert mod._ext_api_get(store,'/products') is None and get.call_count==2
++    store['api_key']='CHANGED-FAKE-KEY'
++    mod._net_sync_fetch(store);assert get.call_count==3
++
++@pytest.mark.parametrize('base',['https://supplier.example','https://api.insightxpro.store'])
++def test_conditional_supplier_sync_reuses_304_but_purchase_catalog_reads_stay_fresh(mod,monkeypatch,base):
++    store=supplier(mod,base_url=base,api_prefix='/api/v1',api_prefix_known=True)
++    data={'products':[{'id':'1','stock':3,'price':1}]};calls=[]
++    def get(*args,**kwargs):
++        headers=kwargs.get('headers') or {};calls.append(dict(headers))
++        return response(304) if headers.get('If-None-Match')=='"version-1"' else response(200,data,{'ETag':'"version-1"'})
++    monkeypatch.setattr(mod.requests,'get',get);monkeypatch.setattr(mod.requests,'request',get)
++    assert mod._net_sync_fetch(store)==data and mod._net_sync_fetch(store)==data
++    assert 'If-None-Match' not in calls[0] and calls[1]['If-None-Match']=='"version-1"'
++    assert mod._ext_api_get(store,'/products')==data and 'If-None-Match' not in calls[2]
++
++def test_large_or_invalid_remote_catalogs_are_never_reused_for_conditional_reads(mod):
++    store=supplier(mod);mod._NET_SYNC_CONTEXT.active=True
++    try:
++        mod._net_catalog_remember(store,'/products',response(headers={'ETag':'x'}),{'unexpected':[]})
++        assert not mod._NET_REMOTE
++        data={'products':[{'id':'1','stock':1,'desc':'x'*600000}]}
++        mod._net_catalog_remember(store,'/products',response(headers={'ETag':'x'}),data)
++        assert not mod._NET_REMOTE
++    finally:mod._NET_SYNC_CONTEXT.active=False
++
++def test_supplier_sync_uses_one_product_collection_read_instead_of_one_per_row(mod,monkeypatch):
++    store=supplier(mod);sid=str(store['_id']);n=150
++    data={'products':[{'id':str(i),'name':'Product','stock':2,'price':1} for i in range(n)]}
++    mod.db.ext_products.insert_many([{'store_id':sid,'ext_id':str(i),'stock':2,
++        'cost_price':1,'base_price':1,'sell_price':1,'_supplier_available':True,'unlimited':False} for i in range(n)])
++    monkeypatch.setattr(mod,'_ext_api_get',lambda *a,**k:data)
++    find=Mock(wraps=mod.db.ext_products.find);monkeypatch.setattr(mod.db.ext_products,'find',find)
++    original_function(mod,'_auto_sync_ext_stores')();before=find.call_count
++    find.reset_mock();mod._auto_sync_ext_stores();after=find.call_count
++    assert before==151 and after==1
++    assert mod.db.ext_products.count_documents({'stock':2})==n
++    metric('supplier_product_reads_per_sync',{'products':n,'before':before,'after':after})
++
++def test_idle_payment_checks_wake_immediately_when_a_deposit_is_created(mod):
++    assert mod._net_payment_interval(12)==60
++    record=mod.register_pending_deposit(1001,5,5.001,'USDT')
++    assert record and all(event.is_set() for event in mod._NET_PAY_EVENTS.values())
++    assert mod._net_payment_interval(12)==12
++    assert mod.db.users.find_one({'user_id':1001})['balance']==100
++
++def test_expired_deposits_do_not_keep_idle_polling_at_the_fast_rate(mod):
++    mod.db.pending_deposits.insert_one({'status':'pending','expires_at':int(time.time())-1})
++    assert mod._net_payment_interval(12)==60
++
++def test_binance_remark_detection_is_still_called_without_a_pending_deposit(mod,monkeypatch):
++    monkeypatch.setattr(mod,'BINANCE_API_KEY','FAKE-KEY');monkeypatch.setattr(mod,'BINANCE_API_SECRET','FAKE-SECRET')
++    get=Mock(return_value=[]);monkeypatch.setattr(mod,'_binance_pay_request',get)
++    mod.check_binance_pay_auto()
++    assert get.call_count==1 and mod._net_payment_interval(12)==60
++
++def test_payment_state_is_shared_without_five_duplicate_preflight_queries(mod,monkeypatch):
++    find=Mock(wraps=mod.db.pending_deposits.find_one);monkeypatch.setattr(mod.db.pending_deposits,'find_one',find)
++    assert [mod._net_payment_interval(12) for _ in range(5)]==[60]*5
++    assert find.call_count==1
++
++def test_payment_database_read_failure_keeps_fast_recovery_interval(mod,monkeypatch):
++    monkeypatch.setattr(mod.db.pending_deposits,'find_one',Mock(side_effect=OSError('offline')))
++    assert mod._net_payment_interval(12)==12
++
++@pytest.mark.parametrize('left_checks',[0,2])
++def test_healthy_referrals_only_write_a_reset_when_it_changes(mod,monkeypatch,left_checks):
++    class StopCycle(BaseException):pass
++    mod.db.settings.insert_one({'key':'ref_left_fix_v1','value':True})
++    mod.db.referrals_v2.insert_one({'invited_id':1001,'referrer_id':1002,'status':'active','left_checks':left_checks})
++    monkeypatch.setattr(mod,'check_forced_sub',lambda *a,**k:True)
++    def sleep(seconds):
++        if seconds==60:raise StopCycle()
++    monkeypatch.setattr(mod.time,'sleep',sleep)
++    update=Mock(wraps=mod.db.referrals_v2.update_one);monkeypatch.setattr(mod.db.referrals_v2,'update_one',update)
++    with pytest.raises(StopCycle):mod.background_referral_checker_v2()
++    assert update.call_count==int(left_checks!=0)
++    assert mod.db.referrals_v2.find_one({'invited_id':1001})['left_checks']==0
++
++def test_outbound_http_measurement_records_sizes_without_tokens_or_payloads(mod,monkeypatch):
++    transport=Mock(return_value=response(200,{}, {'Content-Length':'321'}))
++    def fake_transport(self,prepared,*args,**kwargs):return transport(prepared,*args,**kwargs)
++    monkeypatch.setattr(mod.requests.adapters.HTTPAdapter,'send',fake_transport)
++    mod._net_install_clients()
++    prepared=mod.requests.Request('POST','https://api.telegram.org/bot123:FAKE-TOKEN/sendMessage?password=FAKE-PASSWORD',
++        headers={'Authorization':'Bearer FAKE-SECRET'},data='FAKE-CUSTOMER-CODE').prepare()
++    returned=mod.requests.adapters.HTTPAdapter().send(prepared)
++    assert returned.status_code==200
++    report=mod._NET_METER.snapshot();encoded=json.dumps(report)
++    assert not any(v in encoded for v in ('FAKE-TOKEN','FAKE-PASSWORD','FAKE-SECRET','FAKE-CUSTOMER-CODE','sendMessage'))
++    row=report['rows'][0];assert row['requests']==1 and row['received']==321 and row['sent']>0
++
++def test_mongo_listener_records_command_sizes_without_documents(mod):
++    listener=mod._NET_MONGO_LISTENER
++    listener.started(types.SimpleNamespace(command_name='update',command={'password':'HIDDEN-MONGO-VALUE','q':{'id':123}}))
++    listener.succeeded(types.SimpleNamespace(command_name='update',reply={'ok':1,'value':'HIDDEN-RESPONSE-VALUE'}))
++    text=json.dumps(mod._NET_METER.snapshot())
++    assert 'HIDDEN-' not in text
++    row=mod._NET_METER.snapshot()['rows'][0]
++    assert row['requests']==1 and row['sent']>0 and row['received']>0
++
++@pytest.mark.parametrize('path,expected',[('/SECRET-GATEWAY/products?api_key=SECRET','/api/products'),
++    ('/SECRET-GATEWAY/product/SECRET-PRODUCT','/api/product'),('/webapp/cart/status?token=SECRET','/webapp/cart'),
++    ('/app/emoji/SECRET-FILE.webp','/app/emoji'),('/','/')])
++def test_server_metric_labels_never_store_secret_paths_or_queries(mod,path,expected):
++    assert mod._net_server_route(path)==expected
++
++def test_admin_network_report_is_private_and_available_in_console(mod):
++    mod._NET_METER.record('http_client','supplier.example',sent=1024,received=2048)
++    dispatch(mod,'ad_network',1001)
++    assert not any('supplier.example' in text for _,text,_ in MESSAGES)
++    MESSAGES.clear();dispatch(mod,'ad_network',9001)
++    assert any('supplier.example' in text and 'فاتورة' in text for _,text,_ in MESSAGES)
++    assert 'ad_network' in mod._ADM_OPEN_OK and not mod._wa_bot_only('ad_network')
+--- /dev/null
++++ b/verification/network_baseline.py
+@@ -0,0 +1,155 @@
++# Baseline from delivered version 5, for isolated before/after measurements only.
++
++def _auto_sync_ext_stores():
++    """مزامنة تلقائية دورية لكل متاجر API:
++    - منتج جديد في المتجر الخارجي → إشعار الأدمن (هل تريd إضافته؟)
++    - كمية/ستوك تغيّر لمنتج مضاف → تحديث تلقائي + برودكاست توفّر ستوك
++    """
++    try:
++        stores = list(db.ext_stores.find())
++    except Exception:
++        return
++    for store in stores:
++        sid = str(store['_id'])
++        data = _ext_api_get(store, '/products')
++        prods = _ext_parse_products(data)
++        # لو الرد فشل (None) نتخطّى المتجر — لا نصفّر بالخطأ
++        if not _ext_valid_catalog(data):
++            continue
++        seen_ext_ids = set()
++        for p in prods:
++            _f = _ext_extract_fields(p)
++            ext_id = _f['ext_id']
++            if not ext_id:
++                continue
++            seen_ext_ids.add(ext_id)
++            existing = db.ext_products.find_one({'store_id': sid, 'ext_id': ext_id})
++            # Skip the original write/read path when an available product is unchanged.
++            if (existing and _f['stock'] > 0 and _f['available'] is not False
++                    and existing.get('_supplier_available') is True
++                    and existing.get('stock') == _f['stock']
++                    and existing.get('unlimited', False) == _f.get('unlimited', False)
++                    and not any(existing.get(key) for key in
++                                ('_new_notice', '_stock_notice', '_missing_since',
++                                 '_supplier_empty_since'))
++                    and (not _f['cost_price'] or abs(float(_f['cost_price']) -
++                         float(existing.get('cost_price', existing.get('base_price', 0)) or 0)) <= 0.001)):
++                continue
++            if existing:
++                db.ext_products.update_one({'_id': existing['_id']},
++                    {'$set': {'unlimited': _f.get('unlimited', False)}})
++            new_stock = _f['stock']
++            if _f['available'] is False:
++                new_stock = 0
++            p_name = _f['name']
++
++
++            if not existing:
++                if new_stock <= 0:
++                    continue
++                already = db.ext_pending_new.find_one({'store_id': sid, 'ext_id': ext_id})
++                if already:
++                    continue
++                try:
++                    db.ext_pending_new.insert_one({
++                        'store_id': sid, 'ext_id': ext_id, 'name': p_name,
++                        'raw': p, 'created_at': int(time.time())
++                    })
++                    _notify_admins_new_ext_product(store, sid, ext_id, p_name, new_stock)
++                except Exception as _ne:
++                    logger.debug(f"notify new ext product err: {_ne}")
++            else:
++                # منتج مضاف: نتحقق من تغيّر التكلفة (سعر المتجر) أولاً — عالمي
++                new_cost = _f['cost_price']
++                old_cost = existing.get('cost_price', existing.get('base_price', 0)) or 0
++                if new_cost and abs(float(new_cost) - float(old_cost)) > 0.001:
++                    # المتجر غيّر سعر التكلفة → نعيd حساب سعر البيع بنفس النسبة تلقائياً
++                    mt = existing.get('markup_type', 'percent')
++                    mv = existing.get('markup_value', 0)
++                    new_sell = _ext_compute_sell_price(float(new_cost), mt, mv)
++                    db.ext_products.update_one({'_id': existing['_id']},
++                        {'$set': {'cost_price': float(new_cost),
++                                  'base_price': float(new_cost),
++                                  'sell_price': new_sell}})
++                    # إشعار الأدمن (رفع/خفض سعر من المتجر)
++                    try:
++                        direction = "📈 رفع" if float(new_cost) > float(old_cost) else "📉 خفض"
++                        notify_admins(
++                            f"{direction} <b>سعر من المتجر (API)</b>\n"
++                            f"🏪 {html.escape(store.get('name',''))}\n"
++                            f"📦 {html.escape(str(existing.get('name', p_name)))}\n"
++                            f"💵 التكلفة: ${float(old_cost):.2f} → <b>${float(new_cost):.2f}</b>\n"
++                            f"💰 سعرك الجديد (بالنسبة {mv}{'%' if mt=='percent' else '$'}): "
++                            f"<b>${new_sell:.2f}</b>\n\n"
++                            f"<i>أُعيد حساب سعرك تلقائياً.</i>"
++                        )
++                    except Exception:
++                        pass
++                    # لو ارتفع سعر البيع كثيراً، أو انخفض → نبثّ للعملاء
++                    try:
++                        _emit_event('product.updated', {
++                            'source': 'external_api',
++                            'product_id': f"ext_{existing['_id']}",
++                            'name_ar': existing.get('name', p_name),
++                            'name_en': existing.get('name', p_name),
++                            'price': new_sell,
++                            'is_manual': False, 'is_hidden': False,
++                            'stock': new_stock,
++                        }, product_id=f"ext_{existing['_id']}")
++                    except Exception:
++                        pass
++
++                # منتج مضاف: نتحقق من تغيّر الستوك
++                old_stock = existing.get('stock', 0) or 0
++                try:
++                    _ext_commit_stock(existing, new_stock)
++                except Exception:
++                    logger.exception('Could not update/queue external stock transition')
++
++        # 🔴 المنتجات المضافة عندك لكن غير موجودة في رد المتجر = نفدت (out of stock)
++        #    حسب الدوكس: المنتجات النافدة تُحذف من /products. فنصفّر ستوكها.
++        try:
++            for ep in db.ext_products.find({'store_id': sid}):
++                if str(ep.get('ext_id', '')) not in seen_ext_ids:
++                    _ext_mark_missing(ep)
++        except Exception as _ze:
++            logger.debug(f"zero out-of-stock err: {_ze}")
++
++def _ext_api_get(store, path):
++    """GET من متجر API خارجي — يكتشف الـ prefix تلقائياً. يرجّع JSON أو None."""
++    if _ext_is_insight(store):
++        ok, data = _insight_request(store, 'GET', path)
++        return data if ok else None
++    base = str(store.get('base_url', '')).rstrip('/')
++    # المسارات المحتملة للـ prefix
++    if '/api/v1' in base or '/shop-api/v1' in base:
++        prefixes = ['']  # المستخدم كتبه كاملاً
++    elif store.get('api_prefix'):
++        prefixes = [store['api_prefix']]  # مكتشف مسبقاً
++    else:
++        # نجرّب كل المسارات الشائعة للـ prefix
++        prefixes = ['/api/v1', '/shop-api/v1', '/api', '/v1', '/shop-api',
++                    '/store-api/v1', '/reseller/v1', '']
++    for prefix in prefixes:
++        url = f"{base}{prefix}{path}"
++        try:
++            r = requests.get(url, headers=_ext_api_headers(store), timeout=15)
++            if path == '/products':
++                logger.info('[EXT_SYNC] catalog response bytes=%d status=%d',
++                            len(r.content), r.status_code)
++            if r.status_code == 200:
++                # نحفظ الـ prefix الناجح للمرات القادمة
++                if prefix and not store.get('api_prefix'):
++                    try:
++                        db.ext_stores.update_one({'_id': store['_id']},
++                                                 {'$set': {'api_prefix': prefix}})
++                        store['api_prefix'] = prefix
++                    except Exception:
++                        pass
++                return r.json()
++            if r.status_code != 404:
++                logger.warning(f"[EXT_API] GET {path} → {r.status_code}")
++        except Exception as e:
++            logger.debug(f"[EXT_API] GET err: {e}")
++    return None
++
+--- /dev/null
++++ b/verification/test_network_browser.cjs
+@@ -0,0 +1,78 @@
++/* Actual browser, signed local HTTP, fake integrations and blocked external network. */
++const {spawn}=require('child_process');
++const assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const BASE='http://127.0.0.1:8771';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:'8771'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL CART SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking',
++   '--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const page=await browser.newPage({viewport:{width:390,height:844}}),errors=[],catalog=[];
++  page.on('pageerror',e=>errors.push(e.message));
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  // Expose the real closure only in the served test HTML, to await completed
++  // parsing/finally without relying on global network-idle during emoji loading.
++  await page.route('**/__cart_test__/',async route=>{
++   const response=await route.fetch(),source=await response.text();
++   const anchor='let lastCat = 0, catalogFlight = null;';
++   assert(source.includes(anchor));
++   const html=source.replace(anchor,anchor+'\nwindow.__networkTest={refresh:()=>refreshCatalog(),busy:()=>catalogFlight!==null};');
++   const headers={...response.headers()};delete headers['content-length'];delete headers['content-encoding'];
++   await route.fulfill({status:response.status(),headers,body:html});
++  });
++  let hold=false,release=null;
++  await page.route('**/webapp/catalog',async route=>{
++   const body=route.request().postDataJSON(),response=await route.fetch(),result=await response.json();
++   catalog.push({body,result});
++   if(hold)await new Promise(resolve=>{release=resolve;});
++   await route.fulfill({response});
++  });
++  await page.goto(BASE+'/__cart_test__/',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="product"][data-v="101"]').waitFor();
++  const count=await page.locator('#results [data-act="product"]').count();assert.equal(count,3);
++  await page.clock.install();
++  let got=page.waitForResponse(r=>r.url()===BASE+'/webapp/catalog');
++  await page.clock.fastForward(80000);await got;await page.waitForFunction(()=>!window.__networkTest.busy());
++  assert.equal(catalog.length,1);assert(catalog[0].body.catalog_version);
++  assert.equal(catalog[0].result.not_modified,true);assert(!catalog[0].result.products);
++  assert.equal(await page.locator('#results [data-act="product"]').count(),count);
++  console.log('PASS unchanged catalog uses version and preserves product cards');
++  await page.locator('[data-act="tab"][data-v="profile"]').click();
++  await page.clock.fastForward(130000);
++  assert.equal(catalog.length,1);
++  got=page.waitForResponse(r=>r.url()===BASE+'/webapp/catalog');
++  await page.locator('[data-act="tab"][data-v="store"]').click();await got;await page.waitForFunction(()=>!window.__networkTest.busy());
++  assert.equal(catalog.length,2);
++  console.log('PASS no catalogue polling on profile; returning to store refreshes');
++  hold=true;
++  await page.evaluate(()=>{window.__networkTest.refresh();});
++  // Wait for the local handler without advancing the browser's 25-second timeout.
++  for(let n=0;n<100&&!release;n++)await new Promise(r=>setTimeout(r,20));
++  assert(release,'Pending local catalogue request did not arrive');
++  assert.equal(catalog.length,3);
++  await page.evaluate(()=>{
++   window.__networkTestDateNow=Date.now;
++   Date.now=()=>window.__networkTestDateNow()+65000;
++   for(let n=0;n<3;n++)document.dispatchEvent(new Event('visibilitychange'));
++  });
++  await new Promise(r=>setTimeout(r,150));assert.equal(catalog.length,3);
++  got=page.waitForResponse(r=>r.url()===BASE+'/webapp/catalog');hold=false;release();await got;await page.waitForFunction(()=>!window.__networkTest.busy());
++  await page.evaluate(()=>{Date.now=window.__networkTestDateNow;delete window.__networkTestDateNow;});
++  assert.equal(await page.locator('#results [data-act="product"]').count(),count);
++  console.log('PASS overlapping refresh triggers share one in-flight request');
++  const state=await (await page.request.get(BASE+'/__cart_test__/state')).json();
++  assert.equal(state.orders,0);assert.equal(state.balance,100);assert.deepEqual(errors,[]);
++  console.log('PASS zero JS exceptions, no purchases or charges');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{
++ server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);
++});

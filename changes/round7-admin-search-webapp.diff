@@ -1,0 +1,211 @@
+--- webapp/index.html (READY_6)	2026-10-19 00:27:47.515464913 +0000
++++ webapp/index.html (READY_7)	2026-10-19 00:37:14.050678011 +0000
+@@ -1261,6 +1261,42 @@
+ @keyframes vfPop{from{transform:scale(.4);opacity:0}to{transform:scale(1);opacity:1}}
+ @keyframes vfFall{to{transform:translateY(300px) rotate(540deg);opacity:0}}
+ @media (prefers-reduced-motion: reduce){.vf-card,.vf-okb,.vf-done .ae,.vf-conf i,.vf-shield::before,.vf-scan::before,.vf-work li.on i,.vf-go .spin{animation:none}}
++
++/* ═════════ البحث الشامل في الإدارة ═════════ */
++.ds-list{padding:4px 10px}
++.ds-acc{display:flex;align-items:center;gap:11px;width:100%;padding:11px 2px;border-bottom:1px solid var(--line);text-align:start}
++.ds-acc:last-child{border-bottom:0}
++.ds-ic{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;flex:none;font-size:17px;background:var(--surface-2)}
++.ds-ic.in_stock{background:var(--ok-soft)}.ds-ic.reserved{background:var(--warn-soft)}.ds-ic.sold{background:var(--accent-soft)}
++.ds-ic.sold_multi,.ds-ic.warn{background:var(--bad-soft)}.ds-ic.sold_norecord{background:var(--surface-3)}
++.ds-acc .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
++.ds-acc .meta b{font:600 13px/1.35 var(--f-mono);direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.ds-acc .meta small{font-size:11.5px;color:var(--fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.ds-acc mark,.ds-line mark{background:color-mix(in srgb,var(--warn) 32%,transparent);color:inherit;border-radius:3px;padding:0 1px}
++.ds-tag{display:inline-block;padding:1px 7px;border-radius:7px;font-size:10.5px;font-weight:700;margin-inline-end:5px;vertical-align:1px}
++.ds-tag.in_stock{background:var(--ok-soft);color:var(--ok)}.ds-tag.reserved{background:var(--warn-soft);color:var(--warn)}
++.ds-tag.sold{background:var(--accent-soft);color:var(--accent)}.ds-tag.sold_multi{background:var(--bad-soft);color:var(--bad)}.ds-tag.sold_norecord{background:var(--surface-3);color:var(--fg-2)}
++.ds-hint{margin-top:8px;font-size:12px;color:var(--fg-3)}
++.ds-hint button{color:var(--accent);font-weight:700}
++.ds-line{padding:14px;border-radius:16px;background:var(--surface-2);border:1px dashed var(--line-2)}
++.ds-line .l{font-size:12px;color:var(--fg-2);display:flex;justify-content:space-between;align-items:center;gap:8px}
++.ds-line .v{margin-top:6px;font:600 15px/1.5 var(--f-mono);direction:ltr;text-align:left;overflow-wrap:anywhere;user-select:all}
++.ds-parts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
++.ds-part{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:6px 6px 6px 10px;border-radius:10px;background:var(--surface);border:1px solid var(--line);font:12.5px/1.3 var(--f-mono);direction:ltr}
++.ds-part span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
++.ds-part .copy{width:26px;height:26px;flex:none}
++.ds-warn{margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--bad-soft);color:var(--bad);font-size:13px;font-weight:650;line-height:1.5}
++.ds-sale{padding:12px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
++.ds-sale + .ds-sale{margin-top:8px}
++.ds-sale .top{display:flex;align-items:center;gap:8px;justify-content:space-between}
++.ds-sale .oid{font:700 13.5px var(--f-mono);direction:ltr;color:var(--accent)}
++.ds-sale .sub{font-size:12px;color:var(--fg-3);display:flex;flex-wrap:wrap;gap:4px 10px}
++.ds-buyer{display:flex;align-items:center;gap:10px}
++.ds-buyer .meta{flex:1;min-width:0;display:flex;flex-direction:column}
++.ds-buyer .meta b{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
++.ds-buyer .meta small{font-size:11.5px;color:var(--fg-3);direction:ltr;text-align:start}
++.ds-stock{display:flex;flex-wrap:wrap;gap:6px}
++.ds-stock span{padding:5px 9px;border-radius:9px;background:var(--surface-2);font-size:12px;color:var(--fg-2)}
+ </style>
+ </head>
+ <body>
+@@ -3066,13 +3102,13 @@
+ /* ───────────────────────── admin (admins only — the server checks every request) ───────────────────────── */
+ const ADM_I18N = {
+   ar: { panel: "لوحة البوت", panelBtn: "لوحة البوت كاملة هنا", panelBtnSub: "كل أوامر البوت بأزرارها وشاشاتها — بدون ما تطلع من الموقع", home: "الرئيسية", inChatOpen: "افتحها في المحادثة", typeHere: "اكتب للبوت…", typeReply: "اكتب ردك هنا…", waitingReply: "البوت ينتظر ردك", cancelStep: "إلغاء", docCopy: "وصلتك نسخة من الملف في المحادثة كمان", download: "تحميل", stale: "هذي الشاشة تغيّرت — حدّثتها لك", inSite: "داخل الموقع", ok: "تمام", botCmdsSub: "كل قسم ينفتح هنا داخل الموقع — نفس أزرار البوت وشاشاته بالضبط.", pvPanel: "معاينة: داخل بوتك هنا تشتغل لوحة البوت الحقيقية بكل أزرارها.", pvPanelReal: "معاينة: هذي شاشات بوتك الحقيقية — مسجّلة من الكود الجديد على كتالوجك (المستخدمين والطلبات تجريبية). الضغط هنا ما يغيّر أي شيء، بس يوريك وش يطلع في بوتك.", pvDestr: "🔒 هذا الزر ينفّذ تغيير فعلي (حذف / إرسال / تأكيد / إرجاع…) فما شغّلناه في المعاينة. في بوتك يشتغل عادي من هنا.", pvNotRec: "هذي الشاشة ما انسجّلت في المعاينة — في بوتك تنفتح عادي.", pvStepDone: "📝 <b>وصل ردك.</b>\nفي بوتك هذا الرد ينفّذ الأمر مباشرة (يحفظ / يعدّل). المعاينة ما تغيّر أي بيانات.", pvTry: "💡 <b>معاينة — جرّب تكتب واحد من هذي:</b>", pvNoOrder: "❌ ما لقيت هذا الطلب في بيانات المعاينة.\n💡 جرّب واحد من طلبات المعاينة:", pvChat: "في بوتك أي رقم طلب تلصقه هنا يطلع لك كرته كاملة. جرّب واحد من هذي:", pvDoc: "تحميل الملفات يشتغل في بوتك — المعاينة تعرض اسم الملف فقط.", justNow: "الحين", minsAgo: "قبل {n} د", updated: "آخر تحديث {t}", oosS: "نفد مخزونها", lowS: "مخزون قليل", apiPendS: "طلبات API تنتظر", g_store: "المتجر", g_people: "العملاء", g_money: "الطلبات والفلوس", g_grow: "التسويق", g_sys: "الإعدادات والفريق", t_prod: "المنتجات", t_stock: "الأسعار والمخزون", t_ext: "متاجر API", t_cgpt: "ChatGPT", t_act: "التفعيلات", t_users: "العملاء", t_find: "بحث", t_gift: "شحن رصيد", t_ban: "حظر", t_vip: "VIP", t_ref: "الإحالات", t_orders: "الطلبات", t_deps: "الإيداعات", t_logs: "السجلات", t_reports: "التقارير", t_tx: "فحص معاملة", t_prot: "حماية الإيداع", t_bc: "برودكاست", t_fsub: "اشتراك إجباري", t_cms: "تخصيص البوت", t_settings: "إعدادات المتجر", t_promote: "المدراء", t_panel: "اللوحة كاملة", apFilter: "فلترة القائمة…", apMore: "خيارات", apType: "الصق رقم طلب أو اكتب للبوت…", apAsk: "البوت يحتاج ردك", apTry: "أمثلة من المعاينة:", apSend: "إرسال", apHome: "لوحة الإدارة في البوت", apEmpty: "ما فيه شاشة هنا.", apThread: "عرض كمحادثة", apPages: "عرض كصفحات", apThreadSub: "كل الرسائل بالترتيب مثل تيليجرام", apBack: "رجوع", apAgain: "مرة ثانية", apDone: "تم",
+-    tab: 'الإدارة', title: 'لوحة الإدارة', sub: 'للأدمن فقط · نفس بيانات البوت', q: 'رقم طلب، كود، آيدي أو @يوزر', find: 'بحث',
++    dsAcc: "حسابات وأكواد ({n})", dsMails: "طلبات بالإيميل ({n})", dsUsers: "مستخدمين ({n})", dsMore: "فيه نتائج أكثر — اكتب جزء أطول عشان تضيّق البحث.", ds_in_stock: "بالمخزون", ds_reserved: "محجوز الحين", ds_sold: "مباع", ds_sold_multi: "انباع أكثر من مرة", ds_sold_norecord: "مباع بدون سجل طلب", dsLine: "سطر الحساب", dsPart: "الجزء {n}", dsCopyLine: "نسخ السطر", dsState: "الحالة", dsAdded: "انضاف للمخزون", dsCopies: "نسخ بالمخزون", dsFree: "{n} ما انباعت", dsCopiesN: "{n} نسخة (كلها مباعة)", dsCopiesF: "{n} نسخة · {f} متاحة للبيع", dsSales: "سجل البيع ({n})", dsNoSale: "ما انباع لأحد للحين.", dsBuyer: "المشتري", dsPrice: "السعر", dsW_multi: "⚠️ نفس الحساب انباع لأكثر من شخص ({n}).", dsW_resold: "⚠️ انباع قبل، وموجود بالمخزون مرة ثانية — بينباع مرة ثانية لو ما شلته.", dsW_dup: "⚠️ مكرر بالمخزون ({n} نسخ).", dsOpenOrder: "تفاصيل الطلب", dsOpenUser: "ملف العميل", dsProduct: "المنتج", dsReseller: "عميل الموزّع", dsKind_api: "API (موزّع)", dsKind_ext: "مورد خارجي", dsKind_order: "شراء", dsStockItem: "نسخة بالمخزون", dsSoldMark: "مباعة", dsFreeMark: "متاحة", dsTry: "جرّب: example.com", tab: 'الإدارة', title: 'لوحة الإدارة', sub: 'للأدمن فقط · نفس بيانات البوت', q: 'إيميل، سطر حساب، رقم طلب، آيدي أو @يوزر', find: 'بحث',
+     d1: '24 ساعة', d7: '7 أيام', d30: '30 يوم', sales: 'المبيعات', orders: 'الطلبات', buyers: '{n} مشتري', deps: 'الإيداعات', depN: '{n} عملية', newU: 'مستخدمين جدد', usersN: 'من {n} مستخدم',
+     alerts: 'تنبيهات', oos: 'منتجات نفد مخزونها', low: 'مخزون قليل (3 أو أقل)', apiPend: 'طلبات API يدوية تنتظر', credits: 'إيداعات تنتظر مطابقة', allGood: 'كل شي تمام — ما فيه تنبيهات.',
+     quick: 'إدارة سريعة', products: 'المنتجات', recentOrders: 'آخر الطلبات', recentDeps: 'آخر الإيداعات', users: 'العملاء', usersSub: 'ابحث بالآيدي أو اليوزر',
+     protection: 'حماية الإيداعات', protOn: 'مفعّلة', protOff: 'معطّلة ⚠️', protQ: 'إيقاف حماية الإيداعات؟ بدونها ممكن أحد ياخذ تحويل غيره.', vip: 'نظام VIP', inBotS: 'في البوت',
+     top: 'الأكثر مبيعاً — 7 أيام', sold: '{n} بيعة', botCmds: 'كل أوامر لوحة البوت', inChat: 'المحادثة',
+-    none: 'ما لقيت طلب ولا مستخدم بهذا.', noneTip: 'جرّب رقم الطلب (LS…)، أو أي كود انباع، أو آيدي المستخدم، أو @يوزره.', usersFound: 'مستخدمين مطابقين',
++    none: 'ما لقيت شي بهذا في قاعدة البيانات.', noneTip: 'اكتب إيميل الحساب أو أي جزء من سطره (حتى لو انباع قبل)، أو إيميل العميل، أو رقم الطلب (LS…)، أو آيدي المستخدم أو @يوزره أو اسمه.', usersFound: 'مستخدمين مطابقين',
+     order: 'طلب', orderId: 'رقم الطلب', status: 'الحالة', product: 'المنتج', qty: 'الكمية', total: 'المبلغ', unit: 'القطعة {p}', date: 'التاريخ', via: 'المصدر', email: 'الإيميل',
+     foundBy: 'لقيته من الكود', resellerBuyer: 'عميل الموزع', supplier: 'رقم طلب المورد', buyer: 'المشتري', openUser: 'ملف العميل', message: 'مراسلة', inBot: 'في البوت', codes: 'الأكواد ({n})', copyAll: 'نسخ الكل', moreCodes: '+{n} كود ثاني',
+     balance: 'الرصيد', spent: 'المصروف', deposits: 'الإيداعات', ordersN: 'الطلبات', joined: 'انضم {d}', banned: 'محظور', admin: 'أدمن', owner: 'المالك',
+@@ -3091,13 +3127,13 @@
+     viaL: { bot: 'محادثة البوت', webapp: 'الموقع (Mini App)', api: 'API' }
+   },
+   en: { panel: "Bot panel", panelBtn: "Full bot panel here", panelBtnSub: "Every bot command with its buttons and screens — without leaving the store", home: "Home", inChatOpen: "Open in the chat", typeHere: "Message the bot…", typeReply: "Type your reply…", waitingReply: "The bot is waiting for your reply", cancelStep: "Cancel", docCopy: "A copy of the file was also sent to your chat", download: "Download", stale: "This screen changed — refreshed it for you", inSite: "In the store", ok: "OK", botCmdsSub: "Each section opens right here in the store — the exact same bot buttons and screens.", pvPanel: "Preview: inside your bot the real bot panel runs here with all its buttons.", pvPanelReal: "Preview: these are your bot's real screens — recorded from the new code on your catalog (users and orders are samples). Pressing here changes nothing; it shows what your bot shows.", pvDestr: "🔒 This button makes a real change (delete / send / confirm / refund…), so it is not run in the preview. In your bot it works from here.", pvNotRec: "This screen was not recorded in the preview — in your bot it opens normally.", pvStepDone: "📝 <b>Got your reply.</b>\nIn your bot this reply runs the command right away (saves / edits). The preview changes no data.", pvTry: "💡 <b>Preview — try typing one of these:</b>", pvNoOrder: "❌ This order is not in the preview data.\n💡 Try one of the preview orders:", pvChat: "In your bot, any order ID you paste here shows its full card. Try one of these:", pvDoc: "File downloads work in your bot — the preview only shows the file name.", justNow: "just now", minsAgo: "{n} min ago", updated: "Updated {t}", oosS: "out of stock", lowS: "low stock", apiPendS: "API orders waiting", g_store: "Store", g_people: "Customers", g_money: "Orders & money", g_grow: "Marketing", g_sys: "Settings & team", t_prod: "Products", t_stock: "Prices & stock", t_ext: "API stores", t_cgpt: "ChatGPT", t_act: "Activations", t_users: "Customers", t_find: "Search", t_gift: "Add balance", t_ban: "Ban", t_vip: "VIP", t_ref: "Referrals", t_orders: "Orders", t_deps: "Deposits", t_logs: "Logs", t_reports: "Reports", t_tx: "Check payment", t_prot: "Deposit guard", t_bc: "Broadcast", t_fsub: "Forced join", t_cms: "Customize bot", t_settings: "Store settings", t_promote: "Admins", t_panel: "Full panel", apFilter: "Filter the list…", apMore: "Options", apType: "Paste an order ID or message the bot…", apAsk: "The bot needs your reply", apTry: "Preview examples:", apSend: "Send", apHome: "Bot admin panel", apEmpty: "Nothing to show here.", apThread: "Show as chat", apPages: "Show as pages", apThreadSub: "Every message in order, like Telegram", apBack: "Back", apAgain: "Do it again", apDone: "Done",
+-    tab: 'Admin', title: 'Admin panel', sub: 'Admins only · same data as the bot', q: 'Order ID, code, user ID or @username', find: 'Search',
++    dsAcc: "Accounts & codes ({n})", dsMails: "Orders by email ({n})", dsUsers: "Users ({n})", dsMore: "More results — type a longer part to narrow it down.", ds_in_stock: "In stock", ds_reserved: "Reserved now", ds_sold: "Sold", ds_sold_multi: "Sold more than once", ds_sold_norecord: "Sold, no order record", dsLine: "Account line", dsPart: "Part {n}", dsCopyLine: "Copy line", dsState: "Status", dsAdded: "Added to stock", dsCopies: "Copies in stock", dsFree: "{n} unsold", dsCopiesN: "{n} (all sold)", dsCopiesF: "{n} · {f} available to sell", dsSales: "Sales history ({n})", dsNoSale: "Not sold to anyone yet.", dsBuyer: "Buyer", dsPrice: "Price", dsW_multi: "⚠️ This account was sold to more than one person ({n}).", dsW_resold: "⚠️ Sold before and back in stock — it will be sold again unless you remove it.", dsW_dup: "⚠️ Duplicated in stock ({n} copies).", dsOpenOrder: "Order details", dsOpenUser: "Customer profile", dsProduct: "Product", dsReseller: "Reseller customer", dsKind_api: "API (reseller)", dsKind_ext: "External supplier", dsKind_order: "Purchase", dsStockItem: "Stock copy", dsSoldMark: "sold", dsFreeMark: "available", dsTry: "Try: example.com", tab: 'Admin', title: 'Admin panel', sub: 'Admins only · same data as the bot', q: 'Email, account line, order ID, user ID or @username', find: 'Search',
+     d1: '24 h', d7: '7 days', d30: '30 days', sales: 'Sales', orders: 'Orders', buyers: '{n} buyers', deps: 'Top-ups', depN: '{n} payments', newU: 'New users', usersN: 'of {n} users',
+     alerts: 'Alerts', oos: 'Products out of stock', low: 'Low stock (3 or less)', apiPend: 'Manual API orders waiting', credits: 'Deposits waiting for a match', allGood: 'All good — no alerts.',
+     quick: 'Quick actions', products: 'Products', recentOrders: 'Latest orders', recentDeps: 'Latest top-ups', users: 'Users', usersSub: 'Search by ID or username',
+     protection: 'Deposit protection', protOn: 'On', protOff: 'Off ⚠️', protQ: 'Turn off deposit protection? Without it someone could claim another person’s transfer.', vip: 'VIP tiers', inBotS: 'In the bot',
+     top: 'Best sellers — 7 days', sold: '{n} sold', botCmds: 'Every bot admin command', inChat: 'Chat',
+-    none: 'No order or user matches that.', noneTip: 'Try an order ID (LS…), any sold code, a user ID or @username.', usersFound: 'Matching users',
++    none: 'Nothing in the database matches that.', noneTip: 'Type an account email or any part of its line (even if it was sold before), a customer email, an order ID (LS…), a user ID, @username or name.', usersFound: 'Matching users',
+     order: 'Order', orderId: 'Order ID', status: 'Status', product: 'Product', qty: 'Quantity', total: 'Amount', unit: '{p} each', date: 'Date', via: 'Source', email: 'Email',
+     foundBy: 'Found by code', resellerBuyer: 'Reseller’s customer', supplier: 'Supplier order', buyer: 'Buyer', openUser: 'User file', message: 'Message', inBot: 'In the bot', codes: 'Codes ({n})', copyAll: 'Copy all', moreCodes: '+{n} more codes',
+     balance: 'Balance', spent: 'Spent', deposits: 'Top-ups', ordersN: 'Orders', joined: 'Joined {d}', banned: 'Banned', admin: 'Admin', owner: 'Owner',
+@@ -3187,6 +3223,7 @@
+       <button class="icon-btn" data-act="adm-reload" aria-label="${esc(adt('refresh'))}">${ic.refresh}</button></header>
+     <div class="adm-search"><label class="search"><input id="admq" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" dir="auto" placeholder="${esc(adt('q'))}" value="${esc(S.admQ || '')}" data-in="admq"></label>
+       <button class="btn primary adm-go" data-act="adm-search" aria-label="${esc(adt('find'))}">${ic.search}</button></div>
++    ${DEMO && !S.admRes ? `<div class="ds-hint"><button data-act="adm-ds-try" data-v="example.com">${esc(adt('dsTry'))}</button></div>` : ''}
+     <div class="adm-res" id="admres">${admResHtml()}</div>
+     <section class="ad-led">
+       <div class="ad-seg" role="tablist">${['d1', 'd7', 'd30'].map(k => `<button class="${per === k ? 'on' : ''}" role="tab" aria-selected="${per === k}" data-act="adm-per" data-v="${k}">${esc(adt(k))}</button>`).join('')}</div>
+@@ -3207,9 +3244,72 @@
+   if (!R) return '';
+   if (R.loading) return `<div class="skel" style="height:56px;border-radius:14px"></div>`;
+   if (R.err) return `<div class="adm-none">${esc(R.err)}</div>`;
++  if (R.kind === 'deep') return dsResHtml(R);
+   if (R.kind === 'users') return `<div class="lbl">${esc(adt('usersFound'))}</div><div class="api-card adm-list">${R.users.map(u => `<button class="adm-row" data-act="adm-user" data-v="${u.id}"><span class="adm-av sm">${esc(String(u.name || '?')[0].toUpperCase())}</span><span class="meta"><b dir="auto">${esc(u.name)}</b><small dir="ltr">${u.username ? '@' + esc(u.username) + ' · ' : ''}${u.id}</small></span><span class="amt num">${usd(u.balance)}</span></button>`).join('')}</div>`;
+   return `<div class="adm-none"><b>${esc(adt('none'))}</b><span>${esc(adt('noneTip'))}</span></div>`;
+ }
++
++/* ───────── البحث الشامل: حسابات/أكواد + إيميلات + مستخدمين ───────── */
++const DS_IC = { in_stock: '🟢', reserved: '⏳', sold: '✅', sold_multi: '⚠️', sold_norecord: '❔' };
++function dsHl(text, q) {
++  const t0 = String(text || ''), i = q ? t0.toLowerCase().indexOf(String(q).toLowerCase()) : -1;
++  return i < 0 ? esc(t0) : esc(t0.slice(0, i)) + '<mark>' + esc(t0.slice(i, i + q.length)) + '</mark>' + esc(t0.slice(i + q.length));
++}
++function dsWho(u) { return u ? (u.name || String(u.id)) + (u.username ? ' @' + u.username : '') : ''; }
++function dsResHtml(R) {
++  const A = R.accounts || [], O = R.orders || [], U = R.users || [];
++  if (!A.length && !O.length && !U.length) return `<div class="adm-none"><b>${esc(adt('none'))}</b><span>${esc(adt('noneTip'))}</span></div>`;
++  let h = '';
++  if (A.length) h += `<div class="lbl">${esc(adt('dsAcc', { n: A.length + (R.more ? '+' : '') }))}</div><div class="api-card ds-list">${A.map((a, i) => {
++    const last = (a.sales || [])[a.sales.length - 1], cls = a.warn && a.warn.length ? 'warn' : a.state;
++    const sub = [`<span class="ds-tag ${a.state}">${esc(adt('ds_' + a.state))}</span>${esc(admName(a.product || {}))}`];
++    if (last && last.user) sub.push(esc(dsWho(last.user)));
++    if (last && last.ts) sub.push(esc(fmtDate(last.ts))); else if (a.added) sub.push(esc(fmtDate(a.added)));
++    return `<button class="ds-acc" data-act="adm-ds-acc" data-v="${i}"><span class="ds-ic ${cls}">${a.warn && a.warn.length ? '⚠️' : DS_IC[a.state] || '🔑'}</span>
++      <span class="meta"><b>${dsHl(a.line, R.q)}</b><small>${sub.join(' · ')}</small></span>${ic.chev}</button>`;
++  }).join('')}</div>`;
++  if (O.length) h += `<div class="lbl">${esc(adt('dsMails', { n: O.length }))}</div><div class="api-card adm-list">${O.map(o => `<button class="adm-row" data-act="adm-order" data-v="${esc(o.order_id)}"><span class="meta"><b dir="ltr" style="text-align:start">${dsHl(o.email || o.buyer_info || o.order_id, R.q)}</b><small>${esc(admName(o.product || {}))} · <span class="mono" dir="ltr">${esc(o.order_id)}</span>${o.user ? ' · ' + esc(dsWho(o.user)) : ''}${o.ts ? ' · ' + esc(fmtDate(o.ts)) : ''}</small></span><span class="amt num">${usd(o.price || 0)}</span></button>`).join('')}</div>`;
++  if (U.length) h += `<div class="lbl">${esc(adt('dsUsers', { n: U.length }))}</div><div class="api-card adm-list">${U.map(u => `<button class="adm-row" data-act="adm-user" data-v="${u.id}"><span class="adm-av sm">${esc(String(u.name || '?')[0].toUpperCase())}</span><span class="meta"><b dir="auto">${dsHl(u.name, R.q)}${u.banned ? ` <span class="adm-badge bad">${esc(adt('banned'))}</span>` : ''}</b><small dir="ltr">${u.username ? '@' + dsHl(u.username, R.q.replace(/^@/, '')) + ' · ' : ''}${u.id}</small></span><span class="amt num">${usd(u.balance)}</span></button>`).join('')}</div>`;
++  if (R.more) h += `<p class="api-muted">${esc(adt('dsMore'))}</p>`;
++  return h;
++}
++function dsParts(line) {
++  const seps = [':', '|', ';', ' ', '----', '---', ','];
++  for (const sp of seps) { const parts = line.split(sp).map(x => x.trim()).filter(Boolean); if (parts.length >= 2 && parts.length <= 6) return parts; }
++  return [];
++}
++function openDsAccount(a, q) {
++  const kv = (k, v, raw) => v == null || v === '' ? '' : `<div class="kv"><span>${esc(k)}</span><b ${raw ? '' : 'dir="auto"'}>${raw ? v : esc(v)}</b></div>`;
++  const parts = dsParts(a.line), st = a.stock || [], sales = a.sales || [];
++  const warn = (a.warn || []).map(w => `<div class="ds-warn">${esc(adt('dsW_' + w, { n: w === 'dup' ? st.length : sales.length }))}</div>`).join('');
++  const saleH = x => {
++    const u = x.user;
++    return `<div class="ds-sale"><div class="top"><button class="oid" data-act="adm-order" data-v="${esc(x.order_id)}">${esc(x.order_id)}</button>
++        <span class="status st-info">${esc(adt('dsKind_' + (x.kind || 'order')))}</span><b class="num">${usd(x.price || 0)}</b></div>
++      <div class="sub">${x.ts ? `<span>📅 ${esc(fmtDate(x.ts))}</span>` : ''}${x.via ? `<span>${esc(admVia(x.via))}</span>` : ''}${x.buyer_info ? `<span>🏷 ${esc(adt('dsReseller'))}: ${esc(x.buyer_info)}</span>` : ''}${x.email ? `<span dir="ltr">✉️ ${esc(x.email)}</span>` : ''}${x.supplier_order ? `<span class="mono" dir="ltr">#${esc(x.supplier_order)}</span>` : ''}</div>
++      ${u ? `<div class="ds-buyer"><span class="adm-av sm">${esc(String(u.name || '?')[0].toUpperCase())}</span><span class="meta"><b dir="auto">${esc(u.name || String(u.id))}${u.banned ? ` <span class="adm-badge bad">${esc(adt('banned'))}</span>` : ''}</b><small>${u.username ? '@' + esc(u.username) + ' · ' : ''}${u.id}</small></span>
++        <button class="copy" data-act="copy" data-v="${u.id}" aria-label="copy">${ic.copy}</button>${u.missing ? '' : `<button class="btn ghost sm" data-act="adm-user" data-v="${u.id}">${esc(adt('dsOpenUser'))}</button>`}</div>` : ''}</div>`;
++  };
++  const body = `
++    <div class="ds-line"><div class="l"><span>${esc(adt('dsLine'))}</span><button class="linkish" style="margin:0" data-act="copy" data-v="${esc(a.line)}">${esc(adt('dsCopyLine'))}</button></div>
++      <div class="v">${dsHl(a.line, q)}</div>
++      ${parts.length ? `<div class="ds-parts">${parts.map(x => `<span class="ds-part"><span>${esc(x)}</span><button class="copy" data-act="copy" data-v="${esc(x)}" aria-label="copy">${ic.copy}</button></span>`).join('')}</div>` : ''}
++    </div>
++    ${warn}
++    <div class="summary" style="margin-top:12px">
++      ${kv(adt('dsState'), `<span class="ds-tag ${a.state}">${esc(adt('ds_' + a.state))}</span>`, true)}
++      ${kv(adt('dsProduct'), admName(a.product || {}))}
++      ${a.added ? kv(adt('dsAdded'), fmtDate(a.added)) : ''}
++      ${st.length ? kv(adt('dsCopies'), adt(a.in_stock ? 'dsCopiesF' : 'dsCopiesN', { n: st.length, f: a.in_stock }), false) : ''}
++    </div>
++    ${(a.product && a.product.id && !String(a.product.id).startsWith('ext_')) ? `<button class="btn ghost sm" style="margin-top:10px" data-act="adm-prod" data-v="${esc(a.product.id)}">📦 ${esc(admName(a.product))} ↗</button>` : ''}
++    <div class="lbl">${esc(adt('dsSales', { n: sales.length }))}</div>
++    ${sales.length ? sales.slice().reverse().map(saleH).join('') : `<p class="api-muted">${esc(adt('dsNoSale'))}</p>`}
++    ${st.length > 1 ? `<div class="lbl">${esc(adt('dsCopies'))}</div><div class="ds-stock">${st.map(x => `<span>${x.sold ? (x.reserved ? '⏳ ' + esc(adt('ds_reserved')) : '✅ ' + esc(adt('dsSoldMark'))) : '🟢 ' + esc(adt('dsFreeMark'))}${x.added ? ' · ' + esc(fmtDate(x.added)) : ''}</span>`).join('')}</div>` : ''}
++    ${DEMO ? pvNote() : ''}`;
++  openSheet({ title: adt('ds_' + a.state) + ' · ' + admName(a.product || {}), body });
++}
++
+ function renderAdmRes() { const box = $('#admres'); if (box) { box.innerHTML = admResHtml(); hydrate(box); } }
+ async function admSearch() {
+   const inp = $('#admq'); const q = String((inp && inp.value) || S.admQ || '').trim();
+@@ -3221,7 +3321,9 @@
+   if (!r.ok) { S.admRes = { err: errText(r) }; renderAdmRes(); return; }
+   if (r.kind === 'order') { S.admRes = null; renderAdmRes(); openAdmOrder(r.order); }
+   else if (r.kind === 'user') { S.admRes = null; renderAdmRes(); openAdmUser(r.user.id); }
+-  else { S.admRes = r; renderAdmRes(); }
++  else { S.admRes = r; renderAdmRes(); if (r.kind === 'deep' && (r.accounts || []).length === 1 && !(r.orders || []).length && !(r.users || []).length) openDsAccount(r.accounts[0], r.q); }
++  hap(r.kind === 'none' || (r.kind === 'deep' && !(r.accounts || []).length && !(r.orders || []).length && !(r.users || []).length) ? 'warning' : 'select');
++  return;
+   hap(r.kind === 'none' ? 'warning' : 'select');
+ }
+ 
+@@ -3869,6 +3971,8 @@
+ async function admAction(act, el) {
+   if (act === 'adm-reload') { S.adm = null; renderView(); return true; }
+   if (act === 'adm-search') { admSearch(); return true; }
++  if (act === 'adm-ds-acc') { const R = S.admRes; if (R && R.accounts) openDsAccount(R.accounts[+el.dataset.v], R.q); return true; }
++  if (act === 'adm-ds-try') { S.admQ = el.dataset.v; const inp = $('#admq'); if (inp) inp.value = el.dataset.v; admSearch(); return true; }
+   if (act === 'adm-per') { S.admP = el.dataset.v; hap('select'); renderView(); return true; }
+   if (act === 'adm-focus') { const i = $('#admq'); if (i) { window.scrollTo({ top: 0, behavior: 'smooth' }); setTimeout(() => i.focus(), 250); } return true; }
+   if (act === 'adm-prods') { openAdmProducts(el.dataset.v || 'all'); return true; }
+@@ -4195,7 +4299,20 @@
+     }
+     const methods = ['Binance Pay (Auto Note)', 'USDT (BEP20) On-chain', 'Telegram Stars ⭐️', 'Bybit (UID Transfer)', 'Toncoin (TON) Auto', 'Manual Gift (Admin)'];
+     const deps = Array.from({ length: 24 }, (_, i) => ({ amount: [10, 25, 5, 50, 15, 2][i % 6], method: methods[i % 6], tx: 'tx' + (900000 + i * 7919), ts: now - i * 7200 - 300, gift: i % 6 === 5, user: users[i % users.length] }));
+-    this.adm = { users, orders, deps, prot: true, vipCls: {}, hidden: new Set() };
++    const P0 = sell[0] || { id: '1', name_ar: 'Netflix', name_en: 'Netflix', price: 3 }, P1 = sell[1] || P0, P2 = sell[2] || P0;
++    const pr = p => ({ id: p.id, name: p.name_ar, name_en: p.name_en });
++    const saleOf = (o) => ({ order_id: o.order_id, ts: o.ts, price: o.unit, via: o.via, kind: 'order', user: { id: o.user.id, name: o.user.name, username: o.user.username } });
++    const accts = [
++      { line: 'lara.demo1@example.com:Sunset#4821', product: pr(P0), stock: [{ sold: true, reserved: false, added: now - 86400 * 9 }], sales: [saleOf(orders[2])] },
++      { line: 'lara.demo2@example.com:River!7730', product: pr(P0), stock: [{ sold: false, reserved: false, added: now - 86400 * 2 }], sales: [] },
++      { line: 'lara.demo3@example.com:Maple@1904', product: pr(P1), stock: [{ sold: true, reserved: false, added: now - 86400 * 20 }, { sold: false, reserved: false, added: now - 86400 }], sales: [saleOf(orders[5])] },
++      { line: 'lara.demo4@example.com:Cloud$5566', product: pr(P2), stock: [{ sold: true, reserved: false, added: now - 86400 * 30 }, { sold: true, reserved: false, added: now - 86400 * 25 }], sales: [saleOf(orders[11]), saleOf(orders[7])] },
++      { line: 'lara.demo5@example.com:Stone%2210', product: pr(P1), stock: [{ sold: true, reserved: true, added: now - 86400 * 4 }], sales: [] }];
++    accts.forEach(a => { const free = a.stock.filter(x => !x.sold).length, n = a.sales.length;
++      a.in_stock = free; a.state = n > 1 ? 'sold_multi' : n ? 'sold' : a.stock.some(x => x.reserved) ? 'reserved' : free ? 'in_stock' : 'sold_norecord';
++      a.warn = [n > 1 ? 'multi' : '', n && free ? 'resold' : '', a.stock.length > 1 ? 'dup' : ''].filter(Boolean);
++      a.added = Math.min(...a.stock.map(x => x.added)); });
++    this.adm = { users, orders, deps, accts, prot: true, vipCls: {}, hidden: new Set() };
+     return this.adm;
+   },
+   vcReplay(b, PN) {
+@@ -4276,6 +4393,10 @@
+       if (/^LS[A-Z0-9]{8}$/i.test(q.replace(/\s/g, ''))) return { ok: true, kind: 'order', order: Object.assign({}, D.orders[0], { order_id: q.replace(/\s/g, '').toUpperCase() }) };
+       const u = D.users.find(x => String(x.id) === q || (x.username && '@' + x.username === q.toLowerCase()) || x.username === q.toLowerCase());
+       if (u) return { ok: true, kind: 'user', user: u };
++      if (q.length >= 3) {
++        const ql = q.toLowerCase(), acc = D.accts.filter(a => a.line.toLowerCase().includes(ql)), us = D.users.filter(x => (x.name + ' ' + x.username).toLowerCase().includes(ql.replace('@', '')));
++        if (acc.length || us.length) return { ok: true, kind: 'deep', q, accounts: acc, orders: [], users: us.map(x => ({ id: x.id, name: x.name, username: x.username, balance: x.balance, banned: x.banned })), more: false };
++      }
+       const part = D.users.filter(x => (x.name + ' ' + x.username).toLowerCase().includes(q.toLowerCase().replace('@', '')));
+       if (part.length && q.length >= 2) return { ok: true, kind: 'users', users: part.map(x => ({ id: x.id, name: x.name, username: x.username, balance: x.balance })) };
+       return { ok: true, kind: 'none' };

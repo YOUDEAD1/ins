@@ -1,0 +1,353 @@
+--- before/bot.py
++++ after/bot.py
+@@ -5832,6 +5832,26 @@
+         return InlineKeyboardButton(clean_label, callback_data="copy_fb")
+ 
+ 
++def _deposit_copy_button(uid, key, value):
++    """Keep payment-copy labels distinct while sharing the configured copy emoji."""
++    source = get_text(uid, 'dep_btn_copy_amount')
++    source_text, emoji_id = _parse_btn_label(source)
++    label, _unused = _parse_btn_label(get_text(uid, key))
++
++    def without_symbol_prefix(text):
++        first, space, rest = text.partition(' ')
++        return rest.strip() if space and first and not any(ch.isalnum() for ch in first) else text
++
++    label = without_symbol_prefix(label)
++    if emoji_id:
++        label = f'<tg-emoji emoji-id="{emoji_id}">📋</tg-emoji> {html.escape(label)}'
++    else:
++        first = source_text.partition(' ')[0]
++        symbol = first if first and not any(ch.isalnum() for ch in first) else ''
++        label = f'{symbol} {label}'.strip()
++    return _copy_button(label, value)
++
++
+ def _make_btn(label, callback_data=None, url=None, style=None):
+     """
+     drop-in replacement لـ InlineKeyboardButton ينظّف HTML تلقائياً
+@@ -5990,7 +6010,7 @@
+         'dep_btn_copy_amount': "📋 نسخ المبلغ",
+         'bybit_btn_copy_uid': "📋 نسخ الـ UID",
+         'dep_btn_copy_wallet': "📋 نسخ العنوان",
+-        'dep_btn_copy_id': "📋 نسخ الآيدي",
++        'dep_btn_copy_id': "📋 نسخ آيدي Telegram",
+         'dep_btn_copy_binance_id': "📋 نسخ Binance Pay ID",
+         'dep_btn_check': "🔍 فحص الدفع",
+         'dep_btn_cancel': "❌ إلغاء",
+@@ -6177,7 +6197,7 @@
+         'dep_btn_copy_amount': "📋 Copy Amount",
+         'bybit_btn_copy_uid': "📋 Copy UID",
+         'dep_btn_copy_wallet': "📋 Copy Address",
+-        'dep_btn_copy_id': "📋 Copy ID",
++        'dep_btn_copy_id': "📋 Copy Telegram ID",
+         'dep_btn_copy_binance_id': "📋 Copy Binance Pay ID",
+         'dep_btn_check': "🔍 Check Payment",
+         'dep_btn_cancel': "❌ Cancel",
+@@ -12160,6 +12180,13 @@
+         bot.register_next_step_handler(msg, ask_binance_deposit_amount)
+         return
+ 
++    wallet = str(get_setting('wallet_address') or '').strip()
++    if not wallet or wallet == 'Not Set':
++        markup = InlineKeyboardMarkup()
++        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data='cancel_deposit'))
++        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML', reply_markup=markup)
++        return
++
+     # نولّد مبلغ فريد بـ 4 خانات عشرية = 9000 احتمال
+     unique_amount = generate_unique_amount_for_user(base_amount, uid, 'BINANCE')
+ 
+@@ -12169,23 +12196,17 @@
+         bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
+         return
+ 
+-    wallet = get_setting('wallet_address')
+ 
+     # نص قابل للتعديل من إعدادات الأدمن (key: dep_msg_binance)
+     msg_text = get_text(uid, 'dep_msg_binance', f"{unique_amount:.4f}", wallet, uid)
+ 
+     cancel_markup = InlineKeyboardMarkup(row_width=2)
+-    # صف أزرار النسخ
++    # المبلغ وBinance Pay ID معاً؛ آيدي Telegram يبقى للملاحظة فقط.
+     cancel_markup.add(
+-        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.4f}")
++        _deposit_copy_button(uid, 'dep_btn_copy_amount', f"{unique_amount:.4f}"),
++        _deposit_copy_button(uid, 'dep_btn_copy_binance_id', wallet)
+     )
+-    # زر نسخ Binance Pay ID حق المتجر (اللي يحوّل له العميل)
+-    if wallet and str(wallet) != 'Not Set':
+-        cancel_markup.add(_copy_button(get_text(uid, 'dep_btn_copy_binance_id'), str(wallet)))
+-    # زر نسخ الآيدي (مهم — Binance يحتاجه في الـ Notes)
+-    cancel_markup.add(
+-        _copy_button(get_text(uid, 'dep_btn_copy_id'), str(uid))
+-    )
++    cancel_markup.add(_deposit_copy_button(uid, 'dep_btn_copy_id', str(uid)))
+     cancel_markup.add(_make_btn(
+         get_text(uid, 'dep_btn_check'),
+         callback_data=f"binance_check_{uid}"
+@@ -12197,6 +12218,7 @@
+     
+     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
+     bot.clear_step_handler_by_chat_id(chat_id=uid)
++
+ 
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("binance_check_"))
+@@ -16369,11 +16391,6 @@
+     # نولّد المبلغ الفريد
+     unique_amount = generate_unique_amount_for_user(base_amount, uid, coin)
+     
+-    # نسجّل في DB
+-    pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
+-    if not pending:
+-        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode="HTML")
+-        return
+     
+     # نجلب عنوان المحفظة
+     if coin == "USDT": db_key = "usdt_address"
+@@ -16389,25 +16406,35 @@
+         'LTC': 'Litecoin (LTC)'
+     }.get(coin, coin)
+     
+-    # نحسب المبلغ بعملة الكريبتو
+-    crypto_amount_value = ""
+-    coin_short = ""
+-    try:
+-        if coin == 'LTC':
+-            ltc_price = get_ltc_price_usd()
+-            crypto_amount = unique_amount / ltc_price
+-            crypto_amount_value = f"{crypto_amount:.8f}"
+-            coin_short = "LTC"
+-        elif coin == 'TON':
+-            ton_price = get_ton_price_usd()
+-            crypto_amount = unique_amount / ton_price
+-            crypto_amount_value = f"{crypto_amount:.6f}"
+-            coin_short = "TON"
+-        elif coin in ['USDT', 'USDT_BEP20']:
+-            crypto_amount_value = f"{unique_amount:.4f}"
+-            coin_short = "USDT"
+-    except Exception: pass
+-    
++    # زر المبلغ ينسخ كمية العملة الفعلية، والدولار يبقى مرجعاً في النص.
++    crypto_amount_value = ''
++    coin_short = {'USDT': 'USDT', 'USDT_BEP20': 'USDT', 'TON': 'TON', 'LTC': 'LTC'}.get(coin, coin)
++    try:
++        if coin in ('LTC', 'TON'):
++            price = float(get_ltc_price_usd() if coin == 'LTC' else get_ton_price_usd())
++            if not __import__('math').isfinite(price) or price <= 0:
++                raise ValueError('Unavailable exchange rate')
++            crypto_amount = unique_amount / price
++            crypto_amount_value = f"{crypto_amount:.8f}" if coin == 'LTC' else f"{crypto_amount:.6f}"
++        else:
++            crypto_amount_value = f"{unique_amount:.6f}"
++        if not __import__('math').isfinite(float(crypto_amount_value)) or float(crypto_amount_value) <= 0:
++            raise ValueError('Invalid payment amount')
++    except Exception:
++        markup = InlineKeyboardMarkup()
++        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data='cancel_deposit'))
++        msg = bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML', reply_markup=markup)
++        bot.register_next_step_handler(msg, ask_deposit_amount, coin)
++        return
++
++    pending = register_pending_deposit(uid, base_amount, unique_amount, coin)
++    if not pending:
++        bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML')
++        return
++    # Opening the same pending deposit in the website keeps this exact quote.
++    db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid}, {'$set': {
++        'wa_pay_amount': crypto_amount_value, 'wa_pay_unit': coin_short, 'wa_address': str(wallet)}})
++
+     # رسالة التعليمات
+     coin_emoji = {'USDT': '🟢', 'USDT_BEP20': '🟡', 'TON': '💎', 'LTC': '🔵'}.get(coin, '💰')
+ 
+@@ -16420,23 +16447,19 @@
+     )
+ 
+     cancel_markup = InlineKeyboardMarkup(row_width=2)
+-    # صف أزرار النسخ — المبلغ + العنوان
++    # زر مبلغ واحد بالعملة المطلوبة، وزر مستقل لنسخ عنوان المحفظة.
+     cancel_markup.add(
+-        _copy_button(get_text(uid, 'dep_btn_copy_amount'), f"{unique_amount:.6f}"),
+-        _copy_button(get_text(uid, 'dep_btn_copy_wallet'), wallet)
++        _deposit_copy_button(uid, 'dep_btn_copy_amount', crypto_amount_value),
++        _deposit_copy_button(uid, 'dep_btn_copy_wallet', wallet)
+     )
+-    # LTC/TON: زر ثاني لنسخ المبلغ بالعملة نفسها. USDT ما يحتاج — المبلغ هو نفسه (كان يطلع زرين لنفس المبلغ)
+-    if crypto_amount_value and coin not in ('USDT', 'USDT_BEP20'):
+-        coin_short = {'USDT': 'USDT', 'USDT_BEP20': 'USDT', 'TON': 'TON', 'LTC': 'LTC'}.get(coin, '')
+-        cancel_markup.add(
+-            _copy_button(f"📋 {crypto_amount_value} {coin_short}", crypto_amount_value)
+-        )
+     cancel_markup.add(_make_btn(
+         get_text(uid, 'dep_btn_cancel'),
+         callback_data="cancel_deposit"
+     ))
+     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
+     PENDING_DEPOSIT_USERS[uid] = coin
++
++
+ 
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("dep_crypto_"))
+@@ -31075,7 +31098,7 @@
+                 elif coin == 'LTC':
+                     pay = f"{unique / float(get_ltc_price_usd()):.8f}"
+                 else:
+-                    pay = f"{unique:.4f}"
++                    pay = f"{unique:.6f}"
+             except Exception:
+                 pay = f"{unique:.4f}"
+     created = int(rec.get('created_at') or time.time())
+@@ -31085,6 +31108,7 @@
+             'address': str(address or ''), 'address_label': label or coin, 'note': note,
+             'created_at': created, 'display_until': created + 30 * 60,
+             'expires_at': int(rec.get('expires_at') or created + 7200)}
++
+ 
+ 
+ # ─────────────────────────── نقاط الواجهة (POST) ───────────────────────────
+@@ -31541,7 +31565,7 @@
+         elif coin == 'LTC':
+             pay_amount, unit = f"{unique / price:.8f}", 'LTC'
+         else:
+-            pay_amount, unit = f"{unique:.4f}", 'USDT'
++            pay_amount, unit = f"{unique:.6f}", 'USDT'
+ 
+     pending = register_pending_deposit(uid, amount, unique, coin)
+     if not pending:
+@@ -31564,6 +31588,7 @@
+         pass
+     return 200, {'ok': True, 'kind': 'transfer', 'pending': _wa_pending_view(uid, pending),
+                  'warn_fee': 'bep20' if (coin in ('USDT_BEP20', 'BINANCE')) else 'general'}
++
+ 
+ 
+ def _wa_deposit_status(identity, body):
+--- before/verification/test_deposit_buttons.py
++++ after/verification/test_deposit_buttons.py
+@@ -0,0 +1,123 @@
++"""Payment copy controls; offline Telegram and in-memory MongoDB only."""
++import pytest
++from harness import MESSAGES
++from test_integration import mod, isolate, server, request
++
++
++def message(mod,uid=1001):
++    return mod.types.Message.de_json({'message_id':9,'date':1,'chat':{'id':uid,'type':'private'},
++        'from':{'id':uid,'is_bot':False,'first_name':'Test'},'text':'10'})
++
++
++def controls():
++    return [(text,kw['reply_markup'].to_dict()['inline_keyboard'])
++        for cid,text,kw in MESSAGES if kw.get('reply_markup')]
++
++
++def copies(rows):
++    return [b for row in rows for b in row if 'copy_text' in b]
++
++
++@pytest.mark.parametrize('uid',[1001,1002])
++def test_binance_amount_and_pay_id_share_first_row_with_correct_values(mod,uid):
++    mod.ask_binance_deposit_amount(message(mod,uid))
++    text,rows=controls()[-1]
++    pending=mod.db.pending_deposits.find_one({'user_id':uid,'coin':'BINANCE'})
++    assert [b['copy_text']['text'] for b in rows[0]]==[f"{pending['unique_amount_usd']:.4f}",'12345678']
++    assert 'Binance Pay ID' in rows[0][1]['text']
++    assert all(b['text'].startswith('📋 ') for b in rows[0])
++    # Telegram's numeric ID remains a separate copy control for the transfer note.
++    assert rows[1][0]['copy_text']['text']==str(uid) and 'Telegram' in rows[1][0]['text']
++    assert any(b.get('callback_data')==f'binance_check_{uid}' for row in rows for b in row)
++    assert any(b.get('callback_data')=='cancel_deposit' for row in rows for b in row)
++
++
++@pytest.mark.parametrize('uid',[1001,1002])
++def test_binance_copy_controls_share_custom_premium_emoji(mod,uid):
++    lang='en' if uid==1001 else 'ar'
++    mod.db.custom_texts.insert_many([
++        {'lang':lang,'key':'dep_btn_copy_amount','value':'<tg-emoji emoji-id="5271604874419647061">📋</tg-emoji> Amount'},
++        {'lang':lang,'key':'dep_btn_copy_binance_id','value':'<tg-emoji emoji-id="5271619747891388291">💰</tg-emoji> Binance Pay ID'}])
++    mod.ask_binance_deposit_amount(message(mod,uid))
++    buttons=copies(controls()[-1][1])
++    assert len(buttons)==3
++    assert all(b['icon_custom_emoji_id']=='5271604874419647061' for b in buttons)
++    assert all('<' not in b['text'] and '📋' not in b['text'] and '💰' not in b['text'] for b in buttons)
++    assert buttons[1]['copy_text']['text']=='12345678'
++
++
++def test_copy_controls_share_custom_regular_emoji(mod):
++    mod.db.custom_texts.insert_one({'lang':'en','key':'dep_btn_copy_amount','value':'💎 Copy Amount'})
++    mod.ask_binance_deposit_amount(message(mod))
++    assert all(b['text'].startswith('💎 ') for b in copies(controls()[-1][1]))
++
++
++@pytest.mark.parametrize('value',['','Not Set','   '])
++def test_unconfigured_binance_never_creates_an_unusable_payment(mod,monkeypatch,value):
++    original=mod.get_setting
++    monkeypatch.setattr(mod,'get_setting',lambda key,*a,**kw:value if key=='wallet_address' else original(key,*a,**kw))
++    mod.ask_binance_deposit_amount(message(mod))
++    assert mod.db.pending_deposits.count_documents({'user_id':1001})==0
++    assert not any(copies(rows) for text,rows in controls())
++    assert any(b.get('callback_data')=='cancel_deposit' for text,rows in controls() for row in rows for b in row)
++
++
++def test_binance_pay_id_is_trimmed_without_using_telegram_id(mod,monkeypatch):
++    original=mod.get_setting
++    monkeypatch.setattr(mod,'get_setting',lambda key,*a,**kw:'  90807060  ' if key=='wallet_address' else original(key,*a,**kw))
++    mod.ask_binance_deposit_amount(message(mod))
++    assert controls()[-1][1][0][1]['copy_text']['text']=='90807060'
++
++
++@pytest.mark.parametrize('coin,address,unit,amount',[
++    ('USDT','TTESTADDRESS','USDT','10.012345'),
++    ('USDT_BEP20','0xTESTADDRESS','USDT','10.012345'),
++    ('LTC','ltc1TESTADDRESS','LTC','0.10012345'),
++    ('TON','EQTESTADDRESS','TON','2.002469')])
++@pytest.mark.parametrize('uid',[1001,1002])
++def test_crypto_has_one_amount_control_in_native_units(mod,server,monkeypatch,coin,address,unit,amount,uid):
++    monkeypatch.setattr(mod,'generate_unique_amount_for_user',lambda *a,**kw:10.012345)
++    mod.ask_deposit_amount(message(mod,uid),coin)
++    text,rows=controls()[-1]
++    buttons=copies(rows)
++    assert len(buttons)==2
++    assert [b['copy_text']['text'] for b in buttons]==[amount,address]
++    assert text.find(amount)>=0 and unit in text
++    assert all(b['text'].startswith('📋 ') for b in buttons)
++    # The existing website pending-deposit screen shows this same exact quote,
++    # including after market-price functions change.
++    monkeypatch.setattr(mod,'get_ton_price_usd',lambda:50.)
++    monkeypatch.setattr(mod,'get_ltc_price_usd',lambda:1000.)
++    st,data,_=request(server,'/webapp/deposit/status',uid=uid)
++    assert st==200 and data['pending']['pay_amount']==amount
++    assert data['pending']['pay_unit']==unit and data['pending']['address']==address
++
++
++@pytest.mark.parametrize('coin',['USDT','USDT_BEP20','LTC','TON'])
++def test_crypto_copy_pair_uses_same_premium_emoji(mod,coin):
++    mod.db.custom_texts.insert_one({'lang':'en','key':'dep_btn_copy_amount',
++        'value':'<tg-emoji emoji-id="5271604874419647061">📋</tg-emoji> Copy Amount'})
++    mod.ask_deposit_amount(message(mod),coin)
++    buttons=copies(controls()[-1][1])
++    assert len(buttons)==2
++    assert all(b['icon_custom_emoji_id']=='5271604874419647061' for b in buttons)
++
++
++@pytest.mark.parametrize('coin',['USDT','USDT_BEP20'])
++def test_site_created_usdt_deposit_keeps_all_unique_digits(mod,server,monkeypatch,coin):
++    monkeypatch.setattr(mod,'generate_unique_amount_for_user',lambda *a,**kw:10.012345)
++    st,data,_=request(server,'/webapp/deposit/create',{'method':coin,'amount':10})
++    assert st==200
++    assert data['pending']['pay_amount']=='10.012345'
++    pending=mod.db.pending_deposits.find_one({'user_id':1001,'coin':coin})
++    assert float(data['pending']['pay_amount'])==pending['unique_amount_usd']
++
++
++@pytest.mark.parametrize('coin,price_function',[('LTC','get_ltc_price_usd'),('TON','get_ton_price_usd')])
++@pytest.mark.parametrize('rate',[0,None,float('inf')])
++def test_failed_rate_never_offers_usd_as_native_coin_amount(mod,monkeypatch,coin,price_function,rate):
++    monkeypatch.setattr(mod,price_function,lambda:rate)
++    mod.ask_deposit_amount(message(mod),coin)
++    assert mod.db.pending_deposits.count_documents({'user_id':1001})==0
++    assert not any(copies(rows) for text,rows in controls())
++    assert any(b.get('callback_data')=='cancel_deposit' for text,rows in controls() for row in rows for b in row)

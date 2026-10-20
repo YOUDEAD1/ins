@@ -1,0 +1,237 @@
+--- a/webapp/index.html	2026-10-19 15:47:15.967544474 +0000
++++ b/webapp/index.html	2026-10-19 15:47:15.969649813 +0000
+@@ -294,6 +294,28 @@
+ .adm-sets{padding:0 14px}
+ .adm-set{display:flex;align-items:center;gap:12px;width:100%;padding:14px 0;border-bottom:1px solid var(--line);text-align:start;font-size:14px;font-weight:600}
+ .adm-set:last-child{border-bottom:0}
++.adm-set small.pu.pos{color:var(--ok)}.adm-set small.pu.neg{color:var(--bad);font-weight:700}.adm-set small.pu.warn{color:var(--warn)}
++.adm-set b.mut{color:var(--fg-3);font-weight:600;font-size:13px}
++.adm-live{margin:10px 2px 0;font-size:13.5px;font-weight:700;min-height:1.4em}
++.adm-live .pos{color:var(--ok)}.adm-live .neg{color:var(--bad)}.adm-live .warn{color:var(--warn)}
++.api-card.pp{padding:0;overflow:hidden}
++.pp-sub{margin:-4px 2px 10px;font-size:12px}
++.pp-row{display:grid;gap:6px;padding:12px 14px}
++.pp-row+.pp-row{border-top:1px solid var(--line)}
++.pp-row.now{background:color-mix(in srgb,var(--ok) 6%,transparent)}
++.pp-h{display:flex;align-items:center;gap:6px;min-width:0}
++.pp-h b{font:800 16px/1.2 var(--f-display)}
++.pp-h small{margin-inline-start:auto;font-size:11.5px;color:var(--fg-3);white-space:nowrap}
++.pp-n{display:flex;flex-wrap:wrap;gap:3px 12px;font-size:12.5px;color:var(--fg-2)}
++.pp-n .pos{color:var(--ok);font-weight:800}.pp-n .neg{color:var(--bad);font-weight:800}.pp .mut,.pp-n .mut{color:var(--fg-3)}
++.pp-tot{background:var(--surface-2)}
++.pp-ch{display:flex;align-items:center;gap:10px;padding:12px 14px}
++.pp-ch+.pp-ch{border-top:1px solid var(--line)}
++.pp-ch .meta{flex:1;min-width:0;display:grid;gap:3px}
++.pp-ch .meta b{font-size:13.5px;font-weight:700}
++.pp-ch .meta small{font-size:11.5px;color:var(--fg-3)}
++.pp-ch .amt{font-size:12px;font-weight:800;white-space:nowrap}
++.pp-ch .amt.pos{color:var(--ok)}.pp-ch .amt.neg{color:var(--bad)}
+ .adm-set .grow{flex:1;min-width:0}
+ .adm-set small{display:block;font-size:12px;color:var(--fg-3);margin-top:3px;font-weight:500}
+ .adm-set > svg{flex:none;width:15px;height:15px;color:var(--fg-3)}
+@@ -3118,6 +3140,13 @@
+ const ADM_I18N = {
+   ar: { panel: "لوحة البوت", panelBtn: "لوحة البوت كاملة هنا", panelBtnSub: "كل أوامر البوت بأزرارها وشاشاتها — بدون ما تطلع من الموقع", home: "الرئيسية", inChatOpen: "افتحها في المحادثة", typeHere: "اكتب للبوت…", typeReply: "اكتب ردك هنا…", waitingReply: "البوت ينتظر ردك", cancelStep: "إلغاء", docCopy: "وصلتك نسخة من الملف في المحادثة كمان", download: "تحميل", stale: "هذي الشاشة تغيّرت — حدّثتها لك", inSite: "داخل الموقع", ok: "تمام", botCmdsSub: "كل قسم ينفتح هنا داخل الموقع — نفس أزرار البوت وشاشاته بالضبط.", pvPanel: "معاينة: داخل بوتك هنا تشتغل لوحة البوت الحقيقية بكل أزرارها.", pvPanelReal: "معاينة: هذي شاشات بوتك الحقيقية — مسجّلة من الكود الجديد على كتالوجك (المستخدمين والطلبات تجريبية). الضغط هنا ما يغيّر أي شيء، بس يوريك وش يطلع في بوتك.", pvDestr: "🔒 هذا الزر ينفّذ تغيير فعلي (حذف / إرسال / تأكيد / إرجاع…) فما شغّلناه في المعاينة. في بوتك يشتغل عادي من هنا.", pvNotRec: "هذي الشاشة ما انسجّلت في المعاينة — في بوتك تنفتح عادي.", pvStepDone: "📝 <b>وصل ردك.</b>\nفي بوتك هذا الرد ينفّذ الأمر مباشرة (يحفظ / يعدّل). المعاينة ما تغيّر أي بيانات.", pvTry: "💡 <b>معاينة — جرّب تكتب واحد من هذي:</b>", pvNoOrder: "❌ ما لقيت هذا الطلب في بيانات المعاينة.\n💡 جرّب واحد من طلبات المعاينة:", pvChat: "في بوتك أي رقم طلب تلصقه هنا يطلع لك كرته كاملة. جرّب واحد من هذي:", pvDoc: "تحميل الملفات يشتغل في بوتك — المعاينة تعرض اسم الملف فقط.", justNow: "الحين", minsAgo: "قبل {n} د", updated: "آخر تحديث {t}", oosS: "نفد مخزونها", lowS: "مخزون قليل", apiPendS: "طلبات API تنتظر", g_store: "المتجر", g_people: "العملاء", g_money: "الطلبات والفلوس", g_grow: "التسويق", g_sys: "الإعدادات والفريق", t_prod: "المنتجات", t_stock: "الأسعار والمخزون", t_ext: "متاجر API", t_cgpt: "ChatGPT", t_act: "التفعيلات", t_users: "العملاء", t_find: "بحث", t_gift: "شحن رصيد", t_ban: "حظر", t_vip: "VIP", t_ref: "الإحالات", t_orders: "الطلبات", t_deps: "الإيداعات", t_logs: "السجلات", t_reports: "التقارير", t_tx: "فحص معاملة", t_prot: "حماية الإيداع", t_bc: "برودكاست", t_fsub: "اشتراك إجباري", t_cms: "تخصيص البوت", t_settings: "إعدادات المتجر", t_promote: "المدراء", t_panel: "اللوحة كاملة", apFilter: "فلترة القائمة…", apMore: "خيارات", apType: "الصق رقم طلب أو اكتب للبوت…", apAsk: "البوت يحتاج ردك", apTry: "أمثلة من المعاينة:", apSend: "إرسال", apHome: "لوحة الإدارة في البوت", apEmpty: "ما فيه شاشة هنا.", apThread: "عرض كمحادثة", apPages: "عرض كصفحات", apThreadSub: "كل الرسائل بالترتيب مثل تيليجرام", apBack: "رجوع", apAgain: "مرة ثانية", apDone: "تم",
+     dsAcc: "حسابات وأكواد ({n})", dsMails: "طلبات بالإيميل ({n})", dsUsers: "مستخدمين ({n})", dsMore: "فيه نتائج أكثر — اكتب جزء أطول عشان تضيّق البحث.", ds_in_stock: "بالمخزون", ds_reserved: "محجوز الحين", ds_sold: "مباع", ds_sold_multi: "انباع أكثر من مرة", ds_sold_norecord: "مباع بدون سجل طلب", dsLine: "سطر الحساب", dsPart: "الجزء {n}", dsCopyLine: "نسخ السطر", dsState: "الحالة", dsAdded: "انضاف للمخزون", dsCopies: "نسخ بالمخزون", dsFree: "{n} ما انباعت", dsCopiesN: "{n} نسخة (كلها مباعة)", dsCopiesF: "{n} نسخة · {f} متاحة للبيع", dsSales: "سجل البيع ({n})", dsNoSale: "ما انباع لأحد للحين.", dsBuyer: "المشتري", dsPrice: "السعر", dsW_multi: "⚠️ نفس الحساب انباع لأكثر من شخص ({n}).", dsW_resold: "⚠️ انباع قبل، وموجود بالمخزون مرة ثانية — بينباع مرة ثانية لو ما شلته.", dsW_dup: "⚠️ مكرر بالمخزون ({n} نسخ).", dsOpenOrder: "تفاصيل الطلب", dsOpenUser: "ملف العميل", dsProduct: "المنتج", dsReseller: "عميل الموزّع", dsKind_api: "API (موزّع)", dsKind_ext: "مورد خارجي", dsKind_order: "شراء", dsStockItem: "نسخة بالمخزون", dsSoldMark: "مباعة", dsFreeMark: "متاحة", dsTry: "جرّب: example.com", apBusy: "البوت لسه شغّال على الطلب السابق — لحظات.", apWorking: "البوت شغّال على طلبك… النتيجة تطلع هنا أول ما تجهز (مثل المحادثة).", dsDeps: "إيداعات مسجّلة ({n})", dsLive: "فحص المعاملة مباشرة", dsLiveSub: "نفس زر «🔍 فحص معاملة» في البوت — يفحص قاعدة البيانات وبعدين الشبكات مباشرة.", txCheck: "فحص معاملة", tab: 'الإدارة', title: 'لوحة الإدارة', sub: 'للأدمن فقط · نفس بيانات البوت', q: 'إيميل، سطر حساب، رقم طلب، آيدي أو @يوزر', find: 'بحث',
++    apQuick: 'اختر بضغطة:', costPrice: 'سعر التكلفة', editCost: 'كم يكلّفك المنتج الواحد', costQ: 'سعر التكلفة بالدولار (خلّه فاضي للمسح)',
++    costNote: 'التكلفة الجديدة على الطلبات الجاية بس — الطلبات اللي قبل تبقى بتكلفتها.', costNone: 'ما حددته', unitProfit: 'ربح القطعة {p} · هامش {m}%', unitLoss: '⚠️ خسارة {p} بالقطعة', unitZero: 'بدون ربح (السعر = التكلفة)', unitNoCost: 'حدّد سعر التكلفة عشان تعرف ربحك',
++    liveProfit: 'بهذا السعر: ربح {p} بالقطعة', liveLoss: 'بهذا السعر: ⚠️ خسارة {p} بالقطعة', liveZero: 'بهذا السعر: بدون ربح', priceOld: 'الطلبات اللي قبل تبقى بسعرها وربحها — السعر الجديد على الطلبات الجاية بس.',
++    byPrice: 'الربح حسب السعر', byPriceSub: 'كل تغيير سعر له حسابه — القديم ما يتغير', nowTag: 'الحين', since: 'من {a}', fromTo: '{a} ← {b}', sinceStart: 'من البداية', untilA: 'لين {a}', notSold: 'ما انباع شي بهذا السعر',
++    pcs: '{n} قطعة', salesL: 'مبيعات {p}', costL: 'تكلفة {p}', profitL: 'ربح {p}', lossL: 'خسارة {p}', noCostL: 'بدون تكلفة', totalAll: 'الإجمالي', moreP: '+{n} أسعار أقدم', estNote: '* طلبات قديمة ما انحفظت معها تكلفة — انحسبت بالتكلفة الحالية.',
++    paidNote: 'المبيعات بالمبلغ المدفوع فعلاً (بعد خصم الكمية و VIP).', changesL: 'آخر تغييرات السعر والتكلفة', chPrice: 'السعر', chCost: 'التكلفة', chPU: 'ربح القطعة {p}', chPL: 'خسارة القطعة {p}',
++    savedProfit: 'تم · ربحك بالقطعة {p}', savedLoss: 'تم · ⚠️ خسارة {p} بالقطعة', savedNoCost: 'تم · حدّد سعر التكلفة عشان تعرف ربحك',
+     d1: 'اليوم', d7: '7 أيام', d30: 'الشهر', y: 'السنة', profit: 'الربح', cost: 'التكلفة', net: 'الصافي', margin: 'هامش {n}%', netSub: 'إحالات وتعويضات {p}', netSame: 'بدون مصاريف',
+     noCost: 'فيه مبيعات {p} بدون سعر تكلفة — انحسب ربحها كامل. حدّد التكلفة عشان يطلع الربح صح', noCostBtn: 'أسعار التكلفة', t_profit: 'الأرباح', sales: 'المبيعات', orders: 'الطلبات', buyers: '{n} مشتري', deps: 'الإيداعات', depN: '{n} عملية', newU: 'مستخدمين جدد', usersN: 'من {n} مستخدم',
+     alerts: 'تنبيهات', oos: 'منتجات نفد مخزونها', low: 'مخزون قليل (3 أو أقل)', apiPend: 'طلبات API يدوية تنتظر', credits: 'إيداعات تنتظر مطابقة', allGood: 'كل شي تمام — ما فيه تنبيهات.',
+@@ -3144,6 +3173,13 @@
+   },
+   en: { panel: "Bot panel", panelBtn: "Full bot panel here", panelBtnSub: "Every bot command with its buttons and screens — without leaving the store", home: "Home", inChatOpen: "Open in the chat", typeHere: "Message the bot…", typeReply: "Type your reply…", waitingReply: "The bot is waiting for your reply", cancelStep: "Cancel", docCopy: "A copy of the file was also sent to your chat", download: "Download", stale: "This screen changed — refreshed it for you", inSite: "In the store", ok: "OK", botCmdsSub: "Each section opens right here in the store — the exact same bot buttons and screens.", pvPanel: "Preview: inside your bot the real bot panel runs here with all its buttons.", pvPanelReal: "Preview: these are your bot's real screens — recorded from the new code on your catalog (users and orders are samples). Pressing here changes nothing; it shows what your bot shows.", pvDestr: "🔒 This button makes a real change (delete / send / confirm / refund…), so it is not run in the preview. In your bot it works from here.", pvNotRec: "This screen was not recorded in the preview — in your bot it opens normally.", pvStepDone: "📝 <b>Got your reply.</b>\nIn your bot this reply runs the command right away (saves / edits). The preview changes no data.", pvTry: "💡 <b>Preview — try typing one of these:</b>", pvNoOrder: "❌ This order is not in the preview data.\n💡 Try one of the preview orders:", pvChat: "In your bot, any order ID you paste here shows its full card. Try one of these:", pvDoc: "File downloads work in your bot — the preview only shows the file name.", justNow: "just now", minsAgo: "{n} min ago", updated: "Updated {t}", oosS: "out of stock", lowS: "low stock", apiPendS: "API orders waiting", g_store: "Store", g_people: "Customers", g_money: "Orders & money", g_grow: "Marketing", g_sys: "Settings & team", t_prod: "Products", t_stock: "Prices & stock", t_ext: "API stores", t_cgpt: "ChatGPT", t_act: "Activations", t_users: "Customers", t_find: "Search", t_gift: "Add balance", t_ban: "Ban", t_vip: "VIP", t_ref: "Referrals", t_orders: "Orders", t_deps: "Deposits", t_logs: "Logs", t_reports: "Reports", t_tx: "Check payment", t_prot: "Deposit guard", t_bc: "Broadcast", t_fsub: "Forced join", t_cms: "Customize bot", t_settings: "Store settings", t_promote: "Admins", t_panel: "Full panel", apFilter: "Filter the list…", apMore: "Options", apType: "Paste an order ID or message the bot…", apAsk: "The bot needs your reply", apTry: "Preview examples:", apSend: "Send", apHome: "Bot admin panel", apEmpty: "Nothing to show here.", apThread: "Show as chat", apPages: "Show as pages", apThreadSub: "Every message in order, like Telegram", apBack: "Back", apAgain: "Do it again", apDone: "Done",
+     dsAcc: "Accounts & codes ({n})", dsMails: "Orders by email ({n})", dsUsers: "Users ({n})", dsMore: "More results — type a longer part to narrow it down.", ds_in_stock: "In stock", ds_reserved: "Reserved now", ds_sold: "Sold", ds_sold_multi: "Sold more than once", ds_sold_norecord: "Sold, no order record", dsLine: "Account line", dsPart: "Part {n}", dsCopyLine: "Copy line", dsState: "Status", dsAdded: "Added to stock", dsCopies: "Copies in stock", dsFree: "{n} unsold", dsCopiesN: "{n} (all sold)", dsCopiesF: "{n} · {f} available to sell", dsSales: "Sales history ({n})", dsNoSale: "Not sold to anyone yet.", dsBuyer: "Buyer", dsPrice: "Price", dsW_multi: "⚠️ This account was sold to more than one person ({n}).", dsW_resold: "⚠️ Sold before and back in stock — it will be sold again unless you remove it.", dsW_dup: "⚠️ Duplicated in stock ({n} copies).", dsOpenOrder: "Order details", dsOpenUser: "Customer profile", dsProduct: "Product", dsReseller: "Reseller customer", dsKind_api: "API (reseller)", dsKind_ext: "External supplier", dsKind_order: "Purchase", dsStockItem: "Stock copy", dsSoldMark: "sold", dsFreeMark: "available", dsTry: "Try: example.com", apBusy: "The bot is still working on the previous request — one moment.", apWorking: "The bot is working on it… the result shows here as soon as it is ready (just like the chat).", dsDeps: "Recorded deposits ({n})", dsLive: "Check this transaction live", dsLiveSub: "Same as «🔍 Check transaction» in the bot: the database, then Binance, TON, LTC, USDT and Bybit live.", txCheck: "Check transaction", tab: 'Admin', title: 'Admin panel', sub: 'Admins only · same data as the bot', q: 'Email, account line, order ID, user ID or @username', find: 'Search',
++    apQuick: 'Tap one:', costPrice: 'Cost price', editCost: 'What one item costs you', costQ: 'Cost price in dollars (leave empty to clear)',
++    costNote: 'A new cost applies to future orders only — past orders keep theirs.', costNone: 'Not set', unitProfit: '{p} profit per item · {m}% margin', unitLoss: '⚠️ {p} loss per item', unitZero: 'No profit (price = cost)', unitNoCost: 'Set the cost price to see your profit',
++    liveProfit: 'At this price: {p} profit per item', liveLoss: 'At this price: ⚠️ {p} loss per item', liveZero: 'At this price: no profit', priceOld: 'Past orders keep their price and profit — the new price applies to future orders only.',
++    byPrice: 'Profit by price', byPriceSub: 'Each price change is counted on its own — past numbers never change', nowTag: 'Now', since: 'since {a}', fromTo: '{a} → {b}', sinceStart: 'from the start', untilA: 'until {a}', notSold: 'Nothing sold at this price',
++    pcs: '{n} sold', salesL: '{p} sales', costL: '{p} cost', profitL: '{p} profit', lossL: '{p} loss', noCostL: 'no cost set', totalAll: 'Total', moreP: '+{n} older prices', estNote: '* Older orders saved no cost — counted with the current cost.',
++    paidNote: 'Sales are the amounts actually paid (after quantity and VIP discounts).', changesL: 'Latest price & cost changes', chPrice: 'Price', chCost: 'Cost', chPU: '{p} profit/item', chPL: '{p} loss/item',
++    savedProfit: 'Saved · {p} profit per item', savedLoss: 'Saved · ⚠️ {p} loss per item', savedNoCost: 'Saved · set the cost price to see your profit',
+     d1: 'Today', d7: '7 days', d30: 'Month', y: 'Year', profit: 'Profit', cost: 'Cost', net: 'Net', margin: '{n}% margin', netSub: 'referrals & comp. {p}', netSame: 'no expenses',
+     noCost: '{p} of sales have no cost price — counted as full profit. Set the cost so profit is right', noCostBtn: 'Cost prices', t_profit: 'Profit', sales: 'Sales', orders: 'Orders', buyers: '{n} buyers', deps: 'Top-ups', depN: '{n} payments', newU: 'New users', usersN: 'of {n} users',
+     alerts: 'Alerts', oos: 'Products out of stock', low: 'Low stock (3 or less)', apiPend: 'Manual API orders waiting', credits: 'Deposits waiting for a match', allGood: 'All good — no alerts.',
+@@ -3476,13 +3512,14 @@
+   setTimeout(() => { const i = sh.el.querySelector('[data-in="admb-amt"]'); if (i) i.focus(); }, 320);
+ }
+ 
+-function admPrompt(title, label, value, note) {
++function admPrompt(title, label, value, note, live) {
+   return new Promise(res => {
+     let v = value == null ? '' : String(value), done = false;
++    const lv = () => live ? `<p class="adm-live" id="admpr-live">${live(v)}</p>` : '';
+     const sh = openSheet({ title,
+-      body: `<label class="adm-field"><span>${esc(label)}</span><input type="text" inputmode="decimal" dir="ltr" value="${esc(v)}" data-in="admpr"></label>${note ? `<p class="api-muted">${esc(note)}</p>` : ''}`,
++      body: `<label class="adm-field"><span>${esc(label)}</span><input type="text" inputmode="decimal" dir="ltr" value="${esc(v)}" data-in="admpr"></label>${lv()}${note ? `<p class="api-muted">${esc(note)}</p>` : ''}`,
+       foot: `<button class="btn primary full" data-act="admpr-ok">${esc(adt('save'))}</button>`,
+-      onInput: (k, el) => { if (k === 'admpr') v = el.value; },
++      onInput: (k, el) => { if (k === 'admpr') { v = el.value; const o = sh.el.querySelector('#admpr-live'); if (o && live) o.innerHTML = live(v); } },
+       onAction: act => { if (act === 'admpr-ok') { done = true; closeSheet(sh); res(v); return true; } return false; },
+       onClose: () => { if (!done) res(null); } });
+     setTimeout(() => { const i = sh.el.querySelector('[data-in="admpr"]'); if (i) { i.focus(); i.select(); } }, 320);
+@@ -3517,20 +3554,47 @@
+   if (!r.ok) { sh.body(`<div class="empty">${ae('cross')}<h3>${esc(errText(r))}</h3></div>`); return; }
+   items = r.products || []; draw(sh);
+ }
++function admUnit(price, cost) {
++  if (cost == null) return { t: adt('unitNoCost'), c: 'warn' };
++  const d = Math.round((price - cost) * 100) / 100;
++  if (d > 0) return { t: adt('unitProfit', { p: usd(d), m: price ? Math.round(d / price * 100) : 0 }), c: 'pos' };
++  if (d === 0) return { t: adt('unitZero'), c: '' };
++  return { t: adt('unitLoss', { p: usd(-d) }), c: 'neg' };
++}
++function admPP(P) {
++  if (!P || !(P.periods || []).length) return '';
++  const d = ts => { const x = new Date(ts * 1000); return x.toLocaleDateString({ ar: 'ar-u-nu-latn', en: 'en-GB', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { day: 'numeric', month: 'short', year: x.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }); };
++  const money = r => r.cost || !r.no_cost ? `<span class="${r.profit < 0 ? 'neg' : 'pos'}">${esc(adt(r.profit < 0 ? 'lossL' : 'profitL', { p: usd(Math.abs(r.profit)) }))}</span>` : `<span class="mut">${esc(adt('noCostL'))}</span>`;
++  const row = r => {
++    const now = r.to == null;
++    const span = now ? (r.from ? adt('since', { a: d(r.from) }) : adt('sinceStart')) : (r.from ? adt('fromTo', { a: d(r.from), b: d(r.to) }) : adt('untilA', { a: d(r.to) }));
++    return `<div class="pp-row ${now ? 'now' : ''}"><div class="pp-h"><b class="num">${usd(r.price)}</b>${now ? `<span class="adm-badge ok">${esc(adt('nowTag'))}</span>` : ''}<small>${esc(span)}</small></div>
++      <div class="pp-n">${r.qty ? `<span>${esc(adt('pcs', { n: r.qty }))}</span><span>${esc(adt('salesL', { p: usd(r.sales) }))}</span>${r.cost ? `<span>${esc(adt('costL', { p: usd(r.cost) }))}</span>` : ''}${money(r)}` : `<span class="mut">${esc(adt('notSold'))}</span>`}</div></div>`;
++  };
++  const t = P.totals || {};
++  const ch = (P.changes || []).length ? `<div class="lbl">${esc(adt('changesL'))}</div><div class="api-card pp">${P.changes.map(c => `<div class="pp-ch"><span class="meta"><b>${esc(adt(c.kind === 'price' ? 'chPrice' : 'chCost'))} <span class="num" dir="ltr">${c.old == null ? '—' : usd(c.old)} → ${c.new == null ? '—' : usd(c.new)}</span>${c.via === 'webapp' ? ' 🌐' : ''}</b><small>${esc(fmtDate(c.at))}</small></span>${c.profit_unit == null ? '' : `<span class="amt num ${c.profit_unit < 0 ? 'neg' : 'pos'}">${esc(adt(c.profit_unit < 0 ? 'chPL' : 'chPU', { p: usd(Math.abs(c.profit_unit)) }))}</span>`}</div>`).join('')}</div>` : '';
++  return `<div class="lbl">${esc(adt('byPrice'))}</div><p class="api-muted pp-sub">${esc(adt('byPriceSub'))}</p>
++    <div class="api-card pp">${P.periods.map(row).join('')}
++      ${P.more ? `<div class="pp-row"><small class="mut">${esc(adt('moreP', { n: P.more }))}</small></div>` : ''}
++      <div class="pp-row pp-tot"><div class="pp-h"><b>${esc(adt('totalAll'))}</b></div><div class="pp-n"><span>${esc(adt('pcs', { n: t.qty || 0 }))}</span><span>${esc(adt('salesL', { p: usd(t.sales || 0) }))}</span>${t.cost ? `<span>${esc(adt('costL', { p: usd(t.cost) }))}</span>` : ''}${money(t)}</div></div></div>
++    <p class="api-muted pp-sub">${esc(adt('paidNote'))}${t.est ? ' ' + esc(adt('estNote')) : ''}</p>${ch}`;
++}
+ async function openAdmProduct(id, onChange) {
+   let R = null;
+   const html = () => {
+-    const p = R.product, s = R.sales || {};
++    const p = R.product, s = R.sales || {}, u = admUnit(p.price, p.cost);
+     return `<div class="adm-big"><span>${esc(adt('stock'))}</span><b class="num">${p.manual ? '∞' : p.stock}</b></div>
+       <div class="adm-tiles two"><div class="adm-tile"><span>${esc(adt('sales7'))}</span><b class="num">${usd((s.d7 || {}).rev || 0)}</b><small>${esc(adt('sold', { n: (s.d7 || {}).n || 0 }))}</small></div>
+         <div class="adm-tile"><span>${esc(adt('sales30'))}</span><b class="num">${usd((s.d30 || {}).rev || 0)}</b><small>${esc(adt('sold', { n: (s.d30 || {}).n || 0 }))}</small></div></div>
+       <div class="api-card adm-sets">
+-        <button class="adm-set" data-act="admp-price"><span class="grow">${esc(adt('price'))}<small>${esc(adt('editPrice'))}</small></span><b class="num">${usd(p.price)}</b>${ic.chev}</button>
++        <button class="adm-set" data-act="admp-price"><span class="grow">${esc(adt('price'))}<small class="pu ${u.c}">${esc(u.t)}</small></span><b class="num">${usd(p.price)}</b>${ic.chev}</button>
++        <button class="adm-set" data-act="admp-cost"><span class="grow">${esc(adt('costPrice'))}<small>${esc(adt('editCost'))}</small></span><b class="num ${p.cost == null ? 'mut' : ''}">${p.cost == null ? esc(adt('costNone')) : usd(p.cost)}</b>${ic.chev}</button>
+         <button class="adm-set" data-act="admp-vis"><span class="grow">${esc(p.hidden ? adt('hidden') : adt('visible'))}</span><span class="sw ${p.hidden ? '' : 'on'}"></span></button>
+         <div class="adm-set col"><span class="grow">${esc(adt('vipClass'))}</span><div class="adm-vc">${['none', 'low', 'mid', 'high'].map(k => `<button class="${p.vip === k ? 'on' : ''}" data-act="admp-vip" data-v="${k}">${esc(adt('vc_' + k))}</button>`).join('')}</div></div>
+         ${!p.manual && p.type === 'standard' ? `<button class="adm-set" data-act="admp-stock"><span class="grow">➕ ${esc(adt('addStock'))}<small>${esc(adt('inStockN', { n: p.stock }))}</small></span>${ic.chev}</button>` : ''}
+         <button class="adm-set" data-act="adm-open" data-v="edit_p_${esc(p.id)}" data-l="${esc(admName(p))}"><span class="grow">✏️ ${esc(adt('fullEdit'))}</span><span class="go">↗</span></button>
+       </div>
++      ${admPP(R.profit)}
+       ${(R.recent || []).length ? `<div class="lbl">${esc(adt('recent'))}</div><div class="api-card adm-list">${R.recent.map(o => `<button class="adm-row" data-act="adm-order" data-v="${esc(o.order_id)}"><span class="meta"><b class="mono" dir="ltr">${esc(o.order_id)}</b><small dir="ltr">${o.uid} · ${esc(fmtDate(o.ts))}</small></span><span class="amt num">${usd(o.total)}</span></button>`).join('')}</div>` : ''}
+       ${DEMO ? pvNote() : ''}`;
+   };
+@@ -3538,11 +3602,23 @@
+     onAction: async (act, el) => {
+       if (!R) return false;
+       if (act === 'admp-price') {
+-        const v = await admPrompt(adt('editPrice'), adt('priceQ'), R.product.price, adt('priceNote'));
++        const c = R.product.cost;
++        const live = v => { const n = parseFloat(String(v).replace(',', '.')); if (c == null || !isFinite(n)) return ''; const d = Math.round((n - c) * 100) / 100; return `<span class="${d < 0 ? 'neg' : d > 0 ? 'pos' : ''}">${esc(d > 0 ? adt('liveProfit', { p: usd(d) }) : d < 0 ? adt('liveLoss', { p: usd(-d) }) : adt('liveZero'))}</span>`; };
++        const v = await admPrompt(adt('editPrice'), adt('priceQ'), R.product.price, adt('priceOld') + ' ' + adt('priceNote'), live);
+         if (v == null) return true;
+         const n = parseFloat(String(v).replace(',', '.'));
+         if (!isFinite(n) || n < 0 || n > 100000) { toast(adt('badPrice'), 'bad'); return true; }
+-        await upd({ price: n }); return true;
++        await upd({ price: n }, true); return true;
++      }
++      if (act === 'admp-cost') {
++        const pr = R.product.price;
++        const live = v => { if (String(v).trim() === '') return ''; const n = parseFloat(String(v).replace(',', '.')); if (!isFinite(n)) return ''; const u = admUnit(pr, n); return `<span class="${u.c}">${esc(u.t)}</span>`; };
++        const v = await admPrompt(adt('costPrice'), adt('costQ'), R.product.cost == null ? '' : R.product.cost, adt('costNote'), live);
++        if (v == null) return true;
++        const raw = String(v).trim();
++        const n = raw === '' ? null : parseFloat(raw.replace(',', '.'));
++        if (n != null && (!isFinite(n) || n < 0 || n > 100000)) { toast(adt('badPrice'), 'bad'); return true; }
++        await upd({ cost: n }, true); return true;
+       }
+       if (act === 'admp-vis') { await upd({ hidden: !R.product.hidden }); return true; }
+       if (act === 'admp-vip') { if (el.dataset.v !== R.product.vip) await upd({ vip: el.dataset.v }); return true; }
+@@ -3550,9 +3626,14 @@
+       return false;
+     } });
+   const draw = () => { sh.title(admName(R.product)).body(html()); };
+-  const upd = async b => {
++  const upd = async (b, money) => {
+     const r = await api('admin/product/update', Object.assign({ id: R.product.id }, b));
+-    if (r.ok) { R = r; draw(); hap('ok'); toast(adt('saved'), 'ok'); if (onChange) onChange(R.product); if (S.adm) S.adm._t = 0; }
++    if (r.ok) {
++      R = r; draw(); hap('ok');
++      const p = R.product, d = p.cost == null ? null : Math.round((p.price - p.cost) * 100) / 100;
++      toast(!money ? adt('saved') : d == null ? adt('savedNoCost') : d < 0 ? adt('savedLoss', { p: usd(-d) }) : adt('savedProfit', { p: usd(d) }), d != null && d < 0 ? 'bad' : 'ok');
++      if (onChange) onChange(R.product); if (S.adm) S.adm._t = 0;
++    }
+     else toast(r.error === 'bad_price' ? adt('badPrice') : errText(r), 'bad');
+   };
+   const r = await api('admin/product', { id });
+@@ -3865,7 +3946,7 @@
+         ${before.length ? `<div class="ap-nts">${before.map(apNoticeHtml).join('')}</div>` : ''}
+         <div class="ap-q"><small>⌨\uFE0F ${esc(adt('apAsk'))}</small><div dir="auto">${q ? rich(q.html) : ''}</div></div>
+         <textarea id="apin" data-in="apin" dir="auto" rows="3" enterkeyhint="send" placeholder="${esc(adt('typeReply'))}">${esc(P.ask)}</textarea>
+-        ${tries.length ? `<div class="ap-try"><small>${esc(adt('apTry'))}</small>${tries.map(b => `<button data-act="vc-say" data-v="${esc(b.v)}" dir="ltr">${esc(b.t)}</button>`).join('')}</div>` : ''}
++        ${tries.length ? `<div class="ap-try"><small>${esc(adt(DEMO ? 'apTry' : 'apQuick'))}</small>${tries.map(b => `<button data-act="vc-say" data-v="${esc(b.v)}" dir="ltr">${esc(b.t)}</button>`).join('')}</div>` : ''}
+         <div class="ap-askb"><button class="btn ghost" data-act="ap-cancel">${esc(adt('cancelStep'))}</button><button class="btn primary" data-act="ap-send">${esc(adt('apSend'))}</button></div>
+       </section>`;
+     } else {
+@@ -3888,7 +3969,7 @@
+     box.innerHTML = html;
+     box.querySelectorAll('.ap-page code, .ap-ask code, .ap-nt code').forEach(c => { if (!c.closest('[data-act]')) { c.dataset.act = 'copy'; c.dataset.v = c.textContent; } });
+     hydrate(box);
+-    sh.foot(step && !P.thread ? '' : comp());
++    sh.foot(P.thread && step ? comp() : '');     // مربع الكتابة يطلع بس لما البوت ينتظر رد
+     const body = sh.el.querySelector('.sh-body');
+     if (body && anim) body.scrollTop = 0;
+     if (P.thread && body) requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+@@ -4358,7 +4439,7 @@
+       a.in_stock = free; a.state = n > 1 ? 'sold_multi' : n ? 'sold' : a.stock.some(x => x.reserved) ? 'reserved' : free ? 'in_stock' : 'sold_norecord';
+       a.warn = [n > 1 ? 'multi' : '', n && free ? 'resold' : '', a.stock.length > 1 ? 'dup' : ''].filter(Boolean);
+       a.added = Math.min(...a.stock.map(x => x.added)); });
+-    this.adm = { users, orders, deps, accts, prot: true, vipCls: {}, hidden: new Set() };
++    this.adm = { users, orders, deps, accts, prot: true, vipCls: {}, hidden: new Set(), cost: {}, pch: {}, ppBase: {} };
+     return this.adm;
+   },
+   vcReplay(b, PN) {
+@@ -4419,11 +4500,25 @@
+     const D = this.admInit(), now = Math.floor(Date.now() / 1000);
+     const rows = () => (this.P || []).filter(x => x.kind !== 'cgpt').map(x => ({ id: x.id, name: x.name_ar, name_en: x.name_en, price: x.price,
+       stock: x.manual ? 0 : (x.stock == null ? (x.in_stock ? 99 : 0) : x.stock), manual: !!x.manual, hidden: D.hidden.has(x.id), type: 'standard',
+-      vip: D.vipCls[x.id] || 'none', emoji_id: x.emoji_id || null, tiers: (x.tiers || []).length }));
++      vip: D.vipCls[x.id] || 'none', emoji_id: x.emoji_id || null, tiers: (x.tiers || []).length,
++      cost: D.cost[x.id] !== undefined ? D.cost[x.id] : Math.round(x.price * 0.62 * 100) / 100 }));
++    const demoPP = r => {     // معاينة: سعرين قدام + السعر الحالي، كل واحد بحسابه — والقديم ثابت مهما غيّرت
++      const day = 86400, r2 = v => Math.round(v * 100) / 100;
++      const per = (price, from, to, q, cost) => ({ price, from, to, qty: q, orders: q, sales: r2(price * q), cost: r2(cost * q), no_cost: 0, est: false, profit: r2((price - cost) * q) });
++      if (!D.ppBase[r.id]) {
++        const c = r.cost, P0 = r2(r.price + 0.5), P1 = r2(r.price - 0.25);
++        D.ppBase[r.id] = { ps: [per(r.price, now - day * 4, null, 9, c), per(P1, now - day * 12, now - day * 4, 21, c), per(P0, now - day * 30, now - day * 12, 34, r2(c - 0.2))],
++          ch: [{ kind: 'price', old: P1, new: r.price, at: now - day * 4, via: 'bot', profit_unit: r2(r.price - c) }, { kind: 'price', old: P0, new: P1, at: now - day * 12, via: 'webapp', profit_unit: r2(P1 - c) }] };
++      }
++      const B0 = D.ppBase[r.id], ps = B0.ps;
++      const t = ps.reduce((a, x) => ({ qty: a.qty + x.qty, orders: a.orders + x.orders, sales: a.sales + x.sales, cost: a.cost + x.cost, no_cost: 0 }), { qty: 0, orders: 0, sales: 0, cost: 0, no_cost: 0 });
++      t.sales = r2(t.sales); t.cost = r2(t.cost); t.profit = r2(t.sales - t.cost);
++      return { price: r.price, cost: r.cost, profit_unit: r.cost == null ? null : r2(r.price - r.cost), periods: ps, more: 0, totals: t, changes: (D.pch[r.id] || []).concat(B0.ch) };
++    };
+     const userOut = u => ({ ok: true, user: u, me: 784512369, vip: { level: u.vip.level, cents: u.vip.cents, override: u.vip.override, remaining: Math.max(0, [30000, 60000, 100000, 200000, 350000, 500000][u.vip.level] - u.vip.cents), next: u.vip.level < 6 ? u.vip.level + 1 : null },
+       orders: D.orders.filter(o => o.user.id === u.id).slice(0, 12).map(o => ({ order_id: o.order_id, name: o.product.name, name_en: o.product.name_en, total: o.total, qty: o.qty, ts: o.ts, kind: o.kind })),
+       deposits: D.deps.filter(d => d.user.id === u.id).slice(0, 10), logs: [{ amount: 1.5, type: 'manual', note: 'Netflix profile replaced', ts: now - 86400 * 6 }] });
+-    const prodOut = id => { const r = rows().find(x => x.id === id); if (!r) return { error: 'not_found' }; return { ok: true, product: r, sales: { d7: { n: 14, rev: Math.round(r.price * 14 * 100) / 100 }, d30: { n: 61, rev: Math.round(r.price * 61 * 100) / 100 } }, recent: D.orders.filter(o => o.product.id === id).slice(0, 6).map(o => ({ order_id: o.order_id, uid: o.user.id, total: o.total, ts: o.ts })) }; };
++    const prodOut = id => { const r = rows().find(x => x.id === id); if (!r) return { error: 'not_found' }; return { ok: true, product: r, profit: demoPP(r), sales: { d7: { n: 14, rev: Math.round(r.price * 14 * 100) / 100 }, d30: { n: 61, rev: Math.round(r.price * 61 * 100) / 100 } }, recent: D.orders.filter(o => o.product.id === id).slice(0, 6).map(o => ({ order_id: o.order_id, uid: o.user.id, total: o.total, ts: o.ts })) }; };
+     if (p === 'home') {
+       const all = rows(), sellable = all.filter(x => !x.hidden && !x.manual);
+       const oos = sellable.filter(x => x.stock <= 0), low = sellable.filter(x => x.stock > 0 && x.stock <= 3);
+@@ -4464,7 +4559,10 @@
+     if (p === 'product') return prodOut(b.id);
+     if (p === 'product/update') {
+       const x = (this.P || []).find(y => y.id === b.id); if (!x) return { error: 'not_found' };
+-      if (b.price != null) { const n = +b.price; if (!isFinite(n) || n < 0) return { error: 'bad_price' }; x.price = n; }
++      const c0 = rows().find(y => y.id === b.id).cost;
++      if (b.price != null) { const n = +b.price; if (!isFinite(n) || n < 0) return { error: 'bad_price' }; (D.pch[x.id] = D.pch[x.id] || []).unshift({ kind: 'price', old: x.price, new: n, at: now, via: 'webapp', profit_unit: c0 == null ? null : Math.round((n - c0) * 100) / 100 });
++        prodOut(b.id); const B0 = D.ppBase[x.id]; if (B0 && n !== x.price) { B0.ps[0].to = now; B0.ps.unshift({ price: n, from: now, to: null, qty: 0, orders: 0, sales: 0, cost: 0, no_cost: 0, est: false, profit: 0 }); } x.price = n; }
++      if ('cost' in b) { const n = b.cost == null ? null : +b.cost; if (n != null && (!isFinite(n) || n < 0)) return { error: 'bad_price' }; (D.pch[x.id] = D.pch[x.id] || []).unshift({ kind: 'cost', old: c0, new: n, at: now, via: 'webapp', profit_unit: n == null ? null : Math.round((x.price - n) * 100) / 100 }); D.cost[x.id] = n; }
+       if (b.hidden != null) { if (b.hidden) D.hidden.add(x.id); else D.hidden.delete(x.id); }
+       if (b.vip != null) D.vipCls[x.id] = b.vip;
+       return prodOut(b.id);

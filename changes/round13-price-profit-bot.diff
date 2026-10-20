@@ -1,0 +1,307 @@
+--- a/bot.py	2026-10-19 15:47:15.962429872 +0000
++++ b/bot.py	2026-10-19 15:47:15.965154500 +0000
+@@ -3353,7 +3353,7 @@
+ _ADMIN_CB_PREFIXES = ('ad_', 'admin_', 'edit_txt_', 'rst_txt_', 'edit_btn_', 'btnstyle_', 'toggle_amount_protection',
+                       'stk_', 'set_v_', 'set_pemj_', 'edit_p_', 'ep_', 'toggle_hide_', 'del_fsub_', 'gift_cancel_',
+                       'togglecoin_', 'hide_coins_menu', 'emj_reg_', 'p_set_first_', 'ext_add_store', 'ext_api_main',
+-                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_')
++                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_', 'pprofit_')
+ 
+ 
+ def _is_admin_cb(data):
+@@ -24122,6 +24122,7 @@
+                InlineKeyboardButton("⭐ Custom Emoji", callback_data=f"ep_emoji_{short_pid}{c_sfx}"))
+     markup.add(InlineKeyboardButton("🏷 خصومات الكمية", callback_data=f"ep_disc_{short_pid}{c_sfx}"),
+                InlineKeyboardButton("💰 سعر التكلفة", callback_data=f"pcost_{short_pid}"))
++    markup.add(InlineKeyboardButton("💹 ربح المنتج (حسب كل سعر)", callback_data=f"pprofit_{short_pid}"))
+     hide_txt = "👁️ Show Product" if p.get('is_hidden', False) else "🙈 Hide Product"
+     markup.add(InlineKeyboardButton(hide_txt, callback_data=f"toggle_hide_{short_pid}{c_sfx}"))
+     # زر رجوع: للمنتج نفسه وليس لقائمة الأدمن
+@@ -24456,8 +24457,10 @@
+             f"💵 <b>تعديل سعر المنتج</b>\n"
+             f"━━━━━━━━━━━━━━━\n\n"
+             f"{p_display_name}\n\n"
+-            f"💰 <b>السعر الحالي:</b> <code>${current_price:.2f}</code>\n\n"
+-            f"━━━━━━━━━━━━━━━\n"
++            f"💰 <b>السعر الحالي:</b> <code>${current_price:.2f}</code>\n"
++            + (f"📦 <b>التكلفة:</b> <code>${float(p['cost']):.2f}</code> · {_pp_word(current_price - float(p['cost']))} بالقطعة\n"
++               if p.get('cost') is not None else "📦 <i>ما حددت سعر التكلفة — بعد الحفظ أقولك كيف تحدده عشان تعرف ربحك.</i>\n")
++            + f"\n━━━━━━━━━━━━━━━\n"
+             f"👇 <b>أرسل السعر الجديد بالدولار:</b>\n"
+             f"<i>(مثال: 5.99 أو 10)</i>\n\n"
+             f"💡 <i>أرسل <b>الغاء</b> للإلغاء.</i>"
+@@ -24649,6 +24652,8 @@
+                 return
+             old_price = float(p.get('price', 0))
+             db.products.update_one({'_id': p['_id']}, {'$set': {'price': new_price}})
++            if new_price != old_price:
++                _price_log(p, 'price', old_price, new_price, getattr(message.from_user, 'id', None))
+             
+             # رسالة توضح التغيير
+             if new_price < old_price:
+@@ -24662,8 +24667,11 @@
+                 change_txt = f"السعر بقي نفسه: <b>${new_price:.2f}</b>"
+             
+             back_markup = InlineKeyboardMarkup()
++            back_markup.add(InlineKeyboardButton("💹 ربح المنتج", callback_data=f"pprofit_{pid}"),
++                            InlineKeyboardButton("💰 سعر التكلفة", callback_data=f"pcost_{pid}"))
+             back_markup.add(InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=back_cb))
+-            bot.send_message(message.chat.id, f"{change_emoji} <b>تم التحديث!</b>\n{change_txt}", parse_mode="HTML", reply_markup=back_markup)
++            bot.send_message(message.chat.id, f"{change_emoji} <b>تم التحديث!</b>\n{change_txt}\n\n"
++                             f"{price_profit_lines(old_price, new_price, p.get('cost'))}", parse_mode="HTML", reply_markup=back_markup)
+             
+             # برودكاست فقط لو السعر نزل
+             if new_price < old_price:
+@@ -32271,8 +32279,9 @@
+         'price': round(_wa_fnum(p.get('price')), 4), 'stock': get_product_stock_count(pid),
+         'manual': bool(p.get('is_manual')), 'hidden': bool(p.get('is_hidden')),
+         'type': p.get('product_type') or 'standard', 'vip': vip_classes().get(vip_key(pid), 'none'),
+-        'tiers': _wa_tiers(p), 'emoji_id': str(p['custom_emoji_id']) if p.get('custom_emoji_id') else None},
+-        'sales': sales, 'recent': recent}
++        'tiers': _wa_tiers(p), 'emoji_id': str(p['custom_emoji_id']) if p.get('custom_emoji_id') else None,
++        'cost': (round(_wa_fnum(p.get('cost')), 4) if p.get('cost') is not None else None)},
++        'sales': sales, 'recent': recent, 'profit': product_profit(p)}
+ 
+ 
+ import types as _adm_pytypes
+@@ -32313,6 +32322,26 @@
+         admin_save_edit(_AdmMsg(uid, f"{price:g}"), 'price', pid)   # نفس دالة البوت (وإشعار التخفيض لو نزل)
+         done.append('price')
+         _adm_audit(uid, 'price', pid, old=_wa_fnum(p.get('price')), new=price)
++    if 'cost' in body:
++        cv = body.get('cost')
++        old_c = p.get('cost')
++        if cv is None or str(cv).strip() == '':
++            if old_c is not None:
++                db.products.update_one({'_id': p['_id']}, {'$unset': {'cost': ''}})
++                _price_log(p, 'cost', old_c, None, uid)
++        else:
++            try:
++                cv = round(float(str(cv).replace(',', '.')), 4)
++            except Exception:
++                return 400, {'error': 'bad_price'}
++            if not _vip_math.isfinite(cv) or cv < 0 or cv > 100000:
++                return 400, {'error': 'bad_price'}
++            db.products.update_one({'_id': p['_id']}, {'$set': {'cost': cv}})
++            if old_c is None or float(old_c) != cv:
++                _price_log(p, 'cost', old_c, cv, uid)
++        _PROFIT_CACHE['v'] = None
++        done.append('cost')
++        _adm_audit(uid, 'cost', pid, old=old_c, new=cv)
+     if 'hidden' in body and body.get('hidden') is not None:
+         hidden = bool(body.get('hidden'))
+         db.products.update_one({'_id': p['_id']}, {'$set': {'is_hidden': hidden}})
+@@ -34536,8 +34565,11 @@
+     q = {'_id': p['_id']}
+     mk = InlineKeyboardMarkup()
+     mk.add(InlineKeyboardButton("💰 أسعار التكلفة", callback_data="ad_pcost_0"), InlineKeyboardButton("💹 الأرباح", callback_data="ad_profit"))
++    mk.add(InlineKeyboardButton("💹 ربح المنتج", callback_data=f"pprofit_{pid}"))
+     if t in ('حذف', 'delete', '-'):
+         db.products.update_one(q, {'$unset': {'cost': ''}})
++        if p.get('cost') is not None:
++            _price_log(p, 'cost', p.get('cost'), None, message.from_user.id)
+         _invalidate_products_cache()
+         bot.send_message(message.chat.id, "🗑 انمسحت تكلفة المنتج.", reply_markup=mk)
+         return
+@@ -34550,14 +34582,199 @@
+         bot.register_next_step_handler(msg, ad_pcost_save, pid)
+         return
+     db.products.update_one(q, {'$set': {'cost': round(v, 4)}})
++    if p.get('cost') is None or float(p['cost']) != round(v, 4):
++        _price_log(p, 'cost', p.get('cost'), round(v, 4), message.from_user.id)
+     _invalidate_products_cache()
+     _PROFIT_CACHE['v'] = None
+     price = float(p.get('price') or 0)
+-    warn = "\n⚠️ <b>التكلفة أعلى من سعر البيع</b> — كل بيعة خسارة." if v > price else ""
+-    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ.</b>\n📦 التكلفة: ${v:.2f} · 💵 البيع: ${price:.2f} · 💰 الربح للقطعة: ${price - v:.2f}{warn}",
++    bot.send_message(message.chat.id, f"✅ <b>تم الحفظ.</b>\n📦 التكلفة: ${v:.2f} · 💵 البيع: ${price:.2f}\n{profit_unit_text(price, v)}\n"
++                     "<i>🧾 الطلبات اللي قبل تبقى بتكلفتها — الجديدة على الطلبات الجاية بس.</i>",
+                      parse_mode='HTML', reply_markup=mk)
+ 
+ 
++
++# ============================================================
++# 💹 ربح كل منتج حسب سعره — كل تغيير سعر له حسابه، والقديم ما يتغير
++# ============================================================
++def _pp_ids(p):
++    raw = p.get('id') if p.get('id') is not None else p.get('_id')
++    ids = {str(raw), raw}
++    sid = str(p.get('_id'))
++    if sid.startswith('cgpt_main_'):
++        h = sid[len('cgpt_main_'):]
++        ids |= {h, 'cgpt_' + h, sid}
++    return str(raw), list(ids)
++
++
++def _price_log(p, kind, old, new, by=None):
++    """سجل ثابت لكل تغيير سعر / تكلفة (ما ينمسح ولا يتعدّل)."""
++    try:
++        pid, _ids = _pp_ids(p)
++        price = new if kind == 'price' else p.get('price')
++        cost = new if kind == 'cost' else p.get('cost')
++        db.price_history.insert_one({'product_id': pid, 'kind': kind, 'old': old, 'new': new,
++                                     'price': float(price or 0), 'cost': (float(cost) if cost is not None else None),
++                                     'at': int(time.time()), 'by': by, 'via': _log_src_get() or 'bot'})
++    except Exception as e:
++        logger.debug(f"price log: {e}")
++
++
++def _pp_word(v):
++    return f"💰 ربح ${v:.2f}" if v >= 0 else f"🔻 خسارة ${-v:.2f}"
++
++
++def profit_unit_text(price, cost):
++    if cost is None:
++        return "📦 ما حددت «سعر التكلفة» لهذا المنتج — حدّده من الزر تحت وأقولك كم تربح بالقطعة."
++    price, cost = float(price or 0), float(cost)
++    pr = price - cost
++    if pr > 0:
++        return f"💰 ربحك بالقطعة: <b>${pr:.2f}</b> (التكلفة ${cost:.2f} · هامش {pr / price * 100:.0f}%)"
++    if pr == 0:
++        return f"⚖️ بدون ربح: السعر = التكلفة (${cost:.2f})"
++    return f"🔻 <b>خسارة ${-pr:.2f} بالقطعة</b> — السعر أقل من التكلفة (${cost:.2f})"
++
++
++def price_profit_lines(old_price, new_price, cost):
++    out = [profit_unit_text(new_price, cost)]
++    if cost is not None and float(old_price) != float(new_price):
++        out.append(f"<i>قبل التغيير: {_pp_word(float(old_price) - float(cost))} بالقطعة</i>")
++    out.append("<i>🧾 الطلبات اللي قبل تبقى بسعرها وربحها — السعر الجديد على الطلبات الجاية بس.</i>")
++    return '\n'.join(out)
++
++
++def _pp_date(ts, with_time=False):
++    try:
++        d = datetime.datetime.utcfromtimestamp(int(ts)) + datetime.timedelta(hours=_rpt_offset())
++        return d.strftime('%d/%m/%Y %H:%M' if with_time else '%d/%m/%Y')
++    except Exception:
++        return '—'
++
++
++def product_profit(p, max_periods=12, max_changes=10):
++    """الربح حسب كل سعر انباع فيه المنتج. كل فترة تبدأ من تغيير سعر وتنتهي عند اللي بعده."""
++    pid, ids = _pp_ids(p)
++    cur_cost = p.get('cost')
++    hist = list(db.price_history.find({'product_id': pid}).sort([('at', 1), ('_id', 1)]))
++    ph = [h for h in hist if h.get('kind') == 'price']
++    first_price = float(ph[0].get('old') or 0) if ph else float(p.get('price') or 0)
++    starts = [0] + [int(h.get('at') or 0) for h in ph]
++    prices = [first_price] + [float(h.get('new') or 0) for h in ph]
++    per = [{'price': round(prices[i], 4), 'from': starts[i], 'to': (starts[i + 1] if i + 1 < len(starts) else None),
++            'qty': 0, 'orders': 0, 'sales': 0.0, 'cost': 0.0, 'est': False, 'no_cost': 0.0, '_k': set()}
++           for i in range(len(starts))]
++    import bisect
++    try:
++        for d in db.orders.find({'product_id': {'$in': ids}}, {'qty': 1, 'quantity': 1, 'price': 1, 'total_price': 1,
++                                                               'cost_total': 1, 'order_id': 1, 'api_order_id': 1}):
++            ts = _doc_ts(d)
++            i = max(0, bisect.bisect_right(starts, ts) - 1)
++            r = per[i]
++            _u, q, total = _order_paid(d)
++            r['qty'] += q
++            r['sales'] += total
++            r['_k'].add(d.get('order_id') or d.get('api_order_id') or d['_id'])
++            if d.get('cost_total') is not None:
++                r['cost'] += float(d['cost_total'])
++            elif cur_cost is not None:
++                r['cost'] += float(cur_cost) * q
++                r['est'] = True
++            else:
++                r['no_cost'] += total
++    except Exception as e:
++        logger.debug(f"product profit: {e}")
++    tot = {'qty': 0, 'orders': 0, 'sales': 0.0, 'cost': 0.0, 'no_cost': 0.0, 'est': False}
++    for r in per:
++        r['orders'] = len(r.pop('_k'))
++        r['profit'] = round(r['sales'] - r['cost'], 2)
++        r['sales'], r['cost'], r['no_cost'] = round(r['sales'], 2), round(r['cost'], 2), round(r['no_cost'], 2)
++        for k in ('qty', 'orders', 'sales', 'cost', 'no_cost'):
++            tot[k] += r[k]
++        tot['est'] = tot['est'] or r['est']
++    if len(per) > 1 and per[0]['qty'] == 0:
++        per = per[1:]                                   # ما انباع شي قبل أول تغيير مسجّل
++    for k in ('sales', 'cost', 'no_cost'):
++        tot[k] = round(tot[k], 2)
++    tot['profit'] = round(tot['sales'] - tot['cost'], 2)
++    changes = []
++    for h in reversed(hist[-max_changes:]):
++        c = h.get('cost')
++        pu = None
++        if h.get('kind') == 'price' and c is not None:
++            pu = round(float(h.get('new') or 0) - float(c), 2)
++        elif h.get('kind') == 'cost' and h.get('new') is not None:
++            pu = round(float(h.get('price') or 0) - float(h['new']), 2)
++        changes.append({'kind': h.get('kind'), 'old': h.get('old'), 'new': h.get('new'), 'at': int(h.get('at') or 0),
++                        'via': h.get('via'), 'profit_unit': pu})
++    price = float(p.get('price') or 0)
++    return {'price': price, 'cost': (float(cur_cost) if cur_cost is not None else None),
++            'profit_unit': (round(price - float(cur_cost), 2) if cur_cost is not None else None),
++            'periods': list(reversed(per))[:max_periods], 'more': max(0, len(per) - max_periods),
++            'totals': tot, 'changes': changes}
++
++
++def product_profit_text(p):
++    R = product_profit(p, max_periods=8, max_changes=6)
++    nm = html.escape(clean_name(p.get('name_ar') or p.get('name_en') or ''))
++    L = [f"💹 <b>ربح المنتج</b> — {nm}", "",
++         f"💵 السعر الحالي: <b>${R['price']:.2f}</b> · 📦 التكلفة: <b>{('$' + format(R['cost'], '.2f')) if R['cost'] is not None else '—'}</b>",
++         profit_unit_text(R['price'], R['cost']), "",
++         "📊 <b>حسب السعر</b> — كل تغيير سعر له حسابه، والقديم ما يتغير:"]
++    for i, r in enumerate(R['periods']):
++        now = r['to'] is None
++        span = (f"من {_pp_date(r['from'])} لين الحين" if r['from'] else "منذ البداية لين الحين") if now else \
++               (f"من {_pp_date(r['from'])} لين {_pp_date(r['to'])}" if r['from'] else f"لين {_pp_date(r['to'])}")
++        L.append("━━━━━━━━━━━━━━")
++        L.append(f"{'🟢' if now else '⚪️'} <b>${r['price']:.2f}</b> — {span}")
++        if r['qty']:
++            L.append(f"   🛒 {r['qty']} قطعة · مبيعات ${r['sales']:.2f}" + (f" · تكلفة ${r['cost']:.2f}" if r['cost'] else '')
++                     + (f" · {_pp_word(r['profit'])}" if (r['cost'] or not r['no_cost']) else ''))
++            if r['no_cost'] and not r['cost']:
++                L.append("   <i>بدون سعر تكلفة — ما أقدر أحسب الربح</i>")
++        else:
++            L.append("   <i>ما انباع شي بهذا السعر</i>")
++    if R['more']:
++        L.append(f"<i>… و{R['more']} أسعار أقدم (كاملة في الموقع)</i>")
++    t = R['totals']
++    L += ["━━━━━━━━━━━━━━", f"🧮 <b>الإجمالي:</b> {t['qty']} قطعة · مبيعات ${t['sales']:.2f} · تكلفة ${t['cost']:.2f} · {_pp_word(t['profit'])}"]
++    if t['no_cost']:
++        L.append(f"<i>⚠️ مبيعات ${t['no_cost']:.2f} بدون سعر تكلفة انحسبت ربح كامل.</i>")
++    if t['est']:
++        L.append("<i>* طلبات قديمة ما انحفظت معها تكلفة — انحسبت بالتكلفة الحالية.</i>")
++    L.append("<i>المبيعات بالمبلغ المدفوع فعلاً (بعد خصم الكمية و VIP).</i>")
++    if R['changes']:
++        L += ["", "🕓 <b>آخر التغييرات</b>"]
++        for c in R['changes']:
++            what = 'السعر' if c['kind'] == 'price' else 'التكلفة'
++            fmt = lambda v: ('$' + format(float(v), '.2f')) if v is not None else '—'
++            L.append(f"• {_pp_date(c['at'], True)} — {what} {fmt(c['old'])} ← {fmt(c['new'])}"
++                     + (f" ({'ربح' if c['profit_unit'] >= 0 else 'خسارة'} القطعة ${abs(c['profit_unit']):.2f})" if c['profit_unit'] is not None else '')
++                     + (' 🌐' if c.get('via') == 'webapp' else ''))
++    return '\n'.join(L)[:4000]
++
++
++@bot.callback_query_handler(func=lambda call: call.data.startswith('pprofit_'))
++@admin_required
++def ad_pprofit_cb(call):
++    bot.answer_callback_query(call.id)
++    pid = call.data[len('pprofit_'):]
++    p = find_product(pid)
++    if not p:
++        bot.send_message(call.message.chat.id, "❌ المنتج غير موجود.")
++        return
++    mk = InlineKeyboardMarkup(row_width=2)
++    mk.add(InlineKeyboardButton("💵 تعديل السعر", callback_data=f"ep_price_{pid}"),
++           InlineKeyboardButton("💰 سعر التكلفة", callback_data=f"pcost_{pid}"))
++    mk.add(InlineKeyboardButton("🔄 تحديث", callback_data=f"pprofit_{pid}"),
++           InlineKeyboardButton("🔙 رجوع للمنتج", callback_data=f"edit_p_{pid}"))
++    txt = product_profit_text(p)
++    try:
++        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++    except Exception as e:
++        if 'not modified' not in str(e).lower():
++            bot.send_message(call.message.chat.id, txt, parse_mode='HTML', reply_markup=mk)
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================

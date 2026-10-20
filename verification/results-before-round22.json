@@ -1,0 +1,41 @@
+{
+  "revision": "20 + reliability fixes (round 21)",
+  "verified_at": "2026-10-19T19:59:11.685127+00:00",
+  "python": "3.12.14",
+  "tests": {
+    "total": 249,
+    "passed": 249,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_integration": 183,
+      "verification.test_support": 31,
+      "verification.test_reliability": 35
+    }
+  },
+  "python_compile": "passed",
+  "undefined_names": 0,
+  "javascript_syntax": "passed",
+  "images_validated": 34,
+  "frontend_dom_http_integration": "passed",
+  "frontend_languages": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "frontend_javascript_errors": 0,
+  "preserved_original_definitions": 1052,
+  "old_functions_classes_and_methods_missing": [],
+  "external_live_services_tested": false,
+  "real_browser_render_tested": false,
+  "real_phones_tested": false,
+  "user_windows_machine_tested": false,
+  "test_isolation": "MongoDB in memory; Telegram/payment/supplier/ChatGPT calls mocked; no production credentials loaded",
+  "new_recovery_data": [
+    "stock_rollback_jobs collection",
+    "cgpt_invites_data.renewal_receipts",
+    "temporary user stock debit markers"
+  ],
+  "notes": "Local verification is not a guarantee of all external services or all physical devices."
+}

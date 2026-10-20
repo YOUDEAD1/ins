@@ -1,0 +1,132 @@
+--- a/bot.py	2026-10-19 17:13:54.103127833 +0000
++++ b/bot.py	2026-10-19 17:13:54.105786629 +0000
+@@ -20225,9 +20225,13 @@
+ 
+     if codes:
+         import io
+-        content = "\n".join(str(c) for c in codes)
++        content = (f"=== {clean_name(pname)} ===\nOrder: {order_rec.get('order_id', '')}\nQty: {qty} | Total: ${total:.2f}\n"
++                   f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'=' * 40}\n\n"
++                   + ''.join(f"{i}. {c}\n" for i, c in enumerate(codes, 1)))
+         f = io.BytesIO(content.encode('utf-8'))
+-        f.name = f"order_{qty}x.txt"
++        # اسم فريد لكل طلب (عشان تيليجرام ما يعرض ملف مشتري ثاني من الكاش)
++        _safe = re.sub(r'[^\w\-]', '_', clean_name(pname))[:25].strip('_') or 'order'
++        f.name = f"{_safe}_{uid}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{_uuid_mod.uuid4().hex[:6]}.txt"
+         caption = (
+             (f"✅ <b>تم الشراء بنجاح!</b>\n\n📦 <b>{html.escape(pname)}</b>\n"
+              f"🔢 الكمية: <b>{qty}</b>\n💰 المدفوع: <b>${total:.2f}</b>" + order_id_line(order_rec['order_id'], 'ar') + "\n\n"
+@@ -31822,6 +31826,7 @@
+     '/webapp/forced/check': _wa_forced_check,
+     '/webapp/buy': _wa_buy,
+     '/webapp/orders': _wa_orders,
++    '/webapp/codes/txt': lambda identity, body: _wa_codes_txt(identity, body),
+     '/webapp/wallet': _wa_wallet,
+     '/webapp/history': _wa_history,
+     '/webapp/deposit/create': _wa_deposit_create,
+@@ -34026,6 +34031,9 @@
+     if raw.startswith('/app/'):
+         _wa_static(handler, raw[5:])
+         return True
++    if raw.startswith('/webapp/dl/'):
++        _wa_dl_get(handler, raw)
++        return True
+     if raw.startswith('/webapp/ce/'):
+         eid = raw[len('/webapp/ce/'):].strip('/')
+         # آخر IP في X-Forwarded-For هو اللي أضافه بروكسي المنصة (الأول يقدر العميل يزوّره)
+@@ -36054,6 +36062,95 @@
+                      "<i>تقدر تحوّله لقناتك كما هو.</i>", parse_mode='HTML', reply_markup=mk)
+ 
+ 
++
++# ============================================================
++# 📄 تحميل الأكواد كملف TXT من الموقع (أي كمية: حبة، حبتين، 50…)
++# ============================================================
++_TXT_TTL = 600
++
++
++def _wa_order_group(uid, gid=None, ref=None):
++    """نفس تجميع «طلباتي» بالموقع — يرجّع الطلب اللي يخص هذا العميل بس."""
++    try:
++        _st, data = _wa_orders({'id': uid}, {})
++    except Exception:
++        return None
++    for g in data.get('orders', []):
++        if (gid and str(g.get('id')) == str(gid)) or (ref and g.get('ref') and str(g.get('ref')) == str(ref)):
++            return g
++    return None
++
++
++def _codes_txt(uid, gid=None, ref=None):
++    g = _wa_order_group(uid, gid, ref)
++    if not g or not g.get('codes'):
++        return None, None
++    lang = get_lang(uid)
++    name = clean_name(g.get('name_en') if lang == 'en' else g.get('name_ar')) or 'product'
++    try:
++        when = datetime.datetime.utcfromtimestamp(int(g.get('ts') or 0)).strftime('%Y-%m-%d %H:%M') if g.get('ts') else ''
++    except Exception:
++        when = ''
++    head = (f"=== {name} ===\n" + (f"Order: {g['ref']}\n" if g.get('ref') else '')
++            + f"Qty: {len(g['codes'])} | Total: ${float(g.get('total') or 0):.2f}\n" + (f"Date: {when} (UTC)\n" if when else '') + '=' * 40 + "\n\n")
++    body = ''.join(f"{i}. {c}\n" for i, c in enumerate(g['codes'], 1))
++    safe = re.sub(r'[^\w\-]', '_', name)[:25].strip('_') or 'codes'
++    fname = f"{safe}_{(g.get('ref') or g.get('id'))}.txt".replace('/', '_')
++    return head + body, fname
++
++
++def _txt_token(uid, gid, ref):
++    payload = base64.urlsafe_b64encode(json.dumps({'u': int(uid), 'i': gid or '', 'r': ref or '', 'e': int(time.time()) + _TXT_TTL},
++                                                  separators=(',', ':')).encode()).decode().rstrip('=')
++    sig = hmac.new(('txt:' + str(TOKEN)).encode(), payload.encode(), hashlib.sha256).hexdigest()[:40]
++    return payload + '.' + sig
++
++
++def _txt_token_check(tok):
++    try:
++        payload, sig = tok.split('.', 1)
++        good = hmac.new(('txt:' + str(TOKEN)).encode(), payload.encode(), hashlib.sha256).hexdigest()[:40]
++        if not hmac.compare_digest(sig, good):
++            return None
++        d = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
++        if int(d.get('e', 0)) < time.time():
++            return None
++        return d
++    except Exception:
++        return None
++
++
++def _wa_codes_txt(identity, body):
++    """POST /webapp/codes/txt {id | ref, send}: رابط تحميل مؤقت (10 دقايق) أو يرسل الملف لمحادثة البوت."""
++    uid = identity['id']
++    gid = str(body.get('id') or '')[:64] or None
++    ref = str(body.get('ref') or '')[:80] or None
++    if not gid and not ref:
++        return 400, {'error': 'bad_request'}
++    content, fname = _codes_txt(uid, gid, ref)
++    if not content:
++        return 404, {'error': 'not_found'}
++    if body.get('send'):
++        f = io.BytesIO(content.encode('utf-8'))
++        f.name = fname
++        lang = get_lang(uid)
++        bot.send_document(uid, f, caption=("📄 Your codes as a TXT file." if lang == 'en' else "📄 أكوادك في ملف TXT."))
++        return 200, {'ok': True, 'sent': True}
++    return 200, {'ok': True, 'url': f"/webapp/dl/{_txt_token(uid, gid, ref)}/{urllib.parse.quote(fname)}", 'name': fname}
++
++
++def _wa_dl_get(handler, raw):
++    parts = raw[len('/webapp/dl/'):].split('/', 1)
++    d = _txt_token_check(parts[0]) if parts and parts[0] else None
++    if not d:
++        return _json_resp(handler, 403, {'error': 'expired'})
++    content, fname = _codes_txt(int(d['u']), d.get('i') or None, d.get('r') or None)
++    if not content:
++        return _json_resp(handler, 404, {'error': 'not_found'})
++    disp = f"attachment; filename=\"{re.sub(r'[^A-Za-z0-9_.-]', '_', fname)}\"; filename*=UTF-8''{urllib.parse.quote(fname)}"
++    _wa_send(handler, 200, content, 'text/plain; charset=utf-8', 'no-store', extra={'Content-Disposition': disp})
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================

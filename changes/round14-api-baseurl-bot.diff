@@ -1,0 +1,520 @@
+--- a/bot.py	2026-10-19 16:04:31.301040027 +0000
++++ b/bot.py	2026-10-19 16:05:54.896590264 +0000
+@@ -330,15 +330,60 @@
+     return 'bot'
+ 
+ 
+-def _get_server_url():
+-    """يكشف رابط السيرفر تلقائي من متغيرات المنصة"""
+-    for var in ['RENDER_EXTERNAL_URL', 'RAILWAY_PUBLIC_DOMAIN', 'KOYEB_PUBLIC_DOMAIN', 'HEROKU_APP_NAME', 'FLY_APP_NAME', 'APP_URL', 'BASE_URL']:
++_BASEURL_CACHE = {'t': 0, 'v': None}
++
++
++def _baseurl_norm(val):
++    val = str(val or '').strip()
++    if not val:
++        return ''
++    if not re.match(r'^https?://', val, re.I):
++        val = 'https://' + val
++    try:
++        u = urllib.parse.urlsplit(val)
++        val = urllib.parse.urlunsplit((u.scheme.lower(), u.netloc.lower(), u.path, u.query, u.fragment))
++    except Exception:
++        pass
++    return val.rstrip('/')
++
++
++def _baseurl_panel():
++    """الرابط اللي حطه الأدمن من اللوحة (يتخزن 30 ثانية)."""
++    now = time.time()
++    if now - _BASEURL_CACHE['t'] < 30:
++        return _BASEURL_CACHE['v']
++    v = None
++    try:
++        d = db.settings.find_one({'key': 'public_base_url'})
++        v = _baseurl_norm(d.get('value')) if d and d.get('value') else None
++    except Exception:
++        v = _BASEURL_CACHE['v']
++    _BASEURL_CACHE.update(t=now, v=v)
++    return v
++
++
++def _baseurl_source():
++    """(المصدر، الرابط): اللوحة ← متغيراتك (PUBLIC_URL/BASE_URL/APP_URL) ← اكتشاف تلقائي من الاستضافة."""
++    v = _baseurl_panel()
++    if v:
++        return 'panel', v
++    for var in ('PUBLIC_URL', 'BASE_URL', 'APP_URL'):
+         val = os.getenv(var, '')
++        if val and val.strip():
++            return 'env:' + var, _baseurl_norm(val)
++    for var, fmt in (('RENDER_EXTERNAL_URL', '{}'), ('RAILWAY_PUBLIC_DOMAIN', '{}'), ('KOYEB_PUBLIC_DOMAIN', '{}'),
++                     ('HEROKU_APP_NAME', '{}.herokuapp.com'), ('FLY_APP_NAME', '{}.fly.dev')):
++        val = (os.getenv(var, '') or '').strip()
+         if val:
+-            if not val.startswith('http'):
+-                val = f"https://{val}"
+-            return val.rstrip('/')
+-    return None
++            if not re.match(r'^https?://', val, re.I) and '.' not in val:
++                val = fmt.format(val)
++            return 'auto:' + var, _baseurl_norm(val)
++    return None, None
++
++
++def _get_server_url():
++    """رابط السيرفر العام: اللي حطيته من اللوحة، ولا BASE_URL، ولا رابط الاستضافة التلقائي."""
++    return _baseurl_source()[1]
+ 
+ 
+ def _generate_connection_code(api_key):
+@@ -500,6 +545,13 @@
+ 
+ 
+ def _json_resp(h, code, data):
++    hook = getattr(h, '_idem_hook', None)
++    if hook:
++        h._idem_hook = None
++        try:
++            hook(code, data)            # نحفظ النتيجة قبل الإرسال — حتى لو انقطع الاتصال
++        except Exception as e:
++            logger.warning(f"idempotency save failed: {e}")
+     try:
+         h.send_response(code)
+         h.send_header('Content-Type', 'application/json; charset=utf-8')
+@@ -515,6 +567,36 @@
+     except Exception as e:
+         logger.debug(f"_json_resp err: {e}")
+ 
++def _api_idem_begin(uid, key, sig):
++    """Idempotency-Key لكل المنتجات: نفس المفتاح = نفس الطلب (ما ينخصم مرتين)."""
++    if not isinstance(key, str) or not 1 <= len(key.strip()) <= 128:
++        return None, (400, {'error': 'Idempotency-Key must be a nonempty string of at most 128 characters'})
++    ref = 'IDEM_' + hashlib.sha256(f'{uid}:{key.strip()}'.encode()).hexdigest()[:40]
++    try:
++        db.api_idempotency.insert_one({'_id': ref, 'api_user_id': uid, 'sig': sig, 'status': 'pending', 'at': int(time.time())})
++        return ref, None
++    except Exception as exc:
++        if type(exc).__name__ != 'DuplicateKeyError':
++            raise
++    d = db.api_idempotency.find_one({'_id': ref}) or {}
++    if d.get('sig') != sig:
++        return None, (409, {'error': 'Idempotency-Key already used for a different purchase', 'code': 'idempotency_conflict'})
++    if d.get('status') == 'done':
++        return None, (int(d.get('code') or 200), dict(d.get('data') or {}, idempotent_replay=True))
++    return None, (409, {'error': 'This purchase is still processing or its outcome is unknown. Check GET /orders before retrying.',
++                        'code': 'idempotency_in_progress'})
++
++
++def _api_idem_finish(ref, code, data):
++    refunded = isinstance(data, dict) and (data.get('refunded') is True or 'refunded' in str(data.get('error', '')).lower())
++    if code == 200:
++        db.api_idempotency.update_one({'_id': ref}, {'$set': {'status': 'done', 'code': code, 'data': data, 'done_at': int(time.time())}})
++    elif code >= 500 and not refunded:
++        db.api_idempotency.update_one({'_id': ref}, {'$set': {'status': 'unknown', 'code': code}})   # النتيجة مو مؤكدة — لا نعيد الشراء
++    else:
++        db.api_idempotency.delete_one({'_id': ref})          # ما انخصم شي → المفتاح يقدر ينعاد
++
++
+ def _read_body(h):
+     """قراءة body آمنة تدعم Content-Length و chunked encoding"""
+     try:
+@@ -2229,6 +2311,9 @@
+         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+         if p in ('', '/'):
+             return _json_resp(self, 200, {'status': 'online'})
++        if p == '/__lara/ping':
++            n = str((params.get('n') or [''])[0])[:64]
++            return _json_resp(self, 200, {'ok': True, 'app': 'lara', 'sig': _baseurl_sig(n)})
+ 
+         gw = _get_api_gateway()
+ 
+@@ -2780,6 +2865,14 @@
+             if product_id.startswith('cgpt_') and qty != 1:
+                 return _json_resp(self, 400, {'error': 'ChatGPT purchases require qty=1 and one buyer email'})
+ 
++            _idem = self.headers.get('Idempotency-Key') or body.get('idempotency_key')
++            if _idem is not None:
++                _ref, _early = _api_idem_begin(uid, _idem, {'product_id': product_id, 'qty': qty,
++                                                            'buyer_info': buyer_info, 'email': buyer_email})
++                if _early:
++                    return _json_resp(self, *_early)
++                self._idem_hook = lambda code, data, ref=_ref: _api_idem_finish(ref, code, data)
++
+             # 🤖 منتج ChatGPT Business؟ (يحتاج معاملة خاصة + إيميل)
+             if product_id.startswith('cgpt_'):
+                 # نستخرج معرّف المنتج والمدة
+@@ -2845,6 +2938,12 @@
+                     except Exception:
+                         pass
+                     try:
++                        db.orders.insert_one({'user_id': uid, 'product_id': f"cgpt_{_cgid}", 'code_delivered': f"API: {order_id}",
++                                              'qty': 1, 'total_price': cg_price, 'via_api': True, 'api_order_id': order_id,
++                                              'order_id': order_id, 'via': 'api', **_order_cost(f"cgpt_{_cgid}", 1)})
++                    except Exception:
++                        pass
++                    try:
+                         _cgpt_api_purchase_receipt(uid, buyer_email, cg_minutes, cg_price,
+                             float(updated.get('balance', 0)), order_id, inv.get('expires_at', ''))
+                     except Exception:
+@@ -2893,7 +2992,7 @@
+             # sell_price المقفول للـ response فقط (ما يؤثر على الخصم من رصيده)
+             unit = float(cp_doc.get('sell_price', store_price))
+ 
+-            order_id = f"API_{int(time.time())}_{uid}"
++            order_id = f"API_{int(time.time())}_{uid}_{secrets.token_hex(3)}"   # فريد حتى لو طلبين بنفس الثانية
+ 
+             if is_manual:
+                 # atomic: فحص الرصيد والخصم في عملية واحدة
+@@ -3353,7 +3452,7 @@
+ _ADMIN_CB_PREFIXES = ('ad_', 'admin_', 'edit_txt_', 'rst_txt_', 'edit_btn_', 'btnstyle_', 'toggle_amount_protection',
+                       'stk_', 'set_v_', 'set_pemj_', 'edit_p_', 'ep_', 'toggle_hide_', 'del_fsub_', 'gift_cancel_',
+                       'togglecoin_', 'hide_coins_menu', 'emj_reg_', 'p_set_first_', 'ext_add_store', 'ext_api_main',
+-                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_', 'pprofit_')
++                      'refwd_', 'refdv_', 'rfl_', 'rfs_', 'rfd_', 'ref_ms_scan', 'ordinfo_', 'credit_pending_', 'vipadm_', 'pcost_', 'pprofit_', 'baseurl_')
+ 
+ 
+ def _is_admin_cb(data):
+@@ -26643,6 +26742,7 @@
+     # 👁 إخفاء/إظهار العملات من قائمة الإيداع
+     markup.add(InlineKeyboardButton("👁 إخفاء/إظهار العملات", callback_data="hide_coins_menu"))
+     markup.add(InlineKeyboardButton("📢 Logs Channel (@)", callback_data="set_v_log"))
++    markup.add(InlineKeyboardButton("🌐 الرابط الأساسي (API والموقع)", callback_data="ad_baseurl"))
+     markup.add(InlineKeyboardButton("🔙 Back", callback_data="admin_panel_main"))
+     try: bot.edit_message_text("⚙️ <b>Settings:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+     except: pass
+@@ -27435,9 +27535,10 @@
+ Authorization: Bearer {api_key}
+ ```
+ 
+-External-store products use the same `ext_...` ID returned by GET /products in
+-POST /purchase with `product_id` and `qty`. Send a unique `Idempotency-Key`
+-header for each purchase; reuse that key only when retrying the SAME purchase.
++POST /purchase with `product_id` and `qty` (external-store products use the same
++`ext_...` ID returned by GET /products). Send a unique `Idempotency-Key` header with
++EVERY purchase; reuse that key only when retrying the SAME purchase — a retry with the
++same key returns the same order and is never charged twice.
+ HTTP 202 / pending_verification means the supplier outcome is pending: do not
+ start another purchase. Check GET /order/ORDER_ID. HTTP 200 / completed
+ contains delivery in `codes`.
+@@ -27789,7 +27890,7 @@
+ 2. **Currency:** all prices in USD.
+ 3. **`is_manual` is critical:** read it before showing the product so the customer knows the delivery type.
+ 4. **HTML in names:** the `*_html` fields contain `<tg-emoji>` tags for premium emojis — use `parse_mode="HTML"`.
+-5. **Idempotency:** sending the same `purchase` request twice will charge twice — do NOT auto-retry `/purchase`.
++5. **Idempotency:** send a unique `Idempotency-Key` header with every `/purchase`. If the connection drops, retry with the SAME key: you get the same order back and are never charged twice. Without the header, a repeated request is a new purchase.
+ 6. **Rate limit:** 30 requests per minute per API key — more returns HTTP 429. Don't poll `/products` every second; use `/changes` or webhooks.
+ """
+     return docs
+@@ -31866,6 +31967,7 @@
+     ('gift', '💰', 'شحن رصيد', 'Gift balance', 'ad_gift'),
+     ('logs', '📜', 'السجلات', 'Records', 'ad_logs_all'),
+     ('settings', '⚙️', 'إعدادات المتجر', 'Store settings', 'ad_shop_settings'),
++    ('baseurl', '🌐', 'الرابط الأساسي (API والموقع)', 'Base URL (API & store)', 'ad_baseurl'),
+     ('fsub', '📣', 'الاشتراك الإجباري', 'Forced subscription', 'ad_fsub_list'),
+     ('act', '🎓', 'إعدادات التفعيلات', 'Activation settings', 'ad_api_main'),
+     ('ext', '🔌', 'متاجر API الخارجية', 'External API stores', 'ext_api_main'),
+@@ -34775,6 +34877,303 @@
+             bot.send_message(call.message.chat.id, txt, parse_mode='HTML', reply_markup=mk)
+ 
+ 
++
++# ============================================================
++# 🌐 الرابط الأساسي (API + الموقع) — تغييره من لوحة الإدارة
++# ============================================================
++_BASEURL_PENDING = {}
++_BASEURL_SRC_AR = {'panel': 'من لوحة الإدارة', 'env:PUBLIC_URL': 'من متغير PUBLIC_URL', 'env:BASE_URL': 'من متغير BASE_URL',
++                   'env:APP_URL': 'من متغير APP_URL'}
++
++
++def _baseurl_sig(nonce):
++    try:
++        d = db.settings.find_one_and_update({'key': 'server_ping_key'}, {'$setOnInsert': {'value': secrets.token_hex(16)}},
++                                            upsert=True, return_document=True)
++        key = str((d or {}).get('value') or '')
++    except Exception:
++        key = ''
++    return hmac.new(key.encode(), str(nonce).encode(), hashlib.sha256).hexdigest() if key else ''
++
++
++def _baseurl_fetch(url, timeout=8):
++    return requests.get(url, timeout=timeout, allow_redirects=False, headers={'User-Agent': 'LARA-baseurl-check'})
++
++
++def _baseurl_valid(url):
++    """https + دومين حقيقي، بدون مسار."""
++    try:
++        u = urllib.parse.urlparse(url)
++    except Exception:
++        return False
++    host = (u.hostname or '').lower()
++    return (u.scheme == 'https' and bool(host) and '.' in host and not host.endswith('.') and u.path in ('', '/')
++            and not u.query and not u.fragment and not u.username and not u.password
++            and re.fullmatch(r'[a-z0-9.-]+', host) is not None and host not in ('localhost',))
++
++
++def _baseurl_probe(url):
++    """(ok, سبب): يتأكد إن الرابط يوصل لنفس هذا السيرفر (نفس قاعدة البيانات)."""
++    nonce = secrets.token_hex(8)
++    try:
++        r = _baseurl_fetch(f"{url}/__lara/ping?n={nonce}")
++    except Exception as e:
++        return False, 'unreachable'
++    if getattr(r, 'status_code', 0) in (301, 302, 307, 308):
++        return False, 'redirect'
++    try:
++        j = r.json()
++    except Exception:
++        return False, 'other_server'
++    if j.get('app') == 'lara' and j.get('sig') and hmac.compare_digest(str(j.get('sig')), _baseurl_sig(nonce)):
++        return True, 'ok'
++    return False, ('other_bot' if j.get('app') == 'lara' else 'other_server')
++
++
++_BASEURL_WHY = {'unreachable': 'ما قدرت أوصل للرابط (الدومين ما يوصل للسيرفر للحين، أو الشهادة SSL ما جهزت).',
++                'redirect': 'الرابط يحوّل لمكان ثاني (redirect) — حط الرابط النهائي مباشرة.',
++                'other_server': 'الرابط يفتح، بس مو هذا السيرفر حق البوت.',
++                'other_bot': 'الرابط يوصل لنسخة ثانية من البوت (قاعدة بيانات ثانية).'}
++
++
++def _wa_refresh_menu_button():
++    try:
++        if (os.getenv('WEBAPP_MENU_BUTTON', '1') or '1').strip().lower() in ('0', 'false', 'off', 'no'):
++            return
++        url = _wa_public_url()
++        if not url:
++            return
++        text = (os.getenv('WEBAPP_MENU_TEXT', '') or 'Store').strip()[:64]
++        bot.set_chat_menu_button(menu_button=types.MenuButtonWebApp(type='web_app', text=text, web_app=types.WebAppInfo(url=url)))
++        logger.info(f"✅ Mini App menu button → {url}")
++    except Exception as e:
++        logger.warning(f"menu button refresh failed: {e}")
++
++
++def _baseurl_screen():
++    src, url = _baseurl_source()
++    try:
++        gw = _get_api_gateway()
++    except Exception:
++        gw = '…'
++    wa = _wa_public_url()
++    keys = db.api_keys.count_documents({'is_active': True})
++    if src and src.startswith('auto:'):
++        src_txt = 'تلقائي من الاستضافة (' + src[5:] + ')'
++    else:
++        src_txt = _BASEURL_SRC_AR.get(src, 'غير معروف')
++    L = ["🌐 <b>الرابط الأساسي</b>", "",
++         f"🔗 الرابط الحالي: <code>{html.escape(url or '— ما لقيت رابط')}</code>",
++         f"📍 المصدر: {src_txt}", "━━━━━━━━━━━━━━",
++         f"🔌 رابط الـ API لعملائك:\n<code>{html.escape((url or '…') + '/' + gw)}</code>",
++         f"🛍 رابط الموقع (Mini App):\n<code>{html.escape(wa or '—')}</code>"]
++    if (os.getenv('WEBAPP_URL', '') or '').strip():
++        L.append("<i>⚠️ رابط الموقع مثبّت من متغير WEBAPP_URL — لو غيّرت الدومين غيّره هناك بعد (أو امسحه عشان يتبع الرابط هذا).</i>")
++    L += ["━━━━━━━━━━━━━━",
++          "<i>تقدر تحط دومينك، مثل: https://api.mystore.com</i>",
++          "<i>أول شي اربط الدومين بالسيرفر من الاستضافة: في Render افتح Settings ثم Custom Domains. "
++          "بعدين حطه هنا — أفحصه قبل الحفظ.</i>",
++          f"<i>👥 عملاء الـ API النشطين: {keys}</i>"]
++    mk = InlineKeyboardMarkup(row_width=2)
++    mk.add(InlineKeyboardButton("✏️ تغيير الرابط", callback_data="baseurl_set"),
++           InlineKeyboardButton("🔎 فحص الرابط", callback_data="baseurl_test"))
++    if src == 'panel':
++        mk.add(InlineKeyboardButton("↩️ رجوع للرابط التلقائي", callback_data="baseurl_reset"))
++    if keys:
++        mk.add(InlineKeyboardButton("📣 أرسل الرابط لعملاء الـ API", callback_data="baseurl_notify"))
++    mk.add(InlineKeyboardButton("🔙 الإعدادات", callback_data="ad_shop_settings"))
++    return '\n'.join(L), mk
++
++
++def _baseurl_edit(call, txt=None, mk=None):
++    if txt is None:
++        txt, mk = _baseurl_screen()
++    try:
++        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk,
++                              disable_web_page_preview=True)
++    except Exception as e:
++        if 'not modified' not in str(e).lower():
++            bot.send_message(call.message.chat.id, txt, parse_mode='HTML', reply_markup=mk, disable_web_page_preview=True)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_baseurl')
++@admin_required
++def ad_baseurl_cb(call):
++    bot.answer_callback_query(call.id)
++    _baseurl_edit(call)
++
++
++def _baseurl_save(url, admin_id):
++    old = _get_server_url()
++    if url:
++        db.settings.update_one({'key': 'public_base_url'}, {'$set': {'value': url, 'by': admin_id, 'at': int(time.time())}}, upsert=True)
++    else:
++        db.settings.delete_one({'key': 'public_base_url'})
++    _BASEURL_CACHE.update(t=0, v=None)
++    try:
++        db.admin_audit.insert_one({'admin': admin_id, 'action': 'base_url', 'target': url or 'auto', 'details': {'old': old},
++                                   'via': _log_src_get() or 'bot', 'at': datetime.datetime.utcnow()})
++    except Exception:
++        pass
++    threading.Thread(target=_wa_refresh_menu_button, daemon=True).start()
++    return old
++
++
++def _baseurl_done_text(old):
++    src, url = _baseurl_source()
++    gw = _get_api_gateway()
++    t = ["✅ <b>تم حفظ الرابط الأساسي</b>", "",
++         f"🔌 رابط الـ API الجديد:\n<code>{html.escape(url + '/' + gw)}</code>",
++         f"🛍 الموقع: <code>{html.escape(_wa_public_url() or '—')}</code>", "",
++         "• المفاتيح (API Keys) ما تغيّرت — بس الرابط.",
++         "• زر المتجر في البوت انضبط على الرابط الجديد."]
++    if old and old != url:
++        t.append(f"• الرابط القديم <code>{html.escape(old)}</code> يظل يشتغل طالما يوصل لنفس السيرفر — عملاؤك ما ينقطعون. "
++                 "لو بتوقفه، أرسل لهم الجديد من الزر تحت.")
++    return '\n'.join(t)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'baseurl_set')
++@admin_required
++def baseurl_set_cb(call):
++    bot.answer_callback_query(call.id)
++    msg = bot.send_message(call.message.chat.id,
++                           "✏️ <b>أرسل الرابط الأساسي الجديد</b>\n\nمثال: <code>https://api.mystore.com</code>\n"
++                           "<i>بدون مسار — الدومين بس. لازم يكون https ويوصل لنفس السيرفر.</i>", parse_mode='HTML')
++    bot.register_next_step_handler(msg, baseurl_set_save)
++
++
++def baseurl_set_save(message):
++    if not _is_admin_check(message.from_user.id):
++        return
++    t = (message.text or '').strip()
++    if t in ('الغاء', 'إلغاء', 'cancel', '/cancel'):
++        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
++        return
++    url = _baseurl_norm(t)
++    mk = InlineKeyboardMarkup()
++    mk.add(InlineKeyboardButton("🌐 الرابط الأساسي", callback_data="ad_baseurl"))
++    if url.startswith('http://'):
++        bot.send_message(message.chat.id, "❌ لازم الرابط يكون <b>https</b> — تيليجرام ما يفتح الموقع بدونه.", parse_mode='HTML', reply_markup=mk)
++        return
++    if not _baseurl_valid(url):
++        bot.send_message(message.chat.id, "❌ الرابط مو صحيح. أرسل الدومين بس، مثل: <code>https://api.mystore.com</code>",
++                         parse_mode='HTML', reply_markup=mk)
++        return
++    if url == _get_server_url():
++        bot.send_message(message.chat.id, "ℹ️ هذا هو الرابط الحالي نفسه.", reply_markup=mk)
++        return
++    bot.send_message(message.chat.id, "⏳ أفحص الرابط…")
++    ok, why = _baseurl_probe(url)
++    if ok:
++        old = _baseurl_save(url, message.from_user.id)
++        keys = db.api_keys.count_documents({'is_active': True})
++        mk2 = InlineKeyboardMarkup(row_width=1)
++        if keys:
++            mk2.add(InlineKeyboardButton(f"📣 أرسل الرابط الجديد لعملاء الـ API ({keys})", callback_data="baseurl_notify"))
++        mk2.add(InlineKeyboardButton("🌐 الرابط الأساسي", callback_data="ad_baseurl"))
++        bot.send_message(message.chat.id, _baseurl_done_text(old), parse_mode='HTML', reply_markup=mk2, disable_web_page_preview=True)
++        return
++    _BASEURL_PENDING[message.from_user.id] = url
++    mk3 = InlineKeyboardMarkup(row_width=1)
++    mk3.add(InlineKeyboardButton("🔁 افحص مرة ثانية", callback_data="baseurl_retry"),
++            InlineKeyboardButton("💾 احفظه برضو (على مسؤوليتي)", callback_data="baseurl_force"),
++            InlineKeyboardButton("❌ إلغاء", callback_data="ad_baseurl"))
++    bot.send_message(message.chat.id, f"⚠️ <b>ما حفظته.</b>\n{_BASEURL_WHY.get(why, why)}\n\n"
++                     f"<code>{html.escape(url)}</code>\n\n<i>لو حفظته وهو ما يوصل للسيرفر، الموقع والـ API بالرابط هذا ما يشتغلون "
++                     "لين تربطه صح. الرابط الحالي ما يتأثر.</i>", parse_mode='HTML', reply_markup=mk3)
++
++
++@bot.callback_query_handler(func=lambda call: call.data in ('baseurl_retry', 'baseurl_force'))
++@admin_required
++def baseurl_pending_cb(call):
++    url = _BASEURL_PENDING.get(call.from_user.id)
++    if not url:
++        bot.answer_callback_query(call.id, "انتهت العملية — أرسل الرابط من جديد.", show_alert=True)
++        return
++    if call.data == 'baseurl_retry':
++        ok, why = _baseurl_probe(url)
++        if not ok:
++            bot.answer_callback_query(call.id, "للحين ما يوصل: " + _BASEURL_WHY.get(why, why)[:150], show_alert=True)
++            return
++    bot.answer_callback_query(call.id)
++    _BASEURL_PENDING.pop(call.from_user.id, None)
++    old = _baseurl_save(url, call.from_user.id)
++    keys = db.api_keys.count_documents({'is_active': True})
++    mk = InlineKeyboardMarkup(row_width=1)
++    if keys:
++        mk.add(InlineKeyboardButton(f"📣 أرسل الرابط الجديد لعملاء الـ API ({keys})", callback_data="baseurl_notify"))
++    mk.add(InlineKeyboardButton("🌐 الرابط الأساسي", callback_data="ad_baseurl"))
++    _baseurl_edit(call, _baseurl_done_text(old) + ("" if call.data == 'baseurl_retry' else "\n\n⚠️ <i>انحفظ بدون ما يتأكد إنه يوصل للسيرفر.</i>"), mk)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'baseurl_test')
++@admin_required
++def baseurl_test_cb(call):
++    url = _get_server_url()
++    if not url:
++        bot.answer_callback_query(call.id, "ما فيه رابط أفحصه.", show_alert=True)
++        return
++    ok, why = _baseurl_probe(url)
++    bot.answer_callback_query(call.id, ("✅ الرابط يشتغل ويوصل لهذا السيرفر." if ok else "❌ " + _BASEURL_WHY.get(why, why))[:190], show_alert=True)
++
++
++@bot.callback_query_handler(func=lambda call: call.data == 'baseurl_reset')
++@admin_required
++def baseurl_reset_cb(call):
++    bot.answer_callback_query(call.id, "↩️ رجع للرابط التلقائي")
++    _baseurl_save(None, call.from_user.id)
++    _baseurl_edit(call)
++
++
++def _baseurl_notice(uid, lang):
++    base = _get_server_url()
++    gw = _get_api_gateway()
++    k = db.api_keys.find_one({'user_id': uid, 'is_active': True})
++    conn = _generate_connection_code(k['api_key']) if k else None
++    if lang == 'ar':
++        return ("🔔 <b>تحديث رابط الـ API</b>\n\nالرابط الأساسي الجديد:\n<code>" + html.escape(f"{base}/{gw}") + "</code>\n\n"
++                + (f"كود الاتصال:\n<code>{conn}</code>\n\n" if conn else '')
++                + "مفتاحك (API Key) ما تغيّر — غيّر الرابط بس في بوتك أو موقعك.")
++    return ("🔔 <b>API base URL updated</b>\n\nNew base URL:\n<code>" + html.escape(f"{base}/{gw}") + "</code>\n\n"
++            + (f"Connection code:\n<code>{conn}</code>\n\n" if conn else '')
++            + "Your API key did not change — just update the base URL in your bot or site.")
++
++
++@bot.callback_query_handler(func=lambda call: call.data in ('baseurl_notify', 'baseurl_notify_ok'))
++@admin_required
++def baseurl_notify_cb(call):
++    uids = sorted({int(d['user_id']) for d in db.api_keys.find({'is_active': True}, {'user_id': 1}) if d.get('user_id') is not None})
++    if call.data == 'baseurl_notify':
++        bot.answer_callback_query(call.id)
++        mk = InlineKeyboardMarkup(row_width=1)
++        mk.add(InlineKeyboardButton(f"✅ أرسل لـ {len(uids)} عميل", callback_data="baseurl_notify_ok"),
++               InlineKeyboardButton("❌ إلغاء", callback_data="ad_baseurl"))
++        _baseurl_edit(call, "📣 <b>إرسال الرابط الجديد لعملاء الـ API</b>\n\nيوصل كل عميل عنده مفتاح API نشط رسالة فيها:\n"
++                            f"• الرابط الأساسي الجديد: <code>{html.escape((_get_server_url() or '') + '/' + _get_api_gateway())}</code>\n"
++                            "• كود الاتصال الجديد حقه\n• إن مفتاحه ما تغيّر", mk)
++        return
++    bot.answer_callback_query(call.id, "⏳ جاري الإرسال…")
++    admin_chat = call.message.chat.id
++
++    def run():
++        ok = bad = 0
++        for u in uids:
++            try:
++                lang = 'ar' if get_lang(u) == 'ar' else 'en'
++                bot.send_message(u, _baseurl_notice(u, lang), parse_mode='HTML', disable_web_page_preview=True)
++                ok += 1
++            except Exception:
++                bad += 1
++            time.sleep(0.05)
++        try:
++            bot.send_message(admin_chat, f"📣 وصل الرابط الجديد لـ <b>{ok}</b> عميل" + (f" (ما وصل لـ {bad})" if bad else '') + ".", parse_mode='HTML')
++        except Exception:
++            pass
++    threading.Thread(target=run, daemon=True).start()
++    _baseurl_edit(call)
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================

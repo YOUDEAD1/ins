@@ -1,0 +1,166 @@
+--- webapp/index.html (READY_7)	2026-10-19 14:06:34.020155564 +0000
++++ webapp/index.html (READY_8)	2026-10-19 14:16:01.579331806 +0000
+@@ -1297,6 +1297,13 @@
+ .ds-buyer .meta small{font-size:11.5px;color:var(--fg-3);direction:ltr;text-align:start}
+ .ds-stock{display:flex;flex-wrap:wrap;gap:6px}
+ .ds-stock span{padding:5px 9px;border-radius:9px;background:var(--surface-2);font-size:12px;color:var(--fg-2)}
++
++/* ═════════ أوامر البوت الطويلة في الموقع + فحص المعاملة ═════════ */
++.ap-work{display:flex;align-items:center;gap:10px;margin-top:12px;padding:12px 14px;border-radius:14px;background:var(--accent-soft);color:var(--fg);font-size:13.5px;font-weight:600;line-height:1.5}
++.ap-work .spin{width:18px;height:18px;flex:none;border-radius:50%;border:2.5px solid var(--accent);border-top-color:transparent;animation:vfSpin .8s linear infinite}
++.ds-live{margin-top:12px;white-space:normal;height:auto;min-height:46px;line-height:1.35}
++.ds-live-sub{display:block;margin-top:6px;font-size:12px;color:var(--fg-3);text-align:center}
++@media (prefers-reduced-motion: reduce){.ap-work .spin{animation:none}}
+ </style>
+ </head>
+ <body>
+@@ -3102,7 +3109,7 @@
+ /* ───────────────────────── admin (admins only — the server checks every request) ───────────────────────── */
+ const ADM_I18N = {
+   ar: { panel: "لوحة البوت", panelBtn: "لوحة البوت كاملة هنا", panelBtnSub: "كل أوامر البوت بأزرارها وشاشاتها — بدون ما تطلع من الموقع", home: "الرئيسية", inChatOpen: "افتحها في المحادثة", typeHere: "اكتب للبوت…", typeReply: "اكتب ردك هنا…", waitingReply: "البوت ينتظر ردك", cancelStep: "إلغاء", docCopy: "وصلتك نسخة من الملف في المحادثة كمان", download: "تحميل", stale: "هذي الشاشة تغيّرت — حدّثتها لك", inSite: "داخل الموقع", ok: "تمام", botCmdsSub: "كل قسم ينفتح هنا داخل الموقع — نفس أزرار البوت وشاشاته بالضبط.", pvPanel: "معاينة: داخل بوتك هنا تشتغل لوحة البوت الحقيقية بكل أزرارها.", pvPanelReal: "معاينة: هذي شاشات بوتك الحقيقية — مسجّلة من الكود الجديد على كتالوجك (المستخدمين والطلبات تجريبية). الضغط هنا ما يغيّر أي شيء، بس يوريك وش يطلع في بوتك.", pvDestr: "🔒 هذا الزر ينفّذ تغيير فعلي (حذف / إرسال / تأكيد / إرجاع…) فما شغّلناه في المعاينة. في بوتك يشتغل عادي من هنا.", pvNotRec: "هذي الشاشة ما انسجّلت في المعاينة — في بوتك تنفتح عادي.", pvStepDone: "📝 <b>وصل ردك.</b>\nفي بوتك هذا الرد ينفّذ الأمر مباشرة (يحفظ / يعدّل). المعاينة ما تغيّر أي بيانات.", pvTry: "💡 <b>معاينة — جرّب تكتب واحد من هذي:</b>", pvNoOrder: "❌ ما لقيت هذا الطلب في بيانات المعاينة.\n💡 جرّب واحد من طلبات المعاينة:", pvChat: "في بوتك أي رقم طلب تلصقه هنا يطلع لك كرته كاملة. جرّب واحد من هذي:", pvDoc: "تحميل الملفات يشتغل في بوتك — المعاينة تعرض اسم الملف فقط.", justNow: "الحين", minsAgo: "قبل {n} د", updated: "آخر تحديث {t}", oosS: "نفد مخزونها", lowS: "مخزون قليل", apiPendS: "طلبات API تنتظر", g_store: "المتجر", g_people: "العملاء", g_money: "الطلبات والفلوس", g_grow: "التسويق", g_sys: "الإعدادات والفريق", t_prod: "المنتجات", t_stock: "الأسعار والمخزون", t_ext: "متاجر API", t_cgpt: "ChatGPT", t_act: "التفعيلات", t_users: "العملاء", t_find: "بحث", t_gift: "شحن رصيد", t_ban: "حظر", t_vip: "VIP", t_ref: "الإحالات", t_orders: "الطلبات", t_deps: "الإيداعات", t_logs: "السجلات", t_reports: "التقارير", t_tx: "فحص معاملة", t_prot: "حماية الإيداع", t_bc: "برودكاست", t_fsub: "اشتراك إجباري", t_cms: "تخصيص البوت", t_settings: "إعدادات المتجر", t_promote: "المدراء", t_panel: "اللوحة كاملة", apFilter: "فلترة القائمة…", apMore: "خيارات", apType: "الصق رقم طلب أو اكتب للبوت…", apAsk: "البوت يحتاج ردك", apTry: "أمثلة من المعاينة:", apSend: "إرسال", apHome: "لوحة الإدارة في البوت", apEmpty: "ما فيه شاشة هنا.", apThread: "عرض كمحادثة", apPages: "عرض كصفحات", apThreadSub: "كل الرسائل بالترتيب مثل تيليجرام", apBack: "رجوع", apAgain: "مرة ثانية", apDone: "تم",
+-    dsAcc: "حسابات وأكواد ({n})", dsMails: "طلبات بالإيميل ({n})", dsUsers: "مستخدمين ({n})", dsMore: "فيه نتائج أكثر — اكتب جزء أطول عشان تضيّق البحث.", ds_in_stock: "بالمخزون", ds_reserved: "محجوز الحين", ds_sold: "مباع", ds_sold_multi: "انباع أكثر من مرة", ds_sold_norecord: "مباع بدون سجل طلب", dsLine: "سطر الحساب", dsPart: "الجزء {n}", dsCopyLine: "نسخ السطر", dsState: "الحالة", dsAdded: "انضاف للمخزون", dsCopies: "نسخ بالمخزون", dsFree: "{n} ما انباعت", dsCopiesN: "{n} نسخة (كلها مباعة)", dsCopiesF: "{n} نسخة · {f} متاحة للبيع", dsSales: "سجل البيع ({n})", dsNoSale: "ما انباع لأحد للحين.", dsBuyer: "المشتري", dsPrice: "السعر", dsW_multi: "⚠️ نفس الحساب انباع لأكثر من شخص ({n}).", dsW_resold: "⚠️ انباع قبل، وموجود بالمخزون مرة ثانية — بينباع مرة ثانية لو ما شلته.", dsW_dup: "⚠️ مكرر بالمخزون ({n} نسخ).", dsOpenOrder: "تفاصيل الطلب", dsOpenUser: "ملف العميل", dsProduct: "المنتج", dsReseller: "عميل الموزّع", dsKind_api: "API (موزّع)", dsKind_ext: "مورد خارجي", dsKind_order: "شراء", dsStockItem: "نسخة بالمخزون", dsSoldMark: "مباعة", dsFreeMark: "متاحة", dsTry: "جرّب: example.com", tab: 'الإدارة', title: 'لوحة الإدارة', sub: 'للأدمن فقط · نفس بيانات البوت', q: 'إيميل، سطر حساب، رقم طلب، آيدي أو @يوزر', find: 'بحث',
++    dsAcc: "حسابات وأكواد ({n})", dsMails: "طلبات بالإيميل ({n})", dsUsers: "مستخدمين ({n})", dsMore: "فيه نتائج أكثر — اكتب جزء أطول عشان تضيّق البحث.", ds_in_stock: "بالمخزون", ds_reserved: "محجوز الحين", ds_sold: "مباع", ds_sold_multi: "انباع أكثر من مرة", ds_sold_norecord: "مباع بدون سجل طلب", dsLine: "سطر الحساب", dsPart: "الجزء {n}", dsCopyLine: "نسخ السطر", dsState: "الحالة", dsAdded: "انضاف للمخزون", dsCopies: "نسخ بالمخزون", dsFree: "{n} ما انباعت", dsCopiesN: "{n} نسخة (كلها مباعة)", dsCopiesF: "{n} نسخة · {f} متاحة للبيع", dsSales: "سجل البيع ({n})", dsNoSale: "ما انباع لأحد للحين.", dsBuyer: "المشتري", dsPrice: "السعر", dsW_multi: "⚠️ نفس الحساب انباع لأكثر من شخص ({n}).", dsW_resold: "⚠️ انباع قبل، وموجود بالمخزون مرة ثانية — بينباع مرة ثانية لو ما شلته.", dsW_dup: "⚠️ مكرر بالمخزون ({n} نسخ).", dsOpenOrder: "تفاصيل الطلب", dsOpenUser: "ملف العميل", dsProduct: "المنتج", dsReseller: "عميل الموزّع", dsKind_api: "API (موزّع)", dsKind_ext: "مورد خارجي", dsKind_order: "شراء", dsStockItem: "نسخة بالمخزون", dsSoldMark: "مباعة", dsFreeMark: "متاحة", dsTry: "جرّب: example.com", apBusy: "البوت لسه شغّال على الطلب السابق — لحظات.", apWorking: "البوت شغّال على طلبك… النتيجة تطلع هنا أول ما تجهز (مثل المحادثة).", dsDeps: "إيداعات مسجّلة ({n})", dsLive: "فحص المعاملة مباشرة", dsLiveSub: "نفس زر «🔍 فحص معاملة» في البوت — يفحص قاعدة البيانات وبعدين الشبكات مباشرة.", txCheck: "فحص معاملة", tab: 'الإدارة', title: 'لوحة الإدارة', sub: 'للأدمن فقط · نفس بيانات البوت', q: 'إيميل، سطر حساب، رقم طلب، آيدي أو @يوزر', find: 'بحث',
+     d1: '24 ساعة', d7: '7 أيام', d30: '30 يوم', sales: 'المبيعات', orders: 'الطلبات', buyers: '{n} مشتري', deps: 'الإيداعات', depN: '{n} عملية', newU: 'مستخدمين جدد', usersN: 'من {n} مستخدم',
+     alerts: 'تنبيهات', oos: 'منتجات نفد مخزونها', low: 'مخزون قليل (3 أو أقل)', apiPend: 'طلبات API يدوية تنتظر', credits: 'إيداعات تنتظر مطابقة', allGood: 'كل شي تمام — ما فيه تنبيهات.',
+     quick: 'إدارة سريعة', products: 'المنتجات', recentOrders: 'آخر الطلبات', recentDeps: 'آخر الإيداعات', users: 'العملاء', usersSub: 'ابحث بالآيدي أو اليوزر',
+@@ -3127,7 +3134,7 @@
+     viaL: { bot: 'محادثة البوت', webapp: 'الموقع (Mini App)', api: 'API' }
+   },
+   en: { panel: "Bot panel", panelBtn: "Full bot panel here", panelBtnSub: "Every bot command with its buttons and screens — without leaving the store", home: "Home", inChatOpen: "Open in the chat", typeHere: "Message the bot…", typeReply: "Type your reply…", waitingReply: "The bot is waiting for your reply", cancelStep: "Cancel", docCopy: "A copy of the file was also sent to your chat", download: "Download", stale: "This screen changed — refreshed it for you", inSite: "In the store", ok: "OK", botCmdsSub: "Each section opens right here in the store — the exact same bot buttons and screens.", pvPanel: "Preview: inside your bot the real bot panel runs here with all its buttons.", pvPanelReal: "Preview: these are your bot's real screens — recorded from the new code on your catalog (users and orders are samples). Pressing here changes nothing; it shows what your bot shows.", pvDestr: "🔒 This button makes a real change (delete / send / confirm / refund…), so it is not run in the preview. In your bot it works from here.", pvNotRec: "This screen was not recorded in the preview — in your bot it opens normally.", pvStepDone: "📝 <b>Got your reply.</b>\nIn your bot this reply runs the command right away (saves / edits). The preview changes no data.", pvTry: "💡 <b>Preview — try typing one of these:</b>", pvNoOrder: "❌ This order is not in the preview data.\n💡 Try one of the preview orders:", pvChat: "In your bot, any order ID you paste here shows its full card. Try one of these:", pvDoc: "File downloads work in your bot — the preview only shows the file name.", justNow: "just now", minsAgo: "{n} min ago", updated: "Updated {t}", oosS: "out of stock", lowS: "low stock", apiPendS: "API orders waiting", g_store: "Store", g_people: "Customers", g_money: "Orders & money", g_grow: "Marketing", g_sys: "Settings & team", t_prod: "Products", t_stock: "Prices & stock", t_ext: "API stores", t_cgpt: "ChatGPT", t_act: "Activations", t_users: "Customers", t_find: "Search", t_gift: "Add balance", t_ban: "Ban", t_vip: "VIP", t_ref: "Referrals", t_orders: "Orders", t_deps: "Deposits", t_logs: "Logs", t_reports: "Reports", t_tx: "Check payment", t_prot: "Deposit guard", t_bc: "Broadcast", t_fsub: "Forced join", t_cms: "Customize bot", t_settings: "Store settings", t_promote: "Admins", t_panel: "Full panel", apFilter: "Filter the list…", apMore: "Options", apType: "Paste an order ID or message the bot…", apAsk: "The bot needs your reply", apTry: "Preview examples:", apSend: "Send", apHome: "Bot admin panel", apEmpty: "Nothing to show here.", apThread: "Show as chat", apPages: "Show as pages", apThreadSub: "Every message in order, like Telegram", apBack: "Back", apAgain: "Do it again", apDone: "Done",
+-    dsAcc: "Accounts & codes ({n})", dsMails: "Orders by email ({n})", dsUsers: "Users ({n})", dsMore: "More results — type a longer part to narrow it down.", ds_in_stock: "In stock", ds_reserved: "Reserved now", ds_sold: "Sold", ds_sold_multi: "Sold more than once", ds_sold_norecord: "Sold, no order record", dsLine: "Account line", dsPart: "Part {n}", dsCopyLine: "Copy line", dsState: "Status", dsAdded: "Added to stock", dsCopies: "Copies in stock", dsFree: "{n} unsold", dsCopiesN: "{n} (all sold)", dsCopiesF: "{n} · {f} available to sell", dsSales: "Sales history ({n})", dsNoSale: "Not sold to anyone yet.", dsBuyer: "Buyer", dsPrice: "Price", dsW_multi: "⚠️ This account was sold to more than one person ({n}).", dsW_resold: "⚠️ Sold before and back in stock — it will be sold again unless you remove it.", dsW_dup: "⚠️ Duplicated in stock ({n} copies).", dsOpenOrder: "Order details", dsOpenUser: "Customer profile", dsProduct: "Product", dsReseller: "Reseller customer", dsKind_api: "API (reseller)", dsKind_ext: "External supplier", dsKind_order: "Purchase", dsStockItem: "Stock copy", dsSoldMark: "sold", dsFreeMark: "available", dsTry: "Try: example.com", tab: 'Admin', title: 'Admin panel', sub: 'Admins only · same data as the bot', q: 'Email, account line, order ID, user ID or @username', find: 'Search',
++    dsAcc: "Accounts & codes ({n})", dsMails: "Orders by email ({n})", dsUsers: "Users ({n})", dsMore: "More results — type a longer part to narrow it down.", ds_in_stock: "In stock", ds_reserved: "Reserved now", ds_sold: "Sold", ds_sold_multi: "Sold more than once", ds_sold_norecord: "Sold, no order record", dsLine: "Account line", dsPart: "Part {n}", dsCopyLine: "Copy line", dsState: "Status", dsAdded: "Added to stock", dsCopies: "Copies in stock", dsFree: "{n} unsold", dsCopiesN: "{n} (all sold)", dsCopiesF: "{n} · {f} available to sell", dsSales: "Sales history ({n})", dsNoSale: "Not sold to anyone yet.", dsBuyer: "Buyer", dsPrice: "Price", dsW_multi: "⚠️ This account was sold to more than one person ({n}).", dsW_resold: "⚠️ Sold before and back in stock — it will be sold again unless you remove it.", dsW_dup: "⚠️ Duplicated in stock ({n} copies).", dsOpenOrder: "Order details", dsOpenUser: "Customer profile", dsProduct: "Product", dsReseller: "Reseller customer", dsKind_api: "API (reseller)", dsKind_ext: "External supplier", dsKind_order: "Purchase", dsStockItem: "Stock copy", dsSoldMark: "sold", dsFreeMark: "available", dsTry: "Try: example.com", apBusy: "The bot is still working on the previous request — one moment.", apWorking: "The bot is working on it… the result shows here as soon as it is ready (just like the chat).", dsDeps: "Recorded deposits ({n})", dsLive: "Check this transaction live", dsLiveSub: "Same as «🔍 Check transaction» in the bot: the database, then Binance, TON, LTC, USDT and Bybit live.", txCheck: "Check transaction", tab: 'Admin', title: 'Admin panel', sub: 'Admins only · same data as the bot', q: 'Email, account line, order ID, user ID or @username', find: 'Search',
+     d1: '24 h', d7: '7 days', d30: '30 days', sales: 'Sales', orders: 'Orders', buyers: '{n} buyers', deps: 'Top-ups', depN: '{n} payments', newU: 'New users', usersN: 'of {n} users',
+     alerts: 'Alerts', oos: 'Products out of stock', low: 'Low stock (3 or less)', apiPend: 'Manual API orders waiting', credits: 'Deposits waiting for a match', allGood: 'All good — no alerts.',
+     quick: 'Quick actions', products: 'Products', recentOrders: 'Latest orders', recentDeps: 'Latest top-ups', users: 'Users', usersSub: 'Search by ID or username',
+@@ -3257,9 +3264,11 @@
+ }
+ function dsWho(u) { return u ? (u.name || String(u.id)) + (u.username ? ' @' + u.username : '') : ''; }
+ function dsResHtml(R) {
+-  const A = R.accounts || [], O = R.orders || [], U = R.users || [];
+-  if (!A.length && !O.length && !U.length) return `<div class="adm-none"><b>${esc(adt('none'))}</b><span>${esc(adt('noneTip'))}</span></div>`;
++  const A = R.accounts || [], O = R.orders || [], U = R.users || [], D = R.deposits || [];
++  const live = R.txlike ? `<button class="btn ghost full ds-live" data-act="adm-txcheck" data-v="${esc(R.q)}">🔍 ${esc(adt('dsLive'))}</button><small class="ds-live-sub">${esc(adt('dsLiveSub'))}</small>` : '';
++  if (!A.length && !O.length && !U.length && !D.length) return `<div class="adm-none"><b>${esc(adt('none'))}</b><span>${esc(adt('noneTip'))}</span></div>${live}`;
+   let h = '';
++  if (D.length) h += `<div class="lbl">${esc(adt('dsDeps', { n: D.length }))}</div><div class="api-card adm-list">${D.map(d => `<button class="adm-row" ${d.user ? `data-act="adm-user" data-v="${d.user.id}"` : ''}><span class="meta"><b class="mono" dir="ltr" style="text-align:left">${dsHl(d.tx, R.q)}</b><small>${esc(d.method || '')}${d.user ? ' · ' + esc(dsWho(d.user)) + ' · ' + d.user.id : ''}${d.ts ? ' · ' + esc(fmtDate(d.ts)) : ''}</small></span><span class="amt num pos">${usd(d.amount || 0)}</span></button>`).join('')}</div>`;
+   if (A.length) h += `<div class="lbl">${esc(adt('dsAcc', { n: A.length + (R.more ? '+' : '') }))}</div><div class="api-card ds-list">${A.map((a, i) => {
+     const last = (a.sales || [])[a.sales.length - 1], cls = a.warn && a.warn.length ? 'warn' : a.state;
+     const sub = [`<span class="ds-tag ${a.state}">${esc(adt('ds_' + a.state))}</span>${esc(admName(a.product || {}))}`];
+@@ -3271,7 +3280,7 @@
+   if (O.length) h += `<div class="lbl">${esc(adt('dsMails', { n: O.length }))}</div><div class="api-card adm-list">${O.map(o => `<button class="adm-row" data-act="adm-order" data-v="${esc(o.order_id)}"><span class="meta"><b dir="ltr" style="text-align:start">${dsHl(o.email || o.buyer_info || o.order_id, R.q)}</b><small>${esc(admName(o.product || {}))} · <span class="mono" dir="ltr">${esc(o.order_id)}</span>${o.user ? ' · ' + esc(dsWho(o.user)) : ''}${o.ts ? ' · ' + esc(fmtDate(o.ts)) : ''}</small></span><span class="amt num">${usd(o.price || 0)}</span></button>`).join('')}</div>`;
+   if (U.length) h += `<div class="lbl">${esc(adt('dsUsers', { n: U.length }))}</div><div class="api-card adm-list">${U.map(u => `<button class="adm-row" data-act="adm-user" data-v="${u.id}"><span class="adm-av sm">${esc(String(u.name || '?')[0].toUpperCase())}</span><span class="meta"><b dir="auto">${dsHl(u.name, R.q)}${u.banned ? ` <span class="adm-badge bad">${esc(adt('banned'))}</span>` : ''}</b><small dir="ltr">${u.username ? '@' + dsHl(u.username, R.q.replace(/^@/, '')) + ' · ' : ''}${u.id}</small></span><span class="amt num">${usd(u.balance)}</span></button>`).join('')}</div>`;
+   if (R.more) h += `<p class="api-muted">${esc(adt('dsMore'))}</p>`;
+-  return h;
++  return h + live;
+ }
+ function dsParts(line) {
+   const seps = [':', '|', ';', ' ', '----', '---', ','];
+@@ -3321,8 +3330,8 @@
+   if (!r.ok) { S.admRes = { err: errText(r) }; renderAdmRes(); return; }
+   if (r.kind === 'order') { S.admRes = null; renderAdmRes(); openAdmOrder(r.order); }
+   else if (r.kind === 'user') { S.admRes = null; renderAdmRes(); openAdmUser(r.user.id); }
+-  else { S.admRes = r; renderAdmRes(); if (r.kind === 'deep' && (r.accounts || []).length === 1 && !(r.orders || []).length && !(r.users || []).length) openDsAccount(r.accounts[0], r.q); }
+-  hap(r.kind === 'none' || (r.kind === 'deep' && !(r.accounts || []).length && !(r.orders || []).length && !(r.users || []).length) ? 'warning' : 'select');
++  else { S.admRes = r; renderAdmRes(); if (r.kind === 'deep' && (r.accounts || []).length === 1 && !(r.orders || []).length && !(r.users || []).length && !(r.deposits || []).length) openDsAccount(r.accounts[0], r.q); }
++  hap(r.kind === 'none' || (r.kind === 'deep' && !(r.accounts || []).length && !(r.orders || []).length && !(r.users || []).length && !(r.deposits || []).length) ? 'warning' : 'select');
+   return;
+   hap(r.kind === 'none' ? 'warning' : 'select');
+ }
+@@ -3814,7 +3823,7 @@
+   return `<div class="ap-nt ${tone}">${body}${doc}${other.length ? `<div class="ap-try">${other.map(b => b.k === 'cb' ? `<button data-act="ap-btn" data-m="${m.id}" data-v="${esc(b.v)}" dir="auto">${esc(b.t)}</button>` : b.k === 'url' ? `<button data-act="vc-url" data-v="${esc(b.v)}" dir="auto">${esc(b.t)} ↗</button>` : b.k === 'copy' ? `<button data-act="copy" data-v="${esc(b.v)}" dir="auto">${esc(b.t)}</button>` : '').join('')}</div>` : ''}${tries.length ? `<div class="ap-try">${tries.map(b => `<button data-act="vc-say" data-v="${esc(b.v)}" dir="ltr">${esc(b.t)}</button>`).join('')}</div>` : ''}</div>`;
+ }
+ const apHasPageBtns = m => (m.buttons || []).some(r => r.some(b => b.k !== 'text'));
+-async function openPanel(cb, label, hue) {
++async function openPanel(cb, label, hue, opts) {
+   const P = { V: null, busy: false, draft: '', ask: '', sigs: new Map(), fresh: new Set(), pageSig: '', thread: false, depth: 0,
+     label: label || adt('panel'), root: cb || 'admin_panel_main', hue: hue || admHue(cb || 'admin_panel_main') };
+   const sig = m => m.html + '\u0001' + JSON.stringify(m.buttons || []) + '\u0001' + (m.doc ? m.doc.name : '');
+@@ -3845,7 +3854,8 @@
+         <div class="ap-askb"><button class="btn ghost" data-act="ap-cancel">${esc(adt('cancelStep'))}</button><button class="btn primary" data-act="ap-send">${esc(adt('apSend'))}</button></div>
+       </section>`;
+     } else {
+-      const nts = fresh.length ? `<div class="ap-nts">${fresh.map(apNoticeHtml).join('')}</div>` : '';
++      const work = P.job ? `<div class="ap-work" role="status"><span class="spin"></span><span>${esc(adt('apWorking'))}</span></div>` : '';
++      const nts = (fresh.length ? `<div class="ap-nts">${fresh.map(apNoticeHtml).join('')}</div>` : '') + work;
+       if (page) {
+         const pr = apParse(page.html), bt = apButtons(page);
+         const title = pr.title || esc(P.label);
+@@ -3855,7 +3865,7 @@
+           ${bt.runs.map(r => apRunHtml(r, page.id)).join('')}
+           ${bt.pager.length ? `<div class="ap-pager">${bt.pager.map(b => b.kind === 'pind' ? `<span class="num">${esc(b.t)}</span>` : `<button data-act="ap-btn" data-m="${page.id}" data-v="${esc(b.v)}" dir="auto">${esc(b.t)}</button>`).join('')}</div>` : ''}
+         </article>`;
+-      } else if (nts) html += `<article class="ap-page ${anim ? 'in' : ''}">${nts}<div class="ap-askb"><button class="btn ghost" data-act="ap-home">${esc(adt('apAgain'))}</button><button class="btn primary" data-act="sheet-close">${esc(adt('apDone'))}</button></div></article>`;
++      } else if (nts) html += `<article class="ap-page ${anim ? 'in' : ''}">${nts}${P.job ? '' : `<div class="ap-askb"><button class="btn ghost" data-act="ap-home">${esc(adt('apAgain'))}</button><button class="btn primary" data-act="sheet-close">${esc(adt('apDone'))}</button></div>`}</article>`;
+       else if (P.V) html += `<div class="ap-empty"><span style="font-size:40px">📭</span><span>${esc(adt('apEmpty'))}</span><button class="btn ghost sm" data-act="ap-home">${esc(adt('apHome'))}</button></div>`;
+       else html += `<div class="ap-page"><div class="skel" style="height:58px;border-radius:17px;width:70%"></div><div class="skel" style="height:120px;border-radius:18px"></div><div class="skel" style="height:220px;border-radius:18px"></div></div>`;
+     }
+@@ -3870,12 +3880,18 @@
+     if (step && !P.thread) setTimeout(() => { const i = sh.el.querySelector('#apin'); if (i && document.activeElement !== i) i.focus(); }, 160);
+   };
+   const call = async (b, el) => {
+-    if (P.busy) return null;
++    if (P.busy) { if (P.job) toast(adt('apBusy')); return null; }
+     P.busy = true; if (el) el.classList.add('busy');
+     const pr = sh.el.querySelector('.ap-prog'); if (pr) pr.classList.add('on');
+     const before = P.sigs;
++    P.jobBefore = before;
+     const r = await api('admin/vc', b);
+-    P.busy = false;
++    return apply(r, el, before);
++  };
++  /* الأمر لو طوّل (فحص بينانس / TON / …) يكمل بالسيرفر، وإحنا نسحب رسائله أول بأول لين يخلص */
++  const apply = (r, el, before) => {
++    clearTimeout(P.pollT);
++    P.busy = !!(r && r.busy); P.job = P.busy;
+     if (!sh.el.isConnected) return r;
+     if (r.msgs) {
+       const now = new Map(); r.msgs.forEach(m => now.set(m.id, sig(m)));
+@@ -3888,10 +3904,19 @@
+       render(changed);
+     } else { const p2 = sh.el.querySelector('.ap-prog'); if (p2) p2.classList.remove('on'); if (el && el.isConnected) el.classList.remove('busy'); }
+     if (r.error === 'stale_button') toast(adt('stale'));
++    else if (r.error === 'busy') toast(adt('apBusy'));
+     else if (!r.ok && !r.msgs) toast(errText(r), 'bad');
+     (r.toasts || []).forEach(x => x.alert ? vcAlert(x.text) : toast(x.text));
++    if (P.job) P.pollT = setTimeout(poll, 1300);
++    else if (el && el.isConnected) el.classList.remove('busy');
+     return r;
+   };
++  const poll = async () => {
++    if (!sh.el.isConnected || !P.job) return;
++    const r = await api('admin/vc', { action: 'state' });
++    if (r && r.error === 'network') { P.pollT = setTimeout(poll, 2500); return; }
++    apply(r, null, P.jobBefore);
++  };
+   const sendText = async (v) => { v = String(v || '').trim(); if (!v || P.busy) return; hap('light'); await call({ action: 'send', text: v }); };
+   const goBack = async () => {
+     if (P.thread) { P.thread = false; render(true); return; }
+@@ -3967,11 +3992,17 @@
+   const r0 = await api('admin/vc', { action: 'reset' });
+   if (r0 && r0.msgs) r0.msgs.forEach(m => P.sigs.set(m.id, sig(m)));
+   await call({ action: 'open', cb: P.root });
++  // فتح «فحص معاملة» من البحث: نرسل الهاش / Order ID للبوت على طول
++  if (opts && opts.say) {
++    for (let i = 0; i < 20 && P.job; i++) await new Promise(res => setTimeout(res, 300));
++    if (P.V && P.V.step) await sendText(opts.say);
++  }
+ }
+ async function admAction(act, el) {
+   if (act === 'adm-reload') { S.adm = null; renderView(); return true; }
+   if (act === 'adm-search') { admSearch(); return true; }
+   if (act === 'adm-ds-acc') { const R = S.admRes; if (R && R.accounts) openDsAccount(R.accounts[+el.dataset.v], R.q); return true; }
++  if (act === 'adm-txcheck') { openPanel('ad_check_tx', adt('txCheck'), null, { say: el.dataset.v }); return true; }
+   if (act === 'adm-ds-try') { S.admQ = el.dataset.v; const inp = $('#admq'); if (inp) inp.value = el.dataset.v; admSearch(); return true; }
+   if (act === 'adm-per') { S.admP = el.dataset.v; hap('select'); renderView(); return true; }
+   if (act === 'adm-focus') { const i = $('#admq'); if (i) { window.scrollTo({ top: 0, behavior: 'smooth' }); setTimeout(() => i.focus(), 250); } return true; }
+@@ -4395,7 +4426,9 @@
+       if (u) return { ok: true, kind: 'user', user: u };
+       if (q.length >= 3) {
+         const ql = q.toLowerCase(), acc = D.accts.filter(a => a.line.toLowerCase().includes(ql)), us = D.users.filter(x => (x.name + ' ' + x.username).toLowerCase().includes(ql.replace('@', '')));
+-        if (acc.length || us.length) return { ok: true, kind: 'deep', q, accounts: acc, orders: [], users: us.map(x => ({ id: x.id, name: x.name, username: x.username, balance: x.balance, banned: x.banned })), more: false };
++        const dep = D.deps.filter(d => !d.gift && d.tx.toLowerCase().includes(ql)).slice(0, 8).map(d => ({ tx: d.tx, amount: d.amount, method: d.method, ts: d.ts, user: { id: d.user.id, name: d.user.name, username: d.user.username } }));
++        const txlike = /^(0x)?[0-9a-f]{40,80}$/i.test(q) || /^\d{12,24}$/.test(q);
++        if (acc.length || us.length || dep.length || txlike) return { ok: true, kind: 'deep', q, accounts: acc, orders: [], deposits: dep, txlike, users: us.map(x => ({ id: x.id, name: x.name, username: x.username, balance: x.balance, banned: x.banned })), more: false };
+       }
+       const part = D.users.filter(x => (x.name + ' ' + x.username).toLowerCase().includes(q.toLowerCase().replace('@', '')));
+       if (part.length && q.length >= 2) return { ok: true, kind: 'users', users: part.map(x => ({ id: x.id, name: x.name, username: x.username, balance: x.balance })) };

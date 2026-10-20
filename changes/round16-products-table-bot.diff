@@ -1,0 +1,190 @@
+--- a/bot.py	2026-10-19 17:00:25.353349955 +0000
++++ b/bot.py	2026-10-19 17:00:25.359991323 +0000
+@@ -20788,6 +20788,7 @@
+         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
+         markup.add(InlineKeyboardButton("💹 Profit", callback_data="ad_profit"),
+                    InlineKeyboardButton("📊 Sales Reports (CSV)", callback_data="ad_reports"))
++        markup.add(InlineKeyboardButton("📋 Available products table", callback_data="ad_plist"))
+         markup.add(InlineKeyboardButton("👥 Referrals Settings", callback_data="ad_ref_settings"))
+         markup.add(InlineKeyboardButton("👑 VIP Tiers", callback_data="ad_vip"))
+         # 🛡 زر الحماية ضد سرقة الحوالات
+@@ -20814,6 +20815,7 @@
+         markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cgpt_panel"))
+         markup.add(InlineKeyboardButton("💹 الأرباح", callback_data="ad_profit"),
+                    InlineKeyboardButton("📊 تقارير المبيعات (CSV)", callback_data="ad_reports"))
++        markup.add(InlineKeyboardButton("📋 جدول المنتجات المتوفرة (للنشر)", callback_data="ad_plist"))
+         markup.add(InlineKeyboardButton("👥 إعدادات الإحالات", callback_data="ad_ref_settings"))
+         markup.add(InlineKeyboardButton("👑 نظام VIP", callback_data="ad_vip"))
+         # 🛡 زر الحماية ضد سرقة الحوالات
+@@ -32575,6 +32577,7 @@
+     ('tx', '🔍', 'فحص معاملة (هاش / Order ID)', 'Check transaction (hash / order ID)', 'ad_check_tx'),
+     ('cgpt', '🤖', 'ChatGPT Business', 'ChatGPT Business', 'ad_cgpt_panel'),
+     ('profit', '💹', 'الأرباح', 'Profit', 'ad_profit'),
++    ('plist', '📋', 'جدول المنتجات المتوفرة', 'Available products table', 'ad_plist'),
+     ('reports', '📊', 'تقارير المبيعات (CSV)', 'Sales reports (CSV)', 'ad_reports'),
+     ('ref', '🤝', 'إعدادات الإحالات', 'Referral settings', 'ad_ref_settings'),
+     ('vip', '💎', 'نظام VIP', 'VIP tiers', 'ad_vip'),
+@@ -35894,6 +35897,163 @@
+                      'تطلع في الموقع من أول فتح جديد.', parse_mode='HTML', reply_markup=mk)
+ 
+ 
++
++# ============================================================
++# 📋 جدول «المنتجات المتوفرة» للأدمن (رسالة غنية بجدول — جاهزة تنحوّل للقناة)
++# ============================================================
++_PLIST_ROWS = 100            # صفوف كل رسالة (القوائم الطويلة تنقسم)
++
++
++def _plist_rows():
++    """المنتجات المتوفرة والظاهرة (عادية + ChatGPT + متاجر API) بالإنجليزي، مع المخزون وخصومات الكمية ورابط المنتج."""
++    bu = get_bot_username()
++    rows = []
++    prods = [p for p in _get_all_products_cached() if not p.get('is_hidden')]
++    ids = []
++    for p in prods:
++        sp = str(p.get('id', p.get('_id')))
++        ids.append(sp)
++        if sp.isdigit():
++            ids.append(int(sp))
++    stock = {}
++    try:
++        for r in db.product_stock.aggregate([{'$match': {'product_id': {'$in': ids}, 'is_sold': False}},
++                                             {'$group': {'_id': '$product_id', 'c': {'$sum': 1}}}]):
++            stock[str(r['_id'])] = r['c']
++    except Exception:
++        pass
++    seats = None
++    for p in prods:
++        pid = str(p.get('id', p.get('_id')))
++        manual = bool(p.get('is_manual'))
++        emoji = p.get('custom_emoji_id')
++        if p.get('product_type') == 'cgpt_main':
++            if seats is None:
++                seats = _cgpt_display_seats() or 0
++            st, manual = seats, False
++            try:
++                cg = db.cgpt_products.find_one({'_id': ObjectId(pid.replace('cgpt_main_', ''))}, {'custom_emoji_id': 1})
++                emoji = (cg or {}).get('custom_emoji_id') or emoji
++            except Exception:
++                pass
++        else:
++            st = stock.get(pid, 0)
++        if not manual and st <= 0:
++            continue
++        tiers = sorted([(int(t.get('min_qty', 0)), float(t.get('price', 0))) for t in (p.get('discount_tiers') or [])
++                        if t.get('min_qty') and t.get('price') is not None], key=lambda x: x[0])
++        rows.append({'name': clean_name(p.get('name_en') or p.get('name_ar') or pid), 'stock': None if manual else st,
++                     'price': float(p.get('price') or 0), 'tiers': tiers, 'emoji': emoji,
++                     'url': f"https://t.me/{bu}?start=p_{pid}"})
++    try:
++        for ep in db.ext_products.find({'hidden': {'$ne': True}}, _EXT_LIGHT_PROJ):
++            st = int(ep.get('stock', 0) or 0)
++            if st <= 0 and not ep.get('unlimited'):
++                continue
++            rows.append({'name': clean_name(str(ep.get('name', ''))), 'stock': None if ep.get('unlimited') else st,
++                         'price': float(ep.get('sell_price', ep.get('base_price', 0)) or 0), 'tiers': [],
++                         'emoji': ep.get('emoji_id'), 'url': f"https://t.me/{bu}?start=vext_{ep['_id']}"})
++    except Exception as e:
++        logger.debug(f"plist ext: {e}")
++    rows.sort(key=lambda r: r['name'].lower())
++    return rows
++
++
++def _plist_price_txt(r):
++    t = f"${r['price']:.2f}"
++    if r['tiers']:
++        t += ' · ' + ' · '.join(f"{q}+ pcs ${pr:.2f}" for q, pr in r['tiers'])
++    return t
++
++
++def _plist_rich(rows, part=1, parts=1):
++    head_emoji = get_setting('emoji_store', '')
++    title = 'Available products' + (f' ({part}/{parts})' if parts > 1 else '')
++    head = ([{'type': 'custom_emoji', 'custom_emoji_id': str(head_emoji), 'alternative_text': '🛍'}, ' ' + title]
++            if head_emoji and str(head_emoji).isdigit() else '🛍 ' + title)
++    def cell(text, header=False, align='left'):
++        c = {'align': align, 'valign': 'middle', 'text': text}
++        if header:
++            c['is_header'] = True
++        return c
++    cells = [[cell({'type': 'bold', 'text': 'PRODUCT'}, True), cell({'type': 'bold', 'text': 'PRICE'}, True, 'center')]]
++    for r in rows:
++        name = r['name'] + (f" ({r['stock']})" if r['stock'] is not None else '')
++        icon = ({'type': 'custom_emoji', 'custom_emoji_id': str(r['emoji']), 'alternative_text': '📦'} if r['emoji'] else '📦')
++        price = [f"${r['price']:.2f}"]
++        if r['tiers']:
++            price += [' · ', {'type': 'italic', 'text': ' · '.join(f"{q}+ pcs ${pr:.2f}" for q, pr in r['tiers'])}]
++        cells.append([cell([icon, ' ', {'type': 'url', 'text': name, 'url': r['url']}]), cell(price, align='center')])
++    return {'blocks': [{'type': 'heading', 'size': 3, 'text': head},
++                       {'type': 'paragraph', 'text': f"{_PLIST_TOTAL[0]} products"},
++                       {'type': 'table', 'cells': cells, 'is_bordered': True, 'is_striped': True, 'is_compact': True}],
++            'skip_entity_detection': True}
++
++
++_PLIST_TOTAL = [0]
++
++
++def _plist_html(rows, part=1, parts=1):
++    """نسخة نصية عادية (لو الرسائل الغنية مو مدعومة، أو تبيها نص)."""
++    emo = get_setting('emoji_store', '')
++    head = (f'<tg-emoji emoji-id="{emo}">🛍</tg-emoji>' if emo and str(emo).isdigit() else '🛍')
++    out = [f"{head} <b>Available products</b>" + (f" ({part}/{parts})" if parts > 1 else ''), f"{_PLIST_TOTAL[0]} products", ""]
++    for r in rows:
++        icon = f'<tg-emoji emoji-id="{r["emoji"]}">📦</tg-emoji>' if r['emoji'] else '📦'
++        name = html.escape(r['name']) + (f" ({r['stock']})" if r['stock'] is not None else '')
++        out.append(f'{icon} <a href="{html.escape(r["url"], quote=True)}">{name}</a> — <b>{html.escape(_plist_price_txt(r))}</b>')
++    return '\n'.join(out)
++
++
++def _send_rich_raw(chat_id, rich):
++    return telebot.apihelper._make_request(bot.token, 'sendRichMessage', params={'chat_id': chat_id, 'rich_message': json.dumps(rich, ensure_ascii=False)},
++                                   method='post')
++
++
++def _plist_send(chat_id, admin_uid, as_text=False):
++    rows = _plist_rows()
++    _PLIST_TOTAL[0] = len(rows)
++    vc = _vc_active(chat_id)
++    target = vc.uid if vc else chat_id
++    chunks = [rows[i:i + _PLIST_ROWS] for i in range(0, len(rows), _PLIST_ROWS)] or [[]]
++    rich_ok = not as_text
++    sent = 0
++    for i, ch in enumerate(chunks, 1):
++        if rich_ok:
++            try:
++                _send_rich_raw(target, _plist_rich(ch, i, len(chunks)))
++                sent += 1
++                continue
++            except Exception as e:
++                logger.warning(f"rich product list failed, sending text: {e}")
++                rich_ok = False
++        txt = _plist_html(ch, i, len(chunks))
++        for j in range(0, len(txt), 3900):                 # حد رسالة تيليجرام العادية
++            part = txt[j:j + 3900]
++            if j:
++                part = part[part.find('\n') + 1:] if '\n' in part else part
++            (_VC_ORIG['send_message'] if vc else bot.send_message)(target, part, parse_mode='HTML', disable_web_page_preview=True)
++        sent += 1
++    return len(rows), rich_ok and not as_text
++
++
++@bot.callback_query_handler(func=lambda call: call.data in ('ad_plist', 'ad_plist_txt'))
++@admin_required
++def ad_plist_cb(call):
++    bot.answer_callback_query(call.id, "⏳ أجهّز الجدول…")
++    n, rich = _plist_send(call.message.chat.id, call.from_user.id, as_text=(call.data == 'ad_plist_txt'))
++    mk = InlineKeyboardMarkup(row_width=2)
++    mk.add(InlineKeyboardButton("🔄 تحديث", callback_data="ad_plist"),
++           InlineKeyboardButton("📄 نسخة نصية", callback_data="ad_plist_txt"))
++    mk.add(InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel_main"))
++    where = " في محادثتك بتيليجرام" if _vc_active(call.message.chat.id) else ""
++    kind = "جدول" if rich else "قائمة نصية"
++    bot.send_message(call.message.chat.id,
++                     f"📋 أرسلت {kind} المنتجات المتوفرة{where} — <b>{n}</b> منتج بالإنجليزي.\n"
++                     "• اسم كل منتج رابط يفتحه في البوت مباشرة.\n• خصومات الكمية مكتوبة جنب السعر.\n"
++                     "<i>تقدر تحوّله لقناتك كما هو.</i>", parse_mode='HTML', reply_markup=mk)
++
++
+ # ============================================================
+ # 🚀 15. التشغيل
+ # ============================================================
