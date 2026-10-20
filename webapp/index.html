@@ -8,11 +8,20 @@
 <!-- لو استضفت الواجهة على دومين غير سيرفر البوت، اكتب رابط السيرفر هنا (مثال: https://my-bot.onrender.com) -->
 <meta name="lara-api" content="">
 <meta name="theme-color" content="#080b12">
+<script id="lara-tg-early">
+/* Telegram (iOS) can deliver events before telegram-web-app.js has loaded; keep them and hand them over once it has. */
+(function () {
+  if (window.TelegramGameProxy && window.TelegramGameProxy.receiveEvent) return;
+  var q = [];
+  window.__laraTgQueue = q;
+  window.TelegramGameProxy = { receiveEvent: function () { q.push([].slice.call(arguments)); } };
+})();
+</script>
 <script id="lara-error-bootstrap">
 /* Bounded diagnostics are installed before external scripts; never collect form values. */
 (function(){
  'use strict';
- const build='lara-30.1',queue=[],recent=new Map();
+ const build='lara-33.1',queue=[],recent=new Map();
  let connection=null,lastAction='',windowAt=0,windowCount=0;
  function safe(value,limit){
   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
@@ -69,7 +78,7 @@
 })();
 
 </script>
-<!--TG-SDK--><script src="https://telegram.org/js/telegram-web-app.js"></script><!--/TG-SDK-->
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Unbounded:wght@500;700&family=JetBrains+Mono:wght@500;600&display=swap">
@@ -129,26 +138,79 @@ img{max-width:100%}
 .muted{color:var(--fg-2)}
 .faint{color:var(--fg-3)}
 
-/* Lightweight page loading motion: no GIFs, polling or extra network requests. */
-.page-loading{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;
-  background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
-  opacity:1;transition:opacity .22s ease}
+/* ── Loading: the real LARA logo rises in slow motion inside its tile; a light travels round the tile's edge while we load,
+   a soft sheen passes over the logo, the store name settles letter by letter. When ready: text fades, the logo lifts, the store appears.
+   Light on phones: only transform/opacity, one small image already used by the header, nothing runs while hidden. ── */
+.page-loading{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;background:var(--bg);
+  contain:strict;opacity:1;transition:opacity .5s cubic-bezier(.4,0,.2,1) .3s}
+.page-loading[hidden]{display:none}
 .page-loading.leaving{opacity:0;pointer-events:none}
-.load-card{width:min(100%,300px);padding:34px 26px 26px;text-align:center;border-radius:30px;
-  border:1px solid var(--line-2);background:var(--surface);box-shadow:0 20px 70px var(--glow)}
-.load-art{position:relative;display:grid;place-items:center;width:108px;height:108px;margin:0 auto 22px}
-.load-orbit{position:absolute;inset:0;border:1px solid var(--line-2);border-radius:50%}
-.load-orbit::before{content:"";position:absolute;inset:-2px;border:2px solid transparent;border-top-color:var(--accent-2);
-  border-inline-end-color:var(--accent);border-radius:50%;animation:loadOrbit 1.5s linear infinite}
-.load-diamond{width:62px;height:62px;filter:drop-shadow(0 5px 12px var(--glow));animation:loadFloat 1.9s ease-in-out infinite}
-.load-brand{font:700 14px/1.5 var(--f-display);letter-spacing:.06em;color:var(--fg)}
-.load-label{margin:8px 0 20px;color:var(--fg-2);font-size:13px}
-.load-track{height:4px;overflow:hidden;border-radius:8px;background:var(--accent-soft)}
-.load-track i{display:block;width:38%;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));animation:loadTrack 1.3s ease-in-out infinite}
-@keyframes loadOrbit{to{transform:rotate(360deg)}}
-@keyframes loadFloat{50%{transform:translateY(-5px) scale(1.04)}}
-@keyframes loadTrack{from{transform:translateX(-110%)}to{transform:translateX(370%)}}
-@media(prefers-reduced-motion:reduce){.load-orbit::before,.load-diamond,.load-track i{animation:none}.page-loading{transition:none}.load-track i{width:100%;opacity:.65}}
+.page-loading.soft{background:color-mix(in srgb,var(--bg) 55%,transparent);transition-delay:0s;transition-duration:.25s}
+.ld{position:relative;display:grid;justify-items:center;text-align:center;width:min(100%,320px);--p:.04}
+.ld-glow{position:absolute;top:-70px;left:50%;width:300px;height:300px;margin-left:-150px;border-radius:50%;pointer-events:none;
+  background:radial-gradient(closest-side,var(--glow),transparent 74%);opacity:.5;animation:ldGlow 7s ease-in-out infinite alternate}
+.ld-mark{position:relative;display:block;width:150px;height:130px;overflow:visible;transition:transform .8s cubic-bezier(.4,0,.2,1),opacity .42s ease .12s}
+.ld-mark *{transform-box:fill-box;transform-origin:center}
+.lm-draw{stroke-dasharray:1 1;stroke-dashoffset:1;animation:ldDraw 1.9s cubic-bezier(.65,0,.35,1) .1s forwards}
+.lm-sheen{opacity:0;transform:translateX(-10px);animation:ldSheen 5.2s cubic-bezier(.45,0,.2,1) 2.4s infinite}
+.lm-plane{opacity:0;animation:ldFly 1.5s cubic-bezier(.22,1,.36,1) .85s both,ldBob 3.8s ease-in-out 2.4s infinite alternate}
+.ld-lara{display:block;overflow:visible;--lw-1:#ffffff;--lw-2:#e8edf6;--lw-3:#b4c0d4;--lw-4:#f2f5fa}
+:root[data-theme="light"] .ld-lara{--lw-1:#3a4a66;--lw-2:#18233a;--lw-3:#05101f;--lw-4:#2c3b57}
+@media(prefers-color-scheme:light){:root:not([data-theme="dark"]) .ld-lara{--lw-1:#3a4a66;--lw-2:#18233a;--lw-3:#05101f;--lw-4:#2c3b57}}
+.lw-l{opacity:0;transform:translateY(14px);animation:ldUp 1s cubic-bezier(.16,1,.3,1) forwards;animation-delay:calc(.95s + var(--i,0) * .09s)}
+.lw-t{opacity:0;transform:scale(.2);animation:ldPop .7s cubic-bezier(.34,1.56,.64,1) forwards;animation-delay:calc(1.6s + var(--i,0) * .12s)}
+.ld-brand{display:grid;justify-items:center;margin-top:14px;line-height:1}
+.ld-word{font:700 30px/1 var(--f-display);letter-spacing:.06em;color:var(--fg);white-space:nowrap}
+.ld-word i{display:inline-block;font-style:normal;opacity:0;transform:translateY(12px);
+  animation:ldUp 1s cubic-bezier(.16,1,.3,1) forwards;animation-delay:calc(.7s + var(--i,0) * .085s)}
+.ld-sub{margin-top:10px;padding-inline-start:.62em;font:600 10.5px/1 var(--f-display);letter-spacing:.62em;color:var(--accent-2);
+  opacity:0;animation:ldUp 1.1s cubic-bezier(.16,1,.3,1) 1.5s forwards}
+.ld-sub:empty{display:none}
+.ld-status{min-height:20px;margin:26px 0 0;max-width:280px;color:var(--fg-2);font-size:13.5px;line-height:1.5;opacity:0;animation:ldIn .8s ease .35s forwards}
+.ld-status.swap{animation:ldSwap .65s cubic-bezier(.16,1,.3,1) both}
+.ld-bar{position:relative;width:148px;height:3px;margin-top:12px;border-radius:3px;overflow:hidden;background:var(--accent-soft)}
+.ld-bar i{position:absolute;inset:0;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));
+  transform:scaleX(var(--p));transform-origin:left center;transition:transform 1.2s cubic-bezier(.16,1,.3,1)}
+[dir="rtl"] .ld-bar i{transform-origin:right center}
+.ld-bar::after{content:"";position:absolute;top:0;bottom:0;left:0;width:34px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.7),transparent);
+  transform:translateX(-40px);animation:ldGlint 2.8s cubic-bezier(.45,0,.55,1) 1s infinite}
+.ld-slow{max-width:270px;margin:16px 0 0;color:var(--fg-3);font-size:12px;line-height:1.55;animation:ldIn .9s ease both}
+/* in-app loads (orders, wallet, profile…): small card, no name, no intro — the store stays visible behind */
+.page-loading.soft .ld-brand,.page-loading.soft .ld-slow,.page-loading.soft .ld-glow{display:none}
+.page-loading.soft .ld{width:auto;min-width:168px;padding:20px 26px 18px;border-radius:26px;background:var(--surface);border:1px solid var(--line-2);box-shadow:0 18px 50px rgba(0,0,0,.32)}
+.page-loading.soft .ld-mark{width:84px;height:73px}
+.page-loading.soft .ld-status{margin-top:12px;animation:none;opacity:1}
+.page-loading.soft .ld-bar i{transition:none;transform:translateX(-45%) scaleX(.4);animation:ldIndet 1.5s cubic-bezier(.45,0,.55,1) infinite}
+.page-loading.soft .ld-bar::after{display:none}
+.ld.instant .lm-draw{animation:none;stroke-dashoffset:0}.ld.instant .lm-plane{opacity:1;animation:ldBob 3.8s ease-in-out infinite alternate}
+.ld.instant .lw-l,.ld.instant .lw-t{animation:none;opacity:1;transform:none}
+.ld.instant .ld-word i,.ld.instant .ld-sub{animation:none;opacity:1;transform:none}
+/* ready → text fades first, the logo lifts away, then the background dissolves into the store */
+.page-loading.leaving .lm-plane{animation:ldOff .8s cubic-bezier(.55,0,.75,.15) forwards}
+.page-loading.leaving .ld-mark{opacity:0;transform:translateY(-6px) scale(1.05)}
+.page-loading.leaving .ld-brand,.page-loading.leaving .ld-status,.page-loading.leaving .ld-bar,.page-loading.leaving .ld-slow{
+  transition:opacity .24s ease,transform .5s cubic-bezier(.4,0,.2,1);opacity:0;transform:translateY(-8px)}
+.page-loading.leaving .ld-status{animation:none}
+#view.enter{animation:ldView .7s cubic-bezier(.16,1,.3,1) both}
+@keyframes ldDraw{to{stroke-dashoffset:0}}
+@keyframes ldSheen{0%{opacity:0;transform:translateX(-10px)}12%{opacity:1}55%{opacity:1;transform:translateX(70px)}56%,100%{opacity:0;transform:translateX(70px)}}
+@keyframes ldFly{0%{opacity:0;transform:translate(-64px,46px) rotate(-24deg) scale(.5)}30%{opacity:1}72%{transform:translate(4px,-5px) rotate(5deg) scale(1.04)}100%{opacity:1;transform:none}}
+@keyframes ldBob{from{transform:translateY(0) rotate(0)}to{transform:translateY(-3px) rotate(-2deg)}}
+@keyframes ldOff{0%{opacity:1;transform:none}25%{transform:translate(-4px,4px) rotate(4deg)}100%{opacity:0;transform:translate(90px,-84px) rotate(-10deg) scale(.7)}}
+@keyframes ldPop{to{opacity:1;transform:none}}
+@keyframes ldGlow{from{opacity:.38;transform:scale(.92)}to{opacity:.62;transform:scale(1.06)}}
+@keyframes ldUp{to{opacity:1;transform:none}}
+@keyframes ldIn{to{opacity:1}}
+@keyframes ldSwap{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes ldGlint{0%{transform:translateX(-40px)}70%,100%{transform:translateX(160px)}}
+@keyframes ldIndet{from{transform:translateX(-45%) scaleX(.4)}to{transform:translateX(100%) scaleX(.4)}}
+@keyframes ldView{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){
+  .ld *,.ld *::after,.ld .ld-bar::after{animation:none!important}
+  .lm-draw{stroke-dashoffset:0}.lm-plane,.lw-l,.lw-t,.ld-word i,.ld-sub,.ld-status{opacity:1;transform:none}
+  .lm-sheen,.ld-bar::after{display:none}.ld-glow{animation:none;opacity:.45}
+  .page-loading{transition:opacity .2s}.ld-bar i{transition:none}#view.enter{animation:none}
+  .page-loading.leaving .ld-mark,.page-loading.leaving .ld-brand,.page-loading.leaving .ld-status,.page-loading.leaving .ld-bar{transform:none}}
 
 /* ── header ── */
 .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;align-items:center;gap:10px;
@@ -1483,10 +1545,84 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 </head>
 <body>
 <div class="page-loading" id="page-loading" role="status" aria-live="polite" aria-label="Loading">
-  <div class="load-card"><div class="load-art" aria-hidden="true"><span class="load-orbit"></span>
-    <svg class="load-diamond" viewBox="0 0 64 64" width="62" height="62"><path d="M13 12h38l10 16-29 32L3 28z" fill="var(--accent)"/><path d="m13 12 9 16 10-16 10 16 9-16M3 28h58M22 28l10 32 10-32" fill="none" stroke="var(--accent-2)" stroke-width="2.5" stroke-linejoin="round"/><path d="m13 12 9 16H3z" fill="white" opacity=".3"/><path d="m32 12 10 16H22z" fill="white" opacity=".45"/></svg>
-  </div><div class="load-brand">LARA STOCK</div><p class="load-label">Loading…</p><div class="load-track" aria-hidden="true"><i></i></div></div>
+  <div class="ld" id="ld">
+    <span class="ld-glow" aria-hidden="true"></span>
+    <svg class="ld-mark" viewBox="4 2 122 106" width="150" height="130" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="lmBody" x1="0" y1="0" x2="1" y2=".25"><stop offset="0" stop-color="#5cc3ff"/><stop offset=".3" stop-color="#2b8fff"/><stop offset=".55" stop-color="#1170ff"/><stop offset="1" stop-color="#38bbff"/></linearGradient><linearGradient id="lmFootTop" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0f6cff"/><stop offset=".45" stop-color="#1ea4ff"/><stop offset="1" stop-color="#62dbff"/></linearGradient>
+        <linearGradient id="lmBack" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ab4ff"/><stop offset="1" stop-color="#1a6ef2"/></linearGradient>
+        <linearGradient id="lmFace" x1=".3" y1="0" x2=".55" y2="1"><stop offset="0" stop-color="#f7fdff"/><stop offset=".5" stop-color="#d4f0ff"/><stop offset="1" stop-color="#8fd0ff"/></linearGradient>
+        <linearGradient id="lmCurl" x1="0" y1="0" x2=".7" y2="1"><stop offset="0" stop-color="#bfe7ff"/><stop offset=".6" stop-color="#eef9ff"/><stop offset="1" stop-color="#a9dcff"/></linearGradient>
+        <linearGradient id="lmFront" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2a86ff"/><stop offset=".5" stop-color="#0f6af7"/><stop offset="1" stop-color="#0aa8fb"/></linearGradient>
+        <linearGradient id="lmShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#03268f"/><stop offset="1" stop-color="#0539c8"/></linearGradient>
+        <linearGradient id="lmWU" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#8fd6ff"/><stop offset="1" stop-color="#dcf4ff"/></linearGradient>
+        <linearGradient id="lmWR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5cb8ff"/><stop offset="1" stop-color="#2c86f5"/></linearGradient>
+        <linearGradient id="lmSheen" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".85"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+        <mask id="lmDraw" maskUnits="userSpaceOnUse" x="-20" y="-20" width="170" height="150"><path class="lm-draw" pathLength="1" d="M33 0C41 11 44 25 42 39C40 52 34 62 30 74C26 87 31 100 47 100C63 100 85 93 116 92" fill="none" stroke="#fff" stroke-width="60" stroke-linecap="round" stroke-linejoin="round"/></mask>
+        <mask id="lmFaceM" maskUnits="userSpaceOnUse" x="0" y="0" width="130" height="110"><path d="M21 8.8C27 7.6 34 9 39.2 11.8C45 14.6 50 18.6 52.6 23.6C55 28.4 55.6 33.6 55.5 39.4C55.4 45.2 52.6 51.4 48.4 56.8C47.2 58.8 46.1 61 45.2 63.2C45.6 58.6 46.9 53.6 47.8 49.6C48.1 47.8 47.6 46.6 46.4 45.8C43.6 43.8 39 43.6 35.4 45C31 46.8 26.6 48.8 23 51.4C24.6 46.4 26.6 41.6 27.9 36.6C29.2 31.6 29.4 26.4 29 22C28.4 16.8 25.6 12 21 8.8Z" fill="#fff"/><path d="M12.2 73.8C10.8 76.6 10 80 10.2 83.4C10.4 88.4 12.6 93 16.4 96.8C20.4 100.6 26.4 103 33 103.8C35 103.9 36.6 103.4 37 102.2C35.6 100.8 34 99.6 32.6 97.2C28 95.6 23.8 93.6 20.6 90.6C17.6 87.8 15.6 84.4 14.2 80.6C13.4 78.4 12.8 76.2 12.2 73.8Z" fill="#fff"/></mask>
+      </defs>
+      <g class="lm-rib" mask="url(#lmDraw)"><path d="M26 11C33 10.4 41 12 48 16C53.5 19.4 57.6 24.6 59 30.5L59.6 36V79.4C60 80.3 61.2 80.7 62.6 80.7L90.6 80.8C95.5 81.3 99 84.4 100.8 88.4C102.1 92 101.7 96.4 99.5 99.6C97.9 102 95.5 103.6 92.6 104.1L34 104.3C26.5 104.2 19.5 101.8 15.2 96.6C11.4 92 9.8 86.4 10.4 80.6C11.2 73.6 15 66.6 19.6 60.4C24.4 54 29.6 47.6 31.6 40.4C33.4 33.8 33.4 26.6 31.6 20.4C30.4 16.2 28.6 13.2 26 11Z" fill="url(#lmBody)"/><path d="M20.6 8.6C18.2 9.6 16.4 11.6 16.4 15L16.5 52C16.6 55 17.4 58 19 59.5C19.8 56 21 51 22.6 47L24 13C23.2 10.6 22 9.2 20.6 8.6Z" fill="url(#lmBack)"/><path d="M19.2 12.2C21.6 11.4 24 12.2 25.8 14.2L28.4 25L27.8 36C26.8 42 24.4 48 21.8 53C19.8 56.8 17.6 60.4 15.4 62.4L15.8 57C17 50 18.4 40 18.6 30C18.6 22 18.8 16 19.2 12.2Z" fill="url(#lmShade)" opacity=".42"/><path d="M59.6 80.7L90.6 80.8C95.5 81.3 99 84.4 100.8 88.4L97.6 87.2C93 85.4 86 86.4 79.4 89C64 95.6 52 100.4 44 104.2C44.4 99 46.6 93.6 50 89.4C53 85.6 56.4 82.6 59.6 80.7Z" fill="url(#lmFootTop)"/><path d="M44 104.2C52 100.4 64 95.6 79.4 89C86 86.4 93 85.4 97.6 87.2C100.4 88.6 101.6 92 101.4 95C101.2 99 98.8 102.4 95 103.6C93.6 104 92.4 104.1 91 104.1Z" fill="url(#lmFront)"/><path d="M44.4 103.8C53 99.6 65 94.6 78.6 88.6L80.6 90.4C68 95.6 56.6 100.6 47.6 104.2Z" fill="#06318f" opacity=".55"/><path d="M66 80.9L90.6 81C94.4 81.4 97.4 83.6 99 86.6C96.2 84.6 93 83.6 89.6 83.4L68 83Z" fill="#e8f6ff" opacity=".6"/><path d="M59.2 31.5C59.6 46 59.6 62 59.4 78" fill="none" stroke="#9ad8ff" stroke-opacity=".55" stroke-width="1.2" stroke-linecap="round"/><path d="M45.6 62.6C44.6 66 44.6 72 44.6 78.4C42 80 39.6 82 38 84.6C37.4 87.6 37.8 91 39.4 93.6C40.6 96 41.8 98.4 42.6 100.2C44.2 101.6 46 102.6 47.4 103.2L44 103.8C40 102.2 37 100 35.2 97.6C32.6 94.6 31 91 31 87.4C31 83.4 32.6 80 34.6 77.6C37.4 73.4 40.4 69.6 42.6 66.4C43.6 65 44.6 63.8 45.6 62.6Z" fill="url(#lmShade)" opacity=".5"/><path d="M12.2 73.8C10.8 76.6 10 80 10.2 83.4C10.4 88.4 12.6 93 16.4 96.8C20.4 100.6 26.4 103 33 103.8C35 103.9 36.6 103.4 37 102.2C35.6 100.8 34 99.6 32.6 97.2C28 95.6 23.8 93.6 20.6 90.6C17.6 87.8 15.6 84.4 14.2 80.6C13.4 78.4 12.8 76.2 12.2 73.8Z" fill="url(#lmCurl)"/><path d="M21 8.8C27 7.6 34 9 39.2 11.8C45 14.6 50 18.6 52.6 23.6C55 28.4 55.6 33.6 55.5 39.4C55.4 45.2 52.6 51.4 48.4 56.8C47.2 58.8 46.1 61 45.2 63.2C45.6 58.6 46.9 53.6 47.8 49.6C48.1 47.8 47.6 46.6 46.4 45.8C43.6 43.8 39 43.6 35.4 45C31 46.8 26.6 48.8 23 51.4C24.6 46.4 26.6 41.6 27.9 36.6C29.2 31.6 29.4 26.4 29 22C28.4 16.8 25.6 12 21 8.8Z" fill="url(#lmFace)"/></g>
+      <g mask="url(#lmFaceM)"><rect class="lm-sheen" x="0" y="0" width="18" height="110" fill="url(#lmSheen)"/></g>
+      <g class="lm-plane"><path d="M118.2 30L84.4 62.6L105.6 80.4Z" fill="url(#lmWR)"/><path d="M84.2 59.6L89.4 67.4L84.4 74.4Z" fill="#1c66de"/><path d="M65.6 51.6L118 29.6L80.4 57.6Z" fill="url(#lmWU)"/><path d="M118 29.6 80.4 57.6" stroke="#eaf7ff" stroke-opacity=".55" stroke-width=".7"/></g>
+    </svg>
+    <div class="ld-brand" dir="ltr"><svg class="ld-lara" id="ld-lara" viewBox="0 0 202 46" width="146" height="33" aria-hidden="true" focusable="false">
+      <defs><linearGradient id="lwChrome" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--lw-1)"/><stop offset=".46" style="stop-color:var(--lw-2)"/><stop offset=".54" style="stop-color:var(--lw-3)"/><stop offset="1" style="stop-color:var(--lw-4)"/></linearGradient></defs>
+      <g fill="url(#lwChrome)"><path class="lw-l" style="--i:0" d="M0 0H12V34H38V46H0Z"/><path class="lw-l" style="--i:1" d="M44 46L64 0H76L96 46H82.5L70 15.5L57.5 46Z"/><path class="lw-l" style="--i:2" d="M102 0H128C138.5 0 145 6.4 145 15.4C145 22.6 140.8 28 133.6 30L148 46H134L121.4 30.8H114V46H102ZM114 10.8V20H127.5C131 20 133 18.2 133 15.4C133 12.6 131 10.8 127.5 10.8Z"/><path class="lw-l" style="--i:3" d="M150 46L170 0H182L202 46H188.5L176 15.5L163.5 46Z"/></g><path class="lw-t" style="--i:0" d="M70 28L77.5 46H62.5Z" fill="var(--accent)"/><path class="lw-t" style="--i:1" d="M176 28L183.5 46H168.5Z" fill="var(--accent)"/></svg><span class="ld-word" id="ld-word" hidden>LARA</span><span class="ld-sub" id="ld-sub">STOCK</span></div>
+    <p class="ld-status" id="ld-status">Loading…</p>
+    <div class="ld-bar" aria-hidden="true"><i></i></div>
+    <p class="ld-slow" id="ld-slow" hidden></p>
+  </div>
 </div>
+<script id="lara-loading-lang">
+/* Picks the store language before anything heavy loads: link (?l=) → the language the store last showed (= the bot's) →
+   a Russian/Chinese choice made in the store → Telegram's own language → the phone. Never the phone first. */
+(function () {
+  var L = {
+    en: { c: 'Connecting to the store…', a: 'Checking your account…', p: 'Getting your products ready…', l: 'Loading…',
+          w: 'Waking the store up — the first open can take up to a minute.' },
+    ar: { c: 'جارٍ الاتصال بالمتجر…', a: 'جارٍ التحقق من حسابك…', p: 'جارٍ تجهيز المنتجات…', l: 'جاري التحميل…',
+          w: 'جارٍ تشغيل المتجر — قد يستغرق أول فتح حتى دقيقة.' },
+    ru: { c: 'Подключаемся к магазину…', a: 'Проверяем аккаунт…', p: 'Готовим товары…', l: 'Загрузка…',
+          w: 'Запускаем магазин — первое открытие может занять до минуты.' },
+    zh: { c: '正在连接商店…', a: '正在验证你的账号…', p: '正在准备商品…', l: '加载中…', w: '正在唤醒商店——首次打开可能需要一分钟。' }
+  };
+  function norm(c) { c = String(c || '').toLowerCase(); return /^ar/.test(c) ? 'ar' : /^(ru|uk|be|kk)/.test(c) ? 'ru' : /^zh/.test(c) ? 'zh' : /^en/.test(c) ? 'en' : ''; }
+  function ls(k) { try { var v = localStorage.getItem('lara:' + k); return v == null ? null : JSON.parse(v); } catch (e) { return null; } }
+  function tgLang() {
+    try { var u = window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user; if (u && u.language_code) return u.language_code; } catch (e) {}
+    try { var d = decodeURIComponent((location.hash.match(/tgWebAppData=([^&]*)/) || [])[1] || ''), m = d.match(/(?:^|&)user=([^&]*)/);
+          if (m) return JSON.parse(decodeURIComponent(m[1])).language_code || ''; } catch (e) {}
+    return '';
+  }
+  var q = (location.search.match(/[?&]l=(ar|en|ru|zh)(?:&|$)/) || [])[1];
+  var own = ls('lang');
+  var lang = q || norm(ls('uiLang')) || ((own === 'ru' || own === 'zh') ? own : '') || norm(tgLang()) || norm(navigator.language) || 'en';
+  var root = document.documentElement;
+  root.lang = lang === 'zh' ? 'zh-CN' : lang; root.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  try {   /* Telegram light/dark before the SDK arrives — no dark flash for light-theme users */
+    var tp = decodeURIComponent((location.hash.match(/tgWebAppThemeParams=([^&]*)/) || [])[1] || '');
+    var bg = tp ? String(JSON.parse(tp).bg_color || '').replace('#', '') : '';
+    if (bg.length === 6) { var n = parseInt(bg, 16); root.dataset.theme = (((n >> 16) * 299 + ((n >> 8 & 255) * 587) + ((n & 255) * 114)) / 1000) > 150 ? 'light' : 'dark'; }
+  } catch (e) {}
+  var brand = String(ls('uiBrand') || 'LARA STOCK').trim().slice(0, 40) || 'LARA STOCK';
+  var parts = brand.split(/\s+/), word = parts.shift(), sub = parts.join(' ');
+  var w = document.getElementById('ld-word'), su = document.getElementById('ld-sub'), lara = document.getElementById('ld-lara');
+  if (word.toUpperCase() === 'LARA') { if (w) w.hidden = true; w = null; } else { if (lara) lara.style.display = 'none'; if (w) w.hidden = false; }
+  if (w) { w.innerHTML = ''; for (var i = 0; i < word.length; i++) { var it = document.createElement('i'); it.style.setProperty('--i', i); it.textContent = word[i]; w.appendChild(it); }
+           if (word.length > 8) w.style.fontSize = Math.max(18, Math.round(30 * 8 / word.length)) + 'px'; }
+  if (su) su.textContent = sub;
+  var st = document.getElementById('ld-status'); if (st) st.textContent = L[lang].c;
+  var el = document.getElementById('page-loading'); if (el) el.setAttribute('aria-label', L[lang].l);
+  window.__LD = { lang: lang, L: L, t0: Date.now() };
+})();
+</script>
+<!--TG-SDK--><script src="https://telegram.org/js/telegram-web-app.js"></script><!--/TG-SDK-->
+<script id="lara-tg-replay">
+(function () {
+  var q = window.__laraTgQueue, wv = window.Telegram && window.Telegram.WebView;
+  if (q && q.length && wv && wv.receiveEvent) { var items = q.splice(0); for (var i = 0; i < items.length; i++) { try { wv.receiveEvent.apply(wv, items[i]); } catch (e) {} } }
+})();
+</script>
 <header class="top" id="top" hidden></header>
 <main id="view" aria-live="polite"></main>
 <nav class="dock" id="dock" hidden></nav>
@@ -1685,20 +1821,54 @@ function pageLoadVisible(path) {
     ((path === 'referrals' || path === 'cgpt/subs') && S.tab === 'profile') ||
     (path === 'api/state' && S.tab === 'api');
 }
+/* loading screen: real stages (connecting → account → products), slow-server note, soft overlay for in-app loads */
+const LD = window.__LD || { lang: 'en', L: null, t0: Date.now() };
+const Ld = { p: .04, stage: '', creep: null, slowT: null, acctT: null, softT: null, hideT: null, played: false, booted: false };
+function ldTxt(k) { const L = LD.L || {}; return ((L[LANG] || L.en || {})[k]) || t('loading'); }
+function ldEl(id) { return document.getElementById(id); }
+function ldProgress(p) { Ld.p = Math.max(Ld.p, Math.min(1, p)); const r = ldEl('ld'); if (r) r.style.setProperty('--p', Ld.p.toFixed(3)); }
+function ldStage(k) {
+  const st = ldEl('ld-status'); if (!st) return;
+  const txt = ldTxt(k); Ld.stage = k;
+  if (st.textContent === txt) return;
+  st.classList.remove('swap'); void st.offsetWidth; st.textContent = txt; st.classList.add('swap');
+}
+function ldBootStart() {
+  clearTimeout(Ld.acctT); clearTimeout(Ld.slowT); clearInterval(Ld.creep);
+  const slow = ldEl('ld-slow'); if (slow) slow.hidden = true;
+  ldStage('c'); ldProgress(.16);
+  Ld.acctT = setTimeout(() => { if (S.screen === 'loading') { ldStage('a'); ldProgress(.42); } }, 1200);
+  Ld.creep = setInterval(() => { if (S.screen === 'loading') ldProgress(Ld.p + (.86 - Ld.p) * .14); else clearInterval(Ld.creep); }, 700);
+  Ld.slowT = setTimeout(() => {           // Render's free plan sleeps: say so instead of looking frozen
+    if (S.screen !== 'loading') return;
+    const s2 = ldEl('ld-slow'); if (s2) { s2.textContent = ldTxt('w'); s2.hidden = false; }
+  }, 7000);
+}
+function ldBootData() { clearTimeout(Ld.slowT); const s2 = ldEl('ld-slow'); if (s2) s2.hidden = true; ldStage('p'); ldProgress(.95); }
 function syncPageLoading() {
   const el = document.getElementById('page-loading');
   if (!el) return;
-  const visible = S.screen === 'loading' || [...PageLoad.pending.values()].some(pageLoadVisible);
-  clearTimeout(PageLoad.hideTimer);
+  const boot = S.screen === 'loading';
+  const visible = boot || [...PageLoad.pending.values()].some(pageLoadVisible);
+  clearTimeout(PageLoad.hideTimer); clearTimeout(Ld.softT);
   document.getElementById('view')?.setAttribute('aria-busy', String(visible));
+  const root = ldEl('ld');
   if (visible) {
-    el.hidden = false; el.classList.remove('leaving');
-    el.setAttribute('aria-label', t('loading'));
-    el.querySelector('.load-label').textContent = t('loading');
-    el.querySelector('.load-brand').textContent = S.store?.name || 'LARA STOCK';
+    const show = () => {
+      el.classList.toggle('soft', !boot);
+      if (root) root.classList.toggle('instant', !boot || Ld.played);   // the slow-motion intro plays once per open
+      if (!boot) { const st = ldEl('ld-status'); if (st) { st.classList.remove('swap'); st.textContent = t('loading'); } }
+      el.setAttribute('aria-label', boot ? ldTxt('l') : t('loading'));
+      el.hidden = false; el.classList.remove('leaving');
+    };
+    if (boot || !el.hidden && !el.classList.contains('leaving')) show();
+    else Ld.softT = setTimeout(show, 220);         // fast in-app loads never flash the overlay
   } else if (!el.hidden) {
+    const wasBoot = !el.classList.contains('soft');
+    if (wasBoot) { Ld.played = true; ldProgress(1); clearInterval(Ld.creep); clearTimeout(Ld.slowT); clearTimeout(Ld.acctT); }
     el.classList.add('leaving');
-    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; }, 220);
+    if (wasBoot && !Ld.booted) { Ld.booted = true; const v = document.getElementById('view'); if (v) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); setTimeout(() => v.classList.remove('enter'), 900); } }
+    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; el.classList.remove('leaving', 'soft'); }, wasBoot ? 820 : 260);
   }
 }
 function pageLoadBegin(path) {
@@ -1713,13 +1883,23 @@ function pageLoadEnd(token) {
   if (token == null) return;
   PageLoad.pending.delete(token); syncPageLoading();
 }
+/* read-only requests (safe to repeat) — purchases, deposits and the cart are never retried automatically */
+const API_READ = /^(bootstrap|catalog|me|orders|history|referrals|terms|desc|tr|forced\/check|deposit\/status|cgpt\/subs|api\/(state|docs|orders|products)|admin\/(home|feed|search|user|order|product|products))$/;
 async function api(path, body) {
   if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
   const loadingToken = pageLoadBegin(path);
   const controller = (loadingToken != null || path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
+  const read = API_READ.test(path);
   try {
-    const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      try { res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) }); break; }
+      catch (e) {   // a dropped mobile connection / server restart: read-only requests try once more before failing
+        if (read && attempt === 0 && !(controller && controller.signal.aborted)) { await new Promise(r => setTimeout(r, 1200)); continue; }
+        throw e;
+      }
+    }
     let data = {};
     try { data = await res.json(); } catch (e) {}
     if (!res.ok && !data.error) data.error = res.status === 401 ? 'auth' : 'server_error';
@@ -1729,7 +1909,10 @@ async function api(path, body) {
     if (typeof data.ref_debt === 'number' && S.user) { S.user.ref_debt = data.ref_debt; if (S.refs) S.refs.ref_debt = data.ref_debt; }
     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
     return data;
-  } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
+  } catch (e) {
+    if (navigator.onLine !== false && document.visibilityState !== 'hidden') reportClientError('Network request failed', '', path);   // offline / app in background → not a store error
+    return { error: 'network' };
+  }
   finally { if (timer) clearTimeout(timer); pageLoadEnd(loadingToken); }
 }
 function errText(r) {
@@ -2197,10 +2380,7 @@ function renderView() {
   syncPageLoading();
 }
 function vLoading() {
-  return `<div class="hello"><div style="width:60%"><div class="skel" style="height:14px;width:40%;border-radius:8px"></div><div class="skel" style="height:24px;margin-top:8px;border-radius:8px"></div></div></div>
-    <div class="skel" style="height:46px;border-radius:16px"></div>
-    <div class="chips">${'<div class="skel" style="flex:none;width:96px;height:40px;border-radius:14px"></div>'.repeat(4)}</div>
-    <div class="grid" style="margin-top:14px">${'<div class="skel" style="aspect-ratio:1/1.32"></div>'.repeat(6)}</div>`;
+  return '';     // the full-screen loading screen covers this moment — no hidden shimmering placeholders eating the phone's CPU
 }
 function vFull(emoji, title, body, actions) {
   return `<div class="fullscreen">${ae(emoji)}<h2>${esc(title)}</h2>${body ? `<p>${esc(body)}</p>` : ''}${actions ? `<div style="margin-top:10px;display:flex;gap:8px">${actions}</div>` : ''}</div>`;
@@ -4964,7 +5144,7 @@ window.addEventListener('scroll', () => { const top = $('#top'); if (top) top.cl
 
 function setLang(l) {
   if (!I[l] || l === LANG) return;
-  LANG = l; store.set('lang', l); hap('select');
+  LANG = l; store.set('lang', l); store.set('uiLang', l); hap('select');
   if (!DEMO && (l === 'ar' || l === 'en') && S.user) { S.user.lang = l; api('lang', { lang: l }); }   // نفس زر 🌐 في البوت
   document.documentElement.lang = l === 'zh' ? 'zh-CN' : l;
   document.documentElement.dir = l === 'ar' ? 'rtl' : 'ltr';
@@ -5168,9 +5348,11 @@ function applyTheme() {
   } catch (e) {}
 }
 async function boot() {
-  S.screen = 'loading'; renderAll();
+  S.screen = 'loading'; renderAll(); ldBootStart();
   if (!DEMO && !INIT) { S.screen = 'notg'; renderAll(); return; }
+  if (DEMO && !Ld.played) await new Promise(r => setTimeout(r, 3400));   // preview only: let the slow-motion intro play (real customers never wait)
   const r = await api('bootstrap');
+  if (r.ok) ldBootData();
   if (!r.ok) {
     S.screen = r.error === 'banned' ? 'banned' : r.error === 'auth' ? 'auth' : r.error === 'network' ? 'error' : 'error';
     renderAll(); return;
@@ -5184,6 +5366,8 @@ async function boot() {
   const own = saved === 'ru' || saved === 'zh' ? saved : null;   // الروسي/الصيني للموقع بس — العربي/الإنجليزي يتبع لغة البوت (تتغير من البوت أو من هنا)
   const want = own || (!saved && /^ru|^uk|^be|^kk/.test(tgl) ? 'ru' : !saved && /^zh/.test(tgl) ? 'zh' : (r.user.lang || saved || 'en'));
   if (I[want]) { LANG = want; document.documentElement.lang = want === 'zh' ? 'zh-CN' : want; document.documentElement.dir = want === 'ar' ? 'rtl' : 'ltr'; }
+  store.set('uiLang', LANG); if (S.store && S.store.name) store.set('uiBrand', String(S.store.name).slice(0, 40));   // next open: right language + name from the first frame
+  if (r.ok) ldStage('p');
   S.verify = !!r.verify;
   S.screen = S.verify ? 'verify' : S.forced ? 'gate' : 'app';
   S.orders = S.refs = null; S.hist.data = null;
@@ -5200,7 +5384,7 @@ if (tg) {
   try { tg.BackButton.onClick(backSheet); } catch (e) {}
   try { tg.onEvent('activated', () => { if (S.screen === 'app') { refreshMe(); refreshCatalog(); } }); } catch (e) {}
 }
-const initLang = store.get('lang', null) || ((navigator.language || '').startsWith('ar') ? 'ar' : 'en');
+const initLang = (window.__LD && window.__LD.lang) || store.get('lang', null) || 'en';   // same pick as the loading screen (never the phone first)
 if (I[initLang]) { LANG = initLang; document.documentElement.dir = initLang === 'ar' ? 'rtl' : 'ltr'; }
 
 /* ───────────────────────── demo data (preview only) ───────────────────────── */

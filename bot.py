@@ -2394,7 +2394,7 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
     debit_field = '_api_ext_debits.' + reference
     # Debit and its marker are a single atomic change to the user's document.
     # An interrupted order remains pending; replay never charges it a second time.
-    updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total},
+    updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total - MONEY_EPS},
             debit_field: {'$exists': False}},
         {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
     _invalidate_user_cache(uid)
@@ -2939,7 +2939,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     return _json_resp(self, 402, {'error': 'Insufficient balance',
                                                   'required': cg_price, 'balance': api_bal})
                 updated = db.users.find_one_and_update(
-                    {'user_id': uid, 'balance': {'$gte': cg_price}},
+                    {'user_id': uid, 'balance': {'$gte': cg_price - MONEY_EPS}},
                     {'$inc': {'balance': -cg_price}}, return_document=True)
                 if not updated:
                     return _json_resp(self, 402, {'error': 'Insufficient balance'})
@@ -3026,7 +3026,7 @@ class APIHandler(BaseHTTPRequestHandler):
             if is_manual:
                 # atomic: فحص الرصيد والخصم في عملية واحدة
                 updated = db.users.find_one_and_update(
-                    {'user_id': uid, 'balance': {'$gte': total}},
+                    {'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
                     {'$inc': {'balance': -total}},
                     return_document=True
                 )
@@ -3102,7 +3102,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 reserved.append(r)
 
             debit_field = '_stock_debits.' + order_id
-            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}},
+            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
                 {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
             if not updated:
                 db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
@@ -9468,7 +9468,7 @@ def gemini_buy_prompt(call):
         updated_user = db.users.find_one_and_update(
             {
                 'user_id': uid,
-                'balance': {'$gte': gemini_price}
+                'balance': {'$gte': gemini_price - MONEY_EPS}
             },
             {'$inc': {'balance': -gemini_price}},
             return_document=True
@@ -9602,7 +9602,7 @@ def process_gh_step_2fa(message):
     # (كان $inc بسيط بدون فحص؛ والرصيد فُحص فقط في البداية قبل دقائق —
     #  ثغرة TOCTOU لأن إدخال 2FA قد يتجاوز قفل الـ60 ثانية.)
     _gh_updated = db.users.find_one_and_update(
-        {'user_id': uid, 'balance': {'$gte': price}},
+        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
         {'$inc': {'balance': -price}},
         return_document=True
     )
@@ -11885,7 +11885,7 @@ def cgpt_email_confirmed(call):
 
     # خصم الرصيد أتوميك
     updated = db.users.find_one_and_update(
-        {'user_id': buyer_uid, 'balance': {'$gte': price}},
+        {'user_id': buyer_uid, 'balance': {'$gte': price - MONEY_EPS}},
         {'$inc': {'balance': -price}},
         return_document=True
     )
@@ -12192,7 +12192,7 @@ def _do_purchase(uid, pid, qty, lang):
 
         # 🛡 خصم الرصيد atomically
         updated_user = db.users.find_one_and_update(
-            {'user_id': uid, 'balance': {'$gte': total_price}},
+            {'user_id': uid, 'balance': {'$gte': total_price - MONEY_EPS}},
             {'$inc': {'balance': -total_price}, **({'$set': {debit_field: total_price}} if debit_field else {})},
             return_document=True
         )
@@ -15621,7 +15621,7 @@ def _cgpt_renew_core(uid, s, prod_id, dur_id, via='bot'):
     if balance < price:
         return {'ok': False, 'error': 'insufficient_balance', 'price': price, 'balance': balance}
     updated = db.users.find_one_and_update(
-        {'user_id': uid, 'balance': {'$gte': price}},
+        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
         {'$inc': {'balance': -price}}, return_document=True)
     if not updated:
         _invalidate_user_cache(uid)
@@ -21175,7 +21175,7 @@ def _ext_execute_buy(message, epid, lang):
 
     # خصم الرصيد ذرّياً
     updated = db.users.find_one_and_update(
-        {'user_id': uid, 'balance': {'$gte': total}},
+        {'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
         {'$inc': {'balance': -total}}, return_document=True)
     if not updated:
         _invalidate_user_cache(uid)
@@ -21336,7 +21336,7 @@ def ext_customer_buy(call):
 
     # 1) خصم الرصيد ذرياً (يمنع الشراء لو الرصيد غير كافٍ)
     updated = db.users.find_one_and_update(
-        {'user_id': uid, 'balance': {'$gte': price}},
+        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
         {'$inc': {'balance': -price}}, return_document=True)
     if not updated:
         _invalidate_user_cache(uid)
@@ -31138,7 +31138,40 @@ def _wa_lang_of(u):
 def _wa_balance(uid):
     _invalidate_user_cache(uid)
     u = db.users.find_one({'user_id': uid}, {'balance': 1})
-    return round(_wa_fnum((u or {}).get('balance', 0)), 2)
+    b = round(_wa_fnum((u or {}).get('balance', 0)), 2)
+    return 0.0 if b == 0 else b          # never «-$0.00»
+
+
+def _wa_short(uid, need):
+    """True if the customer's EXACT balance (not the rounded one shown) can't cover `need`."""
+    try:
+        u = db.users.find_one({'user_id': uid}, {'balance': 1})
+        return _wa_fnum((u or {}).get('balance', 0)) + MONEY_EPS < float(need)
+    except Exception:
+        return False
+
+
+def _wa_why_not_bought(uid, pid, qty, total, manual):
+    """_do_purchase stopped without an order — find the real reason for the customer (never a vague purchase_failed)."""
+    try:
+        with _purchase_locks_master:
+            ts = _purchase_locks.get(uid)
+        if ts and (int(time.time()) - ts) < PURCHASE_LOCK_TIMEOUT:
+            return 429, {'error': 'busy'}
+    except Exception:
+        pass
+    try:
+        if is_deposit_locked(uid):
+            return 409, {'error': 'deposit_pending', 'pending': _wa_pending_view(uid)}
+    except Exception:
+        pass
+    if not manual:
+        st = get_product_stock_count(pid)
+        if st < qty:
+            return 409, {'error': 'not_enough_stock' if st else 'out_of_stock', 'available': st, 'balance': _wa_balance(uid)}
+    if _wa_short(uid, total):
+        return 402, {'error': 'insufficient_balance', 'required': total, 'balance': _wa_balance(uid)}
+    return None
 
 
 class _WAUser:
@@ -31389,6 +31422,121 @@ def _wa_invalidate_catalog():
 # 🔗 أي كتابة على المنتجات / الستوك / المجلدات / متاجر API / باقات ChatGPT / خصومات VIP
 #    (من أي أمر في البوت — قديم أو جديد) تمسح كاش البوت والموقع فوراً، فالموقع يعرض التغيير على طول.
 # ============================================================
+# ============================================================
+# 💰 Balances are floats: 1.10 − 0.55 − 0.55 … can leave 0.5499999999999999 — the store shows $0.55 but
+#    «balance ≥ 0.55» refuses it (the customer saw «purchase_failed» again and again). Two guards:
+#    • every deduction accepts a half-micro-dollar difference (MONEY_EPS);
+#    • after any balance $inc the stored value is settled to 6 decimals (dust → 0), only if nothing changed it meanwhile.
+# ============================================================
+MONEY_EPS = 5e-7
+
+
+def _money_clean(v):
+    try:
+        b = float(v)
+    except (TypeError, ValueError):
+        return None
+    c = round(b, 6)
+    return 0.0 if abs(c) < 1e-6 else c
+
+
+def _money_settle_doc(coll, doc):
+    """Settles one user document's balance in place (exact-value guard: a concurrent write wins)."""
+    try:
+        if not isinstance(doc, dict) or 'balance' not in doc:
+            return doc
+        b = doc.get('balance')
+        c = _money_clean(b)
+        if c is None or c == b:
+            return doc
+        key = {'_id': doc['_id']} if doc.get('_id') is not None else {'user_id': doc.get('user_id')}
+        r = coll.update_one(dict(key, balance=b), {'$set': {'balance': c}})
+        if getattr(r, 'modified_count', 0):
+            doc['balance'] = c
+            try:
+                _invalidate_user_cache(doc.get('user_id'))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return doc
+
+
+def _install_money_hook():
+    classes = []
+    try:
+        import pymongo.collection as _pmc
+        classes.append(_pmc.Collection)
+    except Exception:
+        pass
+    _mm = sys.modules.get('mongomock')
+    if _mm is not None and getattr(_mm, 'Collection', None) is not None:
+        classes.append(_mm.Collection)
+
+    def _touches_balance(update):
+        return isinstance(update, dict) and isinstance(update.get('$inc'), dict) and 'balance' in update['$inc']
+
+    for cls in classes:
+        if getattr(cls, '_lara_money_hook', False):
+            continue
+        orig_fou, orig_uo = cls.find_one_and_update, cls.update_one
+
+        def _fou(self, filter, update, *a, _o=orig_fou, **k):
+            res = _o(self, filter, update, *a, **k)
+            try:
+                if self.name == 'users' and _touches_balance(update) and isinstance(res, dict):
+                    after = k.get('return_document', a[2] if len(a) > 2 else False)
+                    if after:
+                        _money_settle_doc(self, res)
+                    else:
+                        _money_settle_doc(self, self.find_one({'_id': res['_id']}, {'balance': 1, 'user_id': 1}))
+            except Exception:
+                pass
+            return res
+
+        def _uo(self, filter, update, *a, _o=orig_uo, **k):
+            res = _o(self, filter, update, *a, **k)
+            try:
+                if self.name == 'users' and _touches_balance(update) and getattr(res, 'modified_count', 0) and isinstance(filter, dict) and 'user_id' in filter:
+                    _money_settle_doc(self, self.find_one({'user_id': filter['user_id']}, {'balance': 1, 'user_id': 1}))
+            except Exception:
+                pass
+            return res
+        _fou.__wrapped__, _uo.__wrapped__ = orig_fou, orig_uo
+        cls.find_one_and_update, cls.update_one = _fou, _uo
+        cls._lara_money_hook = True
+
+
+try:
+    _install_money_hook()
+except Exception as _e:
+    logger.warning(f"money hook not installed: {_e}")
+
+
+def _money_dust_cleanup_once():
+    """One-time: settle existing dusty balances (0.5499999999999999 → 0.55). Exact-value guard per user."""
+    try:
+        if str(get_setting('money_dust_v1', '')) == 'done':
+            return
+        n = 0
+        try:
+            cur = db.users.find({'$expr': {'$ne': ['$balance', {'$round': ['$balance', 6]}]}}, {'balance': 1, 'user_id': 1})
+            for doc in cur:
+                before = doc.get('balance')
+                _money_settle_doc(db.users, doc)
+                n += doc.get('balance') != before
+        except Exception as e:      # test databases without $round
+            logger.debug(f"money dust scan skipped: {e}")
+        db.settings.update_one({'key': 'money_dust_v1'}, {'$set': {'value': 'done', 'fixed': n}}, upsert=True)
+        if n:
+            logger.info(f"💰 settled {n} balances with float dust")
+    except Exception as e:
+        logger.warning(f"money dust cleanup failed: {e}")
+
+
+threading.Thread(target=_money_dust_cleanup_once, daemon=True).start()
+
+
 _CATALOG_COLLS = frozenset({'products', 'product_stock', 'catalogs', 'ext_products', 'ext_stores',
                             'cgpt_products', 'vip_products', 'deleted_products'})
 _CATALOG_WRITE_METHODS = ('insert_one', 'insert_many', 'update_one', 'update_many', 'replace_one',
@@ -32014,7 +32162,7 @@ def _wa_buy_standard(uid, p, qty, lang, body=None):
             return 409, {'error': 'not_enough_stock', 'available': st}
     total = vip_quote(uid, pid, _wa_unit_price(p, qty), qty)['total']
     bal = _wa_balance(uid)
-    if bal < total:
+    if _wa_short(uid, total):
         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
     # Correlate this exact attempt; a previous order can be only milliseconds old.
     request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
@@ -32033,10 +32181,9 @@ def _wa_buy_standard(uid, p, qty, lang, body=None):
                                 'product_id': {'$in': cands}}).sort('_id', 1))
     new_bal = _wa_balance(uid)
     if not docs:
-        if not manual and get_product_stock_count(pid) < qty:
-            return 409, {'error': 'not_enough_stock', 'available': get_product_stock_count(pid), 'balance': new_bal}
-        if new_bal < total:
-            return 402, {'error': 'insufficient_balance', 'required': total, 'balance': new_bal}
+        why = _wa_why_not_bought(uid, pid, qty, total, manual)
+        if why:
+            return why
         return 500, {'error': 'purchase_failed', 'balance': new_bal}
     _wa_invalidate_catalog()
     if manual:
@@ -32082,7 +32229,7 @@ def _wa_buy_seat(uid, p, body, lang):
     if get_product_stock_count(pid) < 1:
         return 409, {'error': 'out_of_stock', 'available': 0}
     total = vip_quote(uid, pid, _wa_fnum(p.get('price')))['total']
-    if _wa_balance(uid) < total:
+    if _wa_short(uid, total):
         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': _wa_balance(uid)}
     _do_purchase(uid, pid, 1, lang)
     pending = _cgpt_pending.get(uid)
@@ -32130,7 +32277,7 @@ def _wa_buy_cgpt(uid, hexid, body, lang):
     if not str(label or '').strip():
         label = _wa_dur_label(minutes, lang)
     bal = _wa_balance(uid)
-    if bal < price:
+    if _wa_short(uid, price):
         return 402, {'error': 'insufficient_balance', 'required': round(price, 2), 'balance': bal}
     try:
         seats = _cgpt_get_seats_cached()
@@ -32174,7 +32321,7 @@ def _wa_buy_ext(uid, epid, qty, lang):
         return 409, {'error': 'not_enough_stock', 'available': stock}
     total = vip_quote(uid, f'ext_{epid}', _wa_fnum(ep.get('sell_price', ep.get('base_price', 0))), qty)['total']
     bal = _wa_balance(uid)
-    if bal < total:
+    if _wa_short(uid, total):
         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
     request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
     previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
@@ -35521,6 +35668,10 @@ def _wa_start_button(uid):
     if not url or str(get_setting('webapp_start_button', 'on')) == 'off':
         return None
     text, emj = get_btn_data(uid, 'btn_webapp')
+    try:      # لغة العميل في الرابط: شاشة التحميل تطلع بلغة البوت من أول لحظة
+        url = url + ('&' if '?' in url else '?') + 'l=' + ('en' if get_lang(uid) == 'en' else 'ar')
+    except Exception:
+        pass
     kwargs = {'text': _parse_btn_label(text)[0] or 'Store', 'web_app': types.WebAppInfo(url=url), 'style': 'primary'}
     if emj:
         kwargs['icon_custom_emoji_id'] = emj
@@ -36066,6 +36217,7 @@ def _ref_dv_prompt(uid, chat_id=None, lang=None):
             logger.warning('🛡 تحقق الإحالات: رابط الموقع غير مضبوط — تظل الإحالات معلّقة حتى التحقق.')
         return False
     lang = lang or get_lang(uid)
+    url = url + '&l=' + ('en' if lang == 'en' else 'ar')      # شاشة التحميل بلغة العميل من أول لحظة
     if lang == 'en':
         text = ("🛡 <b>One last step</b>\n\nTo keep the store safe from fake accounts, tap the button and verify your device. "
                 "It takes a few seconds and we don't collect personal data.")

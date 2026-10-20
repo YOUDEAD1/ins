@@ -1,0 +1,543 @@
+diff -ruN a/bot.py b/bot.py
+--- a/bot.py	2026-10-20 17:13:29.315858468 +0000
++++ b/bot.py	2026-10-20 17:13:29.321944549 +0000
+@@ -2394,7 +2394,7 @@
+     debit_field = '_api_ext_debits.' + reference
+     # Debit and its marker are a single atomic change to the user's document.
+     # An interrupted order remains pending; replay never charges it a second time.
+-    updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total},
++    updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total - MONEY_EPS},
+             debit_field: {'$exists': False}},
+         {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
+     _invalidate_user_cache(uid)
+@@ -2939,7 +2939,7 @@
+                     return _json_resp(self, 402, {'error': 'Insufficient balance',
+                                                   'required': cg_price, 'balance': api_bal})
+                 updated = db.users.find_one_and_update(
+-                    {'user_id': uid, 'balance': {'$gte': cg_price}},
++                    {'user_id': uid, 'balance': {'$gte': cg_price - MONEY_EPS}},
+                     {'$inc': {'balance': -cg_price}}, return_document=True)
+                 if not updated:
+                     return _json_resp(self, 402, {'error': 'Insufficient balance'})
+@@ -3026,7 +3026,7 @@
+             if is_manual:
+                 # atomic: فحص الرصيد والخصم في عملية واحدة
+                 updated = db.users.find_one_and_update(
+-                    {'user_id': uid, 'balance': {'$gte': total}},
++                    {'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
+                     {'$inc': {'balance': -total}},
+                     return_document=True
+                 )
+@@ -3102,7 +3102,7 @@
+                 reserved.append(r)
+ 
+             debit_field = '_stock_debits.' + order_id
+-            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total}},
++            updated = db.users.find_one_and_update({'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
+                 {'$inc': {'balance': -total}, '$set': {debit_field: total}}, return_document=True)
+             if not updated:
+                 db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
+@@ -9468,7 +9468,7 @@
+         updated_user = db.users.find_one_and_update(
+             {
+                 'user_id': uid,
+-                'balance': {'$gte': gemini_price}
++                'balance': {'$gte': gemini_price - MONEY_EPS}
+             },
+             {'$inc': {'balance': -gemini_price}},
+             return_document=True
+@@ -9602,7 +9602,7 @@
+     # (كان $inc بسيط بدون فحص؛ والرصيد فُحص فقط في البداية قبل دقائق —
+     #  ثغرة TOCTOU لأن إدخال 2FA قد يتجاوز قفل الـ60 ثانية.)
+     _gh_updated = db.users.find_one_and_update(
+-        {'user_id': uid, 'balance': {'$gte': price}},
++        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
+         {'$inc': {'balance': -price}},
+         return_document=True
+     )
+@@ -11885,7 +11885,7 @@
+ 
+     # خصم الرصيد أتوميك
+     updated = db.users.find_one_and_update(
+-        {'user_id': buyer_uid, 'balance': {'$gte': price}},
++        {'user_id': buyer_uid, 'balance': {'$gte': price - MONEY_EPS}},
+         {'$inc': {'balance': -price}},
+         return_document=True
+     )
+@@ -12192,7 +12192,7 @@
+ 
+         # 🛡 خصم الرصيد atomically
+         updated_user = db.users.find_one_and_update(
+-            {'user_id': uid, 'balance': {'$gte': total_price}},
++            {'user_id': uid, 'balance': {'$gte': total_price - MONEY_EPS}},
+             {'$inc': {'balance': -total_price}, **({'$set': {debit_field: total_price}} if debit_field else {})},
+             return_document=True
+         )
+@@ -15621,7 +15621,7 @@
+     if balance < price:
+         return {'ok': False, 'error': 'insufficient_balance', 'price': price, 'balance': balance}
+     updated = db.users.find_one_and_update(
+-        {'user_id': uid, 'balance': {'$gte': price}},
++        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
+         {'$inc': {'balance': -price}}, return_document=True)
+     if not updated:
+         _invalidate_user_cache(uid)
+@@ -21175,7 +21175,7 @@
+ 
+     # خصم الرصيد ذرّياً
+     updated = db.users.find_one_and_update(
+-        {'user_id': uid, 'balance': {'$gte': total}},
++        {'user_id': uid, 'balance': {'$gte': total - MONEY_EPS}},
+         {'$inc': {'balance': -total}}, return_document=True)
+     if not updated:
+         _invalidate_user_cache(uid)
+@@ -21336,7 +21336,7 @@
+ 
+     # 1) خصم الرصيد ذرياً (يمنع الشراء لو الرصيد غير كافٍ)
+     updated = db.users.find_one_and_update(
+-        {'user_id': uid, 'balance': {'$gte': price}},
++        {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
+         {'$inc': {'balance': -price}}, return_document=True)
+     if not updated:
+         _invalidate_user_cache(uid)
+@@ -31138,7 +31138,40 @@
+ def _wa_balance(uid):
+     _invalidate_user_cache(uid)
+     u = db.users.find_one({'user_id': uid}, {'balance': 1})
+-    return round(_wa_fnum((u or {}).get('balance', 0)), 2)
++    b = round(_wa_fnum((u or {}).get('balance', 0)), 2)
++    return 0.0 if b == 0 else b          # never «-$0.00»
++
++
++def _wa_short(uid, need):
++    """True if the customer's EXACT balance (not the rounded one shown) can't cover `need`."""
++    try:
++        u = db.users.find_one({'user_id': uid}, {'balance': 1})
++        return _wa_fnum((u or {}).get('balance', 0)) + MONEY_EPS < float(need)
++    except Exception:
++        return False
++
++
++def _wa_why_not_bought(uid, pid, qty, total, manual):
++    """_do_purchase stopped without an order — find the real reason for the customer (never a vague purchase_failed)."""
++    try:
++        with _purchase_locks_master:
++            ts = _purchase_locks.get(uid)
++        if ts and (int(time.time()) - ts) < PURCHASE_LOCK_TIMEOUT:
++            return 429, {'error': 'busy'}
++    except Exception:
++        pass
++    try:
++        if is_deposit_locked(uid):
++            return 409, {'error': 'deposit_pending', 'pending': _wa_pending_view(uid)}
++    except Exception:
++        pass
++    if not manual:
++        st = get_product_stock_count(pid)
++        if st < qty:
++            return 409, {'error': 'not_enough_stock' if st else 'out_of_stock', 'available': st, 'balance': _wa_balance(uid)}
++    if _wa_short(uid, total):
++        return 402, {'error': 'insufficient_balance', 'required': total, 'balance': _wa_balance(uid)}
++    return None
+ 
+ 
+ class _WAUser:
+@@ -31389,6 +31422,121 @@
+ # 🔗 أي كتابة على المنتجات / الستوك / المجلدات / متاجر API / باقات ChatGPT / خصومات VIP
+ #    (من أي أمر في البوت — قديم أو جديد) تمسح كاش البوت والموقع فوراً، فالموقع يعرض التغيير على طول.
+ # ============================================================
++# ============================================================
++# 💰 Balances are floats: 1.10 − 0.55 − 0.55 … can leave 0.5499999999999999 — the store shows $0.55 but
++#    «balance ≥ 0.55» refuses it (the customer saw «purchase_failed» again and again). Two guards:
++#    • every deduction accepts a half-micro-dollar difference (MONEY_EPS);
++#    • after any balance $inc the stored value is settled to 6 decimals (dust → 0), only if nothing changed it meanwhile.
++# ============================================================
++MONEY_EPS = 5e-7
++
++
++def _money_clean(v):
++    try:
++        b = float(v)
++    except (TypeError, ValueError):
++        return None
++    c = round(b, 6)
++    return 0.0 if abs(c) < 1e-6 else c
++
++
++def _money_settle_doc(coll, doc):
++    """Settles one user document's balance in place (exact-value guard: a concurrent write wins)."""
++    try:
++        if not isinstance(doc, dict) or 'balance' not in doc:
++            return doc
++        b = doc.get('balance')
++        c = _money_clean(b)
++        if c is None or c == b:
++            return doc
++        key = {'_id': doc['_id']} if doc.get('_id') is not None else {'user_id': doc.get('user_id')}
++        r = coll.update_one(dict(key, balance=b), {'$set': {'balance': c}})
++        if getattr(r, 'modified_count', 0):
++            doc['balance'] = c
++            try:
++                _invalidate_user_cache(doc.get('user_id'))
++            except Exception:
++                pass
++    except Exception:
++        pass
++    return doc
++
++
++def _install_money_hook():
++    classes = []
++    try:
++        import pymongo.collection as _pmc
++        classes.append(_pmc.Collection)
++    except Exception:
++        pass
++    _mm = sys.modules.get('mongomock')
++    if _mm is not None and getattr(_mm, 'Collection', None) is not None:
++        classes.append(_mm.Collection)
++
++    def _touches_balance(update):
++        return isinstance(update, dict) and isinstance(update.get('$inc'), dict) and 'balance' in update['$inc']
++
++    for cls in classes:
++        if getattr(cls, '_lara_money_hook', False):
++            continue
++        orig_fou, orig_uo = cls.find_one_and_update, cls.update_one
++
++        def _fou(self, filter, update, *a, _o=orig_fou, **k):
++            res = _o(self, filter, update, *a, **k)
++            try:
++                if self.name == 'users' and _touches_balance(update) and isinstance(res, dict):
++                    after = k.get('return_document', a[2] if len(a) > 2 else False)
++                    if after:
++                        _money_settle_doc(self, res)
++                    else:
++                        _money_settle_doc(self, self.find_one({'_id': res['_id']}, {'balance': 1, 'user_id': 1}))
++            except Exception:
++                pass
++            return res
++
++        def _uo(self, filter, update, *a, _o=orig_uo, **k):
++            res = _o(self, filter, update, *a, **k)
++            try:
++                if self.name == 'users' and _touches_balance(update) and getattr(res, 'modified_count', 0) and isinstance(filter, dict) and 'user_id' in filter:
++                    _money_settle_doc(self, self.find_one({'user_id': filter['user_id']}, {'balance': 1, 'user_id': 1}))
++            except Exception:
++                pass
++            return res
++        _fou.__wrapped__, _uo.__wrapped__ = orig_fou, orig_uo
++        cls.find_one_and_update, cls.update_one = _fou, _uo
++        cls._lara_money_hook = True
++
++
++try:
++    _install_money_hook()
++except Exception as _e:
++    logger.warning(f"money hook not installed: {_e}")
++
++
++def _money_dust_cleanup_once():
++    """One-time: settle existing dusty balances (0.5499999999999999 → 0.55). Exact-value guard per user."""
++    try:
++        if str(get_setting('money_dust_v1', '')) == 'done':
++            return
++        n = 0
++        try:
++            cur = db.users.find({'$expr': {'$ne': ['$balance', {'$round': ['$balance', 6]}]}}, {'balance': 1, 'user_id': 1})
++            for doc in cur:
++                before = doc.get('balance')
++                _money_settle_doc(db.users, doc)
++                n += doc.get('balance') != before
++        except Exception as e:      # test databases without $round
++            logger.debug(f"money dust scan skipped: {e}")
++        db.settings.update_one({'key': 'money_dust_v1'}, {'$set': {'value': 'done', 'fixed': n}}, upsert=True)
++        if n:
++            logger.info(f"💰 settled {n} balances with float dust")
++    except Exception as e:
++        logger.warning(f"money dust cleanup failed: {e}")
++
++
++threading.Thread(target=_money_dust_cleanup_once, daemon=True).start()
++
++
+ _CATALOG_COLLS = frozenset({'products', 'product_stock', 'catalogs', 'ext_products', 'ext_stores',
+                             'cgpt_products', 'vip_products', 'deleted_products'})
+ _CATALOG_WRITE_METHODS = ('insert_one', 'insert_many', 'update_one', 'update_many', 'replace_one',
+@@ -32014,7 +32162,7 @@
+             return 409, {'error': 'not_enough_stock', 'available': st}
+     total = vip_quote(uid, pid, _wa_unit_price(p, qty), qty)['total']
+     bal = _wa_balance(uid)
+-    if bal < total:
++    if _wa_short(uid, total):
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+     # Correlate this exact attempt; a previous order can be only milliseconds old.
+     request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
+@@ -32033,10 +32181,9 @@
+                                 'product_id': {'$in': cands}}).sort('_id', 1))
+     new_bal = _wa_balance(uid)
+     if not docs:
+-        if not manual and get_product_stock_count(pid) < qty:
+-            return 409, {'error': 'not_enough_stock', 'available': get_product_stock_count(pid), 'balance': new_bal}
+-        if new_bal < total:
+-            return 402, {'error': 'insufficient_balance', 'required': total, 'balance': new_bal}
++        why = _wa_why_not_bought(uid, pid, qty, total, manual)
++        if why:
++            return why
+         return 500, {'error': 'purchase_failed', 'balance': new_bal}
+     _wa_invalidate_catalog()
+     if manual:
+@@ -32082,7 +32229,7 @@
+     if get_product_stock_count(pid) < 1:
+         return 409, {'error': 'out_of_stock', 'available': 0}
+     total = vip_quote(uid, pid, _wa_fnum(p.get('price')))['total']
+-    if _wa_balance(uid) < total:
++    if _wa_short(uid, total):
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': _wa_balance(uid)}
+     _do_purchase(uid, pid, 1, lang)
+     pending = _cgpt_pending.get(uid)
+@@ -32130,7 +32277,7 @@
+     if not str(label or '').strip():
+         label = _wa_dur_label(minutes, lang)
+     bal = _wa_balance(uid)
+-    if bal < price:
++    if _wa_short(uid, price):
+         return 402, {'error': 'insufficient_balance', 'required': round(price, 2), 'balance': bal}
+     try:
+         seats = _cgpt_get_seats_cached()
+@@ -32174,7 +32321,7 @@
+         return 409, {'error': 'not_enough_stock', 'available': stock}
+     total = vip_quote(uid, f'ext_{epid}', _wa_fnum(ep.get('sell_price', ep.get('base_price', 0))), qty)['total']
+     bal = _wa_balance(uid)
+-    if bal < total:
++    if _wa_short(uid, total):
+         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
+     request_id = getattr(_CART_CONTEXT, 'request_id', None) or secrets.token_hex(16)
+     previous_request = getattr(_LOG_SRC, 'wa_purchase_id', None)
+diff -ruN a/verification/test_client_diagnostics_browser.cjs b/verification/test_client_diagnostics_browser.cjs
+--- a/verification/test_client_diagnostics_browser.cjs	2026-10-20 17:13:29.320212848 +0000
++++ b/verification/test_client_diagnostics_browser.cjs	2026-10-20 17:13:29.327783709 +0000
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-32.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-33.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-32.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-33.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+diff -ruN a/verification/test_money_dust.py b/verification/test_money_dust.py
+--- a/verification/test_money_dust.py	1970-01-01 00:00:00.000000000 +0000
++++ b/verification/test_money_dust.py	2026-10-20 17:13:29.327861647 +0000
+@@ -0,0 +1,78 @@
++"""Round 32: float dust in balances (0.5499999999999999 shown as $0.55 but refused) and clear site errors instead of purchase_failed."""
++import pathlib
++import re
++
++from test_integration import mod, isolate, server, request, product, APP  # noqa: F401  (shared fixtures)
++
++
++def _user(mod, uid, balance):
++    mod.db.users.delete_many({'user_id': uid})
++    mod.db.users.insert_one({'user_id': uid, 'name': 'Dust', 'balance': balance, 'lang': 'en', 'lang_chosen': True, 'is_admin': 0, 'is_banned': 0})
++    mod._USER_CACHE.clear()
++
++
++def test_dust_balance_buys_on_the_site(mod, server):
++    product(mod, price=0.55, stock=3)
++    _user(mod, 1001, 0.5499999999999999)           # shows $0.55
++    s, r, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1})
++    assert s == 200 and len(r['codes']) == 1, (s, r)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 0.0          # no -1e-16 left behind
++
++
++def test_dust_balance_buys_in_the_bot(mod):
++    product(mod, price=0.55, stock=3)
++    _user(mod, 1001, 0.5499999999999999)
++    mod._do_purchase(1001, '101', 1, 'en')
++    assert mod.db.orders.count_documents({'user_id': 1001}) == 1
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 0.0
++
++
++def test_every_balance_write_is_settled(mod):
++    _user(mod, 1001, 0.1)
++    mod.db.users.update_one({'user_id': 1001}, {'$inc': {'balance': 0.2}})
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 0.3
++    doc = mod.db.users.find_one_and_update({'user_id': 1001}, {'$inc': {'balance': -0.3}}, return_document=True)
++    assert doc['balance'] == 0.0 and mod.db.users.find_one({'user_id': 1001})['balance'] == 0.0
++    _user(mod, 1002, 0.60)
++    mod.db.users.update_one({'user_id': 1002}, {'$inc': {'balance': -0.55}})
++    assert mod.db.users.find_one({'user_id': 1002})['balance'] == 0.05
++
++
++def test_genuinely_short_balance_still_refused(mod, server):
++    product(mod, price=0.55, stock=3)
++    _user(mod, 1001, 0.30)
++    s, r, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1})
++    assert s == 402 and r['error'] == 'insufficient_balance'
++
++
++def test_site_explains_why_instead_of_purchase_failed(mod, server, monkeypatch):
++    product(mod, price=0.55, stock=3)
++    _user(mod, 1001, 5.0)
++    monkeypatch.setattr(mod, '_do_purchase', lambda *a, **k: None)      # purchase stopped without an order
++    monkeypatch.setattr(mod, 'is_deposit_locked', lambda uid: False)
++    s, r, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1})
++    assert s == 500 and r['error'] == 'purchase_failed'                   # truly unknown → still reported
++    calls = {'n': 0}
++    def locked_after_check(uid):        # the site's own pre-check passes; the purchase then meets an open deposit
++        calls['n'] += 1
++        return calls['n'] > 1
++    monkeypatch.setattr(mod, 'is_deposit_locked', locked_after_check)
++    monkeypatch.setattr(mod, '_wa_pending_view', lambda uid, rec=None: None)
++    mod._WA_RATE.clear()
++    s, r, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1})
++    assert s == 409 and r['error'] == 'deposit_pending', (s, r)
++
++
++def test_all_deductions_accept_float_dust():
++    src = (APP / 'bot.py').read_text(encoding='utf-8')
++    assert len(re.findall(r"'balance': \{'\$gte': \w+ - MONEY_EPS\}", src)) == 11
++    assert not re.findall(r"'balance': \{'\$gte': \w+\}", src)
++
++
++def test_site_tg_early_events_and_read_retry():
++    html = (APP / 'webapp/index.html').read_text(encoding='utf-8')
++    early, sdk, replay = html.index('id="lara-tg-early"'), html.index('telegram-web-app.js'), html.index('id="lara-tg-replay"')
++    assert early < sdk < replay
++    m = re.search(r"const API_READ = /(.+)/;", html)
++    assert m and not re.search(r'buy|deposit\\/create|cart', m.group(1).replace('deposit\\/status', ''))
++    assert "navigator.onLine !== false && document.visibilityState !== 'hidden'" in html
+diff -ruN a/verification/test_resilience_browser.cjs b/verification/test_resilience_browser.cjs
+--- a/verification/test_resilience_browser.cjs	1970-01-01 00:00:00.000000000 +0000
++++ b/verification/test_resilience_browser.cjs	2026-10-20 17:13:29.327925129 +0000
+@@ -0,0 +1,45 @@
++/* Round 32: early Telegram (iOS) events before the SDK, one dropped read request, offline customers — no errors, no false alerts. */
++const {spawn}=require('child_process'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const PORT='8791',BASE='http://127.0.0.1:'+PORT;
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_referral_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:PORT},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL REFERRAL SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const ctx=await browser.newContext({viewport:{width:390,height:844}});
++  const page=await ctx.newPage(),errors=[],reports=[];let boots=0;
++  page.on('pageerror',e=>errors.push(e.message));
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  await page.route('**/__ref_test__/*',async route=>{
++   const response=await route.fetch();let html=await response.text();
++   /* what Telegram iOS does: deliver an event before telegram-web-app.js exists */
++   html=html.replace('<script id="lara-error-bootstrap">','<script>window.TelegramGameProxy.receiveEvent("viewport_changed",{"height":800,"is_state_stable":true});</script><script id="lara-error-bootstrap">');
++   const headers={...response.headers()};delete headers['content-encoding'];delete headers['content-length'];
++   await route.fulfill({status:200,headers,body:html});
++  });
++  await page.route('**/webapp/client/error',async route=>{reports.push(route.request().postDataJSON());await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});});
++  await page.route('**/webapp/bootstrap',async route=>{boots++;if(boots===1)return route.abort('failed');return route.continue();});
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="tab"][data-v="store"]').first().waitFor({timeout:20000});
++  await page.waitForTimeout(600);
++  assert.deepEqual(errors,[],'no TelegramGameProxy TypeError');
++  assert.equal(boots,2,'the dropped startup request was retried once');
++  assert(!reports.some(r=>/Network request failed|TelegramGameProxy/.test(r.message||'')),JSON.stringify(reports));
++  console.log('PASS early Telegram event before the SDK is queued (no TypeError); a dropped startup request retries once and the store opens with no alert');
++  await ctx.setOffline(true);
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  await page.waitForTimeout(2500);
++  assert(!reports.some(r=>/Network request failed/.test(r.message||'')),'offline customer is not reported as a store error');
++  await ctx.setOffline(false);
++  assert.deepEqual(errors,[]);
++  console.log('PASS offline customer never triggers a «Network request failed» alert; zero JS exceptions');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});
+diff -ruN a/webapp/index.html b/webapp/index.html
+--- a/webapp/index.html	2026-10-20 17:13:29.318252562 +0000
++++ b/webapp/index.html	2026-10-20 17:13:29.324923167 +0000
+@@ -8,11 +8,20 @@
+ <!-- لو استضفت الواجهة على دومين غير سيرفر البوت، اكتب رابط السيرفر هنا (مثال: https://my-bot.onrender.com) -->
+ <meta name="lara-api" content="">
+ <meta name="theme-color" content="#080b12">
++<script id="lara-tg-early">
++/* Telegram (iOS) can deliver events before telegram-web-app.js has loaded; keep them and hand them over once it has. */
++(function () {
++  if (window.TelegramGameProxy && window.TelegramGameProxy.receiveEvent) return;
++  var q = [];
++  window.__laraTgQueue = q;
++  window.TelegramGameProxy = { receiveEvent: function () { q.push([].slice.call(arguments)); } };
++})();
++</script>
+ <script id="lara-error-bootstrap">
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-32.1',queue=[],recent=new Map();
++ const build='lara-33.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -1608,6 +1617,12 @@
+ })();
+ </script>
+ <!--TG-SDK--><script src="https://telegram.org/js/telegram-web-app.js"></script><!--/TG-SDK-->
++<script id="lara-tg-replay">
++(function () {
++  var q = window.__laraTgQueue, wv = window.Telegram && window.Telegram.WebView;
++  if (q && q.length && wv && wv.receiveEvent) { var items = q.splice(0); for (var i = 0; i < items.length; i++) { try { wv.receiveEvent.apply(wv, items[i]); } catch (e) {} } }
++})();
++</script>
+ <header class="top" id="top" hidden></header>
+ <main id="view" aria-live="polite"></main>
+ <nav class="dock" id="dock" hidden></nav>
+@@ -1868,13 +1883,23 @@
+   if (token == null) return;
+   PageLoad.pending.delete(token); syncPageLoading();
+ }
++/* read-only requests (safe to repeat) — purchases, deposits and the cart are never retried automatically */
++const API_READ = /^(bootstrap|catalog|me|orders|history|referrals|terms|desc|tr|forced\/check|deposit\/status|cgpt\/subs|api\/(state|docs|orders|products)|admin\/(home|feed|search|user|order|product|products))$/;
+ async function api(path, body) {
+   if (DEMO) { const d = await (path.startsWith('cart/') ? cartDemo(path, body || {}) : Demo.call(path, body || {})); if (d && d.vip) S.vip = d.vip; if (typeof d.balance === 'number' && S.user) { S.user.balance = d.balance; updateHeader(); } return d; }
+   const loadingToken = pageLoadBegin(path);
+   const controller = (loadingToken != null || path.startsWith('cart/') || path === 'catalog') && typeof AbortController !== 'undefined' ? new AbortController() : null;
+   const timer = controller ? setTimeout(() => controller.abort(), 25000) : null;
++  const read = API_READ.test(path);
+   try {
+-    const res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) });
++    let res;
++    for (let attempt = 0; ; attempt++) {
++      try { res = await fetch(API + '/webapp/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': INIT }, body: JSON.stringify(body || {}), ...(controller ? { signal: controller.signal } : {}) }); break; }
++      catch (e) {   // a dropped mobile connection / server restart: read-only requests try once more before failing
++        if (read && attempt === 0 && !(controller && controller.signal.aborted)) { await new Promise(r => setTimeout(r, 1200)); continue; }
++        throw e;
++      }
++    }
+     let data = {};
+     try { data = await res.json(); } catch (e) {}
+     if (!res.ok && !data.error) data.error = res.status === 401 ? 'auth' : 'server_error';
+@@ -1884,7 +1909,10 @@
+     if (typeof data.ref_debt === 'number' && S.user) { S.user.ref_debt = data.ref_debt; if (S.refs) S.refs.ref_debt = data.ref_debt; }
+     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
+     return data;
+-  } catch (e) { reportClientError('Network request failed', '', path); return { error: 'network' }; }
++  } catch (e) {
++    if (navigator.onLine !== false && document.visibilityState !== 'hidden') reportClientError('Network request failed', '', path);   // offline / app in background → not a store error
++    return { error: 'network' };
++  }
+   finally { if (timer) clearTimeout(timer); pageLoadEnd(loadingToken); }
+ }
+ function errText(r) {

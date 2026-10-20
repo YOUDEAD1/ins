@@ -25,13 +25,19 @@ function gate(){let release;const wait=new Promise(r=>release=r);return {wait,re
   const loader=page.locator('#page-loading');
   await loader.waitFor({state:'visible'});
   assert.equal(await page.locator('#view').getAttribute('aria-busy'),'true');
-  assert.equal(await loader.locator('.load-diamond').evaluate(e=>getComputedStyle(e).animationName),'loadFloat');
-  assert((await loader.innerText()).includes('جاري التحميل'));
+  assert((await loader.locator('.lm-plane').evaluate(e=>getComputedStyle(e).animationName)).includes('ldFly'));
+  assert(await loader.locator('svg.ld-mark .lm-rib path').count()>=8);   /* the LARA logo is drawn in the page (vector), not a picture */
+  assert.equal(await loader.locator('img').count(),0);
+  /* Telegram + bot in English on an Arabic phone: the loader follows Telegram/the bot, never the phone */
+  const ltxt=await loader.innerText();
+  assert(/Connecting to the store|Checking your account/.test(ltxt),ltxt);
+  assert(!/[\u0600-\u06FF]/.test(ltxt),ltxt);
+  assert.equal(await page.evaluate(()=>document.documentElement.dir),'ltr');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   if(process.env.LARA_TEST_LOADING_SCREENSHOT)await page.screenshot({path:process.env.LARA_TEST_LOADING_SCREENSHOT});
   boot.release();await loader.waitFor({state:'hidden'});
   assert.equal(calls.filter(x=>x.endsWith('/bootstrap')).length,1);
-  console.log('PASS first paint has blue animated loading card; Arabic label, mobile layout, one bootstrap request');
+  console.log('PASS first paint has the real store logo animating; label in the Telegram/bot language (not the phone), mobile layout, one bootstrap request');
   const refs=gate(),subs=gate();
   await page.route('**/webapp/referrals',async r=>{const response=await r.fetch();await refs.wait;await r.fulfill({response});});
   await page.route('**/webapp/cgpt/subs',async r=>{const response=await r.fetch();await subs.wait;await r.fulfill({response});});
@@ -62,7 +68,7 @@ function gate(){let release;const wait=new Promise(r=>release=r);return {wait,re
   await page.locator('[data-act="retry"]').click();await page.locator('[data-act="tab"][data-v="store"]').first().waitFor();
   await loader.waitFor({state:'hidden'});
   await page.emulateMedia({reducedMotion:'reduce'});
-  assert.equal(await loader.locator('.load-diamond').evaluate(e=>getComputedStyle(e).animationName),'none');
+  assert.equal(await loader.locator('.lm-plane').evaluate(e=>getComputedStyle(e).animationName),'none');
   assert.deepEqual(errors,[]);
   console.log('PASS leaving a slow page, errors and retry never leave overlay stuck; reduced motion respected; zero JS exceptions');
  }finally{await browser.close();}

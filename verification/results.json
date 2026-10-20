@@ -1,10 +1,10 @@
 {
-  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31)",
-  "verified_at": "2026-10-20T14:59:56.646565+00:00",
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33)",
+  "verified_at": "2026-10-20T17:13:29.367522+00:00",
   "python": "3.12.14",
   "tests": {
-    "total": 650,
-    "passed": 650,
+    "total": 657,
+    "passed": 657,
     "failed": 0,
     "skipped": 0,
     "by_module": {
@@ -250,7 +250,7 @@
     "redaction_client_and_server": true,
     "max_reports_per_minute": 12,
     "real_report_7b7d0fb1e3f2_root_cause_identified": false,
-    "frontend_build": "lara-30.1"
+    "frontend_build": "lara-33.1"
   },
   "round28_validation": {
     "new_python_tests": 42,
@@ -361,5 +361,60 @@
     "native_windows_dialog_tested_on_user_device": false,
     "live_customer_balances_modified": false,
     "historical_refund_amount_determined": false
+  },
+  "round32_validation": {
+    "pytest": "650 passed",
+    "browser_tests": {
+      "test_cart_browser": "passed",
+      "test_channel_deeplink": "passed",
+      "test_client_diagnostics_browser": "passed",
+      "test_network_browser": "passed",
+      "test_page_loading_browser": "passed",
+      "test_referral_browser": "passed",
+      "test_ui": "passed",
+      "test_user_inspection_browser": "passed"
+    },
+    "logo": "LARA mark + wordmark drawn as inline SVG in the page (ribbon, plane, Λ letters with blue triangles) — no image request",
+    "loading_language_order": [
+      "?l= from the bot link",
+      "last language the store showed (the bot language)",
+      "ru/zh chosen in the store",
+      "Telegram language",
+      "phone language"
+    ],
+    "english_telegram_on_arabic_phone_shows_english": true,
+    "animated_properties": [
+      "transform",
+      "opacity",
+      "stroke-dashoffset (mask reveal)"
+    ],
+    "reduced_motion_static": true,
+    "slow_server_note_after_seconds": 7,
+    "in_app_overlay_delay_ms": 220,
+    "telegram_sdk_render_blocking": false,
+    "hidden_skeleton_animations_during_boot": false,
+    "frontend_build": "lara-32.1",
+    "frontend_javascript_errors": 0
+  },
+  "round33_validation": {
+    "pytest": "657 passed",
+    "browser_tests": 9,
+    "browser_failed": 0,
+    "root_cause_purchase_failed": "balance 0.5499999999999999 shown as $0.55 but refused by balance >= 0.55; reproduced with the production code",
+    "deductions_with_tolerance": 11,
+    "money_eps": 5e-07,
+    "balance_settled_to_decimals": 6,
+    "one_time_dust_cleanup": "money_dust_v1",
+    "site_purchase_errors": [
+      "insufficient_balance",
+      "busy",
+      "deposit_pending",
+      "not_enough_stock",
+      "purchase_failed (unknown only)"
+    ],
+    "ios_telegram_early_events": "queued before SDK, replayed after",
+    "read_requests_retry_once": true,
+    "network_alert_only_when_online_and_visible": true,
+    "frontend_build": "lara-33.1"
   }
 }
