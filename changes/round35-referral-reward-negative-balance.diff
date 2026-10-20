@@ -1,0 +1,310 @@
+--- a/bot.py	2026-10-20 19:10:36.000000000 +0000
++++ b/bot.py	2026-10-20 19:19:55.631292587 +0000
+@@ -5147,7 +5147,9 @@
+             if saved:
+                 return _ref_money_finish(event, saved)
+             balance = _ref_units(user.get('balance'))
+-            if balance < 0:
++            # Owner's rule (update 35): the purchase referral reward is always credited, even onto a negative
++            # balance — a credit can only reduce the deficit. Deductions on a negative balance still wait for review.
++            if balance < 0 and not (kind == 'ref_purchase' and nominal > 0):
+                 raise ValueError('Negative balance requires ledger review before referral movement')
+             debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
+             if nominal < 0:
+@@ -5173,11 +5175,11 @@
+ 
+ 
+ # ============================================================
+-# ⏸ Update 29 forbids moving referral money while the referrer's balance is below zero (ledger review first).
+-#    Before: a purchase reward for such a referrer raised an ERROR alert and the reward was never recorded.
+-#    Now: the movement stays saved («prepared»), the financial resume loop retries it every minute, and it is
+-#    credited automatically once the balance is ≥ 0 — then recorded in purchase_rewards and the referrer is told.
+-#    Admins get one plain notice per referrer per day instead of an error alert.
++# 🎁 Purchase referral rewards are credited even when the referrer's balance is negative (owner's rule, update 35).
++#    A reward an older version saved but never recorded is credited by the every-minute resume loop, then recorded
++#    in purchase_rewards and the referrer gets the normal reward message — exactly once.
++# ⏸ Deductions (clawback / refund) on a negative balance still wait for review (update 29): kept saved, retried every
++#    minute, one plain admin notice per referrer per day instead of an error alert.
+ # ============================================================
+ _REF_NEGATIVE_HOLD = 'Negative balance requires ledger review before referral movement'
+ _REF_HOLD_NOTICE_EVERY = 86400
+@@ -5215,61 +5217,67 @@
+         return False
+ 
+ 
+-def _ref_hold_purchase_reward(operation, rid, buyer_uid, product_name, purchase_amount, amount):
+-    key = hashlib.sha256(str(operation).encode()).hexdigest()[:32]
++def _ref_purchase_dm(referrer_id, buyer_uid, reward, new_balance):
++    """🎉 The referrer's message for a purchase reward (CMS key ref_purchase_dm, English by default)."""
+     try:
+-        db.ref_money_events.update_one({'_id': key, 'status': 'prepared'}, {'$set': {
+-            'held': True, 'held_reason': 'negative_balance', 'held_at': int(time.time()),
+-            'buyer_id': int(buyer_uid), 'product': str(product_name or '')[:200],
+-            'purchase_amount': float(purchase_amount or 0)}})
++        buyer_data = db.users.find_one({'user_id': int(buyer_uid)}) if buyer_uid else None
++        buyer_display = obscure_text(buyer_data.get('username') or str(buyer_uid)) if buyer_data else "***"
++        args = (buyer_display, f"{float(reward):.2f}", f"{float(new_balance):.2f}")
++        celebration = LANG['en']['ref_purchase_dm'].format(*args)
++        custom_dm = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_purchase_dm'})
++        if custom_dm and custom_dm.get('value'):
++            try:
++                celebration = custom_dm['value'].format(*args)
++            except Exception:
++                pass  # لو في خطأ format، نستخدم الافتراضي
++        bot.send_message(int(referrer_id), celebration, parse_mode="HTML")
++        return True
++    except Exception as notify_err:
++        logger.debug(f"Couldn't notify referrer {referrer_id}: {notify_err}")
++        return False
++
++
++def _ref_mark_unrecorded(operation, buyer_uid, product_name, purchase_amount, reason='award_interrupted'):
++    """The award stopped before recording: flag its saved movement so the resume loop credits it and records it once."""
++    try:
++        key = hashlib.sha256(str(operation).encode()).hexdigest()[:32]
++        db.ref_money_events.update_one({'_id': key, 'held': {'$exists': False}}, {'$set': {
++            'held': True, 'held_reason': reason, 'held_at': int(time.time()), 'buyer_id': int(buyer_uid),
++            'product': str(product_name or '')[:200], 'purchase_amount': float(purchase_amount or 0)}})
+     except Exception as e:
+-        logger.debug(f"held reward details not saved: {e}")
+-    logger.info('Referral purchase reward held until the referrer balance is not negative: referrer=%s buyer=%s amount=%s',
+-                rid, buyer_uid, amount)
+-    product = f" ({html.escape(str(product_name)[:80])})" if product_name else ''
+-    _ref_hold_notice(rid, f"العملية: مكافأة شراء <b>${float(amount):.2f}</b> من شراء <code>{int(buyer_uid)}</code>{product}.")
++        logger.debug(f"unrecorded reward flag not saved: {e}")
+ 
+ 
+-def _ref_release_held_rewards(limit=50):
+-    """Records a held purchase reward once the resume loop has credited it, and tells the referrer — exactly once.
+-    Also adopts purchase rewards an older version saved but never recorded (same note format)."""
+-    cutoff = int(time.time()) - 300                      # never touch an award that is still in progress
++def _ref_adopt_unrecorded_rewards(limit=50):
++    """Purchase rewards an older version saved but never recorded (e.g. the referrer's balance was negative).
++    Runs BEFORE the resume loop credits them; skips anything younger than 5 minutes (an award still in progress)."""
++    cutoff = int(time.time()) - 300
+     for ev in db.ref_money_events.find({'kind': 'ref_purchase', 'status': 'prepared', 'held': {'$exists': False},
+                                         'created_at': {'$lt': cutoff}}).limit(limit):
+         m = re.search(r'\((\d+)\)', str(ev.get('note') or ''))
+         db.ref_money_events.update_one({'_id': ev['_id'], 'held': {'$exists': False}}, {'$set': {
+             'held': True, 'held_reason': 'unrecorded', 'held_at': int(time.time()),
+             'buyer_id': int(m.group(1)) if m else None}})
++
++
++def _ref_release_held_rewards(limit=50):
++    """Records a flagged purchase reward once the resume loop has credited it, and tells the referrer — exactly once."""
+     released = 0
+     for ev in db.ref_money_events.find({'kind': 'ref_purchase', 'status': 'applied', 'held': True}).limit(limit):
+         if not db.ref_money_events.find_one_and_update({'_id': ev['_id'], 'held': True}, {'$set': {
+                 'held': False, 'released_at': int(time.time())}}):
+             continue
+         rid, receipt, amount = int(ev['user_id']), ev.get('receipt') or {}, float(ev.get('amount') or 0)
+-        db.purchase_rewards.update_one({'ref_event': ev['_id']}, {'$setOnInsert': {
++        rec = db.purchase_rewards.update_one({'ref_event': ev['_id']}, {'$setOnInsert': {
+             'referrer_id': rid, 'buyer_id': ev.get('buyer_id'), 'amount': amount,
+             'balance_credited': receipt.get('balance_delta', 0), 'debt_settled': -receipt.get('debt_delta', 0),
+             'product': ev.get('product', ''), 'purchase_amount': ev.get('purchase_amount'),
+             'held_since': ev.get('held_at') or ev.get('created_at'), 'timestamp': int(time.time())}}, upsert=True)
++        if getattr(rec, 'upserted_id', None) is None:
++            continue                                         # already recorded → already told
+         released += 1
+-        logger.info('Held referral purchase reward credited: referrer=%s amount=%s', rid, amount)
+-        try:
+-            new_balance, settled = float(receipt.get('balance_after', 0)), -float(receipt.get('debt_delta', 0))
+-            if get_lang(rid) == 'en':
+-                text = (f"🎁 <b>Referral reward added</b>\n\n<b>${amount:.2f}</b> from a purchase by a customer you referred "
+-                        f"was on hold while your balance was below zero. It has now been added.")
+-                if settled > 0:
+-                    text += f"\n${settled:.4f} of it settled earlier referral liabilities."
+-                text += f"\nBalance: <b>${new_balance:.2f}</b>"
+-            else:
+-                text = (f"🎁 <b>انضافت مكافأة إحالة</b>\n\n<b>${amount:.2f}</b> من شراء عميل جاء عن طريقك كانت محفوظة "
+-                        f"لأن رصيدك كان تحت الصفر، والحين انضافت.")
+-                if settled > 0:
+-                    text += f"\nمنها ${settled:.4f} سددت مستحقات إحالات سابقة."
+-                text += f"\nرصيدك: <b>${new_balance:.2f}</b>"
+-            bot.send_message(rid, text, parse_mode='HTML')
+-        except Exception:
+-            pass
++        logger.info('Saved referral purchase reward credited and recorded: referrer=%s amount=%s', rid, amount)
++        _ref_purchase_dm(rid, ev.get('buyer_id'), amount, receipt.get('balance_after', 0))
+     return released
+ 
+ 
+@@ -5776,16 +5784,14 @@
+         if not referrer or referrer.get('is_banned') == 1:
+             return False
+         
+-        # 🛡 منح المكافأة atomic — بمفتاح معروف؛ رصيد المُحيل السالب يحفظ المكافأة بدل ما تضيع
++        # 🛡 منح المكافأة atomic — تنضاف حتى لو رصيد المُحيل بالسالب (تقلل العجز فقط)
+         operation = f'ref_purchase:{buyer_uid}:{referrer_id}:{secrets.token_hex(12)}'
+         try:
+-            result = _ref_money(referrer_id, purchase_reward, 'ref_purchase',
+-                                f'مكافأة شراء إحالة ({buyer_uid})', event_key=operation)
+-        except ValueError as hold:
+-            if not _ref_is_negative_hold(hold):
+-                raise
+-            _ref_hold_purchase_reward(operation, referrer_id, buyer_uid, product_name, purchase_amount, purchase_reward)
+-            return False
++            result = _ref_money(referrer_id, purchase_reward, 'ref_purchase', f'مكافأة شراء إحالة ({buyer_uid})',
++                                event_key=operation)
++        except Exception:
++            _ref_mark_unrecorded(operation, buyer_uid, product_name, purchase_amount)   # الحلقة تكملها وتسجلها مرة وحدة
++            raise
+         
+         if result is None:
+             return False
+@@ -5807,34 +5813,8 @@
+             pass
+         
+         # 🎉 إشعار خاص للمُحيل في الشات (بالإنجليزي + قابل للتعديل من CMS)
+-        try:
+-            new_balance = float(result.get('balance', 0))
+-            buyer_data = db.users.find_one({'user_id': buyer_uid})
+-            buyer_display = obscure_text(buyer_data.get('username') or str(buyer_uid)) if buyer_data else "***"
+-            
+-            # 🆕 نستخدم نص CMS قابل للتعديل (إنجليزي افتراضياً)
+-            celebration = LANG['en']['ref_purchase_dm'].format(
+-                buyer_display,
+-                f"{purchase_reward:.2f}",
+-                f"{new_balance:.2f}"
+-            )
+-            
+-            # نشيك على النص المخصص لو الأدمن عدّله من CMS
+-            custom_dm = db.custom_texts.find_one({'lang': 'en', 'key': 'ref_purchase_dm'})
+-            if custom_dm and custom_dm.get('value'):
+-                try:
+-                    celebration = custom_dm['value'].format(
+-                        buyer_display,
+-                        f"{purchase_reward:.2f}",
+-                        f"{new_balance:.2f}"
+-                    )
+-                except:
+-                    pass  # لو في خطأ format، نستخدم الافتراضي
+-            
+-            bot.send_message(referrer_id, celebration, parse_mode="HTML")
+-        except Exception as notify_err:
+-            logger.debug(f"Couldn't notify referrer {referrer_id}: {notify_err}")
+-        
++        _ref_purchase_dm(referrer_id, buyer_uid, purchase_reward, result.get('balance', 0))
++
+         logger.info(f"🎁 مكافأة شراء: {referrer_id} ربح ${purchase_reward:.2f} من شراء {buyer_uid}")
+         
+         # 🔔 إشعار قناة اللوق (مع تخفي الأسماء بنجمات)
+@@ -6109,6 +6089,10 @@
+ 
+ 
+ def _ref_resume_financial():
++    try:
++        _ref_adopt_unrecorded_rewards()
++    except Exception:
++        logger.debug('Unrecorded referral rewards will be adopted on the next pass')
+     for event in db.ref_money_events.find({'$or': [{'status': 'prepared'}, {'ledger_pending': True}]}).limit(100):
+         if not event.get('operation_key'):
+             continue
+--- a/verification/test_round34_alerts.py	2026-10-20 19:11:51.000000000 +0000
++++ b/verification/test_round34_alerts.py	2026-10-20 19:20:21.943318859 +0000
+@@ -1,5 +1,5 @@
+-"""Round 34: a referral reward for a referrer with a negative balance is held (not lost, no error alert);
+-timed deletes of an already-deleted message stay quiet; browser-extension errors are not store errors."""
++"""Rounds 34–35: the purchase referral reward is sent even when the referrer's balance is negative (no error alert);
++deductions on a negative balance stay protected; timed deletes of an already-deleted message stay quiet; browser-extension errors are not store errors."""
+ import types
+ from unittest.mock import Mock
+ 
+@@ -26,33 +26,32 @@
+     return mod.db.users.find_one({'user_id': uid})['balance']
+ 
+ 
+-def test_negative_referrer_balance_holds_the_reward_without_an_error_alert(mod, monkeypatch):
++def test_negative_referrer_balance_still_gets_the_purchase_reward(mod, monkeypatch):
++    """Owner's rule (update 35): the reward is sent even when the referrer's balance is negative."""
+     referral(mod)
+     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
+     notices = Mock()
+     monkeypatch.setattr(mod, 'notify_admins', notices)
+     reward = mod.get_referral_purchase_reward()
+-    assert mod.award_purchase_referral_reward(5001, 'Netflix', 10) is False
+-    assert mod.award_purchase_referral_reward(5001, 'Spotify', 12) is False
+-    assert _alerts(mod) == []                                          # the old ERROR alert is gone
+-    held = list(mod.db.ref_money_events.find({'kind': 'ref_purchase'}))
+-    assert len(held) == 2 and all(e['status'] == 'prepared' and e['held'] and e['buyer_id'] == 5001 for e in held)
+-    assert {e['product'] for e in held} == {'Netflix', 'Spotify'}
+-    assert _bal(mod) == -.4                                            # update-29 protection still holds
+-    assert notices.call_count == 1 and '/refwhy 1001' in notices.call_args.args[0]   # one notice a day
+-    mod._ref_resume_financial()                                        # still negative → still waiting
+-    assert _bal(mod) == -.4 and mod.db.purchase_rewards.count_documents({}) == 0
+-    # the referrer tops up → the next minute's pass credits both rewards and records them once
+-    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 1.0}})
+     sent = len(MESSAGES)
++    assert mod.award_purchase_referral_reward(5001, 'Netflix', 10) is True
++    assert _bal(mod) == round(-.4 + reward, 6)
++    ev = mod.db.ref_money_events.find_one({'kind': 'ref_purchase'})
++    assert ev['status'] == 'applied' and 'held' not in ev
++    assert mod.db.purchase_rewards.count_documents({'ref_event': ev['_id'], 'buyer_id': 5001}) == 1
++    assert [m for m in MESSAGES[sent:] if m[0] == 1001]                 # the referrer got the reward message
++    assert _alerts(mod) == [] and notices.call_count == 0               # no error alert, no admin notice
+     mod._ref_resume_financial()
+     mod._ref_resume_financial()
+-    assert _bal(mod) == round(1.0 + 2 * reward, 6)
+-    assert mod.db.purchase_rewards.count_documents({'referrer_id': 1001, 'buyer_id': 5001}) == 2
+-    assert not mod.db.ref_money_events.count_documents({'held': True})
+-    told = [m for m in MESSAGES[sent:] if m[0] == 1001]
+-    assert len(told) == 2 and 'Referral reward added' in told[0][1]
+-    assert _alerts(mod) == []
++    assert _bal(mod) == round(-.4 + reward, 6) and mod.db.purchase_rewards.count_documents({}) == 1
++
++
++def test_deductions_on_a_negative_balance_are_still_protected(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
++    for kind, amount in (('ref_clawback', -.5), ('ref_purchase', -.1)):
++        with pytest.raises(ValueError):
++            mod._ref_money(1001, amount, kind, 'test', event_key='neg-' + kind)
++    assert _bal(mod) == -.4
+ 
+ 
+ def test_normal_referrer_reward_is_unchanged(mod):
+@@ -67,18 +66,36 @@
+     assert mod.db.purchase_rewards.count_documents({}) == 1 and _bal(mod) == round(100 + reward, 6)
+ 
+ 
+-def test_reward_saved_by_the_previous_version_is_recorded_once_credited(mod):
++def test_reward_saved_by_the_previous_version_is_credited_and_recorded_once(mod):
++    """Today's $0.10: the old version saved it (balance was negative) and never recorded it."""
++    import hashlib, time
+     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
+-    with pytest.raises(ValueError):          # what the old award left behind: a saved movement, no record
+-        mod._ref_money(1001, .1, 'ref_purchase', 'مكافأة شراء إحالة (5001)')
+-    mod.db.ref_money_events.update_many({}, {'$inc': {'created_at': -600}})
++    op = 'f' * 48
++    mod.db.ref_money_events.insert_one({'_id': hashlib.sha256(op.encode()).hexdigest()[:32], 'user_id': 1001,
++        'amount': .1, 'kind': 'ref_purchase', 'note': 'مكافأة شراء إحالة (5001)', 'operation_key': op,
++        'status': 'prepared', 'created_at': int(time.time()) - 600})
++    sent = len(MESSAGES)
+     mod._ref_resume_financial()
+-    ev = mod.db.ref_money_events.find_one({})
+-    assert ev['held'] and ev['held_reason'] == 'unrecorded' and ev['buyer_id'] == 5001
+-    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 0.0}})
+     mod._ref_resume_financial()
++    assert _bal(mod) == -.3                                             # credited even though still negative
++    assert mod.db.purchase_rewards.count_documents({'buyer_id': 5001, 'referrer_id': 1001}) == 1
++    assert len([m for m in MESSAGES[sent:] if m[0] == 1001]) == 1      # told once
++
++
++def test_interrupted_award_is_finished_and_recorded_once(mod, monkeypatch):
++    referral(mod)
++    reward = mod.get_referral_purchase_reward()
++    original = mod.db.balance_logs.update_one
++    monkeypatch.setattr(mod.db.balance_logs, 'update_one', Mock(side_effect=RuntimeError('Receipt unavailable')))
++    assert mod.award_purchase_referral_reward(5001, 'Netflix', 10) is False
++    monkeypatch.setattr(mod.db.balance_logs, 'update_one', original)
++    assert mod.db.ref_money_events.find_one({})['held']
++    sent = len(MESSAGES)
+     mod._ref_resume_financial()
+-    assert _bal(mod) == .1 and mod.db.purchase_rewards.count_documents({'buyer_id': 5001}) == 1
++    mod._ref_resume_financial()
++    assert _bal(mod) == round(100 + reward, 6)
++    assert mod.db.purchase_rewards.count_documents({'buyer_id': 5001, 'product': 'Netflix'}) == 1
++    assert len([m for m in MESSAGES[sent:] if m[0] == 1001]) == 1
+ 
+ 
+ def test_clawback_on_a_negative_balance_waits_quietly(mod, monkeypatch):

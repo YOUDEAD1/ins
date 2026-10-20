@@ -1,0 +1,313 @@
+{
+  "update": 37,
+  "frontend_build": "lara-37.1",
+  "verified_at": "2026-10-20T20:28:00.914625+00:00",
+  "tests": {
+    "total": 760,
+    "passed": 760,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_cart": 35,
+      "verification.test_channel_broadcast": 59,
+      "verification.test_client_diagnostics": 17,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_error_monitor": 16,
+      "verification.test_integration": 183,
+      "verification.test_money_dust": 7,
+      "verification.test_network": 47,
+      "verification.test_products_menu": 27,
+      "verification.test_referral_bandwidth": 13,
+      "verification.test_referral_integrity": 40,
+      "verification.test_referral_policy": 19,
+      "verification.test_reliability": 35,
+      "verification.test_report_config": 17,
+      "verification.test_round34_alerts": 14,
+      "verification.test_round37_bybit": 17,
+      "verification.test_round37_notice_language": 44,
+      "verification.test_round37_visibility": 28,
+      "verification.test_runtime_recovery": 42,
+      "verification.test_support": 31,
+      "verification.test_user_inspection": 40
+    }
+  },
+  "preservation": {
+    "source_archive_entries": 203,
+    "python_definitions_before": 1348,
+    "python_definitions_after": 1362,
+    "missing_python_definitions": 0,
+    "frontend_named_functions_before": 331,
+    "frontend_named_functions_after": 332,
+    "missing_frontend_functions": 0,
+    "unchanged_financial_functions": [
+      "_ref_money",
+      "ref_unit_value",
+      "_ref_resume_financial",
+      "award_purchase_referral_reward",
+      "_ref_repair_user"
+    ]
+  },
+  "python_compile": "passed",
+  "javascript_syntax": "passed",
+  "new_lint_findings": 0,
+  "browser_suites": [
+    {
+      "name": "test_page_loading_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 7.23,
+      "stdout": "PASS first paint has the real store logo animating; label in the Telegram/bot language (not the phone), mobile layout, one bootstrap request\nPASS profile waits for concurrent reads; cached navigation adds no requests or artificial loading delay\nPASS leaving a slow page, errors and retry never leave overlay stuck; reduced motion respected; zero JS exceptions\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_cart_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 8.06,
+      "stdout": "UI fixture ready\nUI empty cart rendered\nUI returned to store\nUI added product 101\nUI added product 102\nUI filled desktop rendered\nUI mobile RTL review rendered\nUI lost response recovered\nPASS real Chromium: desktop/mobile light/dark/RTL; quantities and bulk discount; lost-response recovery; reload receipt; safe cancellation; editable invitation email; zero JS exceptions\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_network_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 17.56,
+      "stdout": "PASS unchanged catalog uses version and preserves product cards\nPASS no catalogue polling on profile; returning to store refreshes\nPASS overlapping refresh triggers share one in-flight request\nPASS zero JS exceptions, no purchases or charges\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_referral_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 6.87,
+      "stdout": "PASS wrong answer never counted; trusted website click uses server nonce and activates referral once\nPASS English/Arabic mobile/desktop balances; verification never changes money; settled liability clears without reload\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_user_inspection_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 10.16,
+      "stdout": "PASS user inspection opens clean overview then product buttons across both ledgers\nPASS paginated product records, credentials, complete download and saved subscription state; back preserves page\nPASS virtual console back cancels pending amount, returns to actual prior member screens, then native profile\nPASS desktop/mobile, English/Arabic RTL, supplier delivery, zero JS errors and zero balance mutations\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_resilience_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 6.51,
+      "stdout": "PASS early Telegram event before the SDK is queued (no TypeError); a dropped startup request retries once and the store opens with no alert\nPASS offline customer never triggers a «Network request failed» alert; zero JS exceptions\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_client_diagnostics_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 2.25,
+      "stdout": "PASS error before application initialization is queued and sent after signed transport connects\nPASS actual runtime exception includes stack, build and action without form/button values\nPASS masked errors remain explicit, repeats are coalesced, promise/resource source captured, authenticated records redacted\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_extension_errors_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 3.78,
+      "stdout": "PASS browser-extension errors (chrome / firefox / safari / masked, error + promise) are not sent as store errors\nPASS the store's own error is still reported with its location and build lara-37.1\n",
+      "stderr": ""
+    },
+    {
+      "name": "test_round37_catalog_browser.cjs",
+      "passed": true,
+      "returncode": 0,
+      "seconds": 5.06,
+      "stdout": "PASS hidden/empty folders omitted; duplicate aliases and hidden products excluded from count\nPASS ar/en/ru/zh saved through the real local endpoint and restored on a fresh browser context\nPASS hide/show invalidates the live catalogue; no JS errors or financial operations\n",
+      "stderr": ""
+    }
+  ],
+  "mobile_performance": {
+    "cpu_throttle": 6,
+    "viewport": "360x740",
+    "synthetic_products": 600,
+    "loading": {
+      "mask": "none",
+      "frameGaps": [
+        16.600000000000023,
+        16.699999999999932,
+        16.600000000000023,
+        16.700000000000045,
+        16.699999999999932,
+        16.699999999999932,
+        16.600000000000136,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.699999999999818,
+        16.700000000000045,
+        16.600000000000136,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.59999999999991,
+        16.799999999999955,
+        16.600000000000136,
+        16.700000000000045,
+        16.699999999999818,
+        16.600000000000136,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.699999999999818,
+        16.700000000000045,
+        16.5,
+        16.700000000000045,
+        16.700000000000045,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.59999999999991,
+        16.700000000000045,
+        16.700000000000045,
+        16.600000000000136,
+        16.699999999999818,
+        16.699999999999818,
+        16.600000000000364,
+        16.699999999999818,
+        16.699999999999818,
+        16.700000000000273,
+        16.59999999999991,
+        16.699999999999818,
+        16.600000000000364,
+        16.699999999999818,
+        16.699999999999818,
+        16.600000000000364,
+        16.699999999999818,
+        16.699999999999818,
+        16.600000000000364,
+        16.699999999999818,
+        16.699999999999818,
+        16.700000000000273,
+        16.59999999999991,
+        16.699999999999818,
+        16.700000000000273,
+        16.59999999999991
+      ],
+      "longTasks": []
+    },
+    "first": {
+      "ms": 820.4000000003725,
+      "cards": 12,
+      "low": "lite",
+      "longTasks": [
+        113,
+        342,
+        59
+      ]
+    },
+    "lottie": {
+      "before": 10,
+      "after": 10
+    },
+    "animated_builtin_requests": 4,
+    "poster_requests": 6,
+    "profiles": [
+      {
+        "profile": "strong Android",
+        "passed": true,
+        "motion": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "unlimited": true
+        }
+      },
+      {
+        "profile": "iOS without memory hints",
+        "passed": true,
+        "motion": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "unlimited": true
+        }
+      },
+      {
+        "profile": "no IntersectionObserver",
+        "passed": true,
+        "motion": {
+          "mask": "none",
+          "draw": "none",
+          "unlimited": false
+        }
+      },
+      {
+        "profile": "desktop",
+        "passed": true,
+        "motion": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "unlimited": true
+        }
+      }
+    ],
+    "errors": [],
+    "calls": [
+      "/webapp/client/error",
+      "/webapp/bootstrap",
+      "/webapp/lang",
+      "/webapp/ce/5312361253610475399",
+      "/webapp/ce/5445353829304387411",
+      "/webapp/ce/5947193849871862440",
+      "/webapp/devmark",
+      "/webapp/ce/5282843764451195532",
+      "/webapp/ce/5262742999678329061",
+      "/webapp/ce/900010",
+      "/webapp/ce/900008",
+      "/webapp/ce/900006",
+      "/webapp/ce/900004",
+      "/webapp/ce/900002",
+      "/webapp/ce/900000",
+      "/webapp/ce/5253742260054409879"
+    ]
+  },
+  "live_integrations_used": false,
+  "physical_phones_tested": false,
+  "native_safari_tested": false,
+  "auto_hide_seconds": 259200,
+  "stock_sweep_seconds": 300,
+  "additional_supplier_http_from_stock_sweep": 0,
+  "notification_locales": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ]
+}

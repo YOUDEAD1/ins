@@ -1,0 +1,725 @@
+--- a/webapp/index.html
++++ b/webapp/index.html
+@@ -8,6 +8,19 @@
+ <!-- لو استضفت الواجهة على دومين غير سيرفر البوت، اكتب رابط السيرفر هنا (مثال: https://my-bot.onrender.com) -->
+ <meta name="lara-api" content="">
+ <meta name="theme-color" content="#080b12">
++<script id="lara-render-budget">
++/* Decide before the first paint, without a benchmark, network call or saved device fingerprint. */
++(function () {
++  var mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '') ||
++    (navigator.maxTouchPoints > 0 && matchMedia('(max-width: 820px)').matches);
++  var memory = Number(navigator.deviceMemory) || 0, cores = Number(navigator.hardwareConcurrency) || 0;
++  var lite = (mobile && ((memory > 0 && memory <= 4) || (cores > 0 && cores <= 4))) ||
++    !!(navigator.connection && navigator.connection.saveData);
++  window.__LARA_PERF__ = { mobile: mobile, lite: lite, mediaLimit: lite ? 3 : mobile ? 6 : 12,
++    batch: lite ? 12 : mobile ? 24 : 48, chunk: lite ? 12 : 24 };
++  document.documentElement.dataset.perf = lite ? 'lite' : mobile ? 'mobile' : 'full';
++})();
++</script>
+ <script id="lara-tg-early">
+ /* Telegram (iOS) can deliver events before telegram-web-app.js has loaded; keep them and hand them over once it has. */
+ (function () {
+@@ -21,7 +34,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-34.1',queue=[],recent=new Map();
++ const build='lara-36.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -220,6 +233,25 @@
+   .lm-sheen,.ld-bar::after{display:none}.ld-glow{animation:none;opacity:.45}
+   .page-loading{transition:opacity .2s}.ld-bar i{transition:none}#view.enter{animation:none}
+   .page-loading.leaving .ld-mark,.page-loading.leaving .ld-brand,.page-loading.leaving .ld-status,.page-loading.leaving .ld-bar{transform:none}}
++
++/* Mobile: keep the same vector artwork; animate its small outer layer instead of repainting SVG masks and every letter. */
++:root[data-perf="mobile"] .lm-rib,:root[data-perf="lite"] .lm-rib{mask:none}
++:root[data-perf="mobile"] .lm-draw,:root[data-perf="lite"] .lm-draw{animation:none;stroke-dashoffset:0}
++:root[data-perf="mobile"] .lm-sheen,:root[data-perf="lite"] .lm-sheen{display:none}
++:root[data-perf="mobile"] .lm-plane,:root[data-perf="lite"] .lm-plane,
++:root[data-perf="mobile"] .lw-l,:root[data-perf="lite"] .lw-l,
++:root[data-perf="mobile"] .lw-t,:root[data-perf="lite"] .lw-t,
++:root[data-perf="mobile"] .ld-word i,:root[data-perf="lite"] .ld-word i,
++:root[data-perf="mobile"] .ld-sub,:root[data-perf="lite"] .ld-sub{animation:none;opacity:1;transform:none}
++:root[data-perf="mobile"] .ld-mark,:root[data-perf="lite"] .ld-mark{animation:ldFloatLite 3.2s ease-in-out infinite alternate;will-change:transform;transition:opacity .18s}
++:root[data-perf="mobile"] .ld-glow,:root[data-perf="lite"] .ld-glow{animation:none;opacity:.4}
++:root[data-perf="mobile"] .ld-bar::after,:root[data-perf="lite"] .ld-bar::after{display:none}
++:root[data-perf="mobile"] .page-loading,:root[data-perf="lite"] .page-loading{transition:opacity .18s;transition-delay:0s}
++:root[data-perf="mobile"] .page-loading.leaving .ld-mark,:root[data-perf="lite"] .page-loading.leaving .ld-mark{animation:none;transform:none;opacity:0}
++:root[data-perf="mobile"] #view.enter,:root[data-perf="lite"] #view.enter{animation:none}
++@keyframes ldFloatLite{from{transform:translateY(0)}to{transform:translateY(-4px)}}
++@media(prefers-reduced-motion:reduce){.ld-mark{animation:none!important;will-change:auto!important}}
++:root.page-hidden *,:root.page-hidden *::before,:root.page-hidden *::after{animation-play-state:paused!important}
+ 
+ /* ── header ── */
+ .top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;align-items:center;gap:10px;
+@@ -754,6 +786,20 @@
+ .pv.is-oos .vis,.pv.is-oos .photo{filter:grayscale(1) brightness(.55) blur(.4px)}
+ .pv.is-oos::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg, rgba(5,7,12,.15), rgba(5,7,12,.55))}
+ .noanim .card{animation:none}
++.products-next{display:flex;justify-content:center;padding:20px 0 6px;min-height:62px}
++/* Repeated filters and blurred badges cost much more than a static gradient while scrolling. */
++:root[data-perf="mobile"] .card,:root[data-perf="lite"] .card{animation:none;contain:layout paint}
++:root[data-perf="mobile"] .pv .vis,:root[data-perf="lite"] .pv .vis{filter:none}
++:root[data-perf="mobile"] .pill,:root[data-perf="lite"] .pill,
++:root[data-perf="mobile"] .xmark i,:root[data-perf="lite"] .xmark i{backdrop-filter:none;-webkit-backdrop-filter:none}
++:root[data-perf="mobile"] .card:hover .pv .vis,:root[data-perf="lite"] .card:hover .pv .vis{transform:none}
++:root[data-perf="mobile"] .view,:root[data-perf="lite"] .view{animation:none}
++:root[data-perf="lite"] body{background:var(--bg)}
++:root[data-perf="lite"] .top{background:var(--bg);backdrop-filter:none;-webkit-backdrop-filter:none}
++:root[data-perf="lite"] .dock-in{background:var(--surface);backdrop-filter:none;-webkit-backdrop-filter:none}
++:root[data-perf="lite"] .btile::after{display:none;animation:none}
++:root[data-perf="lite"] .ce-skel,:root[data-perf="lite"] .skel{animation:none}
++:root[data-perf="lite"] .pv.is-oos .vis,:root[data-perf="lite"] .pv.is-oos .photo{filter:none;opacity:.55}
+ .xmark{position:absolute;z-index:2;inset:0;display:grid;place-items:center;pointer-events:none}
+ .xmark i{position:relative;width:58px;height:58px;border-radius:50%;background:rgba(255,90,110,.16);box-shadow:inset 0 0 0 2px rgba(255,90,110,.95),0 6px 22px rgba(255,60,80,.35);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+ .xmark i::before,.xmark i::after{content:"";position:absolute;left:50%;top:50%;width:30px;height:4px;border-radius:4px;background:#ff5a6e;transform:translate(-50%,-50%) rotate(45deg)}
+@@ -1658,6 +1704,7 @@
+ const API = (META_API || (/^https?:/.test(location.origin) ? location.origin : '')).replace(/\/+$/, '');
+ if (window.__LARA_ERROR_REPORTER__) window.__LARA_ERROR_REPORTER__.connect(API,INIT,DEMO,tg);
+ const EMO = 'emoji/';
++const UiPerf = window.__LARA_PERF__ || { mobile: false, lite: false, mediaLimit: 12, batch: 48, chunk: 24 };
+ const LIBS = {
+   lottie: 'https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js',
+   pako: 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako_inflate.min.js',
+@@ -1840,7 +1887,8 @@
+   const st = ldEl('ld-status'); if (!st) return;
+   const txt = ldTxt(k); Ld.stage = k;
+   if (st.textContent === txt) return;
+-  st.classList.remove('swap'); void st.offsetWidth; st.textContent = txt; st.classList.add('swap');
++  st.classList.remove('swap'); if (!UiPerf.mobile && !UiPerf.lite) void st.offsetWidth;
++  st.textContent = txt; st.classList.add('swap');
+ }
+ function ldBootStart() {
+   clearTimeout(Ld.acctT); clearTimeout(Ld.slowT); clearInterval(Ld.creep);
+@@ -1868,7 +1916,7 @@
+       if (root) root.classList.toggle('instant', !boot || Ld.played);   // the slow-motion intro plays once per open
+       if (!boot) { const st = ldEl('ld-status'); if (st) { st.classList.remove('swap'); st.textContent = t('loading'); } }
+       el.setAttribute('aria-label', boot ? ldTxt('l') : t('loading'));
+-      el.hidden = false; el.classList.remove('leaving');
++      el.hidden = false; el.classList.remove('leaving'); syncMediaPlayback();
+     };
+     if (boot || !el.hidden && !el.classList.contains('leaving')) show();
+     else Ld.softT = setTimeout(show, 220);         // fast in-app loads never flash the overlay
+@@ -1876,8 +1924,8 @@
+     const wasBoot = !el.classList.contains('soft');
+     if (wasBoot) { Ld.played = true; ldProgress(1); clearInterval(Ld.creep); clearTimeout(Ld.slowT); clearTimeout(Ld.acctT); }
+     el.classList.add('leaving');
+-    if (wasBoot && !Ld.booted) { Ld.booted = true; const v = document.getElementById('view'); if (v) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); setTimeout(() => v.classList.remove('enter'), 900); } }
+-    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; el.classList.remove('leaving', 'soft'); }, wasBoot ? 820 : 260);
++    if (wasBoot && !Ld.booted) { Ld.booted = true; const v = document.getElementById('view'); if (v && !UiPerf.mobile && !UiPerf.lite) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); setTimeout(() => v.classList.remove('enter'), 900); } }
++    PageLoad.hideTimer = setTimeout(() => { el.hidden = true; el.classList.remove('leaving', 'soft'); syncMediaPlayback(); }, UiPerf.mobile || UiPerf.lite ? 200 : wasBoot ? 820 : 260);
+   }
+ }
+ function pageLoadBegin(path) {
+@@ -1931,7 +1979,7 @@
+ }
+ 
+ /* ───────────────────────── animated emoji ───────────────────────── */
+-function ae(name, cls) { return `<img class="ae ${cls || ''}" src="${EMO}${name}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
++function ae(name, cls) { return `<img class="ae ${cls || ''}" data-ae="${esc(name)}" src="${EMO}poster/${esc(name)}.webp" alt="" draggable="false" decoding="async" loading="lazy">`; }
+ const EMAP = { '⚡': 'bolt', '✔': 'check', '✅': 'check', '☑': 'check', '🚫': 'cross', '❌': 'cross', '✖': 'cross', '⛔': 'cross', '🔥': 'fire', '⭐': 'star', '🌟': 'star', '💎': 'gem', '🔑': 'key', '🗝': 'key', '🔒': 'lock', '🔐': 'lock', '✨': 'sparkles', '🚀': 'rocket', '⏳': 'hourglass', '⌛': 'hourglass', '👑': 'crown', '💰': 'moneybag', '💸': 'moneywings', '🛍': 'store', '🛒': 'cart', '👛': 'purse', '👤': 'profile', '🎉': 'party', '🪙': 'coin', '💬': 'speech', '📢': 'megaphone', '👥': 'busts', '🔍': 'search', '🔎': 'search', '📝': 'memo', '🪪': 'idcard' };
+ function emKey(ch) { return EMAP[String(ch || '').replace(/[\uFE0F\u200D]/g, '').trim()] || null; }
+ /* can this custom emoji actually be loaded here? (live bot: yes; preview: only if the export file carried it) */
+@@ -1943,7 +1991,101 @@
+ function bem(name, fallbackHtml) { const id = S.nav && S.nav[name]; const inner = ceOK(id) ? ceH(id, fallbackHtml || '') : (fallbackHtml || ''); return inner ? `<span class="bem">${inner}</span>` : ''; }
+ function navIc(name, svg) { const id = S.nav && S.nav[name]; return ceOK(id) ? ceH(id, svg, 'nav-ce') : svg; }
+ function slot(name, builtin, cls) { const id = S.nav && S.nav[name]; return ceOK(id) ? ceH(id, ae(builtin), cls || '') : ae(builtin, cls || ''); }
+-const CE = { cache: new Map(), io: null, anims: new WeakMap() };
++const CE = { cache: new Map(), io: null, anims: new WeakMap(), nodes: new Set(), visible: new Set(),
++  playing: new Set(), data: new WeakMap(), mountedImages: new WeakMap(), fallback: new WeakMap(), queue: [], queued: new WeakSet(), active: 0, frame: null, idle: null };
++const mediaMotion = matchMedia('(prefers-reduced-motion: reduce)');
++function mediaCovered() { const overlay = $('#page-loading'); return document.hidden || !!(overlay && !overlay.hidden); }
++function mediaMayPlay(el) { return !mediaMotion.matches && !mediaCovered() && el.isConnected && CE.visible.has(el) && CE.playing.has(el); }
++function pauseMedia(el) {
++  const anim = CE.anims.get(el); if (anim) anim.pause();
++  const video = el.querySelector && el.querySelector('video'); if (video) video.pause();
++  if (el.dataset.ae) { const src = EMO + 'poster/' + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
++  const d = CE.data.get(el), im = CE.mountedImages.get(el);
++  if (d && d.poster && im && im.getAttribute('src') !== d.poster) im.src = d.poster;
++}
++function disposeMedia(el) {
++  pauseMedia(el);
++  const anim = CE.anims.get(el); if (anim) { anim.destroy(); CE.anims.delete(el); }
++  const video = el.querySelector && el.querySelector('video'); if (video) { video.removeAttribute('src'); video.load(); }
++  if (CE.io) CE.io.unobserve(el);
++  CE.nodes.delete(el); CE.visible.delete(el); CE.playing.delete(el); CE.data.delete(el); CE.mountedImages.delete(el); CE.fallback.delete(el);
++}
++function suspendOffscreenEmoji(el) {
++  if (!UiPerf.mobile && !UiPerf.lite || !el.dataset.ce) return;
++  const anim = CE.anims.get(el), video = el.querySelector('video');
++  if (!anim && !video) return;
++  if (anim) { anim.destroy(); CE.anims.delete(el); }
++  if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
++  el.innerHTML = CE.fallback.get(el) || el.dataset.tile || '';
++  delete el.dataset.ceDone; CE.mountedImages.delete(el);
++}
++function pruneMedia() { for (const el of CE.nodes) if (!el.isConnected) disposeMedia(el); }
++function mediaPriority(el) {
++  if (el.closest('.sheet:not(.closing)')) return 100;
++  if (el.closest('.tab.on')) return 90;
++  if (el.closest('.card')) return 60;
++  if (el.closest('.tab')) return 20;
++  return 40;
++}
++function applyMediaPlayback() {
++  CE.frame = null; pruneMedia();
++  if (!CE.io) for (const el of CE.nodes) {
++    const box = el.getBoundingClientRect();
++    if (box.width && box.height && box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth) CE.visible.add(el);
++    else { CE.visible.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
++  }
++  const topSheet = Sheets[Sheets.length - 1];
++  const candidates = [...CE.visible].filter(el => el.isConnected && (!topSheet || topSheet.el.contains(el)));
++  candidates.sort((a, b) => mediaPriority(b) - mediaPriority(a));
++  const next = new Set(mediaMotion.matches || mediaCovered() ? [] : candidates.slice(0, UiPerf.mediaLimit));
++  for (const el of CE.playing) if (!next.has(el)) pauseMedia(el);
++  CE.playing = next;
++  for (const el of candidates) {
++    if (el.dataset.ce) queueEmoji(el);
++    if (!next.has(el)) { pauseMedia(el); continue; }
++    if (el.dataset.ae) { const src = EMO + el.dataset.ae + '.webp'; if (el.getAttribute('src') !== src) el.src = src; }
++    const anim = CE.anims.get(el); if (anim) anim.play();
++    const video = el.querySelector('video'); if (video && video.paused) video.play().catch(() => {});
++    const d = CE.data.get(el), im = CE.mountedImages.get(el); if (d && im && im.getAttribute('src') !== d.url) im.src = d.url;
++  }
++  drainEmojiQueue();
++}
++function syncMediaPlayback() { if (CE.frame == null) CE.frame = requestAnimationFrame(applyMediaPlayback); }
++function queueEmoji(el) {
++  if (el.dataset.ceDone || CE.queued.has(el)) return;
++  CE.queued.add(el); CE.queue.push(el);
++}
++function drainEmojiQueue() {
++  if (CE.idle != null || mediaCovered() || !CE.queue.length || CE.active >= (UiPerf.lite ? 1 : 2)) return;
++  const work = () => {
++    CE.idle = null;
++    if (mediaCovered()) return;
++    while (CE.queue.length && CE.active < (UiPerf.lite ? 1 : 2)) {
++      const el = CE.queue.shift(); CE.queued.delete(el);
++      if (!el.isConnected || !CE.visible.has(el)) continue;
++      CE.active++;
++      ceMount(el).finally(() => { CE.active--; drainEmojiQueue(); });
++    }
++  };
++  CE.idle = 'requestIdleCallback' in window ? requestIdleCallback(work, { timeout: 250 }) : setTimeout(work, 16);
++}
++function emojiPoster(id, image, d) {
++  if (d.poster) return d.poster;
++  try {
++    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 96;
++    const cx = canvas.getContext('2d'); if (!cx) return null;
++    cx.drawImage(image, 0, 0, 96, 96); d.poster = canvas.toDataURL('image/png');
++    return d.poster;
++  } catch (e) { return null; }
++}
++document.addEventListener('visibilitychange', () => {
++  document.documentElement.classList.toggle('page-hidden', document.hidden);
++  if (document.hidden) { for (const el of CE.nodes) pauseMedia(el); CE.playing.clear(); }
++  else syncMediaPlayback();
++});
++document.addEventListener('scroll', () => { if (!CE.io) syncMediaPlayback(); }, { capture: true, passive: true });
++if (mediaMotion.addEventListener) mediaMotion.addEventListener('change', syncMediaPlayback);
++else if (mediaMotion.addListener) mediaMotion.addListener(syncMediaPlayback);
+ /* WEBM video emoji play with transparency only on Chromium-based webviews (Android, Telegram Desktop); iPhone/Mac get an animated WEBP */
+ const CAN_WEBM = (() => { try { const ua = navigator.userAgent; if (/AppleWebKit/.test(ua) && !/Chrome|Chromium|CriOS|Android|Edg/.test(ua)) return false; const v = document.createElement('video'); return !!(v.canPlayType && v.canPlayType('video/webm; codecs="vp9"')); } catch (e) { return false; } })();
+ function loadLottie() { return DEMO ? loadScript(LIBS.lottie) : loadScript('lib/lottie_light.min.js').catch(() => loadScript(LIBS.lottie)); }
+@@ -2088,39 +2230,64 @@
+   try {
+     const d = await ceFetch(id);
+     if (!el.isConnected) return;
++    if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
++    CE.data.set(el, d);
+     if (d.kind === 'lottie') {
+       await loadLottie();
+       if (!el.isConnected) return;
++      if (!CE.visible.has(el) || mediaCovered()) { delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
+       el.innerHTML = '';
+-      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: !matchMedia('(prefers-reduced-motion: reduce)').matches, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
++      const anim = window.lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: false, animationData: JSON.parse(d.json), rendererSettings: { progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
+       CE.anims.set(el, anim);
++      if (UiPerf.lite) anim.setSubframe(false);
++      anim.addEventListener('DOMLoaded', () => {
++        if (!el.isConnected) { disposeMedia(el); return; }
++        if (mediaMayPlay(el)) anim.play();
++        else anim.goToAndStop(Math.max(0, Math.floor(anim.totalFrames * .25)), true);
++      });
++      if (mediaMayPlay(el)) anim.play();
+       ecLearn(id, el, d);
+     } else if (d.kind === 'video') {
+       const v = document.createElement('video');
+-      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.setAttribute('playsinline', '');
++      v.src = d.url; v.muted = true; v.loop = true; v.autoplay = false; v.preload = 'auto'; v.playsInline = true; v.setAttribute('playsinline', '');
+       v.onerror = () => {};
+-      v.addEventListener('loadeddata', () => { el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d); }, { once: true });
+-      v.play().catch(() => {});
++      v.addEventListener('loadeddata', () => {
++        if (!el.isConnected) { v.pause(); v.removeAttribute('src'); v.load(); return; }
++        if (!CE.visible.has(el) || mediaCovered()) { v.pause(); v.removeAttribute('src'); v.load(); delete el.dataset.ceDone; if (CE.visible.has(el)) queueEmoji(el); return; }
++        el.innerHTML = ''; el.appendChild(v); ecLearn(id, el, d);
++        if (mediaMayPlay(el)) v.play().catch(() => {}); else v.pause();
++      }, { once: true });
+     } else {
+       const im = new Image(); im.alt = ''; im.decoding = 'async';
+-      im.onload = () => { if (el.isConnected) { el.innerHTML = ''; el.appendChild(im); ecLearn(id, el, d); } };
++      im.onload = () => { if (el.isConnected && !CE.mountedImages.has(el)) {
++        el.innerHTML = ''; el.appendChild(im); CE.mountedImages.set(el, im); emojiPoster(id, im, d);
++        if (!mediaMayPlay(el) && d.poster) im.src = d.poster;
++        ecLearn(id, el, d);
++      } };
+       im.src = d.url;
+     }
+   } catch (e) { if (el.dataset.tile && el.isConnected) el.innerHTML = el.dataset.tile; }
+ }
+ function hydrate(root) {
+   root = root || document;
++  pruneMedia();
+   if (!CE.io && 'IntersectionObserver' in window) {
+     CE.io = new IntersectionObserver(entries => {
+       for (const en of entries) {
+         const el = en.target;
+-        if (!el.isConnected) { CE.io.unobserve(el); continue; }
+-        if (en.isIntersecting) { ceMount(el); const a = CE.anims.get(el); if (a) a.play(); const v = el.querySelector('video'); if (v) v.play().catch(() => {}); }
+-        else { const a = CE.anims.get(el); if (a) a.pause(); const v = el.querySelector('video'); if (v) v.pause(); }
++        if (!el.isConnected) { disposeMedia(el); continue; }
++        if (en.isIntersecting) CE.visible.add(el);
++        else { CE.visible.delete(el); CE.playing.delete(el); pauseMedia(el); suspendOffscreenEmoji(el); }
+       }
+-    }, { rootMargin: '120px' });
+-  }
+-  root.querySelectorAll('[data-ce]').forEach(el => { if (CE.io) CE.io.observe(el); else ceMount(el); });
++      syncMediaPlayback();
++    }, { rootMargin: '0px', threshold: .01 });
++  }
++  root.querySelectorAll('[data-ce],img[data-ae]').forEach(el => {
++    if (CE.nodes.has(el)) return;
++    CE.nodes.add(el);
++    if (el.dataset.ce) CE.fallback.set(el, el.innerHTML);
++    if (CE.io) CE.io.observe(el); else { CE.visible.add(el); syncMediaPlayback(); }
++  });
+   root.querySelectorAll('img.photo').forEach(im => { im.onerror = () => { const f = im.dataset.fb; if (f) im.outerHTML = f; else im.remove(); }; });
+ }
+ 
+@@ -2163,7 +2330,7 @@
+ function visual(p) {
+   if (p.image) {
+     const fb = `<span class="vis">${visualInner(p)}</span>`;
+-    return `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy" data-fb="${esc(fb)}">`;
++    return `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy" decoding="async" data-fb="${esc(fb)}">`;
+   }
+   return `<span class="vis">${visualInner(p)}</span>`;
+ }
+@@ -2216,7 +2383,7 @@
+         span.className = 'ce'; const id = (n.getAttribute('emoji-id') || '').replace(/\D/g, '');
+         if (id && ceOK(id)) span.dataset.ce = id;
+         const k = emKey(n.textContent);
+-        if (k) { const im = document.createElement('img'); im.className = 'ae'; im.src = EMO + k + '.webp'; im.alt = n.textContent; im.draggable = false; span.appendChild(im); }
++        if (k) { const im = document.createElement('img'); im.className = 'ae'; im.dataset.ae = k; im.src = EMO + 'poster/' + k + '.webp'; im.alt = n.textContent; im.draggable = false; im.decoding = 'async'; im.loading = 'lazy'; span.appendChild(im); }
+         else { const fb = document.createElement('span'); fb.className = 'fb'; fb.textContent = n.textContent || '✨'; span.appendChild(fb); }
+         parent.appendChild(span); return;
+       }
+@@ -2291,6 +2458,7 @@
+   };
+   [grab, head].forEach(h => { h.addEventListener('pointerdown', start); h.addEventListener('pointermove', move); h.addEventListener('pointerup', end); h.addEventListener('pointercancel', end); });
+   Sheets.push(sh);
++  syncMediaPlayback();
+   syncBack();
+   hap('light');
+   return sh;
+@@ -2299,8 +2467,9 @@
+   const i = Sheets.indexOf(sh);
+   if (i < 0) return;
+   Sheets.splice(i, 1);
++  syncMediaPlayback();
+   sh.el.classList.add('closing'); sh.scrim.classList.add('closing');
+-  setTimeout(() => { sh.el.remove(); sh.scrim.remove(); }, 280);
++  setTimeout(() => { sh.el.remove(); sh.scrim.remove(); pruneMedia(); syncMediaPlayback(); }, 280);
+   if (sh.onClose) try { sh.onClose(); } catch (e) {}
+   syncBack();
+ }
+@@ -2329,7 +2498,7 @@
+   const dk = dockKey(S.tab);
+   dock.innerHTML = `<div class="dock-in n${tabs.length}" role="tablist" style="--n:${tabs.length};--i:${Math.max(0, tabs.findIndex(x => x[0] === dk))}"><span class="dock-ind" aria-hidden="true"></span>${tabs.map(([k, a, n]) => `
+     <button class="tab ${dk === k ? 'on' : ''}" role="tab" aria-selected="${dk === k}" data-act="tab" data-v="${k}">
+-      <span class="ico">${ceOK(S.nav[n]) ? ceH(S.nav[n], `<img src="${EMO}static/${a}.png" alt="">`, '') : `<img src="${EMO}static/${a}.png" alt=""><img src="${EMO}${a}.webp" alt="" decoding="async" onload="this.previousElementSibling&&this.previousElementSibling.remove()">`}</span>
++      <span class="ico">${ceOK(S.nav[n]) ? ceH(S.nav[n], `<img src="${EMO}static/${a}.png" alt="">`, '') : ae(a)}</span>
+       <span>${esc(k === 'admin' ? adt('tab') : t(k))}</span></button>`).join('')}</div>`;
+   hydrate(top); hydrate(dock);
+ }
+@@ -2363,6 +2532,7 @@
+ }
+ function renderView() {
+   const v = $('#view');
++  stopStoreRender(true);
+   let h = '';
+   if (S.screen === 'loading') h = vLoading();
+   else if (S.screen === 'gate') h = vGate();
+@@ -2378,7 +2548,9 @@
+   else if (S.tab === 'admin' && isAdmin()) h = vAdmin();
+   else h = vProfile();
+   v.innerHTML = `<div class="view">${DEMO && S.screen === 'app' ? pvRibbon() : ''}${h}</div>`;
++  rememberStoreChips($('#chips'));
+   hydrate(v);
++  bindStoreMore();
+   if (S.tab === 'store') requestAnimationFrame(chipsEdges);
+   if (S.screen === 'app') {
+     if (S.tab === 'orders' && !S.orders) loadOrders();
+@@ -2405,6 +2577,7 @@
+   return s.replace(/[^a-z0-9ء-ي]+/g, ' ').trim();
+ }
+ const SR_IDX = (() => { const m = new Map(); for (const c in SR_ALIASES) for (const a of [c].concat(SR_ALIASES[c])) { const k = srNorm(a).replace(/ /g, ''); if (!m.has(k)) m.set(k, new Set()); m.get(k).add(c); } return m; })();
++const SR_CANON_TERMS = Object.entries(SR_ALIASES).map(([c, aliases]) => [c, aliases.map(a => srNorm(a).replace(/ /g, ''))]);
+ function srDL(a, b, cap) {
+   cap = cap == null ? 3 : cap;
+   const la = a.length, lb = b.length;
+@@ -2435,16 +2608,23 @@
+   for (let i = 0; i < s.length; i++) { if (it < q.length && s[i] === q[it]) { it++; if (it === q.length) { span = i + 1; break; } } }
+   return it === q.length && q.length / span >= 0.5;
+ }
++const SR_PREP = new WeakMap();
+ function srPrep(item) {
++  const saved = SR_PREP.get(item);
++  if (saved && saved.ar === item.name_ar && saved.en === item.name_en && saved.desc === item.desc &&
++      saved.descAr === item.desc_ar && saved.descEn === item.desc_en) return saved.value;
+   const toks = srNorm([item.name_ar || '', item.name_en || ''].join(' ')).split(' ').filter(Boolean);
+   const compact = toks.join(''), canon = new Set();
+   for (const t of toks) for (const c of (SR_IDX.get(t) || [])) canon.add(c);
+-  for (const c in SR_ALIASES) {
++  for (const [c, aliases] of SR_CANON_TERMS) {
+     if (compact.includes(c)) canon.add(c);
+-    for (const a of SR_ALIASES[c]) { const na = srNorm(a).replace(/ /g, ''); if (na.length >= 3 && compact.includes(na)) canon.add(c); }
++    for (const na of aliases) if (na.length >= 3 && compact.includes(na)) canon.add(c);
+   }
+   const firsts = new Set([srNorm(item.name_ar), srNorm(item.name_en)].filter(Boolean).map(n => n.split(' ')[0]));
+-  return { toks, compact, initials: toks.map(t => t[0]).join(''), canon, firsts, desc: srNorm(item.desc || '') };
++  const value = { toks, compact, initials: toks.map(t => t[0]).join(''), canon, firsts,
++    desc: srNorm([item.desc || '', plain(item.desc_ar), plain(item.desc_en)].join(' ')) };
++  SR_PREP.set(item, { ar: item.name_ar, en: item.name_en, desc: item.desc, descAr: item.desc_ar, descEn: item.desc_en, value });
++  return value;
+ }
+ function srTokScore(q, P, typo) {
+   let best = 0;
+@@ -2501,6 +2681,36 @@
+ }
+ 
+ /* ───────────────────────── store ───────────────────────── */
++const ProductNameOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
++const StoreRender = { items: [], shown: 0, key: '', grid: null, io: null, frame: null };
++const StoreChips = new WeakMap();
++function rememberStoreChips(chips) { if (chips) StoreChips.set(chips, { products: S.products, catalogs: S.catalogs, lang: LANG, admin: !!S.user?.is_admin }); }
++function stopStoreRender(reset) {
++  if (StoreRender.io) StoreRender.io.disconnect();
++  if (StoreRender.frame != null) cancelAnimationFrame(StoreRender.frame);
++  StoreRender.io = null; StoreRender.frame = null; StoreRender.grid = null;
++  if (reset) { StoreRender.items = []; StoreRender.shown = 0; StoreRender.key = ''; }
++}
++function moreProductsLabel() { return ({ ar: 'عرض المزيد', en: 'Show more', ru: 'Показать ещё', zh: '显示更多' })[LANG] || 'Show more'; }
++function bindStoreMore() {
++  StoreRender.grid = $('#grid');
++  const more = $('#products-more');
++  if (!more || !StoreRender.grid || !('IntersectionObserver' in window)) return;
++  StoreRender.io = new IntersectionObserver(entries => {
++    if (!entries.some(en => en.isIntersecting) || StoreRender.frame != null) return;
++    StoreRender.frame = requestAnimationFrame(() => { StoreRender.frame = null; appendStoreProducts(); });
++  }, { rootMargin: '160px' });
++  StoreRender.io.observe(more);
++}
++function appendStoreProducts() {
++  const grid = $('#grid'), footer = $('#products-more');
++  if (!grid || grid !== StoreRender.grid || S.tab !== 'store' || S.screen !== 'app') return;
++  const end = Math.min(StoreRender.items.length, StoreRender.shown + UiPerf.chunk);
++  if (end <= StoreRender.shown) return;
++  grid.insertAdjacentHTML('beforeend', StoreRender.items.slice(StoreRender.shown, end).map((p, i) => card(p, StoreRender.shown + i)).join(''));
++  StoreRender.shown = end; hydrate(grid);
++  if (end >= StoreRender.items.length) { if (footer) footer.remove(); if (StoreRender.io) StoreRender.io.disconnect(); }
++}
+ function visibleProducts() {
+   let list = S.products.filter(p => {
+     if (S.cat === '__other') { if ((p.cats || []).length) return false; }
+@@ -2510,7 +2720,7 @@
+   });
+   S.sr = null;
+   if (S.q.trim()) {
+-    S.sr = srSearch(S.q, list.map(p => Object.assign({ desc: plain(p.desc_ar) + ' ' + plain(p.desc_en) }, p)));
++    S.sr = srSearch(S.q, list);
+     const ids = S.sr.items.map(x => x.id), pos = new Map(ids.map((id, i) => [id, i]));
+     list = list.filter(p => pos.has(p.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+     if (S.sort === 'low') list.sort((a, b) => a.price - b.price);
+@@ -2518,7 +2728,7 @@
+     return list;                       // ترتيب البحث: الأقرب لكلمتك أول
+   }
+   const key = p => String(p.name_en || p.name_ar || '').trim();
+-  const byName = (a, b) => key(a).localeCompare(key(b), 'en', { numeric: true, sensitivity: 'base' });
++  const byName = (a, b) => ProductNameOrder.compare(key(a), key(b));
+   if (S.sort === 'low') list.sort((a, b) => (b.in_stock - a.in_stock) || a.price - b.price);
+   else if (S.sort === 'high') list.sort((a, b) => (b.in_stock - a.in_stock) || b.price - a.price);
+   else list.sort((a, b) => (b.in_stock - a.in_stock) || byName(a, b));
+@@ -2540,6 +2750,9 @@
+ }
+ function resultsHtml() {
+   const list = visibleProducts();
++  const key = JSON.stringify([S.cat, S.q.trim(), S.sort, S.onlyStock, LANG]);
++  const keep = key === StoreRender.key ? StoreRender.shown : 0;
++  StoreRender.items = list; StoreRender.shown = Math.min(list.length, Math.max(UiPerf.batch, keep)); StoreRender.key = key;
+   const { cats } = catList();
+   const sortLbl = { rec: t('sortRec'), low: t('sortLow'), high: t('sortHigh') }[S.sort];
+   const title = S.cat === 'all' ? t('all') : S.cat === '__other' ? t('other') : ((cats.find(c => c.id === S.cat) || {})[isAr() ? 'name_ar' : 'name_en'] || '');
+@@ -2547,7 +2760,7 @@
+   const note = R && R.corrected && list.length ? `<div class="sr-note">${ic.search}<span>${esc(t('srFixed', { q: S.q.trim(), c: R.corrected }))}</span></div>` : '';
+   const sug = R && !list.length && (R.suggest || []).length ? `<div class="sr-dym"><span>${esc(t('srDym'))}</span>${R.suggest.map(w => `<button class="chip" data-act="sq" data-v="${esc(w)}" dir="auto">${esc(w)}</button>`).join('')}</div>` : '';
+   return `<div class="section-row"><h2>${esc(title)}</h2><span class="count">${esc(t('products', { n: list.length }))} · ${esc(sortLbl)}</span></div>
+-    ${note}${list.length ? `<div class="grid" id="grid">${list.map((p, i) => card(p, i)).join('')}</div>` :
++    ${note}${list.length ? `<div class="grid" id="grid">${list.slice(0, StoreRender.shown).map((p, i) => card(p, i)).join('')}</div>${StoreRender.shown < list.length ? `<div class="products-next" id="products-more"><button class="btn ghost sm" data-act="products-more">${esc(moreProductsLabel())}</button></div>` : ''}` :
+       `<div class="empty">${ae('search')}<h3>${esc(t('noMatch'))}</h3><p>${esc(t(S.onlyStock && S.q.trim() ? 'srNoStock' : 'noMatchBody'))}</p>${sug}<button class="btn ghost sm" data-act="clear">${esc(t('clear'))}</button></div>`}`;
+ }
+ function vStore() {
+@@ -2567,12 +2780,20 @@
+   const res = $('#results');
+   if (!res || S.tab !== 'store' || S.screen !== 'app') return;
+   const chips = $('#chips');
+-  if (chips) { const x = chips.scrollLeft; chips.innerHTML = chipsHtml(); chips.scrollLeft = x; hydrate(chips); chipsEdges(); }
++  if (chips) {
++    const saved = StoreChips.get(chips);
++    if (!saved || saved.products !== S.products || saved.catalogs !== S.catalogs || saved.lang !== LANG || saved.admin !== !!S.user?.is_admin) {
++      const x = chips.scrollLeft; chips.innerHTML = chipsHtml(); chips.scrollLeft = x; rememberStoreChips(chips); hydrate(chips);
++    } else chips.querySelectorAll('[data-act="cat"]').forEach(el => el.classList.toggle('on', el.dataset.v === S.cat));
++    requestAnimationFrame(chipsEdges);
++  }
+   const sb = $('#stockbtn'); if (sb) { sb.classList.toggle('on', S.onlyStock); sb.setAttribute('aria-pressed', S.onlyStock); }
+   const q = $('#q'); if (q && document.activeElement !== q) q.value = S.q;
+   res.classList.toggle('noanim', !!quiet);
++  stopStoreRender();
+   res.innerHTML = resultsHtml();
+   hydrate(res);
++  bindStoreMore();
+ }
+ function stockPill(p) {
+   if (!p.in_stock) return '';
+@@ -5111,6 +5332,7 @@
+     case 'funds': openFunds(); break;
+     case 'activity': openActivity(); break;
+     case 'product': openProduct(el.dataset.v); break;
++    case 'products-more': appendStoreProducts(); break;
+     case 'chips-nav': { const c = $('#chips'); if (c) c.scrollBy({ left: (+el.dataset.v) * (isAr() ? -1 : 1) * c.clientWidth * 0.7, behavior: 'smooth' }); break; }
+     case 'cat': if (window.__chipDragged) { window.__chipDragged = false; break; } S.cat = el.dataset.v; hap('select'); updateStore(); { const c = $('.chip.on'); if (c) c.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' }); } break;
+     case 'stockonly': S.onlyStock = !S.onlyStock; hap('select'); updateStore(); break;
+@@ -5167,11 +5389,12 @@
+   if (catalogFlight) return catalogFlight;
+   lastCat = Date.now();
+   catalogFlight = (async () => {
++    const previousVip = JSON.stringify(S.vip || null);
+     const r = await api('catalog', {catalog_version: S.catalogVersion || ''});
+     if (r.ok) {
+       S.catalogVersion = r.catalog_version || '';
+       if (!r.not_modified) { S.products = r.products || []; S.catalogs = r.catalogs || []; }
+-      if (S.tab === 'store') updateStore(true);
++      if (S.tab === 'store' && (!r.not_modified || previousVip !== JSON.stringify(S.vip || null))) updateStore(true);
+     }
+     return r;
+   })().finally(() => { catalogFlight = null; });
+--- a/verification/test_round34_alerts.py
++++ b/verification/test_round34_alerts.py
+@@ -175,4 +175,4 @@
+     boot = html[html.index('id="lara-error-bootstrap"'):html.index('__LARA_ERROR_REPORTER__=')]
+     assert 'chrome|moz|safari-web|safari|ms-browser' in boot and 'webkit-masked-url' in boot
+     assert 'if(fromExtension(locationText,extra.stack))return;' in boot
+-    assert "const build='lara-34.1'" in html
++    assert "const build='lara-36.1'" in html
+--- a/verification/test_client_diagnostics_browser.cjs
++++ b/verification/test_client_diagnostics_browser.cjs
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-34.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-36.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-34.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-36.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- a/verification/test_extension_errors_browser.cjs
++++ b/verification/test_extension_errors_browser.cjs
+@@ -35,7 +35,7 @@
+   await page.evaluate(base=>window.dispatchEvent(new ErrorEvent('error',{message:'Store render failed',filename:base+'/__ref_test__/',lineno:12,colno:3,error:new Error('Store render failed')})),BASE);
+   await page.waitForTimeout(800);
+   const own=reports.find(r=>r.message==='Store render failed');
+-  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-34.1',JSON.stringify(reports));
+-  console.log('PASS the store\'s own error is still reported with its location and build lara-34.1');
++  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-36.1',JSON.stringify(reports));
++  console.log('PASS the store\'s own error is still reported with its location and build lara-36.1');
+  }finally{await browser.close();}
+ })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});
+--- /dev/null
++++ b/verification/test_mobile_performance_browser.cjs
+@@ -0,0 +1,161 @@
++/* Mobile rendering regression: signed loopback API, fake products, no external integrations. */
++const {spawn}=require('child_process'),fs=require('fs'),zlib=require('zlib'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const BASE='http://127.0.0.1:8793',optimized=process.env.LARA_TEST_EXPECT_OPTIMIZED!=='0';
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_cart_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:'8793'},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL CART SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++const animation=zlib.gzipSync(Buffer.from(JSON.stringify({v:'5.7.4',fr:30,ip:0,op:60,w:96,h:96,nm:'Local test',ddd:0,assets:[],layers:[{
++ ddd:0,ind:1,ty:4,nm:'circle',sr:1,ks:{o:{a:0,k:100},r:{a:1,k:[{t:0,s:[0],e:[360]},{t:60,s:[360]}]},p:{a:0,k:[48,48,0]},a:{a:0,k:[0,0,0]},s:{a:0,k:[100,100,100]}},
++ shapes:[{ty:'el',p:{a:0,k:[0,0]},s:{a:0,k:[64,48]}},{ty:'fl',c:{a:0,k:[0.1,0.5,1,1]},o:{a:0,k:100},r:1}],ip:0,op:60,st:0,bm:0}]})));
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--disable-background-networking',
++   '--disable-component-update','--disable-sync','--no-pings','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const page=await browser.newPage({viewport:{width:360,height:740},isMobile:true,hasTouch:true,
++   userAgent:'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36'});
++  const errors=[],calls=[],media=[];
++  page.on('pageerror',e=>errors.push(e.message));
++  page.on('request',r=>{const u=new URL(r.url());if(u.pathname.startsWith('/webapp/'))calls.push(u.pathname);if(u.pathname.includes('/emoji/'))media.push(u.pathname);});
++  await page.addInitScript(()=>{
++   Object.defineProperty(navigator,'deviceMemory',{get:()=>2});
++   Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>2});
++   window.__perf={long:[],frames:[],last:0};
++   try{new PerformanceObserver(list=>{for(const e of list.getEntries())window.__perf.long.push({at:e.startTime,duration:e.duration});}).observe({type:'longtask',buffered:true});}catch(e){}
++   function tick(t){const p=window.__perf;if(p.last&&p.frames.length<3000)p.frames.push({at:t,gap:t-p.last});p.last=t;requestAnimationFrame(tick);}requestAnimationFrame(tick);
++  });
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  await page.route('**/__cart_test__/',async route=>{
++   const response=await route.fetch(),current=await response.text();let html=current;
++   if(process.env.LARA_TEST_SOURCE_HTML){
++    const prefix=current.slice(current.indexOf('<head>')+6,current.indexOf('<meta charset'));
++    html=fs.readFileSync(process.env.LARA_TEST_SOURCE_HTML,'utf8').replace('<head>','<head>'+prefix);
++   }
++   const headers={...response.headers()};delete headers['content-length'];delete headers['content-encoding'];
++   await route.fulfill({status:response.status(),headers,body:html});
++  });
++  await page.route('**/webapp/ce/*',r=>r.fulfill({status:200,contentType:'application/x-tgsticker',body:animation}));
++  let release;
++  const gate=new Promise(r=>release=r);
++  await page.route('**/webapp/bootstrap',async route=>{
++   const response=await route.fetch(),data=await response.json(),sample=data.products[0];
++   assert(sample,'Fixture bootstrap missing a product');
++   data.products=data.products.concat(Array.from({length:597},(_,i)=>({...sample,id:String(10000+i),
++    name_en:(i%2?'Netflix':'Spotify')+' Mobile Test '+String(i).padStart(4,'0'),name_ar:'Mobile Test '+i,
++    ae:['fire','crown','store','key'][i%4],emoji_id:i%5===0?String(900000+i%12):null,
++    cats:[i%2?'a':'b'],in_stock:i%7!==0,stock:i%7===0?0:10,price:i%10+1})));
++   data.catalogs=[{id:'a',name_en:'Netflix',name_ar:'Netflix'},{id:'b',name_en:'Spotify',name_ar:'Spotify'}];
++   await gate;await route.fulfill({response,json:data});
++  });
++  const cdp=await page.context().newCDPSession(page);await cdp.send('Emulation.setCPUThrottlingRate',{rate:6});
++  await page.goto(BASE+'/__cart_test__/',{waitUntil:'domcontentloaded'});
++  await page.locator('#page-loading').waitFor({state:'visible'});
++  const loadingStart=await page.evaluate(()=>performance.now());
++  await page.waitForTimeout(1500);
++  const loading=await page.evaluate(start=>({mask:getComputedStyle(document.querySelector('.lm-rib')).mask,
++   frameGaps:window.__perf.frames.filter(f=>f.at>=start).map(f=>f.gap),
++   longTasks:window.__perf.long.filter(e=>e.at>=start).map(e=>e.duration)}),loadingStart);
++  if(process.env.LARA_TEST_SHOTS){fs.mkdirSync(process.env.LARA_TEST_SHOTS,{recursive:true});await page.screenshot({path:process.env.LARA_TEST_SHOTS+'/loading.png'});}
++  const renderStart=await page.evaluate(()=>performance.now());release();
++  await page.locator('#results .card').first().waitFor();
++  await page.locator('#page-loading').waitFor({state:'hidden'});
++  const first=await page.evaluate(start=>({ms:performance.now()-start,cards:document.querySelectorAll('#grid .card').length,
++   low:document.documentElement.dataset.perf||'',longTasks:window.__perf.long.filter(e=>e.at>=start).map(e=>e.duration)}),renderStart);
++  if(optimized){assert(first.cards<=24,JSON.stringify(first));assert.equal(first.low,'lite');assert.equal(loading.mask,'none');}
++  console.log('PASS 600-product fixture; first render:',JSON.stringify({ms:Math.round(first.ms),cards:first.cards,mode:first.low}));
++  if(process.env.LARA_TEST_SHOTS)await page.screenshot({path:process.env.LARA_TEST_SHOTS+'/products.png'});
++  await page.locator('#q').fill('Netflix');
++  await page.waitForFunction(()=>!Array.from(document.querySelectorAll('#grid .card')).some(el=>!el.textContent.includes('Netflix')));
++  assert(await page.locator('#grid .card').count()>0);
++  if(optimized)assert(await page.locator('#grid .card').count()<=24);
++  await page.locator('#q').fill('');await page.waitForTimeout(350);
++  await page.locator('[data-act="sort"]').click();
++  await page.locator('[data-act="stockonly"]').click();
++  assert.equal(await page.locator('#grid .card.oos').count(),0);
++  await page.locator('[data-act="stockonly"]').click();
++  await page.waitForTimeout(600);
++  const peakBefore=await page.evaluate(()=>window.lottie?window.lottie.getRegisteredAnimations().length:0);
++  for(let n=0;n<5;n++){
++   await page.locator('[data-act="cat"][data-v="a"]').click();
++   await page.locator('[data-act="cat"][data-v="all"]').click();
++  }
++  await page.waitForTimeout(700);
++  const peakAfter=await page.evaluate(()=>window.lottie?window.lottie.getRegisteredAnimations().length:0);
++  if(optimized)assert(peakAfter<=24,`Leaked Lottie players: ${peakAfter}`);
++  console.log('PASS search, sort, stock filter and category changes; Lottie players:',peakBefore,'->',peakAfter);
++  const profiles=[];
++  if(optimized){
++   const initial=await page.locator('#grid .card').count();
++   await page.locator('#products-more').scrollIntoViewIfNeeded();
++   await page.waitForFunction(n=>document.querySelectorAll('#grid .card').length>n,initial);
++   for(let n=0;n<3;n++){await page.locator('[data-act="products-more"]').click();await page.waitForTimeout(60);}
++   assert(await page.locator('#grid .card').count()>initial);
++   await page.waitForTimeout(200);
++   assert((await page.evaluate(()=>window.lottie?window.lottie.getRegisteredAnimations().length:0))<=24,'Offscreen players should be released on mobile');
++   await page.locator('#q').fill('Mobile Test 0596');
++   await page.waitForFunction(()=>document.querySelector('#grid .card[data-v="10596"]'));
++   await page.locator('#grid .card[data-v="10596"]').click();await page.locator('.psheet:not(.closing)').waitFor();
++   await page.locator('.psheet:not(.closing) [data-act="sheet-close"]').click();
++   await page.locator('#q').fill('');await page.waitForTimeout(350);
++   console.log('PASS incremental rendering and search/open of a product beyond the first batch');
++   await page.waitForTimeout(300);
++   const moving=await page.evaluate(()=>({
++    lottie:window.lottie?window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).length:0,
++    images:[...document.querySelectorAll('img[data-ae]')].filter(el=>/\/emoji\/[^/]+\.webp$/.test(el.src)).length}));
++   assert(moving.lottie+moving.images<=3,JSON.stringify(moving));
++   await page.emulateMedia({reducedMotion:'reduce'});await page.waitForTimeout(150);
++   assert.equal(await page.evaluate(()=>window.lottie?window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).length:0),0);
++   assert.equal(await page.evaluate(()=>[...document.querySelectorAll('img[data-ae]')].filter(el=>/\/emoji\/[^/]+\.webp$/.test(el.src)).length),0);
++   assert.equal(await page.locator('.ld-mark').evaluate(el=>getComputedStyle(el).animationName),'none');
++   await page.emulateMedia({reducedMotion:'no-preference'});await page.waitForTimeout(150);
++   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'));});
++   assert.equal(await page.evaluate(()=>window.lottie?window.lottie.getRegisteredAnimations().filter(a=>!a.isPaused).length:0),0);
++   assert.equal(await page.evaluate(()=>[...document.querySelectorAll('img[data-ae]')].filter(el=>/\/emoji\/[^/]+\.webp$/.test(el.src)).length),0);
++   console.log('PASS shared three-animation budget; reduced motion and background pause both native emoji and Lottie');
++   for(const profile of [
++    {name:'strong Android',mode:'mobile',memory:8,cores:8,mobile:true},
++    {name:'iOS without memory hints',mode:'mobile',memory:0,cores:0,mobile:true,ios:true,deep:true},
++    {name:'no IntersectionObserver',mode:'lite',memory:2,cores:2,mobile:true,noObserver:true},
++    {name:'desktop',mode:'full',memory:8,cores:8,mobile:false}
++   ]){
++    const prof=await browser.newPage({viewport:profile.mobile?{width:390,height:844}:{width:1280,height:900},
++     isMobile:profile.mobile,hasTouch:profile.mobile,
++     userAgent:profile.ios?'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 Version/16.0 Mobile/15E148 Safari/604.1':profile.mobile?'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36':undefined});
++    const profileErrors=[];prof.on('pageerror',e=>profileErrors.push(e.message));
++    await prof.addInitScript(p=>{
++     Object.defineProperty(navigator,'deviceMemory',{get:()=>p.memory});Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>p.cores});
++     if(p.noObserver)delete window.IntersectionObserver;
++    },profile);
++    await prof.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++    await prof.route('**/webapp/bootstrap',async route=>{
++     const response=await route.fetch(),data=await response.json(),sample=data.products[0];
++     data.products=data.products.concat(Array.from({length:197},(_,i)=>({...sample,id:String(20000+i),name_en:'Profile product '+i,name_ar:'Profile product '+i,emoji_id:null,ae:'fire'})));
++     await route.fulfill({response,json:data});
++    });
++    await prof.goto(BASE+'/__cart_test__/'+(profile.deep?'?p=20196':''),{waitUntil:'domcontentloaded'});
++    await prof.locator('#grid .card').first().waitFor();await prof.locator('#page-loading').waitFor({state:'hidden'});
++    assert.equal(await prof.evaluate(()=>document.documentElement.dataset.perf),profile.mode);
++    assert(await prof.locator('#grid .card').count()<=48);
++    if(profile.deep){await prof.locator('.psheet:not(.closing)').waitFor();const text=await prof.locator('.psheet:not(.closing)').innerText();assert(text.includes('Profile product 196'),text);await prof.locator('.psheet:not(.closing) [data-act="sheet-close"]').click();}
++    if(profile.noObserver){const n=await prof.locator('#grid .card').count();await prof.locator('[data-act="products-more"]').click();assert((await prof.locator('#grid .card').count())>n);}
++    await prof.locator('[data-act="lang"][data-v="ar"]').click();assert.equal(await prof.evaluate(()=>document.documentElement.dir),'rtl');
++    assert(await prof.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(profileErrors,[]);
++    profiles.push({profile:profile.name,passed:true});await prof.close();
++   }
++   console.log('PASS strong Android, iOS without hardware hints, no observer fallback, desktop, Arabic RTL and direct links outside the first batch');
++  }
++  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
++  assert.deepEqual(errors,[]);
++  const result={cpu_throttle:6,viewport:'360x740',synthetic_products:600,loading,first,
++   lottie:{before:peakBefore,after:peakAfter},animated_builtin_requests:media.filter(u=>/\/emoji\/[^/]+\.webp$/.test(u)).length,
++   poster_requests:media.filter(u=>u.includes('/emoji/poster/')).length,profiles,errors,calls};
++  if(process.env.LARA_TEST_PERF_RESULT)fs.writeFileSync(process.env.LARA_TEST_PERF_RESULT,JSON.stringify(result,null,2));
++  console.log('PASS zero JS errors, mobile layout; no financial operations');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

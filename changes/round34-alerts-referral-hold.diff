@@ -1,0 +1,503 @@
+--- a/bot.py	2026-10-20 17:06:52.000000000 +0000
++++ b/bot.py	2026-10-20 19:10:36.835305368 +0000
+@@ -5172,6 +5172,107 @@
+         raise RuntimeError('Referral wallet changed repeatedly; movement remains queued for retry')
+ 
+ 
++# ============================================================
++# ⏸ Update 29 forbids moving referral money while the referrer's balance is below zero (ledger review first).
++#    Before: a purchase reward for such a referrer raised an ERROR alert and the reward was never recorded.
++#    Now: the movement stays saved («prepared»), the financial resume loop retries it every minute, and it is
++#    credited automatically once the balance is ≥ 0 — then recorded in purchase_rewards and the referrer is told.
++#    Admins get one plain notice per referrer per day instead of an error alert.
++# ============================================================
++_REF_NEGATIVE_HOLD = 'Negative balance requires ledger review before referral movement'
++_REF_HOLD_NOTICE_EVERY = 86400
++
++
++def _ref_is_negative_hold(exc):
++    return isinstance(exc, ValueError) and str(exc) == _REF_NEGATIVE_HOLD
++
++
++def _ref_hold_notice(rid, detail):
++    """One notice per referrer per day (atomic claim on _id); never an error alert."""
++    try:
++        rid, now = int(rid), int(time.time())
++        if rid <= 0:
++            return False
++        claimed = db.ref_hold_notices.update_one(
++            {'_id': rid, 'at': {'$lte': now - _REF_HOLD_NOTICE_EVERY}}, {'$set': {'at': now}}).modified_count
++        if not claimed:
++            try:
++                db.ref_hold_notices.insert_one({'_id': rid, 'at': now})
++            except Exception:
++                return False                      # already told today
++        bal = float((db.users.find_one({'user_id': rid}, {'balance': 1}) or {}).get('balance') or 0)
++        notify_admins(
++            "⏸ <b>حركة إحالة محفوظة بانتظار الرصيد</b>\n\n"
++            f"المُحيل: <code>{rid}</code> — رصيده الحالي <b>${bal:.4f}</b> (سالب).\n"
++            "حماية الإحالات تمنع أي حركة على رصيد سالب قبل مراجعته، فما تنفذت الحين.\n"
++            f"{detail}\n\n"
++            "✅ ما ضاعت: محفوظة وتتنفذ تلقائيًا أول ما يرجع رصيده 0 أو أكثر (فحص كل دقيقة).\n"
++            f"🔎 للمراجعة: <code>/refwhy {rid}</code>\n"
++            "<i>هذا التنبيه مرة واحدة في اليوم لكل مُحيل.</i>")
++        return True
++    except Exception as e:
++        logger.debug(f"referral hold notice skipped: {e}")
++        return False
++
++
++def _ref_hold_purchase_reward(operation, rid, buyer_uid, product_name, purchase_amount, amount):
++    key = hashlib.sha256(str(operation).encode()).hexdigest()[:32]
++    try:
++        db.ref_money_events.update_one({'_id': key, 'status': 'prepared'}, {'$set': {
++            'held': True, 'held_reason': 'negative_balance', 'held_at': int(time.time()),
++            'buyer_id': int(buyer_uid), 'product': str(product_name or '')[:200],
++            'purchase_amount': float(purchase_amount or 0)}})
++    except Exception as e:
++        logger.debug(f"held reward details not saved: {e}")
++    logger.info('Referral purchase reward held until the referrer balance is not negative: referrer=%s buyer=%s amount=%s',
++                rid, buyer_uid, amount)
++    product = f" ({html.escape(str(product_name)[:80])})" if product_name else ''
++    _ref_hold_notice(rid, f"العملية: مكافأة شراء <b>${float(amount):.2f}</b> من شراء <code>{int(buyer_uid)}</code>{product}.")
++
++
++def _ref_release_held_rewards(limit=50):
++    """Records a held purchase reward once the resume loop has credited it, and tells the referrer — exactly once.
++    Also adopts purchase rewards an older version saved but never recorded (same note format)."""
++    cutoff = int(time.time()) - 300                      # never touch an award that is still in progress
++    for ev in db.ref_money_events.find({'kind': 'ref_purchase', 'status': 'prepared', 'held': {'$exists': False},
++                                        'created_at': {'$lt': cutoff}}).limit(limit):
++        m = re.search(r'\((\d+)\)', str(ev.get('note') or ''))
++        db.ref_money_events.update_one({'_id': ev['_id'], 'held': {'$exists': False}}, {'$set': {
++            'held': True, 'held_reason': 'unrecorded', 'held_at': int(time.time()),
++            'buyer_id': int(m.group(1)) if m else None}})
++    released = 0
++    for ev in db.ref_money_events.find({'kind': 'ref_purchase', 'status': 'applied', 'held': True}).limit(limit):
++        if not db.ref_money_events.find_one_and_update({'_id': ev['_id'], 'held': True}, {'$set': {
++                'held': False, 'released_at': int(time.time())}}):
++            continue
++        rid, receipt, amount = int(ev['user_id']), ev.get('receipt') or {}, float(ev.get('amount') or 0)
++        db.purchase_rewards.update_one({'ref_event': ev['_id']}, {'$setOnInsert': {
++            'referrer_id': rid, 'buyer_id': ev.get('buyer_id'), 'amount': amount,
++            'balance_credited': receipt.get('balance_delta', 0), 'debt_settled': -receipt.get('debt_delta', 0),
++            'product': ev.get('product', ''), 'purchase_amount': ev.get('purchase_amount'),
++            'held_since': ev.get('held_at') or ev.get('created_at'), 'timestamp': int(time.time())}}, upsert=True)
++        released += 1
++        logger.info('Held referral purchase reward credited: referrer=%s amount=%s', rid, amount)
++        try:
++            new_balance, settled = float(receipt.get('balance_after', 0)), -float(receipt.get('debt_delta', 0))
++            if get_lang(rid) == 'en':
++                text = (f"🎁 <b>Referral reward added</b>\n\n<b>${amount:.2f}</b> from a purchase by a customer you referred "
++                        f"was on hold while your balance was below zero. It has now been added.")
++                if settled > 0:
++                    text += f"\n${settled:.4f} of it settled earlier referral liabilities."
++                text += f"\nBalance: <b>${new_balance:.2f}</b>"
++            else:
++                text = (f"🎁 <b>انضافت مكافأة إحالة</b>\n\n<b>${amount:.2f}</b> من شراء عميل جاء عن طريقك كانت محفوظة "
++                        f"لأن رصيدك كان تحت الصفر، والحين انضافت.")
++                if settled > 0:
++                    text += f"\nمنها ${settled:.4f} سددت مستحقات إحالات سابقة."
++                text += f"\nرصيدك: <b>${new_balance:.2f}</b>"
++            bot.send_message(rid, text, parse_mode='HTML')
++        except Exception:
++            pass
++    return released
++
++
+ def _ref_clawback(rec, reason=None):
+     """Reverse only an attributable paid reward, once per departure cycle."""
+     try:
+@@ -5220,7 +5321,12 @@
+             except Exception:
+                 pass
+             return unit
+-    except Exception:
++    except Exception as e:
++        if _ref_is_negative_hold(e):
++            logger.info('Referral clawback waits for a non-negative balance; saved for retry: invited=%s', rec.get('invited_id'))
++            _ref_hold_notice(rec.get('referrer_id') or 0,
++                             f"العملية: استرجاع مكافأة إحالة (المدعو <code>{html.escape(str(rec.get('invited_id')))}</code>).")
++            return 0.0
+         logger.exception('Referral clawback deferred; its saved operation can be retried')
+         return 0.0
+ 
+@@ -5274,7 +5380,12 @@
+             except Exception:
+                 pass
+             return amount
+-    except Exception:
++    except Exception as e:
++        if _ref_is_negative_hold(e):
++            logger.info('Referral refund waits for a non-negative balance; saved for retry: invited=%s', rec.get('invited_id'))
++            _ref_hold_notice(rec.get('referrer_id') or 0,
++                             f"العملية: إرجاع مبلغ إحالة رجعت (المدعو <code>{html.escape(str(rec.get('invited_id')))}</code>).")
++            return 0.0
+         logger.exception('Referral refund deferred; its saved operation can be retried')
+         return 0.0
+ 
+@@ -5665,9 +5776,16 @@
+         if not referrer or referrer.get('is_banned') == 1:
+             return False
+         
+-        # 🛡 منح المكافأة atomic
+-        result = _ref_money(referrer_id, purchase_reward, 'ref_purchase',
+-                            f'مكافأة شراء إحالة ({buyer_uid})')
++        # 🛡 منح المكافأة atomic — بمفتاح معروف؛ رصيد المُحيل السالب يحفظ المكافأة بدل ما تضيع
++        operation = f'ref_purchase:{buyer_uid}:{referrer_id}:{secrets.token_hex(12)}'
++        try:
++            result = _ref_money(referrer_id, purchase_reward, 'ref_purchase',
++                                f'مكافأة شراء إحالة ({buyer_uid})', event_key=operation)
++        except ValueError as hold:
++            if not _ref_is_negative_hold(hold):
++                raise
++            _ref_hold_purchase_reward(operation, referrer_id, buyer_uid, product_name, purchase_amount, purchase_reward)
++            return False
+         
+         if result is None:
+             return False
+@@ -5998,6 +6116,10 @@
+             _ref_money(event['user_id'], event['amount'], event['kind'], event['note'], event_key=event.get('operation_key'))
+         except Exception:
+             logger.debug('Saved referral movement is waiting for retry')
++    try:
++        _ref_release_held_rewards()
++    except Exception:
++        logger.debug('Held referral rewards will be recorded on the next pass')
+     for milestone in db.referral_milestones.find({'status': 'paying'}).limit(100):
+         operation = f"milestone:{milestone['referrer_id']}:{milestone['batch_no']}"
+         event = db.ref_money_events.find_one({'_id': hashlib.sha256(operation.encode()).hexdigest()[:32], 'status': 'applied'})
+@@ -37850,7 +37972,7 @@
+     try:
+         mid = getattr(m, 'message_id', None)
+         if mid and not _vc_active(call.message.chat.id):
+-            t = threading.Timer(_CREDS_TTL, lambda: bot.delete_message(call.message.chat.id, mid))
++            t = threading.Timer(_CREDS_TTL, _delete_quietly, args=(call.message.chat.id, mid))
+             t.daemon = True
+             t.start()
+     except Exception:
+@@ -37923,6 +38045,33 @@
+                         request_id=secrets.token_hex(6), last_error=None)
+ 
+ 
++# Telegram answers 400 when a message is already gone or unchanged (the customer deleted/hid it first, a
++# double tap, an expired button). Nothing for an admin to do: kept in the error center as a warning, no alert.
++_TG_BENIGN = ('message to delete not found', "message can't be deleted", 'message is not modified',
++              'message to edit not found', 'query is too old', 'query id is invalid')
++
++
++def _tg_benign(exc):
++    try:
++        if type(exc).__name__ != 'ApiTelegramException' or int(getattr(exc, 'error_code', 0) or 0) != 400:
++            return False
++        text = str(getattr(exc, 'description', '') or exc).lower()
++        return any(p in text for p in _TG_BENIGN)
++    except Exception:
++        return False
++
++
++def _delete_quietly(chat_id, message_id):
++    """For timed deletes: the message may already be gone — that is not an error."""
++    try:
++        bot.delete_message(chat_id, message_id)
++        return True
++    except Exception as e:
++        if not _tg_benign(e):
++            logger.warning(f"timed message delete failed: {e}")
++        return False
++
++
+ def _error_capture(message, exc=None, level='ERROR', source=None, location=None, browser_trace=None):
+     """Bounded, nonblocking capture; neither secrets nor request bodies enter records."""
+     if getattr(_ERROR_LOCAL, 'busy', False):
+@@ -37943,6 +38092,8 @@
+         msg = _error_redact(message, 2400)
+         cause = _error_redact(str(exc), 1200) if exc else msg
+         typ = type(exc).__name__ if exc else ('ClientError' if source == 'browser' else 'OperationError')
++        if exc is not None and level in ('ERROR', 'CRITICAL') and _tg_benign(exc):
++            level = 'WARNING'
+         fingerprint_text = re.sub(r'\b(?:[0-9a-f]{16,}|\d{8,})\b', '#', msg, flags=re.I)
+         fingerprint = hashlib.sha256(f'{typ}|{fingerprint_text}|{loc}|{context.get("user_id")}|{context.get("operation", "")}'.encode()).hexdigest()[:32]
+         if exc is not None:
+@@ -38190,9 +38341,24 @@
+     bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=mk)
+ 
+ 
++# Wallet / translator / ad-block extensions inject their own scripts into every page the customer opens;
++# their errors (e.g. «isTerraExtensionAvailable» from a wallet's inpage.js) are not the store's.
++_WA_EXT_SRC = re.compile(r'^(?:chrome|moz|safari-web|safari|ms-browser)-extension:|^webkit-masked-url:', re.I)
++
++
++def _wa_from_extension(location, stack):
++    loc = str(location or '').strip()
++    if re.match(r'[a-z][\w+.-]*:', loc, re.I):
++        return bool(_WA_EXT_SRC.match(loc))
++    m = re.search(r'[a-z][\w+.-]*://[^\s)]+', str(stack or ''), re.I)
++    return bool(m and _WA_EXT_SRC.match(m.group(0)))
++
++
+ def _wa_client_error(identity, body):
+     if not _wa_rate_ok(f'client-error:{identity["id"]}', 12):
+         return 429, {'error': 'rate_limited'}
++    if _wa_from_extension(body.get('location'), body.get('stack')):
++        return 200, {'ok': True, 'ignored': 'browser_extension'}
+     with _error_user_scope(identity, 'browser:' + _error_redact(body.get('operation', 'runtime'), 100), 'browser'):
+         diagnostic = []
+         for field in ('build', 'platform', 'sdk_version', 'last_action', 'user_agent'):
+--- a/webapp/index.html	2026-10-20 17:13:26.000000000 +0000
++++ b/webapp/index.html	2026-10-20 19:10:49.795997629 +0000
+@@ -21,7 +21,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-33.1',queue=[],recent=new Map();
++ const build='lara-34.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -44,8 +44,17 @@
+    fetch(connection.api+'/webapp/client/error',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':connection.init},body:JSON.stringify(body)}).catch(()=>{});
+   }catch(e){} // Reporting failures never report themselves.
+  }
++ /* Wallet, translator and ad-block extensions inject their own scripts into every page; their errors are not the store's. */
++ const EXT=/^(?:chrome|moz|safari-web|safari|ms-browser)-extension:|^webkit-masked-url:/i;
++ function fromExtension(where,stack){
++  const w=String(where||'').trim();
++  if(/^[a-z][\w+.-]*:/i.test(w))return EXT.test(w);
++  const m=String(stack||'').match(/[a-z][\w+.-]*:\/\/[^\s)]+/i);
++  return !!(m&&EXT.test(m[0]));
++ }
+  function report(message,locationText,operation,extra){
+   extra=extra||{};
++  if(fromExtension(locationText,extra.stack))return;
+   const item={message:safe(message||'Browser error',1200),location:safe(locationText,240),
+    operation:safe(operation||'runtime',100),stack:safe(extra.stack,2500),masked:extra.masked===true};
+   send(item);
+--- a/verification/test_client_diagnostics_browser.cjs	2026-10-20 17:13:26.000000000 +0000
++++ b/verification/test_client_diagnostics_browser.cjs	2026-10-20 19:10:49.802037134 +0000
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-33.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-34.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-33.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-34.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- a/verification/test_round34_alerts.py	2026-10-20 03:39:59.243015731 +0000
++++ b/verification/test_round34_alerts.py	2026-10-20 19:11:51.155303669 +0000
+@@ -0,0 +1,161 @@
++"""Round 34: a referral reward for a referrer with a negative balance is held (not lost, no error alert);
++timed deletes of an already-deleted message stay quiet; browser-extension errors are not store errors."""
++import types
++from unittest.mock import Mock
++
++import pytest
++from telebot.apihelper import ApiTelegramException
++
++from harness import MESSAGES
++from test_integration import mod, isolate, server, request, APP  # noqa: F401  (shared fixtures)
++from test_error_monitor import empty_monitor  # noqa: F401
++from test_referral_integrity import referral
++
++
++def _tg_400(description):
++    return ApiTelegramException('deleteMessage', types.SimpleNamespace(status_code=400),
++                                {'ok': False, 'error_code': 400, 'description': description})
++
++
++def _alerts(mod):
++    mod._error_drain()
++    return list(mod.db.system_errors.find({'level': {'$in': ['ERROR', 'CRITICAL']}}))
++
++
++def _bal(mod, uid=1001):
++    return mod.db.users.find_one({'user_id': uid})['balance']
++
++
++def test_negative_referrer_balance_holds_the_reward_without_an_error_alert(mod, monkeypatch):
++    referral(mod)
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
++    notices = Mock()
++    monkeypatch.setattr(mod, 'notify_admins', notices)
++    reward = mod.get_referral_purchase_reward()
++    assert mod.award_purchase_referral_reward(5001, 'Netflix', 10) is False
++    assert mod.award_purchase_referral_reward(5001, 'Spotify', 12) is False
++    assert _alerts(mod) == []                                          # the old ERROR alert is gone
++    held = list(mod.db.ref_money_events.find({'kind': 'ref_purchase'}))
++    assert len(held) == 2 and all(e['status'] == 'prepared' and e['held'] and e['buyer_id'] == 5001 for e in held)
++    assert {e['product'] for e in held} == {'Netflix', 'Spotify'}
++    assert _bal(mod) == -.4                                            # update-29 protection still holds
++    assert notices.call_count == 1 and '/refwhy 1001' in notices.call_args.args[0]   # one notice a day
++    mod._ref_resume_financial()                                        # still negative → still waiting
++    assert _bal(mod) == -.4 and mod.db.purchase_rewards.count_documents({}) == 0
++    # the referrer tops up → the next minute's pass credits both rewards and records them once
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 1.0}})
++    sent = len(MESSAGES)
++    mod._ref_resume_financial()
++    mod._ref_resume_financial()
++    assert _bal(mod) == round(1.0 + 2 * reward, 6)
++    assert mod.db.purchase_rewards.count_documents({'referrer_id': 1001, 'buyer_id': 5001}) == 2
++    assert not mod.db.ref_money_events.count_documents({'held': True})
++    told = [m for m in MESSAGES[sent:] if m[0] == 1001]
++    assert len(told) == 2 and 'Referral reward added' in told[0][1]
++    assert _alerts(mod) == []
++
++
++def test_normal_referrer_reward_is_unchanged(mod):
++    referral(mod)
++    reward = mod.get_referral_purchase_reward()
++    assert mod.award_purchase_referral_reward(5001, 'Netflix', 10) is True
++    assert _bal(mod) == round(100 + reward, 6)
++    ev = mod.db.ref_money_events.find_one({'kind': 'ref_purchase'})
++    assert ev['status'] == 'applied' and 'held' not in ev
++    assert mod.db.purchase_rewards.count_documents({'ref_event': ev['_id']}) == 1
++    mod._ref_resume_financial()
++    assert mod.db.purchase_rewards.count_documents({}) == 1 and _bal(mod) == round(100 + reward, 6)
++
++
++def test_reward_saved_by_the_previous_version_is_recorded_once_credited(mod):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
++    with pytest.raises(ValueError):          # what the old award left behind: a saved movement, no record
++        mod._ref_money(1001, .1, 'ref_purchase', 'مكافأة شراء إحالة (5001)')
++    mod.db.ref_money_events.update_many({}, {'$inc': {'created_at': -600}})
++    mod._ref_resume_financial()
++    ev = mod.db.ref_money_events.find_one({})
++    assert ev['held'] and ev['held_reason'] == 'unrecorded' and ev['buyer_id'] == 5001
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': 0.0}})
++    mod._ref_resume_financial()
++    mod._ref_resume_financial()
++    assert _bal(mod) == .1 and mod.db.purchase_rewards.count_documents({'buyer_id': 5001}) == 1
++
++
++def test_clawback_on_a_negative_balance_waits_quietly(mod, monkeypatch):
++    referral(mod, paid=True)
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
++    notices = Mock()
++    monkeypatch.setattr(mod, 'notify_admins', notices)
++    mod.mark_referral_status(5001, 'left')
++    mod._ref_resume_financial()
++    assert mod._ref_find(5001)['cb_status'] == 'processing' and _bal(mod) == -.4
++    assert _alerts(mod) == [] and notices.call_count == 1
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': .25}})
++    mod._ref_resume_financial()
++    assert mod._ref_find(5001)['cb_status'] == 'applied'
++    user = mod.db.users.find_one({'user_id': 1001})
++    assert user['balance'] == 0 and user['ref_debt'] == .75
++
++
++def test_timed_delete_of_an_already_deleted_message_is_quiet(mod, monkeypatch):
++    def gone(*a, **k):
++        raise _tg_400('Bad Request: message to delete not found')
++    monkeypatch.setitem(mod._VC_ORIG, 'delete_message', gone)
++    assert mod._delete_quietly(1001, 77) is False
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({}) == 0
++    src = (APP / 'bot.py').read_text(encoding='utf-8')
++    assert 'threading.Timer(_CREDS_TTL, _delete_quietly' in src and 'lambda: bot.delete_message' not in src
++
++
++@pytest.mark.parametrize('text', ['Bad Request: message to delete not found', "Bad Request: message can't be deleted",
++                                  'Bad Request: message is not modified: specified new message content and reply markup are exactly the same',
++                                  'Bad Request: query is too old and response timeout expired or query ID is invalid'])
++def test_benign_telegram_400_is_recorded_as_warning_without_alert(mod, monkeypatch, text):
++    notices = Mock()
++    monkeypatch.setattr(mod, 'notify_admins', notices)
++    with mod._error_scope(source='background', operation='Thread-8293'):
++        ref = mod._error_capture('Uncaught background exception', _tg_400(text))
++    mod._error_drain()
++    assert mod.db.system_errors.find_one({'_id': ref})['level'] == 'WARNING' and notices.call_count == 0
++
++
++def test_real_telegram_errors_still_alert(mod, monkeypatch):
++    notices = Mock()
++    monkeypatch.setattr(mod, 'notify_admins', notices)
++    exc = ApiTelegramException('sendMessage', types.SimpleNamespace(status_code=400),
++                               {'ok': False, 'error_code': 400, 'description': "Bad Request: can't parse entities"})
++    with mod._error_scope(source='background', operation='Thread-1'):
++        mod._error_capture('Uncaught background exception', exc)
++    mod._error_drain()
++    assert notices.call_count == 1
++
++
++def test_browser_extension_errors_are_not_store_errors(mod, server):
++    mod._WA_RATE.clear()
++    s, r, _ = request(server, '/webapp/client/error', {
++        'message': "Uncaught TypeError: Cannot assign to read only property 'isTerraExtensionAvailable' of object '#<Window>'",
++        'location': 'chrome-extension://lgmpcpglpngdoalbgeoldeajfclnhafa/inpage.js:164:178359', 'operation': 'runtime'})
++    assert s == 200 and r.get('ignored') == 'browser_extension'
++    for loc, stack in (('moz-extension://abc/content.js:1:2', ''), ('safari-web-extension://x/inpage.js:3:4', ''),
++                       ('Unhandled promise rejection', 'Error: x\n    at f (chrome-extension://abc/inpage.js:1:9)'),
++                       ('webkit-masked-url://hidden/:1:1', '')):
++        s, r, _ = request(server, '/webapp/client/error', {'message': 'x', 'location': loc, 'stack': stack})
++        assert s == 200 and r.get('ignored') == 'browser_extension', loc
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({}) == 0
++    mod._WA_RATE.clear()
++    s, r, _ = request(server, '/webapp/client/error', {'message': 'Our own failure',
++                                                      'location': 'https://local.example/app/:120:5', 'operation': 'runtime',
++                                                      'stack': 'Error\n    at render (https://local.example/app/:120:5)\n    at chrome-extension://abc/hook.js:1:1'})
++    assert s == 200 and r.get('reference')
++    mod._error_drain()
++    assert mod.db.system_errors.count_documents({}) == 1
++
++
++def test_site_reporter_skips_extension_scripts():
++    html = (APP / 'webapp/index.html').read_text(encoding='utf-8')
++    boot = html[html.index('id="lara-error-bootstrap"'):html.index('__LARA_ERROR_REPORTER__=')]
++    assert 'chrome|moz|safari-web|safari|ms-browser' in boot and 'webkit-masked-url' in boot
++    assert 'if(fromExtension(locationText,extra.stack))return;' in boot
++    assert "const build='lara-34.1'" in html
+--- a/verification/test_extension_errors_browser.cjs	2026-10-20 03:39:59.243015731 +0000
++++ b/verification/test_extension_errors_browser.cjs	2026-10-20 19:12:31.795302739 +0000
+@@ -0,0 +1,41 @@
++/* Round 34: a wallet/translator extension's own script error (e.g. «isTerraExtensionAvailable» from inpage.js) is not reported as a store error; the store's own errors still are. */
++const {spawn}=require('child_process'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const PORT='8792',BASE='http://127.0.0.1:'+PORT;
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_referral_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:PORT},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL REFERRAL SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const ctx=await browser.newContext({viewport:{width:390,height:844}});
++  const page=await ctx.newPage(),reports=[];
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():r.abort());
++  await page.route('**/webapp/client/error',async route=>{reports.push(route.request().postDataJSON());await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});});
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="tab"][data-v="store"]').first().waitFor({timeout:20000});
++  await page.evaluate(()=>{
++   const fire=(filename,message)=>window.dispatchEvent(new ErrorEvent('error',{message,filename,lineno:164,colno:178359,error:new TypeError(message)}));
++   fire('chrome-extension://lgmpcpglpngdoalbgeoldeajfclnhafa/inpage.js',"Uncaught TypeError: Cannot assign to read only property 'isTerraExtensionAvailable' of object '#<Window>'");
++   fire('moz-extension://5f1c/content.js','Extension A failed');
++   fire('safari-web-extension://AB12/inpage.js','Extension B failed');
++   fire('webkit-masked-url://hidden/','Extension C failed');
++   const e=new Error('Extension promise failed');e.stack='Error: Extension promise failed\n    at hook (chrome-extension://abc/inpage.js:1:9)';
++   window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection',{promise:Promise.resolve(),reason:e}));
++  });
++  await page.waitForTimeout(800);
++  assert.deepEqual(reports.filter(r=>/extension|Extension|isTerra/.test(JSON.stringify(r))),[],JSON.stringify(reports));
++  console.log('PASS browser-extension errors (chrome / firefox / safari / masked, error + promise) are not sent as store errors');
++  await page.evaluate(base=>window.dispatchEvent(new ErrorEvent('error',{message:'Store render failed',filename:base+'/__ref_test__/',lineno:12,colno:3,error:new Error('Store render failed')})),BASE);
++  await page.waitForTimeout(800);
++  const own=reports.find(r=>r.message==='Store render failed');
++  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-34.1',JSON.stringify(reports));
++  console.log('PASS the store\'s own error is still reported with its location and build lara-34.1');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

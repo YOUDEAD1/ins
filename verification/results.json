@@ -1,10 +1,10 @@
 {
-  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33)",
-  "verified_at": "2026-10-20T17:13:29.367522+00:00",
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33) + mobile product rendering/media lifecycle/loading budget (36) + inventory visibility/folders/notification locales/Bybit resilience (37)",
+  "verified_at": "2026-10-20T20:28:00.914625+00:00",
   "python": "3.12.14",
   "tests": {
-    "total": 657,
-    "passed": 657,
+    "total": 760,
+    "passed": 760,
     "failed": 0,
     "skipped": 0,
     "by_module": {
@@ -14,6 +14,7 @@
       "verification.test_deposit_buttons": 29,
       "verification.test_error_monitor": 16,
       "verification.test_integration": 183,
+      "verification.test_money_dust": 7,
       "verification.test_network": 47,
       "verification.test_products_menu": 27,
       "verification.test_referral_bandwidth": 13,
@@ -21,6 +22,10 @@
       "verification.test_referral_policy": 19,
       "verification.test_reliability": 35,
       "verification.test_report_config": 17,
+      "verification.test_round34_alerts": 14,
+      "verification.test_round37_bybit": 17,
+      "verification.test_round37_notice_language": 44,
+      "verification.test_round37_visibility": 28,
       "verification.test_runtime_recovery": 42,
       "verification.test_support": 31,
       "verification.test_user_inspection": 40
@@ -416,5 +421,138 @@
     "read_requests_retry_once": true,
     "network_alert_only_when_online_and_visible": true,
     "frontend_build": "lara-33.1"
+  },
+  "round34_validation": {
+    "pytest": "669 passed",
+    "browser_tests": 10,
+    "browser_failed": 0,
+    "new_tests": [
+      "verification/test_round34_alerts.py (12)",
+      "verification/test_extension_errors_browser.cjs (2)"
+    ],
+    "new_tests_fail_on_round33": "10 of 12 pytest + the browser test (the 2 that pass on both check unchanged behaviour)",
+    "referral_reward_negative_balance": "held (saved movement), credited by the every-minute resume loop once balance >= 0, then recorded in purchase_rewards and the referrer is told; update-29 protection unchanged",
+    "referral_hold_admin_notice": "once per referrer per 24h, not an error alert",
+    "legacy_unrecorded_purchase_rewards": "adopted and recorded once credited",
+    "clawback_refund_on_negative_balance": "info + daily notice instead of an error alert every 10 minutes",
+    "timed_delete": "api creds auto-delete uses _delete_quietly",
+    "benign_telegram_400_level": "WARNING (recorded, no alert)",
+    "browser_extension_errors": "ignored in the page reporter and by the server (old cached pages)",
+    "frontend_build": "lara-34.1"
+  },
+  "round35_validation": {
+    "pytest": "671 passed",
+    "browser_tests": 10,
+    "browser_failed": 0,
+    "rule": "purchase referral reward is credited even when the referrer's balance is negative (owner's decision)",
+    "still_protected": "deductions (clawback, negative movements) on a negative balance wait for review (update 29)",
+    "saved_unrecorded_reward": "adopted before the resume loop credits it, recorded in purchase_rewards and the referrer told once",
+    "interrupted_award": "flagged, finished by the resume loop, recorded once",
+    "referrer_message": "one helper (_ref_purchase_dm, CMS ref_purchase_dm) for normal and adopted rewards",
+    "frontend_build": "lara-34.1 (unchanged)"
+  },
+  "round36_validation": {
+    "frontend_build": "lara-36.1",
+    "all_original_bot_bytes_identical": true,
+    "all_prior_named_js_functions_preserved": true,
+    "prior_named_js_functions": 314,
+    "current_named_js_functions": 331,
+    "static_emoji_posters": 26,
+    "poster_bytes": 98014,
+    "original_animated_assets_preserved": true,
+    "browser_suites_passed": 8,
+    "mobile_performance_suite_passed": true,
+    "mobile_additional_profiles": [
+      {
+        "profile": "strong Android",
+        "passed": true
+      },
+      {
+        "profile": "iOS without memory hints",
+        "passed": true
+      },
+      {
+        "profile": "no IntersectionObserver",
+        "passed": true
+      },
+      {
+        "profile": "desktop",
+        "passed": true
+      }
+    ],
+    "cpu_throttle": 6,
+    "test_products": 600,
+    "first_render_ms_before": 6362,
+    "first_render_ms_after": 659.8999999999069,
+    "first_render_cards_before": 600,
+    "first_render_cards_after": 12,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "live_integrations_used": false
+  },
+  "round37_validation": {
+    "update": 37,
+    "frontend_build": "lara-37.1",
+    "verified_at": "2026-10-20T20:28:00.914625+00:00",
+    "tests": {
+      "total": 760,
+      "passed": 760,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "preservation": {
+      "source_archive_entries": 203,
+      "python_definitions_before": 1348,
+      "python_definitions_after": 1362,
+      "missing_python_definitions": 0,
+      "frontend_named_functions_before": 331,
+      "frontend_named_functions_after": 332,
+      "missing_frontend_functions": 0,
+      "unchanged_financial_functions": [
+        "_ref_money",
+        "ref_unit_value",
+        "_ref_resume_financial",
+        "award_purchase_referral_reward",
+        "_ref_repair_user"
+      ]
+    },
+    "python_compile": "passed",
+    "javascript_syntax": "passed",
+    "new_lint_findings": 0,
+    "live_integrations_used": false,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "auto_hide_seconds": 259200,
+    "stock_sweep_seconds": 300,
+    "additional_supplier_http_from_stock_sweep": 0,
+    "notification_locales": [
+      "ar",
+      "en",
+      "ru",
+      "zh"
+    ]
   }
 }
