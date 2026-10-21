@@ -36,7 +36,7 @@ def isolate(mod,monkeypatch):
     for k,v in settings.items():mod.db.settings.insert_one({'key':k,'value':v})
     for n in ['_USER_CACHE','_VIP_STATE_CACHE','_WA_CAT_CACHE','_WA_RATE','_WA_BUY_LOCKS','_cgpt_pending','_purchase_locks','_VC_SESS']:
         getattr(mod,n).clear()
-    for n in ('_CGPT_STOCK_CACHE', '_CGPT_CAPACITY_CACHE', '_FORCED_SUB_CACHE'):
+    for n in ('_CGPT_STOCK_CACHE', '_CGPT_CAPACITY_CACHE', '_FORCED_SUB_CACHE', '_FSUB_MEMBER_CACHE'):
         getattr(mod, n).clear()
     mod._FSUB_CHANNEL_CACHE.update(expires=0, rows=[])
     mod._REF_SCAN_HEALTH['retry_at'] = 0

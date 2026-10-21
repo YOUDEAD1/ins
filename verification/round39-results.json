@@ -1,0 +1,112 @@
+{
+  "update": 39,
+  "verified_at": "2026-10-20T23:34:57.103438+00:00",
+  "tests": {
+    "total": 811,
+    "passed": 811,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_cart": 35,
+      "verification.test_channel_broadcast": 59,
+      "verification.test_client_diagnostics": 17,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_error_monitor": 16,
+      "verification.test_integration": 183,
+      "verification.test_money_dust": 7,
+      "verification.test_network": 47,
+      "verification.test_products_menu": 27,
+      "verification.test_referral_bandwidth": 13,
+      "verification.test_referral_integrity": 40,
+      "verification.test_referral_policy": 19,
+      "verification.test_reliability": 35,
+      "verification.test_report_config": 17,
+      "verification.test_round34_alerts": 14,
+      "verification.test_round37_bybit": 17,
+      "verification.test_round37_notice_language": 44,
+      "verification.test_round37_visibility": 28,
+      "verification.test_round38_visibility": 22,
+      "verification.test_round39_bybit": 11,
+      "verification.test_round39_callbacks": 18,
+      "verification.test_runtime_recovery": 42,
+      "verification.test_support": 31,
+      "verification.test_user_inspection": 40
+    }
+  },
+  "python_compile": "passed",
+  "lint": {
+    "before": 104,
+    "after": 104,
+    "new_findings": {}
+  },
+  "preservation": {
+    "old_definitions": 1365,
+    "new_definitions": 1366,
+    "removed_definitions": [],
+    "finance_functions_unchanged": {
+      "_ref_money": true,
+      "ref_unit_value": true,
+      "_ref_resume_financial": true,
+      "award_purchase_referral_reward": true,
+      "_ref_repair_user": true,
+      "credit_user": true,
+      "auto_credit_from_pending": true,
+      "_do_purchase": true,
+      "check_bybit_auto": true
+    },
+    "webapp_files_unchanged": 62
+  },
+  "callback_regression": {
+    "reproduced_before_fix": true,
+    "failure": "ChatGPT product in a folder: 66 UTF-8 bytes exceeds Telegram callback_data maximum of 64",
+    "fixed_length_bytes": 61,
+    "compatibility": "Existing raw hex, cgpt_ and cgpt_main_ detail callbacks still resolve",
+    "tested": [
+      "standalone and linked parent",
+      "Arabic and English customer",
+      "owner store",
+      "send and edit",
+      "product details",
+      "back to the same folder",
+      "premium icon and color",
+      "mixed native/manual/supplier folder",
+      "quantity prompt",
+      "duration/email prompt"
+    ]
+  },
+  "bybit": {
+    "mocked_http_status": 403,
+    "success_after_retry_tested": true,
+    "backoff_seconds": [
+      600,
+      1200,
+      2400,
+      3600,
+      3600
+    ],
+    "repeat_emergency_notifications": false,
+    "first_transport_warning_retained_in_admin_history": true,
+    "cached_admin_status_command": "/bybit_status",
+    "unchanged_balances_pending_orders_and_used_transactions_on_failure": true,
+    "real_invalid_key_disable_protection_preserved": true,
+    "no_proxy_fallback_after_403": true,
+    "unexpected_api_errors_still_alert": true,
+    "external_access_restriction_not_claimed_fixed": true
+  },
+  "frontend": {
+    "build": "lara-38.1",
+    "files_byte_identical_to_update38": 62,
+    "browser_tests_rerun_for_update39": false,
+    "reason": "No frontend files changed; previous browser reports are retained with their original scope."
+  },
+  "test_isolation": "mongomock, fake Telegram and payment credentials; external HTTP disabled; loopback HTTP only",
+  "external_live_services_tested": false,
+  "real_payments_tested": false,
+  "production_bot_started": false,
+  "real_phones_tested": false,
+  "sources": [
+    "https://core.telegram.org/bots/api#inlinekeyboardbutton",
+    "https://bybit-exchange.github.io/docs/v5/error",
+    "https://bybit-exchange.github.io/docs/v5/rate-limit"
+  ]
+}

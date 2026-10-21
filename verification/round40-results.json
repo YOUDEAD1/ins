@@ -1,0 +1,148 @@
+{
+  "update": 40,
+  "verified_at": "2026-10-21T00:54:47.051862+00:00",
+  "tests": {
+    "total": 849,
+    "passed": 849,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_cart": 35,
+      "verification.test_channel_broadcast": 59,
+      "verification.test_client_diagnostics": 17,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_error_monitor": 16,
+      "verification.test_integration": 183,
+      "verification.test_money_dust": 7,
+      "verification.test_network": 47,
+      "verification.test_products_menu": 27,
+      "verification.test_referral_bandwidth": 13,
+      "verification.test_referral_integrity": 40,
+      "verification.test_referral_policy": 19,
+      "verification.test_reliability": 35,
+      "verification.test_report_config": 17,
+      "verification.test_round34_alerts": 14,
+      "verification.test_round37_bybit": 17,
+      "verification.test_round37_notice_language": 44,
+      "verification.test_round37_visibility": 28,
+      "verification.test_round38_visibility": 22,
+      "verification.test_round39_bybit": 11,
+      "verification.test_round39_callbacks": 18,
+      "verification.test_round40_network": 38,
+      "verification.test_runtime_recovery": 42,
+      "verification.test_support": 31,
+      "verification.test_user_inspection": 40
+    }
+  },
+  "python_compile": "passed",
+  "lint": {
+    "before": 104,
+    "after": 104,
+    "new_findings": {}
+  },
+  "preservation": {
+    "before": 1366,
+    "after": 1378,
+    "removed": {},
+    "financial_and_business_functions_unchanged": {
+      "_ref_money": true,
+      "ref_unit_value": true,
+      "_ref_resume_financial": true,
+      "award_purchase_referral_reward": true,
+      "_ref_repair_user": true,
+      "credit_user": true,
+      "auto_credit_from_pending": true,
+      "_do_purchase": true,
+      "check_bybit_auto": true,
+      "_cgpt_renew_core": true,
+      "cgpt_email_confirmed": true,
+      "_save_data": true
+    },
+    "webapp_files_unchanged": 62
+  },
+  "observed_user_screenshots": {
+    "monthly_total_GB": 73.42,
+    "http_responses_GB": 16.33,
+    "service_initiated_GB": 57.08,
+    "recent_process_uptime_hours_displayed_rounded": 0.41,
+    "recent_mongo_commands": 22442,
+    "recent_mongo_find": 18146,
+    "recent_mongo_sent_MiB_before_connection_compression": 6.78,
+    "recent_mongo_received_MiB_before_connection_compression": 148.5,
+    "recent_http_client_requests": 3802,
+    "recent_getChatMember_requests": 3153,
+    "recent_products_responses": 496,
+    "recent_products_sent_MiB": 10.37,
+    "recent_server_responses": 1448,
+    "recent_server_sent_MiB": 25.82,
+    "limits": "Recent process counters cover approximately 25 minutes, not the entire billing month. Screenshot totals do not identify individual database collections or referral jobs."
+  },
+  "code_findings": [
+    "get_setting previously issued a MongoDB find_one for every configuration read.",
+    "check_forced_sub and forced_sub_status independently queried Telegram on the same failed join screen.",
+    "The runtime referral worker scanned up to 100 due referrals per cycle, bypassing recent real membership proof.",
+    "The old meter grouped MongoDB by verb only, without collection or initiating function.",
+    "API products were requested approximately 20 times per minute in the supplied sample; consumer identity was missing from diagnostics.",
+    "GET URL/query bytes were absent from outgoing request-size estimates."
+  ],
+  "changes": {
+    "configuration_cache_seconds": 30,
+    "configuration_missing_cache_seconds": 5,
+    "configuration_local_writes_invalidate_immediately": true,
+    "concurrent_read_coalescing_and_inflight_invalidation_tested": true,
+    "membership_positive_cache_seconds": 300,
+    "membership_negative_cache_seconds": 10,
+    "membership_unknown_cache_seconds": 3,
+    "explicit_website_verification_is_always_fresh": true,
+    "membership_events_invalidate_user_cache": true,
+    "routine_referral_runtime_batch": 25,
+    "membership_events_and_leave_followups_prioritized": true,
+    "financial_rules_balances_and_website_proof_requirements_preserved": true,
+    "read_only_diagnostics": [
+      "collection and function names",
+      "API consumer numeric ID and 200/304 responses",
+      "sent/received sizes and largest measured request",
+      "revision, process marker and rates"
+    ],
+    "admin_command": "/network",
+    "export_button": "ad_network_export",
+    "diagnostic_memory_bounded": true
+  },
+  "offline_benchmarks": {
+    "twenty_configuration_reads": {
+      "mongo_find_before": 20,
+      "mongo_find_after": 1
+    },
+    "twenty_failed_join_screens_two_channels": {
+      "telegram_requests_before": 80,
+      "telegram_requests_after": 2
+    },
+    "one_background_cycle_three_channels": {
+      "telegram_requests_before": 300,
+      "telegram_requests_after": 75,
+      "routine_batch_before": 100,
+      "routine_batch_after": 25
+    }
+  },
+  "frontend": {
+    "build": "lara-38.1",
+    "byte_identical_files": 62,
+    "browser_tests_rerun": false,
+    "reason": "No frontend implementation or animation assets changed; previous browser reports retained."
+  },
+  "not_claimed": [
+    "No attribution of all historical 57.08 GB to this recent sample.",
+    "No promise of a monthly GB threshold or particular bill.",
+    "No assumption that every MongoDB read was a settings read.",
+    "An external API consumer must honor ETag/If-None-Match or reduce its own polling; the server preserves API compatibility."
+  ],
+  "test_isolation": "mongomock, fake Telegram and payment providers, external network disabled, loopback HTTP only",
+  "external_live_services_tested": false,
+  "production_bot_started": false,
+  "real_payments_tested": false,
+  "real_phones_tested": false,
+  "sources": [
+    "https://render.com/docs/service-metrics",
+    "https://render.com/docs/outbound-bandwidth"
+  ]
+}

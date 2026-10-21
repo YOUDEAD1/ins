@@ -11,7 +11,8 @@ from test_integration import mod, isolate
 
 @pytest.fixture(autouse=True)
 def bybit_state(mod, isolate, monkeypatch):
-    mod._BYBIT_HEALTH.update(credentials=None, retry_at=0, reason='', http=None, ret_code=None, reported_at=0)
+    mod._BYBIT_HEALTH.update(credentials=None, retry_at=0, reason='', http=None, ret_code=None,
+                             reported_at=0, failures=0, since=0, last_success=0)
     monkeypatch.setattr(mod, '_BYBIT_INVALID_KEY_COUNT', 0)
     monkeypatch.setattr(mod, '_bybit_creds', lambda: ('fixture-key', 'fixture-secret', '123', 'https://api.bybit.com'))
     monkeypatch.setattr(mod, 'VERIFIED_PROXIES', [])

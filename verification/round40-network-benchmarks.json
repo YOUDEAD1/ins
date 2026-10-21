@@ -1,0 +1,16 @@
+{
+  "twenty_configuration_reads": {
+    "mongo_find_before": 20,
+    "mongo_find_after": 1
+  },
+  "twenty_failed_join_screens_two_channels": {
+    "telegram_requests_before": 80,
+    "telegram_requests_after": 2
+  },
+  "one_background_cycle_three_channels": {
+    "telegram_requests_before": 300,
+    "telegram_requests_after": 75,
+    "routine_batch_before": 100,
+    "routine_batch_after": 25
+  }
+}

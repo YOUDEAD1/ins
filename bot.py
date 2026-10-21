@@ -3663,8 +3663,10 @@ class _NetworkMeter:
         self.lock = threading.RLock()
         self.started = time.monotonic()
         self.rows = {}
+        self.details = {}
+        self.instance = _uuid_mod.uuid4().hex[:12]
 
-    def record(self, group, label, sent=0, received=0, count=1, errors=0):
+    def record(self, group, label, sent=0, received=0, count=1, errors=0, detail=None):
         try:
             key = (str(group)[:24], str(label)[:90])
             with self.lock:
@@ -3673,33 +3675,95 @@ class _NetworkMeter:
                 row = self.rows.setdefault(key, {'requests': 0, 'sent': 0, 'received': 0, 'errors': 0})
                 for field, value in [('requests', count), ('sent', sent), ('received', received), ('errors', errors)]:
                     row[field] += max(0, int(value or 0))
+                row['max_sent'] = max(row.get('max_sent', 0), max(0, int(sent or 0)))
+                if detail:
+                    dkey = (str(group)[:24], str(label)[:90], str(detail)[:160])
+                    if dkey not in self.details and len(self.details) >= 192:
+                        dkey = (str(group)[:24], 'other', 'other')
+                    entry = self.details.setdefault(dkey, {'requests': 0, 'sent': 0, 'received': 0, 'errors': 0})
+                    for field, value in [('requests', count), ('sent', sent), ('received', received), ('errors', errors)]:
+                        entry[field] += max(0, int(value or 0))
+                    entry['max_sent'] = max(entry.get('max_sent', 0), max(0, int(sent or 0)))
         except Exception:
             pass
 
     def snapshot(self):
         with self.lock:
-            return {'seconds': max(0, time.monotonic() - self.started), 'rows': [
-                dict(group=key[0], label=key[1], **row) for key, row in self.rows.items()]}
+            return {'revision': 40, 'instance': self.instance,
+                'seconds': max(0, time.monotonic() - self.started), 'rows': [
+                dict(group=key[0], label=key[1], **row) for key, row in self.rows.items()],
+                'details': [dict(group=k[0], label=k[1], origin=k[2], **v) for k, v in self.details.items()]}
 
 
 _NET_METER = _NetworkMeter()
 
 
+def _net_trace_origin():
+    """Function names only: never frame locals, URLs, user input or credentials."""
+    frame, names = sys._getframe(1), []
+    skip = {'started', 'succeeded', 'failed', 'record', 'measured_send', 'measured_curl',
+            'write', '_w', 'wrapper', 'guarded', '__init__'}
+    for _ in range(64):
+        if frame is None:
+            break
+        name = frame.f_code.co_name
+        if (frame.f_globals.get('__name__') == __name__ and name not in skip and
+                re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name) and name not in names):
+            names.append(name)
+            if len(names) >= 3:
+                break
+        frame = frame.f_back
+    return ' <- '.join(names) or 'background'
+
+
+_NET_MONGO_COLLECTIONS = frozenset('settings users products product_stock catalogs custom_buttons custom_texts '
+    'required_channels referrals_v2 referrals_archived referral_milestones ref_money_events ref_clawbacks '
+    'ref_hold_notices ref_verification_challenges ref_balance_reconciliations purchase_rewards '
+    'orders balance_logs pending_deposits used_transactions claimed_hashes wrong_amount_deposits '
+    'api_keys api_events api_webhooks api_orders api_idempotency api_hidden api_pricing api_purchase_notices '
+    'ext_stores ext_products ext_orders ext_pending_new ext_request_attempts ext_broadcast_approvals '
+    'cgpt_accounts cgpt_cookies cgpt_invites_data cgpt_products cgpt_api_receipts cgpt_pending_migration '
+    'cgpt_sub_cache cgpt_del_cache cgpt_renew_pending system_errors admin_notice_delivery admin_audit '
+    'cart_checkouts channel_broadcasts device_marks deleted_products price_history stock_rollback_jobs '
+    'vip_discounts vip_ledger vip_products webapp_i18n webapp_translation_usage pending_admin_credits '
+    'ref_spam_alerts theft_attempts unauthorized_attempts'.split())
+
+
 class _NetworkMongoListener(_net_mongo_monitoring.CommandListener):
+    def __init__(self):
+        self.pending, self.lock = {}, threading.RLock()
+
+    def _key(self, event):
+        return getattr(event, 'request_id', None) or (threading.get_ident(), event.command_name)
+
+    def _detail(self, event):
+        with self.lock:
+            return self.pending.pop(self._key(event), None)
+
     def started(self, event):
         try:
-            _NET_METER.record('mongo', event.command_name, sent=len(_net_BSON.encode(event.command)))
+            collection = event.command.get(event.command_name)
+            if not isinstance(collection, str):
+                collection = event.command.get('collection')
+            collection = collection if isinstance(collection, str) and collection in _NET_MONGO_COLLECTIONS else 'other'
+            detail = collection + '.' + event.command_name + ' @ ' + _net_trace_origin()
+            with self.lock:
+                if len(self.pending) >= 2048:
+                    self.pending.pop(next(iter(self.pending)))
+                self.pending[self._key(event)] = detail
+            _NET_METER.record('mongo', event.command_name, sent=len(_net_BSON.encode(event.command)), detail=detail)
         except Exception:
             pass
 
     def succeeded(self, event):
         try:
-            _NET_METER.record('mongo', event.command_name, received=len(_net_BSON.encode(event.reply)), count=0)
+            _NET_METER.record('mongo', event.command_name, received=len(_net_BSON.encode(event.reply)), count=0,
+                              detail=self._detail(event))
         except Exception:
             pass
 
     def failed(self, event):
-        _NET_METER.record('mongo', event.command_name, count=0, errors=1)
+        _NET_METER.record('mongo', event.command_name, count=0, errors=1, detail=self._detail(event))
 
 
 _NET_MONGO_LISTENER = _NetworkMongoListener()
@@ -3770,7 +3834,8 @@ def _net_received_size(response):
 def _net_request_size(request):
     try:
         body = _net_payload_size(request.body)
-        return body + sum(len(str(k).encode()) + len(str(v).encode()) + 4 for k, v in request.headers.items())
+        line = len(str(request.method).encode()) + len(str(request.path_url).encode()) + 12
+        return body + line + sum(len(str(k).encode()) + len(str(v).encode()) + 4 for k, v in request.headers.items())
     except Exception:
         return 0
 
@@ -3792,7 +3857,7 @@ def _net_install_clients():
                 try:
                     _NET_METER.record('http_client', _net_client_label(request.url), sent=_net_request_size(request),
                         received=_net_received_size(response) if response is not None else 0,
-                        errors=error or int(getattr(response, 'status_code', 0) >= 400))
+                        errors=error or int(getattr(response, 'status_code', 0) >= 400), detail=_net_trace_origin())
                 except Exception:
                     pass
         measured_send._lara_network_meter = True
@@ -3810,7 +3875,7 @@ def _net_install_clients():
                 raise
             finally:
                 try:
-                    request_size = _net_payload_size(kwargs.get('data'))
+                    request_size = _net_payload_size(kwargs.get('data')) + len(str(method).encode()) + len(str(url).encode()) + 12
                     if kwargs.get('json') is not None:
                         try:
                             request_size += len(json.dumps(kwargs['json']).encode())
@@ -3822,7 +3887,7 @@ def _net_install_clients():
                     if not received and response is not None and not kwargs.get('stream'):
                         received = _net_payload_size(getattr(response, 'content', None))
                     _NET_METER.record('curl_client', _net_client_label(url), sent=request_size, received=received,
-                        errors=error or int(getattr(response, 'status_code', 0) >= 400))
+                        errors=error or int(getattr(response, 'status_code', 0) >= 400), detail=_net_trace_origin())
                 except Exception:
                     pass
         measured_curl._lara_network_meter = True
@@ -3878,6 +3943,7 @@ def _net_install_server():
             before = getattr(self, '_net_written', 0)
             self._net_status = 0
             self._net_etag = None
+            self._net_origin = None
             if hasattr(self, '_net_json_payload'):
                 del self._net_json_payload
             try:
@@ -3885,7 +3951,7 @@ def _net_install_server():
             finally:
                 _NET_METER.record('http_server', _net_server_route(getattr(self, 'path', '')),
                     sent=max(0, getattr(self, '_net_written', before) - before),
-                    errors=int(getattr(self, '_net_status', 0) >= 400))
+                    errors=int(getattr(self, '_net_status', 0) >= 400), detail=self._net_origin)
         return measured
     for method in ('do_GET', 'do_POST', 'do_OPTIONS'):
         if hasattr(APIHandler, method):
@@ -4061,9 +4127,76 @@ def secure_wipe(data_dict: dict):
         pass
 
 
+_SETTINGS_CACHE = {}
+_SETTINGS_CACHE_LOCK = threading.RLock()
+_SETTINGS_READ_LOCKS = [threading.RLock() for _ in range(32)]
+_SETTINGS_CACHE_EPOCH = 0
+
+
+def _settings_cache_invalidate():
+    global _SETTINGS_CACHE_EPOCH
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE_EPOCH += 1
+        _SETTINGS_CACHE.clear()
+
+
 def get_setting(key, default="Not Set"):
-    res = db.settings.find_one({'key': key})
-    return res['value'] if res else default
+    """Share configuration reads briefly; local writes invalidate immediately."""
+    if not isinstance(key, str):
+        res = db.settings.find_one({'key': key}, {'value': 1})
+        return res['value'] if res else default
+    with _SETTINGS_READ_LOCKS[hash(key) % len(_SETTINGS_READ_LOCKS)]:
+        with _SETTINGS_CACHE_LOCK:
+            entry = _SETTINGS_CACHE.get(key)
+            epoch = _SETTINGS_CACHE_EPOCH
+        if not entry or entry['expires'] <= time.monotonic():
+            res = db.settings.find_one({'key': key}, {'value': 1})
+            value = res['value'] if res else None  # Never cache a failed read.
+            entry = {'present': bool(res), 'value': value,
+                     'expires': time.monotonic() + (30 if res else 5)}
+            with _SETTINGS_CACHE_LOCK:
+                if epoch == _SETTINGS_CACHE_EPOCH:
+                    if len(_SETTINGS_CACHE) >= 512:
+                        _SETTINGS_CACHE.pop(next(iter(_SETTINGS_CACHE)))
+                    _SETTINGS_CACHE[key] = entry
+        value = entry['value'] if entry['present'] else default
+        return __import__('copy').deepcopy(value) if isinstance(value, (dict, list, set)) else value
+
+
+def _install_settings_cache_hook():
+    classes = [__import__('pymongo.collection', fromlist=['Collection']).Collection]
+    mock = sys.modules.get('mongomock')
+    if mock is not None:
+        classes.append(mock.Collection)
+    methods = ('insert_one', 'insert_many', 'update_one', 'update_many', 'replace_one',
+               'delete_one', 'delete_many', 'find_one_and_update', 'find_one_and_replace',
+               'find_one_and_delete', 'bulk_write', 'drop')
+    for cls in classes:
+        if getattr(cls, '_lara_settings_cache_hook', False):
+            continue
+        for method in methods:
+            original = getattr(cls, method, None)
+            if not callable(original):
+                continue
+            def wrap(original):
+                @functools.wraps(original)
+                def write(self, *args, **kwargs):
+                    try:
+                        return original(self, *args, **kwargs)
+                    finally:
+                        # Even an acknowledgement failure may follow a committed write.
+                        if self.name == 'settings':
+                            _settings_cache_invalidate()
+                        elif self.name == 'required_channels':
+                            invalidate = globals().get('_fsub_invalidate')
+                            if invalidate:
+                                invalidate()
+                return write
+            setattr(cls, method, wrap(original))
+        cls._lara_settings_cache_hook = True
+
+
+_install_settings_cache_hook()
 
 # ============================================================
 # 👥 4.5. نظام الإحالات الجديد V2 (Real-time + جدول مستقل)
@@ -6125,13 +6258,21 @@ def _ref_checker_tick(limit=100):
         return 0
     due = {'status': {'$in': ['pending', 'active', 'left']}, '$and': [_ref_verified_query(),
         {'$or': [{'sub_next_check_at': {'$exists': False}}, {'sub_next_check_at': {'$lte': now}}]}]}
-    refs = list(db.referrals_v2.find(due).sort('sub_next_check_at', 1).limit(max(1, min(200, int(limit)))))
+    batch = max(1, min(200, int(limit)))
+    urgent = {'$or': [{'membership_event_pending': True},
+                      {'status': 'active', 'left_checks': {'$gt': 0}}]}
+    refs = list(db.referrals_v2.find({'$and': [due, urgent]}).sort('sub_next_check_at', 1).limit(batch))
+    if len(refs) < batch:
+        refs += list(db.referrals_v2.find({'$and': [due, {'_id': {'$nin': [r['_id'] for r in refs]}}]})
+                     .sort('sub_next_check_at', 1).limit(batch - len(refs)))
     errors, checked = 0, 0
     for rec in refs:
         uid = int(rec['invited_id'])
-        subscribed = check_forced_sub(uid, use_cache=False)
+        # Reuse a recent successful real check; website verification still forces
+        # a fresh read, and membership events invalidate it immediately.
+        subscribed = check_forced_sub(uid)
         checked += 1
-        changes = {'sub_checked_at': now}
+        changes = {'sub_checked_at': now, 'membership_event_pending': False}
         if subscribed is None:
             errors += 1
             changes.update(sub_next_check_at=now + 120)
@@ -6157,7 +6298,8 @@ def _ref_checker_tick(limit=100):
                 changes['sub_next_check_at'] = now + 21600 + uid % 301
         else:
             changes['sub_next_check_at'] = now + (300 if rec.get('status') == 'pending' else 21600 + uid % 301)
-        db.referrals_v2.update_one({'_id': rec['_id']}, {'$set': changes})
+        db.referrals_v2.update_one({'_id': rec['_id'],
+            'membership_event_at': rec.get('membership_event_at')}, {'$set': changes})
         if errors >= 3:
             _REF_SCAN_HEALTH['retry_at'] = now + 120
             break
@@ -6175,7 +6317,7 @@ def background_referral_checker_v2():
     while True:
         try:
             _ref_resume_financial()
-            _ref_checker_tick()
+            _ref_checker_tick(limit=25)
         except Exception:
             logger.exception('Background referral verification cycle failed')
         _REF_SCAN_WAKE.wait(timeout=60)
@@ -8303,6 +8445,10 @@ _FORCED_SUB_CACHE = {}          # {uid: (result, expiry_ts)}
 _FORCED_SUB_CACHE_TTL = 300     # 5 دقائق — نتذكّر أن الشخص مشترك فلا نستعلم كل ضغطة
 _FSUB_CHANNEL_CACHE = {'expires': 0, 'rows': []}
 _FSUB_CHANNEL_LOCK = threading.RLock()
+_FSUB_MEMBER_CACHE = {}
+_FSUB_MEMBER_LOCK = threading.RLock()
+_FSUB_MEMBER_READ_LOCKS = [threading.RLock() for _ in range(64)]
+_FSUB_MEMBER_EPOCH = 0
 
 
 def _fsub_channels():
@@ -8314,8 +8460,45 @@ def _fsub_channels():
 
 
 def _fsub_invalidate():
+    global _FSUB_MEMBER_EPOCH
     _FSUB_CHANNEL_CACHE['expires'] = 0
     _FORCED_SUB_CACHE.clear()
+    with _FSUB_MEMBER_LOCK:
+        _FSUB_MEMBER_EPOCH += 1
+        _FSUB_MEMBER_CACHE.clear()
+
+
+def _fsub_invalidate_user(uid):
+    global _FSUB_MEMBER_EPOCH
+    uid = int(uid)
+    _FORCED_SUB_CACHE.pop(uid, None)
+    with _FSUB_MEMBER_LOCK:
+        _FSUB_MEMBER_EPOCH += 1
+        for key in [key for key in _FSUB_MEMBER_CACHE if key[0] == uid]:
+            _FSUB_MEMBER_CACHE.pop(key, None)
+
+
+def _fsub_member(uid, channel_id, use_cache=True):
+    """Coalesce repeated channel checks; explicit verification always reads Telegram."""
+    uid = int(uid)
+    key = (uid, str(channel_id))
+    with _FSUB_MEMBER_READ_LOCKS[uid % len(_FSUB_MEMBER_READ_LOCKS)]:
+        with _FSUB_MEMBER_LOCK:
+            entry = _FSUB_MEMBER_CACHE.get(key)
+            epoch = _FSUB_MEMBER_EPOCH
+        if use_cache and entry and entry[1] > time.time():
+            return entry[0]
+        try:
+            joined = _fsub_joined(bot.get_chat_member(channel_id, uid))
+        except Exception:
+            joined = None
+        with _FSUB_MEMBER_LOCK:
+            if epoch == _FSUB_MEMBER_EPOCH:
+                if len(_FSUB_MEMBER_CACHE) >= 8192:
+                    _FSUB_MEMBER_CACHE.pop(next(iter(_FSUB_MEMBER_CACHE)))
+                _FSUB_MEMBER_CACHE[key] = (joined, time.time() +
+                    (_FORCED_SUB_CACHE_TTL if joined is True else 10 if joined is False else 3))
+        return joined
 
 
 def _fsub_joined(member):
@@ -8334,9 +8517,10 @@ def _ref_channel_membership_changed(update):
     if not any(str(c.get('channel_id', '')).lower() in identities for c in _fsub_channels()):
         return
     uid = int(update.new_chat_member.user.id)
-    _FORCED_SUB_CACHE.pop(uid, None)
+    _fsub_invalidate_user(uid)
     db.referrals_v2.update_one({'invited_id': uid}, {'$set': {
-        'sub_next_check_at': int(time.time()), 'membership_event_at': int(time.time())}})
+        'sub_next_check_at': int(time.time()), 'membership_event_at': int(time.time()),
+        'membership_event_pending': True}})
     _REF_SCAN_WAKE.set()
 
 
@@ -8352,9 +8536,11 @@ def check_forced_sub(uid, use_cache=True):
     يرجع True (مشترك بالكل) / False (طلع من واحدة على الأقل) / None (خطأ اتصال).
 
     ⚡ للسرعة: نخزّن نتيجة "مشترك" مؤقتاً (5 دقائق) فلا نستعلم من تيليجرام
-    في كل ضغطة — التنقّل يصير فورياً. النتيجة False لا تُخزَّن (نعيد الفحص
-    فوراً حتى يشترك). التخزين يُمسح تلقائياً بعد المدة.
+    في كل ضغطة. نتائج كل قناة مشتركة مع قائمة القنوات: الرفض عشر ثوانٍ فقط،
+    والغموض ثلاث ثوانٍ. زر التحقق الصريح وأحداث العضوية يتجاوزان الانتظار.
     """
+    with _FSUB_MEMBER_LOCK:
+        epoch = _FSUB_MEMBER_EPOCH
     # ⚡ cache: لو عندنا نتيجة "مشترك" حديثة، نرجّعها فوراً بلا استعلام
     if use_cache:
         cached = _FORCED_SUB_CACHE.get(uid)
@@ -8370,8 +8556,7 @@ def check_forced_sub(uid, use_cache=True):
     had_error = False
     for c in chans:
         try:
-            member = bot.get_chat_member(c['channel_id'], uid)
-            joined = _fsub_joined(member)
+            joined = _fsub_member(uid, c['channel_id'], use_cache=use_cache)
             if joined is None:
                 had_error = True
                 continue
@@ -8386,7 +8571,14 @@ def check_forced_sub(uid, use_cache=True):
     if had_error:
         return None  # ما نخزّن الغموض
     # مشترك بالكل → نخزّن للسرعة
-    _FORCED_SUB_CACHE[uid] = (True, time.time() + _FORCED_SUB_CACHE_TTL)
+    with _FSUB_MEMBER_LOCK:
+        if epoch == _FSUB_MEMBER_EPOCH:
+            expiry = min([time.time() + _FORCED_SUB_CACHE_TTL] + [
+                _FSUB_MEMBER_CACHE[(int(uid), str(c['channel_id']))][1] for c in chans
+                if (int(uid), str(c['channel_id'])) in _FSUB_MEMBER_CACHE])
+            if len(_FORCED_SUB_CACHE) >= 8192:
+                _FORCED_SUB_CACHE.pop(next(iter(_FORCED_SUB_CACHE)))
+            _FORCED_SUB_CACHE[uid] = (True, expiry)
     return True
 
 _FSUB_META_TTL = 24 * 3600
@@ -8433,11 +8625,10 @@ def _fsub_meta(c, refresh=False):
 def forced_sub_status(uid):
     """كل قناة/جروب إجباري مع حالة المستخدم: joined = True / False / None (ما قدرنا نفحص)."""
     out = []
-    for c in db.required_channels.find():
+    for c in _fsub_channels():
         m = _fsub_meta(c)
         try:
-            st = bot.get_chat_member(c['channel_id'], uid).status
-            m['joined'] = st not in ('left', 'kicked')
+            m['joined'] = _fsub_member(uid, c['channel_id'])
         except Exception:
             m['joined'] = None
         out.append(m)
@@ -9400,8 +9591,8 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
                 if item['kind'] == 'ext':
                     callback = f"vext_{pid[4:]}"
                 else:
-                    if item['kind'] == 'cgpt':
-                        pid = 'cgpt_main_' + pid[5:]
+                    # Keep the canonical cgpt_ alias: cgpt_main_ plus the folder
+                    # produces 66 UTF-8 bytes, above Telegram's 64-byte limit.
                     callback = f'vi_p_{pid}_c_{cat_id}'
                 kwargs = {'text': f"{name_text[:25]}{'..' if len(name_text) > 25 else ''} | 📦 {stock_text}",
                           'callback_data': callback, 'style': 'success' if item.get('in_stock') else 'danger'}
@@ -9903,7 +10094,7 @@ def refresh_main(call):
     bot.answer_callback_query(call.id)
     # مسح cache الاشتراك حتى لو المستخدم اشترك الآن، يُفحص فوراً
     try:
-        _FORCED_SUB_CACHE.pop(call.from_user.id, None)
+        _fsub_invalidate_user(call.from_user.id)
     except Exception:
         pass
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -14974,7 +15165,8 @@ def bybit_available_methods():
     return ['UID'] if uid_set else []
 
 
-_BYBIT_HEALTH = {'credentials': None, 'retry_at': 0.0, 'reason': '', 'http': None, 'ret_code': None, 'reported_at': 0.0}
+_BYBIT_HEALTH = {'credentials': None, 'retry_at': 0.0, 'reason': '', 'http': None, 'ret_code': None,
+                 'reported_at': 0.0, 'failures': 0, 'since': 0.0, 'last_success': 0.0}
 _BYBIT_HEALTH_LOCK = threading.RLock()
 
 
@@ -14983,10 +15175,50 @@ def _bybit_failure(reason, http=None, ret_code=None, cooldown=60):
     now = time.time()
     with _BYBIT_HEALTH_LOCK:
         changed = (reason, http, ret_code) != (_BYBIT_HEALTH['reason'], _BYBIT_HEALTH['http'], _BYBIT_HEALTH['ret_code'])
-        _BYBIT_HEALTH.update(retry_at=max(_BYBIT_HEALTH['retry_at'], now + cooldown), reason=reason, http=http, ret_code=ret_code)
-        if changed or now - _BYBIT_HEALTH['reported_at'] >= 600:
+        failures = 1 if changed else _BYBIT_HEALTH.get('failures', 0) + 1
+        if reason == 'http_rejected' and http == 403:
+            # Bybit requires at least ten minutes after an IP frequency ban.
+            # Continued refusals back off to one hour; never proxy around a 403.
+            cooldown = max(cooldown, min(3600, 600 * 2 ** min(failures - 1, 3)))
+        _BYBIT_HEALTH.update(retry_at=max(_BYBIT_HEALTH['retry_at'], now + cooldown),
+                             reason=reason, http=http, ret_code=ret_code, failures=failures,
+                             since=_BYBIT_HEALTH.get('since') or now)
+        report = changed or not _BYBIT_HEALTH['reported_at']
+        if report:
             _BYBIT_HEALTH['reported_at'] = now
-            logger.error('[BYBIT] request unavailable: reason=%s http=%s api_code=%s; retry deferred', reason, http or 'unavailable', ret_code if ret_code is not None else 'not supplied')
+    if report:
+        # Handled transport outages stay visible in the admin error history,
+        # without creating a fresh emergency notification on every retry.
+        log = logger.warning if reason in ('http_rejected', 'connection_failed') else logger.error
+        log('[BYBIT] request unavailable: reason=%s http=%s api_code=%s; retry deferred; inspect /bybit_status',
+            reason, http or 'unavailable', ret_code if ret_code is not None else 'not supplied')
+
+
+def _bybit_health_lines():
+    """Cached operational status only; no network requests or secret values."""
+    with _BYBIT_HEALTH_LOCK:
+        health = dict(_BYBIT_HEALTH)
+    reason = health.get('reason')
+    if not reason:
+        return ['✅ آخر اتصال بـ Bybit نجح.' if health.get('last_success') else
+                'ℹ️ لم يُسجّل فحص اتصال بـ Bybit منذ بدء هذه النسخة.']
+    labels = {'http_rejected': 'رفض اتصال HTTP', 'connection_failed': 'تعذّر الاتصال',
+              'non_json_response': 'استجابة غير صالحة (ليست JSON)',
+              'invalid_api_envelope': 'استجابة API غير مكتملة',
+              'invalid_result': 'نتيجة API غير صالحة', 'api_rejected': 'رفض من واجهة Bybit'}
+    lines = ['⚠️ حالة اتصال Bybit: ' + labels.get(reason, 'غير متاح مؤقتاً')]
+    if health.get('http') is not None:
+        lines.append('HTTP: ' + str(health['http']))
+    if health.get('ret_code') is not None:
+        lines.append('رمز API: ' + str(health['ret_code']))
+    seconds = max(0, int(health.get('retry_at', 0) - time.time() + 0.999))
+    lines.append(f'إعادة المحاولة بعد {seconds} ثانية عند وجود إيداع معلّق.' if seconds else
+                 'انتهت مهلة الانتظار؛ سيُعاد الفحص عند وجود إيداع معلّق أو طلب فحص.')
+    if health.get('http') == 403:
+        lines.append('Bybit رفض الطلب. افحص قيود IP/منطقة الخادم وحدود الطلبات؛ '
+                     '403 وحده لا يثبت أن مفتاح API خاطئ.')
+    lines.append('تعذّر التحقق لا يثبت وصول التحويل أو عدم وصوله؛ لا تُعد التحويل.')
+    return lines
 
 
 def _bybit_signed_request(path, params=None, timeout=8):
@@ -14998,7 +15230,8 @@ def _bybit_signed_request(path, params=None, timeout=8):
     credentials = hashlib.sha256((api_key + '|' + api_secret + '|' + base).encode()).hexdigest()
     with _BYBIT_HEALTH_LOCK:
         if _BYBIT_HEALTH['credentials'] != credentials:
-            _BYBIT_HEALTH.update(credentials=credentials, retry_at=0, reason='', http=None, ret_code=None, reported_at=0)
+            _BYBIT_HEALTH.update(credentials=credentials, retry_at=0, reason='', http=None, ret_code=None,
+                                 reported_at=0, failures=0, since=0, last_success=0)
             _BYBIT_INVALID_KEY_COUNT = 0
         if _BYBIT_HEALTH['retry_at'] > time.time():
             return None
@@ -15044,8 +15277,12 @@ def _bybit_signed_request(path, params=None, timeout=8):
                 _bybit_failure('invalid_result', status)
                 return False
             with _BYBIT_HEALTH_LOCK:
-                _BYBIT_HEALTH.update(retry_at=0, reason='', http=None, ret_code=None)
+                recovered = bool(_BYBIT_HEALTH['reason'])
+                _BYBIT_HEALTH.update(retry_at=0, reason='', http=None, ret_code=None,
+                                     reported_at=0, failures=0, since=0, last_success=time.time())
                 _BYBIT_INVALID_KEY_COUNT = 0
+            if recovered:
+                logger.info('[BYBIT] connection recovered; normal verification resumed')
             return result
         _rc = data.get('retCode')
         _bybit_failure('api_rejected', status, _rc, cooldown=300 if _rc in (10003, 10004, 10005, 10007, 10009, 10010) else 60)
@@ -15825,6 +16062,18 @@ def bybit_check_payment(call):
         # نجح — رسالة التأكيد وصلت أصلاً من auto_credit_from_pending
         return
 
+    with _BYBIT_HEALTH_LOCK:
+        unavailable = bool(_BYBIT_HEALTH.get('reason'))
+    if unavailable:
+        bot.send_message(uid, bil(uid,
+            '⚠️ <b>تعذّر التحقق من Bybit حالياً.</b>\n'
+            'الاتصال بالخدمة غير متاح؛ لم نتمكن من تأكيد حالة تحويلك. '
+            'تواصل مع الدعم مع رقم العملية، ولا تُعد التحويل.',
+            '⚠️ <b>Bybit verification is temporarily unavailable.</b>\n'
+            'We could not connect to confirm your transfer status. '
+            'Contact support with your transaction ID; do not pay again.'), parse_mode='HTML')
+        return
+
     bot.send_message(
         uid,
         bil(uid,
@@ -16269,6 +16518,7 @@ def bybit_status_command(message):
             problems.append('الفحص متوقف بالقيمة bybit_disabled=1')
         if hidden:
             problems.append('زر Bybit مخفي بإعدادات الأدمن')
+        lines.extend([''] + _bybit_health_lines())
         lines.append('\nسبب المنع: ' + ('؛ '.join(problems) if problems else 'لا يظهر مانع في الإعدادات المقروءة الآن.'))
         lines.append('\nهذا فحص للقيم المحفوظة؛ لا يختبر صلاحية المفتاح لدى Bybit ولا حالة توثيق الحساب.')
         bot.send_message(message.chat.id, '\n'.join(lines), parse_mode=None)
@@ -37012,7 +37262,7 @@ def _wa_ref_verify(identity, body):
     if pending:
         # الخطوة ١: لازم يكون مشترك في القنوات والجروبات قبل فحص الجهاز
         try:
-            _FORCED_SUB_CACHE.pop(uid, None)
+            _fsub_invalidate_user(uid)
         except Exception:
             pass
         _subbed = check_forced_sub(uid, use_cache=False)
@@ -37089,7 +37339,7 @@ def _refdv_apply(uid, verdict, admin_id, admin_name=None):
             return '⏳ لا يمكن اعتماد الإحالة قبل أن يُكمل المدعو التحقق داخل الموقع.'
         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok_admin', 'dv_by': admin_id}})
         try:
-            _FORCED_SUB_CACHE.pop(uid, None)
+            _fsub_invalidate_user(uid)
         except Exception:
             pass
         if rec.get('status') == 'active':
@@ -40033,12 +40283,14 @@ def _net_products_put(uid, data, generation):
 
 
 def _net_api_products_response(handler, uid):
+    handler._net_origin = 'api_products:customer_' + str(int(uid)) + ':200'
     result = _net_api_products_payload(uid)
     encoded = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()
     tag = 'W/"' + hashlib.sha256(str(uid).encode() + b':' + encoded).hexdigest()[:40] + '"'
     handler._net_etag = tag
     values = [v.strip() for v in str(handler.headers.get('If-None-Match', '')).split(',')]
     if tag in values or '*' in values:
+        handler._net_origin = 'api_products:customer_' + str(int(uid)) + ':304'
         return _json_resp(handler, 304, None)
     handler._net_json_payload = encoded
     return _json_resp(handler, 200, result)
@@ -40169,7 +40421,8 @@ def _net_size_text(value):
 @bot.callback_query_handler(func=lambda call: call.data == 'ad_network')
 @admin_required
 def ad_network(call):
-    bot.answer_callback_query(call.id)
+    if call.id:
+        bot.answer_callback_query(call.id)
     data = _NET_METER.snapshot()
     groups = [('http_server', 'ردود الموقع وAPI'), ('http_client', 'طلبات HTTP الصادرة'),
               ('curl_client', 'اتصالات ChatGPT'), ('mongo', 'أوامر MongoDB')]
@@ -40181,18 +40434,56 @@ def ad_network(call):
         for row in sorted(rows, key=lambda r: r['sent'], reverse=True)[:4]:
             lines.append(f'• <code>{html.escape(row["label"])}</code>: {row["requests"]:,} طلب، {_net_size_text(row["sent"])} إرسال')
         lines.append('')
+    details = data.get('details', [])
+    for group, title in [('mongo', 'أكثر مصادر أوامر MongoDB'), ('http_client', 'مصادر HTTP الصادرة'),
+                         ('http_server', 'سحب قائمة المنتجات حسب حساب API')]:
+        rows = [r for r in details if r['group'] == group]
+        if not rows:
+            continue
+        lines.append('<b>' + title + '</b>')
+        for row in sorted(rows, key=lambda r: r['requests'], reverse=True)[:2]:
+            origin = html.escape(row['origin'][:105])
+            lines.append(f'• <code>{origin}</code>: {row["requests"]:,} طلب')
+        lines.append('')
+    lines.append('التحديث: 40 | نسخة التشغيل: <code>' + data['instance'] + '</code>')
     lines += ['هذه أحجام تقريبية داخل التطبيق، وليست فاتورة Render. بعض الاستقبال قد لا يتوفر قياسه.',
         'قياس MongoDB قبل ضغط الاتصال، ولا يشمل هذا التقرير تكاليف TLS أو حركة الخدمات الأخرى.',
         'القياس في الذاكرة فقط؛ لا توجد كتابة لقاعدة البيانات لكل طلب، ويبدأ من جديد بعد إعادة التشغيل.',
         'الرقم الشهري الدقيق: Render ← الخدمة ← Metrics ← Outbound Bandwidth، والإجمالي في Billing.']
     mk = InlineKeyboardMarkup()
     mk.add(InlineKeyboardButton('🔄 تحديث القياس', callback_data='ad_network'))
+    mk.add(InlineKeyboardButton('📄 تقرير تفصيلي JSON', callback_data='ad_network_export'))
     mk.add(InlineKeyboardButton('🔙 لوحة الإدارة', callback_data='admin_panel_main'))
     bot.send_message(call.message.chat.id, '\n'.join(lines), parse_mode='HTML', reply_markup=mk)
 
 
+@bot.callback_query_handler(func=lambda call: call.data == 'ad_network_export')
+@admin_required
+def ad_network_export(call):
+    bot.answer_callback_query(call.id)
+    data = _NET_METER.snapshot()
+    minutes = max(data['seconds'] / 60, 1 / 60)
+    data['rates_per_minute'] = {group: round(sum(r['requests'] for r in data['rows']
+        if r['group'] == group) / minutes, 2) for group in ('mongo', 'http_client', 'curl_client', 'http_server')}
+    data['scope'] = 'One application process since restart; sizes are approximate, not Render billing.'
+    data['measurement_limits'] = ['MongoDB sizes are BSON before connection compression.',
+        'Received bytes are separate from bytes sent; do not add incoming reads to outbound billing.',
+        'TLS, connection overhead and other Render resources are not included.',
+        'Function names, collection names and API consumer numeric IDs only; no request values or credentials.']
+    out = io.BytesIO(json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'))
+    out.name = 'lara-network-report.json'
+    bot.send_document(call.message.chat.id, out, caption='تفاصيل استهلاك هذه النسخة فقط؛ لا يتضمن مفاتيح أو كوكيز أو محتوى الطلبات.')
+
+
+@bot.message_handler(commands=['network'])
+def network_command(message):
+    if not _is_admin_check(message.from_user.id):
+        return
+    ad_network(__import__('types').SimpleNamespace(id='', from_user=message.from_user, message=message))
+
+
 _ADM_SECTIONS.append(('network', '📡', 'استهلاك الشبكة', 'Network usage', 'ad_network'))
-_ADM_OPEN_OK.add('ad_network')
+_ADM_OPEN_OK.update(('ad_network', 'ad_network_export'))
 register_pending_deposit = _net_wrap_pending(register_pending_deposit)
 _net_install_clients()
 _net_install_server()
