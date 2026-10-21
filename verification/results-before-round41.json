@@ -1,0 +1,887 @@
+{
+  "revision": "20 + reliability (21) + deposit buttons (22) + products menu/CMS (23) + error monitor/cart (24) + channel broadcasts/dual links (25) + network usage (26) + user inspection/member navigation (27) + outage recovery/store links (28) + website-gated referrals/wallet reconciliation/network budget (29) + prospective referral policy/read-only diagnosis/page loading (30) + report settings/extended read-only evidence/accurate admin snapshots (31) + vector LARA loading screen in the store/bot language (32) + float-dust balances / clear purchase errors / iOS early Telegram events / network read retry (33) + mobile product rendering/media lifecycle/loading budget (36) + inventory visibility/folders/notification locales/Bybit resilience (37) + original storefront motion/historical inventory/owner visibility (38) + folder callback byte limit/Bybit outage handling (39) + configuration/membership request coalescing and source diagnostics (40)",
+  "verified_at": "2026-10-21T00:54:47.051862+00:00",
+  "python": "3.12.14",
+  "tests": {
+    "total": 849,
+    "passed": 849,
+    "failed": 0,
+    "skipped": 0,
+    "by_module": {
+      "verification.test_cart": 35,
+      "verification.test_channel_broadcast": 59,
+      "verification.test_client_diagnostics": 17,
+      "verification.test_deposit_buttons": 29,
+      "verification.test_error_monitor": 16,
+      "verification.test_integration": 183,
+      "verification.test_money_dust": 7,
+      "verification.test_network": 47,
+      "verification.test_products_menu": 27,
+      "verification.test_referral_bandwidth": 13,
+      "verification.test_referral_integrity": 40,
+      "verification.test_referral_policy": 19,
+      "verification.test_reliability": 35,
+      "verification.test_report_config": 17,
+      "verification.test_round34_alerts": 14,
+      "verification.test_round37_bybit": 17,
+      "verification.test_round37_notice_language": 44,
+      "verification.test_round37_visibility": 28,
+      "verification.test_round38_visibility": 22,
+      "verification.test_round39_bybit": 11,
+      "verification.test_round39_callbacks": 18,
+      "verification.test_round40_network": 38,
+      "verification.test_runtime_recovery": 42,
+      "verification.test_support": 31,
+      "verification.test_user_inspection": 40
+    }
+  },
+  "python_compile": "passed",
+  "undefined_names": 0,
+  "javascript_syntax": "passed",
+  "images_validated": 34,
+  "frontend_dom_http_integration": "passed",
+  "frontend_languages": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "frontend_javascript_errors": 0,
+  "preserved_original_definitions": 1052,
+  "old_functions_classes_and_methods_missing": 0,
+  "external_live_services_tested": false,
+  "real_browser_render_tested": true,
+  "real_phones_tested": false,
+  "user_windows_machine_tested": false,
+  "test_isolation": "Fake credentials; MongoDB in memory; Telegram/payment/supplier/ChatGPT mocked. Browser server permanently blocks external HTTP integrations and outbound non-local sockets.",
+  "new_recovery_data": [
+    "stock_rollback_jobs collection",
+    "cgpt_invites_data.renewal_receipts",
+    "temporary user stock debit markers"
+  ],
+  "notes": "Local verification is not a guarantee of all external services or all physical devices.",
+  "deposit_copy_controls": {
+    "binance_amount_and_pay_id_first_row": true,
+    "shared_custom_copy_emoji": true,
+    "crypto_amount_copy_buttons": 1,
+    "crypto_amount_uses_native_currency": true,
+    "usdt_unique_precision": 6,
+    "bot_pending_quote_shared_with_site": true,
+    "telegram_note_id_copy_preserved": true
+  },
+  "products_menu": {
+    "search_above_available": true,
+    "full_width_rows": true,
+    "languages": [
+      "ar",
+      "en"
+    ],
+    "neutral_default_style": true,
+    "custom_styles_preserved": true,
+    "public_linked_table": true,
+    "quantity_discounts": true,
+    "hidden_products_excluded": true,
+    "text_fallback_preserves_links": true,
+    "old_available_browser_preserved": true,
+    "authenticated_admin_console_cms": true,
+    "premium_emoji_and_messages_editable": true,
+    "console_cms_roundtrip_tested": true
+  },
+  "preserved_immediately_previous_definitions": 1366,
+  "frontend_cart_chromium_integration": "passed",
+  "frontend_viewports": [
+    "1360x960",
+    "390x844"
+  ],
+  "frontend_themes": [
+    "light",
+    "dark"
+  ],
+  "frontend_rtl_tested": true,
+  "frontend_browser_lost_response_recovery": "passed",
+  "frontend_browser_safe_quote_cancel": "passed",
+  "frontend_browser_email_edit": "passed",
+  "error_monitor": {
+    "private_admin_records": true,
+    "redact_before_storage": true,
+    "repeat_count": true,
+    "important_error_alerts": true,
+    "alert_cooldown_seconds": 600,
+    "retention_days": 30,
+    "authenticated_browser_reporting": true,
+    "nonblocking_bounded_queue": true,
+    "db_failure_retry": true
+  },
+  "website_cart": {
+    "website_only": true,
+    "max_lines": 20,
+    "server_price_quote": true,
+    "quantity_and_vip_discounts": true,
+    "auth_and_visibility_enforced": true,
+    "stable_checkout_id": true,
+    "per_item_durable_result": true,
+    "repeat_confirmation_safe": true,
+    "lost_receipt_recovery": true,
+    "partial_fulfillment_explicit": true,
+    "unknown_outcomes_not_retried": true,
+    "old_direct_buy_preserved": true
+  },
+  "new_collections_round24": [
+    "system_errors",
+    "cart_checkouts"
+  ],
+  "current_definitions": 1378,
+  "frontend_channel_deep_links_chromium": "passed",
+  "frontend_channel_deep_links_cases": 4,
+  "channel_publication_live_tested": false,
+  "channel_publishing": {
+    "username_only": true,
+    "separate_from_forced_subscription": true,
+    "bot_and_admin_publish_rights_required": true,
+    "native_content_copy": true,
+    "private_preview_before_confirmation": true,
+    "frozen_reviewed_message": true,
+    "stale_confirmation_rejected": true,
+    "single_atomic_publish_claim": true,
+    "uncertain_delivery_not_retried": true,
+    "persisted_receipts": true,
+    "snapshot_table_english": true,
+    "product_names_link_to_website": true,
+    "customizable_green_buttons": true,
+    "dual_destinations": true,
+    "private_user_language": true,
+    "channel_language_selection": true,
+    "cms_in_bot_and_site_console": true
+  },
+  "new_collections_round25": [
+    "channel_broadcasts"
+  ],
+  "definition_count_scope": "All qualified functions, async functions and classes including nested definitions.",
+  "frontend_network_chromium_integration": "passed",
+  "round26_browser_cases": {
+    "unchanged_catalog_preserves_cards": true,
+    "profile_poll_pause_and_store_resume": true,
+    "inflight_catalog_coalescing": true,
+    "zero_javascript_exceptions": true,
+    "network_test_orders": 0,
+    "network_test_balance": 100,
+    "cart_recovery_regression": true
+  },
+  "network_usage": {
+    "admin_report": true,
+    "in_memory_only": true,
+    "no_secrets_or_payloads_recorded": true,
+    "approximate_sizes_not_billing": true,
+    "mongo_sizes_before_compression": true,
+    "mongo_zlib_negotiation": true,
+    "json_gzip_negotiation": true,
+    "private_api_etag": true,
+    "per_user_bounded_cache": true,
+    "catalog_conditional_body": true,
+    "supplier_success_interval_seconds": 120,
+    "supplier_failure_backoff_cap_seconds": 1800,
+    "payment_active_interval_seconds": 12,
+    "payment_idle_interval_seconds": 60,
+    "payment_new_pending_immediate_wake": true,
+    "binance_note_without_pending_preserved": true,
+    "admin_notice_idle_interval_seconds": 30,
+    "new_admin_notice_immediate_wake": true,
+    "real_render_dashboard_measured": false,
+    "monthly_5gb_guaranteed": false,
+    "benchmarks": {
+      "sample_api_json": {
+        "uncompressed_bytes": 86379,
+        "gzip_bytes": 571,
+        "saved_percent": 99.34,
+        "representative": "repeated bilingual test descriptions"
+      },
+      "sample_unchanged_catalog": {
+        "full_bytes": 8091,
+        "unchanged_bytes": 547
+      },
+      "root_prefix_steady_sync_requests": {
+        "before": 8,
+        "after": 1,
+        "reduction_percent": 87.5
+      },
+      "supplier_product_reads_per_sync": {
+        "products": 150,
+        "before": 151,
+        "after": 1
+      }
+    }
+  },
+  "round27_validation": {
+    "new_python_tests": 57,
+    "chromium_user_inspection": "passed",
+    "chromium_cart_regression": "passed",
+    "desktop_mobile": true,
+    "arabic_english_rtl": true,
+    "javascript_errors": 0,
+    "balance_mutations": 0,
+    "product_buttons_then_records_then_details": true,
+    "credentials_not_in_product_lists": true,
+    "all_user_ledgers": true,
+    "no_duplicate_api_projection": true,
+    "saved_subscription_current_and_original_expiry": true,
+    "all_codes_paginated_and_exported": true,
+    "previous_page_retained_on_back": true,
+    "member_screen_stack_without_command_replay": true,
+    "cancel_pending_amount_on_back": true,
+    "section_scope_prevents_old_pages": true,
+    "fake_credentials_and_external_network_block": true
+  },
+  "user_inspection": {
+    "admin_only": true,
+    "on_demand_only": true,
+    "new_background_network_jobs": 0,
+    "products_per_page": 12,
+    "records_per_page": 12,
+    "codes_per_page": 20,
+    "navigation_stack_max_screens": 24,
+    "customer_credentials_require_detail_request": true,
+    "owner_cookies_excluded": true,
+    "current_subscription_state_basis": "saved bot records, not live membership verification"
+  },
+  "cms_translation": {
+    "counts_actual_unprotected_arabic_letters": true,
+    "recovered_line_not_an_error": true,
+    "previous_english_retained_on_failure": true,
+    "pure_fallback_helper_corrected": true
+  },
+  "browser_diagnostics": {
+    "chromium": "passed",
+    "early_boot_queue": true,
+    "runtime_and_promise_stack": true,
+    "resource_filename": true,
+    "masked_source_explicitly_unknown": true,
+    "action_values_and_form_values_not_collected": true,
+    "redaction_client_and_server": true,
+    "max_reports_per_minute": 12,
+    "real_report_7b7d0fb1e3f2_root_cause_identified": false,
+    "frontend_build": "lara-33.1"
+  },
+  "round28_validation": {
+    "new_python_tests": 42,
+    "chromium_client_diagnostics": "passed",
+    "chromium_user_inspection_and_back_navigation": "passed",
+    "outage_never_proves_empty_member_list": true,
+    "member_backoff_survives_temporary_manager_rebuild": true,
+    "credentials_change_resets_backoff": true,
+    "no_timeout_cookie_expiry_notice": true,
+    "admin_delivery_pause_persisted": true,
+    "admin_private_start_resumes_all_queued_notices": true,
+    "other_admin_delivery_not_repeated": true,
+    "old_product_links_offer_localized_navigation": true,
+    "real_database_errors_remain_visible": true,
+    "masked_script_events_counted_as_warning": true,
+    "actionable_browser_errors_still_alert": true,
+    "masked_script_root_cause_identified": false,
+    "link_command_reads_runtime_configuration_and_verified_main_app": true,
+    "public_site_url_present_in_received_archive": false,
+    "fake_credentials_and_external_network_block": true,
+    "production_services_tested": false
+  },
+  "round29_validation": {
+    "new_python_tests": 53,
+    "chromium_referral_verification_and_liability_display": "passed",
+    "chromium_cart_and_lost_response_recovery": "passed",
+    "chromium_user_inspection_and_back_navigation": "passed",
+    "chromium_client_diagnostics": "passed",
+    "website_verification_required_even_with_device_analysis_off": true,
+    "admin_approval_cannot_bypass_website": true,
+    "failed_human_or_unknown_membership_cannot_activate": true,
+    "signed_identity_bound_single_use_challenge": true,
+    "new_referral_reversal_never_overdraws_spendable_cash": true,
+    "resumable_wallet_event_and_durable_ledger": true,
+    "concurrent_credit_and_deposit_not_lost": true,
+    "legacy_migration_label_does_not_prove_payment": true,
+    "unknown_historical_balances_left_for_review": true,
+    "reconciliation_preserves_balance_minus_liability": true,
+    "archived_referral_rejoin_restores_record": true,
+    "unverified_referrals_background_member_requests": 0,
+    "healthy_membership_fallback_seconds": 21600,
+    "purchase_member_read_fresh": true,
+    "unchanged_invite_document_writes_skipped": true,
+    "static_etag_304_and_single_gzip": true,
+    "network_benchmarks": {
+      "twenty_unchanged_invite_saves": {
+        "writes_before": 20,
+        "writes_after": 0,
+        "update_payload_bytes_before": 4340,
+        "update_payload_bytes_after": 0
+      },
+      "two_thousand_unverified_referrals": {
+        "background_membership_checks_before": 2000,
+        "background_membership_checks_after": 0
+      },
+      "ten_healthy_membership_cycles": {
+        "checks_before": 1200,
+        "checks_after": 120
+      },
+      "ten_emoji_revalidations": {
+        "response_body_bytes_before": 7287480,
+        "response_body_bytes_after": 728748,
+        "conditional_status": 304
+      },
+      "twenty_inventory_reads": {
+        "requests_before": 40,
+        "requests_after": 2,
+        "fresh_purchase_reads_current_members": true
+      }
+    },
+    "fake_credentials_and_external_network_block": true,
+    "production_services_tested": false,
+    "live_customer_balances_modified": false,
+    "monthly_bandwidth_guaranteed": false
+  },
+  "old_javascript_function_names_missing": [],
+  "round30_validation": {
+    "new_python_tests": 18,
+    "prospective_policy_marker": 30,
+    "legacy_active_referrals_retain_admission": true,
+    "new_referrals_require_website": true,
+    "one_thousand_legacy_referrals_and_three_balance_cases": true,
+    "start_unknown_membership_never_becomes_departure": true,
+    "no_startup_negative_balance_reclassification": true,
+    "read_only_username_and_id_diagnosis": true,
+    "standalone_report_does_not_start_bot": true,
+    "report_contains_no_credentials": true,
+    "five_chromium_suites": "passed",
+    "loading_pending_reads_errors_retry_reduced_motion": "passed",
+    "real_user_review": "unavailable: session network unreachable before DNS completion",
+    "live_customer_balances_modified": false,
+    "historical_erroneous_deduction_amount_determined": false
+  },
+  "round31_validation": {
+    "new_python_tests": 18,
+    "report_version": 2,
+    "explicit_file_keeps_uri_and_database_together": true,
+    "blank_environment_uri_does_not_shadow_filled_file": true,
+    "windows_env_txt_utf8_bom_and_paths_with_spaces": true,
+    "settings_selection_precedes_target_prompt": true,
+    "configuration_files_and_environment_never_modified": true,
+    "credentials_not_printed_or_written_to_report": true,
+    "financial_tables_read_only_and_sensitive_fields_excluded": true,
+    "legacy_balance_snapshot_marked_unverified": true,
+    "admin_balance_snapshot_uses_atomic_result": true,
+    "admin_ledger_precision": 4,
+    "frontend_files_changed": false,
+    "native_windows_dialog_tested_on_user_device": false,
+    "live_customer_balances_modified": false,
+    "historical_refund_amount_determined": false
+  },
+  "round32_validation": {
+    "pytest": "650 passed",
+    "browser_tests": {
+      "test_cart_browser": "passed",
+      "test_channel_deeplink": "passed",
+      "test_client_diagnostics_browser": "passed",
+      "test_network_browser": "passed",
+      "test_page_loading_browser": "passed",
+      "test_referral_browser": "passed",
+      "test_ui": "passed",
+      "test_user_inspection_browser": "passed"
+    },
+    "logo": "LARA mark + wordmark drawn as inline SVG in the page (ribbon, plane, Λ letters with blue triangles) — no image request",
+    "loading_language_order": [
+      "?l= from the bot link",
+      "last language the store showed (the bot language)",
+      "ru/zh chosen in the store",
+      "Telegram language",
+      "phone language"
+    ],
+    "english_telegram_on_arabic_phone_shows_english": true,
+    "animated_properties": [
+      "transform",
+      "opacity",
+      "stroke-dashoffset (mask reveal)"
+    ],
+    "reduced_motion_static": true,
+    "slow_server_note_after_seconds": 7,
+    "in_app_overlay_delay_ms": 220,
+    "telegram_sdk_render_blocking": false,
+    "hidden_skeleton_animations_during_boot": false,
+    "frontend_build": "lara-32.1",
+    "frontend_javascript_errors": 0
+  },
+  "round33_validation": {
+    "pytest": "657 passed",
+    "browser_tests": 9,
+    "browser_failed": 0,
+    "root_cause_purchase_failed": "balance 0.5499999999999999 shown as $0.55 but refused by balance >= 0.55; reproduced with the production code",
+    "deductions_with_tolerance": 11,
+    "money_eps": 5e-07,
+    "balance_settled_to_decimals": 6,
+    "one_time_dust_cleanup": "money_dust_v1",
+    "site_purchase_errors": [
+      "insufficient_balance",
+      "busy",
+      "deposit_pending",
+      "not_enough_stock",
+      "purchase_failed (unknown only)"
+    ],
+    "ios_telegram_early_events": "queued before SDK, replayed after",
+    "read_requests_retry_once": true,
+    "network_alert_only_when_online_and_visible": true,
+    "frontend_build": "lara-33.1"
+  },
+  "round34_validation": {
+    "pytest": "669 passed",
+    "browser_tests": 10,
+    "browser_failed": 0,
+    "new_tests": [
+      "verification/test_round34_alerts.py (12)",
+      "verification/test_extension_errors_browser.cjs (2)"
+    ],
+    "new_tests_fail_on_round33": "10 of 12 pytest + the browser test (the 2 that pass on both check unchanged behaviour)",
+    "referral_reward_negative_balance": "held (saved movement), credited by the every-minute resume loop once balance >= 0, then recorded in purchase_rewards and the referrer is told; update-29 protection unchanged",
+    "referral_hold_admin_notice": "once per referrer per 24h, not an error alert",
+    "legacy_unrecorded_purchase_rewards": "adopted and recorded once credited",
+    "clawback_refund_on_negative_balance": "info + daily notice instead of an error alert every 10 minutes",
+    "timed_delete": "api creds auto-delete uses _delete_quietly",
+    "benign_telegram_400_level": "WARNING (recorded, no alert)",
+    "browser_extension_errors": "ignored in the page reporter and by the server (old cached pages)",
+    "frontend_build": "lara-34.1"
+  },
+  "round35_validation": {
+    "pytest": "671 passed",
+    "browser_tests": 10,
+    "browser_failed": 0,
+    "rule": "purchase referral reward is credited even when the referrer's balance is negative (owner's decision)",
+    "still_protected": "deductions (clawback, negative movements) on a negative balance wait for review (update 29)",
+    "saved_unrecorded_reward": "adopted before the resume loop credits it, recorded in purchase_rewards and the referrer told once",
+    "interrupted_award": "flagged, finished by the resume loop, recorded once",
+    "referrer_message": "one helper (_ref_purchase_dm, CMS ref_purchase_dm) for normal and adopted rewards",
+    "frontend_build": "lara-34.1 (unchanged)"
+  },
+  "round36_validation": {
+    "frontend_build": "lara-36.1",
+    "all_original_bot_bytes_identical": true,
+    "all_prior_named_js_functions_preserved": true,
+    "prior_named_js_functions": 314,
+    "current_named_js_functions": 331,
+    "static_emoji_posters": 26,
+    "poster_bytes": 98014,
+    "original_animated_assets_preserved": true,
+    "browser_suites_passed": 8,
+    "mobile_performance_suite_passed": true,
+    "mobile_additional_profiles": [
+      {
+        "profile": "strong Android",
+        "passed": true
+      },
+      {
+        "profile": "iOS without memory hints",
+        "passed": true
+      },
+      {
+        "profile": "no IntersectionObserver",
+        "passed": true
+      },
+      {
+        "profile": "desktop",
+        "passed": true
+      }
+    ],
+    "cpu_throttle": 6,
+    "test_products": 600,
+    "first_render_ms_before": 6362,
+    "first_render_ms_after": 659.8999999999069,
+    "first_render_cards_before": 600,
+    "first_render_cards_after": 12,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "live_integrations_used": false
+  },
+  "round37_validation": {
+    "update": 37,
+    "frontend_build": "lara-37.1",
+    "verified_at": "2026-10-20T20:28:00.914625+00:00",
+    "tests": {
+      "total": 760,
+      "passed": 760,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "preservation": {
+      "source_archive_entries": 203,
+      "python_definitions_before": 1348,
+      "python_definitions_after": 1362,
+      "missing_python_definitions": 0,
+      "frontend_named_functions_before": 331,
+      "frontend_named_functions_after": 332,
+      "missing_frontend_functions": 0,
+      "unchanged_financial_functions": [
+        "_ref_money",
+        "ref_unit_value",
+        "_ref_resume_financial",
+        "award_purchase_referral_reward",
+        "_ref_repair_user"
+      ]
+    },
+    "python_compile": "passed",
+    "javascript_syntax": "passed",
+    "new_lint_findings": 0,
+    "live_integrations_used": false,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "auto_hide_seconds": 259200,
+    "stock_sweep_seconds": 300,
+    "additional_supplier_http_from_stock_sweep": 0,
+    "notification_locales": [
+      "ar",
+      "en",
+      "ru",
+      "zh"
+    ]
+  },
+  "round38_validation": {
+    "update": 38,
+    "frontend_build": "lara-38.1",
+    "verified_at": "2026-10-20T21:03:09.929782+00:00",
+    "tests": {
+      "total": 782,
+      "passed": 782,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_round38_visibility": 22,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "preservation": {
+      "original_entries": 212,
+      "python_before": 1362,
+      "python_after": 1365,
+      "frontend_before": 332,
+      "frontend_after": 332,
+      "missing_definitions": 0,
+      "unchanged_financial_functions": [
+        "_ref_money",
+        "ref_unit_value",
+        "_ref_resume_financial",
+        "award_purchase_referral_reward",
+        "_ref_repair_user",
+        "credit_user"
+      ]
+    },
+    "python_compile": "passed",
+    "javascript_syntax": "passed",
+    "new_lint_findings": 0,
+    "additional_supplier_http_from_stock_visibility": 0,
+    "live_integrations_used": false,
+    "physical_phones_tested": false,
+    "native_safari_tested": false,
+    "historical_outage_sources": [
+      "supplier_empty_since",
+      "supplier_missing_since",
+      "completed_local_sales"
+    ],
+    "owner_customer_visibility_identical": true,
+    "all_animated_assets_preserved": true
+  },
+  "round39_validation": {
+    "update": 39,
+    "verified_at": "2026-10-20T23:34:57.103438+00:00",
+    "tests": {
+      "total": 811,
+      "passed": 811,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_round38_visibility": 22,
+        "verification.test_round39_bybit": 11,
+        "verification.test_round39_callbacks": 18,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "python_compile": "passed",
+    "lint": {
+      "before": 104,
+      "after": 104,
+      "new_findings": {}
+    },
+    "preservation": {
+      "old_definitions": 1365,
+      "new_definitions": 1366,
+      "removed_definitions": [],
+      "finance_functions_unchanged": {
+        "_ref_money": true,
+        "ref_unit_value": true,
+        "_ref_resume_financial": true,
+        "award_purchase_referral_reward": true,
+        "_ref_repair_user": true,
+        "credit_user": true,
+        "auto_credit_from_pending": true,
+        "_do_purchase": true,
+        "check_bybit_auto": true
+      },
+      "webapp_files_unchanged": 62
+    },
+    "callback_regression": {
+      "reproduced_before_fix": true,
+      "failure": "ChatGPT product in a folder: 66 UTF-8 bytes exceeds Telegram callback_data maximum of 64",
+      "fixed_length_bytes": 61,
+      "compatibility": "Existing raw hex, cgpt_ and cgpt_main_ detail callbacks still resolve",
+      "tested": [
+        "standalone and linked parent",
+        "Arabic and English customer",
+        "owner store",
+        "send and edit",
+        "product details",
+        "back to the same folder",
+        "premium icon and color",
+        "mixed native/manual/supplier folder",
+        "quantity prompt",
+        "duration/email prompt"
+      ]
+    },
+    "bybit": {
+      "mocked_http_status": 403,
+      "success_after_retry_tested": true,
+      "backoff_seconds": [
+        600,
+        1200,
+        2400,
+        3600,
+        3600
+      ],
+      "repeat_emergency_notifications": false,
+      "first_transport_warning_retained_in_admin_history": true,
+      "cached_admin_status_command": "/bybit_status",
+      "unchanged_balances_pending_orders_and_used_transactions_on_failure": true,
+      "real_invalid_key_disable_protection_preserved": true,
+      "no_proxy_fallback_after_403": true,
+      "unexpected_api_errors_still_alert": true,
+      "external_access_restriction_not_claimed_fixed": true
+    },
+    "frontend": {
+      "build": "lara-38.1",
+      "files_byte_identical_to_update38": 62,
+      "browser_tests_rerun_for_update39": false,
+      "reason": "No frontend files changed; previous browser reports are retained with their original scope."
+    },
+    "test_isolation": "mongomock, fake Telegram and payment credentials; external HTTP disabled; loopback HTTP only",
+    "external_live_services_tested": false,
+    "real_payments_tested": false,
+    "production_bot_started": false,
+    "real_phones_tested": false,
+    "sources": [
+      "https://core.telegram.org/bots/api#inlinekeyboardbutton",
+      "https://bybit-exchange.github.io/docs/v5/error",
+      "https://bybit-exchange.github.io/docs/v5/rate-limit"
+    ]
+  },
+  "round40_validation": {
+    "update": 40,
+    "verified_at": "2026-10-21T00:54:47.051862+00:00",
+    "tests": {
+      "total": 849,
+      "passed": 849,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 183,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_round38_visibility": 22,
+        "verification.test_round39_bybit": 11,
+        "verification.test_round39_callbacks": 18,
+        "verification.test_round40_network": 38,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "python_compile": "passed",
+    "lint": {
+      "before": 104,
+      "after": 104,
+      "new_findings": {}
+    },
+    "preservation": {
+      "before": 1366,
+      "after": 1378,
+      "removed": {},
+      "financial_and_business_functions_unchanged": {
+        "_ref_money": true,
+        "ref_unit_value": true,
+        "_ref_resume_financial": true,
+        "award_purchase_referral_reward": true,
+        "_ref_repair_user": true,
+        "credit_user": true,
+        "auto_credit_from_pending": true,
+        "_do_purchase": true,
+        "check_bybit_auto": true,
+        "_cgpt_renew_core": true,
+        "cgpt_email_confirmed": true,
+        "_save_data": true
+      },
+      "webapp_files_unchanged": 62
+    },
+    "observed_user_screenshots": {
+      "monthly_total_GB": 73.42,
+      "http_responses_GB": 16.33,
+      "service_initiated_GB": 57.08,
+      "recent_process_uptime_hours_displayed_rounded": 0.41,
+      "recent_mongo_commands": 22442,
+      "recent_mongo_find": 18146,
+      "recent_mongo_sent_MiB_before_connection_compression": 6.78,
+      "recent_mongo_received_MiB_before_connection_compression": 148.5,
+      "recent_http_client_requests": 3802,
+      "recent_getChatMember_requests": 3153,
+      "recent_products_responses": 496,
+      "recent_products_sent_MiB": 10.37,
+      "recent_server_responses": 1448,
+      "recent_server_sent_MiB": 25.82,
+      "limits": "Recent process counters cover approximately 25 minutes, not the entire billing month. Screenshot totals do not identify individual database collections or referral jobs."
+    },
+    "code_findings": [
+      "get_setting previously issued a MongoDB find_one for every configuration read.",
+      "check_forced_sub and forced_sub_status independently queried Telegram on the same failed join screen.",
+      "The runtime referral worker scanned up to 100 due referrals per cycle, bypassing recent real membership proof.",
+      "The old meter grouped MongoDB by verb only, without collection or initiating function.",
+      "API products were requested approximately 20 times per minute in the supplied sample; consumer identity was missing from diagnostics.",
+      "GET URL/query bytes were absent from outgoing request-size estimates."
+    ],
+    "changes": {
+      "configuration_cache_seconds": 30,
+      "configuration_missing_cache_seconds": 5,
+      "configuration_local_writes_invalidate_immediately": true,
+      "concurrent_read_coalescing_and_inflight_invalidation_tested": true,
+      "membership_positive_cache_seconds": 300,
+      "membership_negative_cache_seconds": 10,
+      "membership_unknown_cache_seconds": 3,
+      "explicit_website_verification_is_always_fresh": true,
+      "membership_events_invalidate_user_cache": true,
+      "routine_referral_runtime_batch": 25,
+      "membership_events_and_leave_followups_prioritized": true,
+      "financial_rules_balances_and_website_proof_requirements_preserved": true,
+      "read_only_diagnostics": [
+        "collection and function names",
+        "API consumer numeric ID and 200/304 responses",
+        "sent/received sizes and largest measured request",
+        "revision, process marker and rates"
+      ],
+      "admin_command": "/network",
+      "export_button": "ad_network_export",
+      "diagnostic_memory_bounded": true
+    },
+    "offline_benchmarks": {
+      "twenty_configuration_reads": {
+        "mongo_find_before": 20,
+        "mongo_find_after": 1
+      },
+      "twenty_failed_join_screens_two_channels": {
+        "telegram_requests_before": 80,
+        "telegram_requests_after": 2
+      },
+      "one_background_cycle_three_channels": {
+        "telegram_requests_before": 300,
+        "telegram_requests_after": 75,
+        "routine_batch_before": 100,
+        "routine_batch_after": 25
+      }
+    },
+    "frontend": {
+      "build": "lara-38.1",
+      "byte_identical_files": 62,
+      "browser_tests_rerun": false,
+      "reason": "No frontend implementation or animation assets changed; previous browser reports retained."
+    },
+    "not_claimed": [
+      "No attribution of all historical 57.08 GB to this recent sample.",
+      "No promise of a monthly GB threshold or particular bill.",
+      "No assumption that every MongoDB read was a settings read.",
+      "An external API consumer must honor ETag/If-None-Match or reduce its own polling; the server preserves API compatibility."
+    ],
+    "test_isolation": "mongomock, fake Telegram and payment providers, external network disabled, loopback HTTP only",
+    "external_live_services_tested": false,
+    "production_bot_started": false,
+    "real_payments_tested": false,
+    "real_phones_tested": false,
+    "sources": [
+      "https://render.com/docs/service-metrics",
+      "https://render.com/docs/outbound-bandwidth"
+    ]
+  }
+}

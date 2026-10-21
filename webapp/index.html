@@ -32,7 +32,7 @@
 /* Bounded diagnostics are installed before external scripts; never collect form values. */
 (function(){
  'use strict';
- const build='lara-38.1',queue=[],recent=new Map();
+ const build='lara-41.1',queue=[],recent=new Map();
  let connection=null,lastAction='',windowAt=0,windowCount=0;
  function safe(value,limit){
   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
@@ -1010,6 +1010,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .invite p{margin:3px 0 0;font-size:13px;color:var(--fg-2)}
 .linkbox{display:flex;align-items:center;gap:8px;margin-top:14px;padding:6px 6px 6px 12px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line)}
 .linkbox span{flex:1;min-width:0;font:500 12.5px/1.3 var(--f-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr;text-align:start}
+.ref-l{margin-top:12px}.ref-l .linkbox{margin-top:6px}
+.ref-lt{display:block;font-size:12.5px;font-weight:600;color:var(--fg-2)}
+.ref-pick{margin:12px 0 0!important;font-size:12.5px!important}
 .bar{height:8px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin-top:12px}
 .bar i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .6s}
 .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:12px}
@@ -1726,7 +1729,7 @@ amount:'Amount',minMax:'Min {min} · Max {max}',starsEq:'≈ {n} Stars',payWith:
 pay:'Payment',sendExactly:'Send exactly',toAddr:'To this address',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'Put your ID in the note',waiting:'Waiting for payment',autoCheck:'Checked automatically every few seconds',checkNow:"I've paid · Check now",checking:'Checking…',cancelPay:'Cancel payment',armCancel:'Tap again to cancel',timeUp:"Time's up. If you already paid, it will still be detected for a while.",
 warnExact:"Copy the full amount with all its decimals and send exactly that. A different amount won't be detected.",warnBep:'The platform may deduct a network fee (about 0.1–0.2). Add it on top so the full amount arrives.',warnGen:'If the network deducts a fee, add it on top so the full amount arrives.',
 paidTitle:'Balance added',paidBody:'{p} was added to your balance.',cancelled:'Payment cancelled',expired:'This payment expired',qr:'QR code',existsTitle:'You have an unfinished payment',existsBody:'{p} via {m}. Continue it or start a new one.',continueIt:'Continue it',startNew:'Start a new one',starsPaid:'Stars received. Your balance updates in a moment.',
-profileTitle:'Profile',purchases:'Purchases',language:'Language',support:'Support',terms:'Terms of use',openChat:'Open the bot chat',inviteT:'Invite friends',inviteB:'Earn {r} for every {n} active friends, plus {pr} when a friend spends over {mp}.',share:'Share',clicks:'Visits',active:'Active',pendingR:'Pending',left:'Left',earned:'Earned',toNext:'{n} more active friends to earn {r}',admin:'Admin',
+profileTitle:'Profile',purchases:'Purchases',language:'Language',support:'Support',terms:'Terms of use',openChat:'Open the bot chat',inviteT:'Invite friends',refBotL:'Bot link',refAppL:'Store link (opens the store directly)',refPick:'Share the link you prefer — both count the same.',inviteB:'Earn {r} for every {n} active friends, plus {pr} when a friend spends over {mp}.',share:'Share',clicks:'Visits',active:'Active',pendingR:'Pending',left:'Left',earned:'Earned',toNext:'{n} more active friends to earn {r}',admin:'Admin',
 joinT:'Join our channels',joinB:'Subscribe to keep using the store.',join:'Join',joined:"I've joined",notYet:"You haven't joined every channel yet",channel:'Channel',
 banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
 activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
@@ -1741,7 +1744,7 @@ amount:'المبلغ',minMax:'الحد الأدنى {min} · الأقصى {max}'
 pay:'الدفع',sendExactly:'أرسل هذا المبلغ بالضبط',toAddr:'إلى هذا العنوان',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'اكتب الآيدي الخاص بك في الملاحظة',waiting:'بانتظار الدفع',autoCheck:'يتم الفحص تلقائياً كل بضع ثوانٍ',checkNow:'دفعت · افحص الآن',checking:'جاري الفحص…',cancelPay:'إلغاء عملية الدفع',armCancel:'اضغط مرة ثانية للإلغاء',timeUp:'انتهى الوقت. إذا دفعت فعلاً سيتم اكتشاف دفعتك خلال فترة.',
 warnExact:'انسخ المبلغ كاملاً بكل خاناته العشرية وأرسله بالضبط. أي فرق في الكسور يمنع اكتشاف التحويل.',warnBep:'المنصة قد تخصم رسوم شبكة (حوالي 0.1 – 0.2). أضفها فوق المبلغ ليصل كاملاً.',warnGen:'إذا خصمت الشبكة رسوماً، أضفها فوق المبلغ ليصل كاملاً.',
 paidTitle:'تمت إضافة الرصيد',paidBody:'تمت إضافة {p} إلى رصيدك.',cancelled:'تم إلغاء عملية الدفع',expired:'انتهت صلاحية هذه الدفعة',qr:'رمز QR',existsTitle:'لديك عملية دفع غير مكتملة',existsBody:'{p} عبر {m}. أكملها أو ابدأ عملية جديدة.',continueIt:'إكمالها',startNew:'بدء عملية جديدة',starsPaid:'وصلت النجوم، سيتحدث رصيدك خلال لحظات.',
-profileTitle:'حسابي',purchases:'المشتريات',language:'اللغة',support:'الدعم الفني',terms:'شروط الاستخدام',openChat:'فتح محادثة البوت',inviteT:'ادعُ أصدقاءك',inviteB:'اربح {r} عن كل {n} أصدقاء نشطين، و{pr} عندما يشتري صديقك بأكثر من {mp}.',share:'مشاركة',clicks:'الزيارات',active:'نشط',pendingR:'معلّق',left:'غادر',earned:'الأرباح',toNext:'باقي {n} إحالات نشطة لتربح {r}',admin:'أدمن',
+profileTitle:'حسابي',purchases:'المشتريات',language:'اللغة',support:'الدعم الفني',terms:'شروط الاستخدام',openChat:'فتح محادثة البوت',inviteT:'ادعُ أصدقاءك',refBotL:'رابط البوت',refAppL:'رابط الموقع (يفتح المتجر مباشرة)',refPick:'شارك الرابط اللي تفضّله — الاثنين ينحسبون نفس الشي.',inviteB:'اربح {r} عن كل {n} أصدقاء نشطين، و{pr} عندما يشتري صديقك بأكثر من {mp}.',share:'مشاركة',clicks:'الزيارات',active:'نشط',pendingR:'معلّق',left:'غادر',earned:'الأرباح',toNext:'باقي {n} إحالات نشطة لتربح {r}',admin:'أدمن',
 joinT:'اشترك في قنواتنا',joinB:'الاشتراك مطلوب لمتابعة استخدام المتجر.',join:'اشتراك',joined:'اشتركت',notYet:'لم تشترك في كل القنوات بعد',channel:'القناة',
 banned:'حسابك محظور',bannedB:'تواصل مع الدعم إذا كنت تعتقد أن هذا خطأ.',authT:'انتهت الجلسة',authB:'أغلق المتجر وافتحه من جديد من البوت.',close:'إغلاق',noTgT:'افتحه من تيليجرام',noTgB:'هذا المتجر يعمل داخل تيليجرام. افتحه من قائمة البوت.',
 activity:'النشاط',noActivity:'لا يوجد شيء بعد',translate:'ترجمة',original:'عرض الأصل',translating:'جاري الترجمة…',demo:'معاينة',loading:'جاري التحميل…',retry:'إعادة المحاولة',pcs:'قطعة',
@@ -1756,7 +1759,7 @@ amount:'Сумма',minMax:'Мин. {min} · Макс. {max}',starsEq:'≈ {n} �
 pay:'Оплата',sendExactly:'Отправьте ровно',toAddr:'На этот адрес',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'Укажите ваш ID в комментарии',waiting:'Ожидаем оплату',autoCheck:'Проверяется автоматически каждые несколько секунд',checkNow:'Я оплатил · Проверить',checking:'Проверяем…',cancelPay:'Отменить оплату',armCancel:'Нажмите ещё раз для отмены',timeUp:'Время вышло. Если вы уже оплатили, платёж ещё будет найден.',
 warnExact:'Скопируйте сумму целиком, со всеми знаками после запятой, и отправьте ровно её. Другая сумма не будет распознана.',warnBep:'Платформа может удержать комиссию сети (около 0.1–0.2). Добавьте её сверху, чтобы пришла полная сумма.',warnGen:'Если сеть удерживает комиссию, добавьте её сверху, чтобы пришла полная сумма.',
 paidTitle:'Баланс пополнен',paidBody:'На баланс зачислено {p}.',cancelled:'Оплата отменена',expired:'Срок оплаты истёк',qr:'QR-код',existsTitle:'У вас есть незавершённая оплата',existsBody:'{p} через {m}. Продолжите её или начните новую.',continueIt:'Продолжить',startNew:'Начать новую',starsPaid:'Звёзды получены. Баланс скоро обновится.',
-profileTitle:'Профиль',purchases:'Покупки',language:'Язык',support:'Поддержка',terms:'Условия использования',openChat:'Открыть чат с ботом',inviteT:'Приглашайте друзей',inviteB:'{r} за каждые {n} активных друзей и {pr}, когда друг потратит больше {mp}.',share:'Поделиться',clicks:'Переходы',active:'Активные',pendingR:'Ожидают',left:'Ушли',earned:'Заработано',toNext:'Ещё {n} активных друзей до {r}',admin:'Админ',
+profileTitle:'Профиль',purchases:'Покупки',language:'Язык',support:'Поддержка',terms:'Условия использования',openChat:'Открыть чат с ботом',inviteT:'Приглашайте друзей',refBotL:'Ссылка на бота',refAppL:'Ссылка на магазин (сразу откроет магазин)',refPick:'Поделитесь удобной ссылкой — обе засчитываются одинаково.',inviteB:'{r} за каждые {n} активных друзей и {pr}, когда друг потратит больше {mp}.',share:'Поделиться',clicks:'Переходы',active:'Активные',pendingR:'Ожидают',left:'Ушли',earned:'Заработано',toNext:'Ещё {n} активных друзей до {r}',admin:'Админ',
 joinT:'Подпишитесь на каналы',joinB:'Подписка нужна, чтобы пользоваться магазином.',join:'Подписаться',joined:'Я подписался',notYet:'Вы подписались не на все каналы',channel:'Канал',
 banned:'Аккаунт заблокирован',bannedB:'Напишите в поддержку, если считаете это ошибкой.',authT:'Сессия истекла',authB:'Закройте магазин и откройте его снова из бота.',close:'Закрыть',noTgT:'Откройте в Telegram',noTgB:'Магазин работает внутри Telegram. Откройте его из меню бота.',
 activity:'Активность',noActivity:'Пока пусто',translate:'Перевести',original:'Оригинал',translating:'Перевод…',demo:'Демо',loading:'Загрузка…',retry:'Повторить',pcs:'шт.',
@@ -1771,7 +1774,7 @@ amount:'金额',minMax:'最低 {min} · 最高 {max}',starsEq:'≈ {n} 星',payW
 pay:'支付',sendExactly:'请准确转账',toAddr:'收款地址',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'在备注中填写你的 ID',waiting:'等待付款',autoCheck:'每隔几秒自动检测',checkNow:'我已付款 · 立即检测',checking:'检测中…',cancelPay:'取消支付',armCancel:'再次点击取消',timeUp:'时间已到。如果已付款，系统仍会继续检测一段时间。',
 warnExact:'请复制完整金额（含全部小数位）并准确转账，金额不符将无法识别。',warnBep:'平台可能扣除网络手续费（约 0.1–0.2），请额外加上，确保全额到账。',warnGen:'如网络扣除手续费，请额外加上，确保全额到账。',
 paidTitle:'充值成功',paidBody:'{p} 已存入你的余额。',cancelled:'支付已取消',expired:'该笔支付已过期',qr:'二维码',existsTitle:'你有一笔未完成的支付',existsBody:'{p}，通过 {m}。继续完成或重新开始。',continueIt:'继续支付',startNew:'重新开始',starsPaid:'已收到星星，余额稍后更新。',
-profileTitle:'我的',purchases:'购买次数',language:'语言',support:'客服',terms:'使用条款',openChat:'打开机器人聊天',inviteT:'邀请好友',inviteB:'每邀请 {n} 位活跃好友得 {r}，好友消费超过 {mp} 再得 {pr}。',share:'分享',clicks:'访问',active:'活跃',pendingR:'待确认',left:'已退出',earned:'收益',toNext:'再邀请 {n} 位活跃好友可得 {r}',admin:'管理员',
+profileTitle:'我的',purchases:'购买次数',language:'语言',support:'客服',terms:'使用条款',openChat:'打开机器人聊天',inviteT:'邀请好友',refBotL:'机器人链接',refAppL:'商店链接（直接打开商店）',refPick:'分享你喜欢的链接——两个链接的计算方式相同。',inviteB:'每邀请 {n} 位活跃好友得 {r}，好友消费超过 {mp} 再得 {pr}。',share:'分享',clicks:'访问',active:'活跃',pendingR:'待确认',left:'已退出',earned:'收益',toNext:'再邀请 {n} 位活跃好友可得 {r}',admin:'管理员',
 joinT:'请关注我们的频道',joinB:'关注后才能继续使用商店。',join:'关注',joined:'我已关注',notYet:'你还没有关注全部频道',channel:'频道',
 banned:'账号已被封禁',bannedB:'如有疑问请联系客服。',authT:'会话已过期',authB:'请关闭商店并从机器人重新打开。',close:'关闭',noTgT:'请在 Telegram 中打开',noTgB:'本商店在 Telegram 内运行，请从机器人菜单打开。',
 activity:'动态',noActivity:'暂无内容',translate:'翻译',original:'查看原文',translating:'翻译中…',demo:'演示',loading:'加载中…',retry:'重试',pcs:'件',
@@ -3660,6 +3663,14 @@ function openCgpt() {
   } });
   sh.body(cgptSheetHtml(st));
 }
+/* 🔗 Two referral links — the bot and the store (Main Mini App). The customer shares the one he prefers. */
+function refLinksHtml(r) {
+  const links = r && r.links && r.links.bot ? r.links : { bot: r && r.link, app: null };
+  const box = (cls, icon, label, url) => `<div class="ref-l ${cls}"><small class="ref-lt">${icon} ${esc(label)}</small><div class="linkbox"><span>${esc(url)}</span><button class="copy" data-act="copy" data-v="${esc(url)}" aria-label="copy">${ic.copy}</button><button class="btn primary sm" data-act="share" data-v="${esc(url)}">${ic.share}${esc(t('share'))}</button></div></div>`;
+  return (links.app ? `<p class="ref-pick">${esc(t('refPick'))}</p>` : '') +
+    (links.bot ? box('ref-bot', '🤖', t('refBotL'), links.bot) : '') +
+    (links.app ? box('ref-app', '🛍', t('refAppL'), links.app) : '');
+}
 async function loadRefs() { const r = await api('referrals'); if (r.ok) { S.refs = r; if (S.tab === 'profile') renderView(); } }
 function vProfile() {
   const u = S.user || {}, r = S.refs;
@@ -3668,7 +3679,7 @@ function vProfile() {
   const lang = LANGS.find(l => l[0] === LANG);
   const inv = r ? `<div class="invite">
       <div class="ihead">${slot('invite', 'busts', 'ae')}<div><h3>${esc(t('inviteT'))}</h3><p>${esc(t('inviteB', { r: usd(r.reward), n: r.threshold, pr: usd(r.purchase_reward), mp: usd(r.min_purchase) }))}</p></div></div>
-      <div class="linkbox"><span>${esc(r.link)}</span><button class="copy" data-act="copy" data-v="${esc(r.link)}" aria-label="copy">${ic.copy}</button><button class="btn primary sm" data-act="share" data-v="${esc(r.link)}">${ic.share}${esc(t('share'))}</button></div>
+      ${refLinksHtml(r)}
       <div class="bar"><i style="width:${Math.round((r.progress / Math.max(1, r.threshold)) * 100)}%"></i></div>
       <div class="hint">${esc(t('toNext', { n: r.threshold - r.progress, r: usd(r.reward) }))}</div>
       <div class="mini"><div><b class="num">${r.clicks}</b><span>${esc(t('clicks'))}</span></div><div><b class="num">${r.active}</b><span>${esc(t('active'))}</span></div><div><b class="num">${r.pending}</b><span>${esc(t('pendingR'))}</span></div><div><b class="num">${usd(r.earned_refs + r.earned_buys)}</b><span>${esc(t('earned'))}</span></div></div>
@@ -5907,7 +5918,7 @@ const Demo = {
       const per = b.per || 12, pages = Math.max(1, Math.ceil(all.length / per)), page = Math.min(b.page || 1, pages);
       return { ok: true, items: all.slice((page - 1) * per, page * per), page, pages, total: all.length, sums: { deposits: 85, spent: all.filter(i => i.type === 'purchase').reduce((s, i) => s - i.amount, 0), adjust: 1.5 }, balance: this.bal, pending: this.pend };
     }
-    if (path === 'referrals') return { ok: true, link: 'https://t.me/LaraStockBot?start=784512369', pending: 2, active: 7, left: 1, clicks: 23, earned_refs: 0.1, earned_buys: 0.4, threshold: 10, reward: 0.1, progress: 7, purchase_reward: 0.1, min_purchase: 2, balance: this.bal };
+    if (path === 'referrals') return { ok: true, link: 'https://t.me/LaraStockBot?start=784512369', links: { bot: 'https://t.me/LaraStockBot?start=784512369', app: 'https://t.me/LaraStockBot?startapp=784512369' }, pending: 2, active: 7, left: 1, clicks: 23, earned_refs: 0.1, earned_buys: 0.4, threshold: 10, reward: 0.1, progress: 7, purchase_reward: 0.1, min_purchase: 2, balance: this.bal };
     if (path === 'terms' && window.LARA_DATA && window.LARA_DATA.terms && (window.LARA_DATA.terms.ar || window.LARA_DATA.terms.en)) return { ok: true, html: (isAr() ? window.LARA_DATA.terms.ar : window.LARA_DATA.terms.en) || window.LARA_DATA.terms.en || window.LARA_DATA.terms.ar };
     if (path === 'terms') return { ok: true, html: '📜 <b>Store terms</b>\n\n• Digital products are delivered instantly or manually as shown on each product.\n• Keep your codes private.\n• Contact support within 24 hours for any issue.' };
     if (path.startsWith('api/')) return this.apiCall(path.slice(4), b);

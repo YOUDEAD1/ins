@@ -883,5 +883,98 @@
       "https://render.com/docs/service-metrics",
       "https://render.com/docs/outbound-bandwidth"
     ]
+  },
+  "round41_validation": {
+    "update": 41,
+    "verified_at": "2026-10-21T20:19:43.000819+00:00",
+    "base": "GitHub YOUDEAD1/ins @ e748918 (round 40)",
+    "tests": {
+      "total": 869,
+      "passed": 869,
+      "failed": 0,
+      "skipped": 0,
+      "by_module": {
+        "verification.test_cart": 35,
+        "verification.test_channel_broadcast": 59,
+        "verification.test_client_diagnostics": 17,
+        "verification.test_deposit_buttons": 29,
+        "verification.test_error_monitor": 16,
+        "verification.test_integration": 184,
+        "verification.test_money_dust": 7,
+        "verification.test_network": 47,
+        "verification.test_products_menu": 27,
+        "verification.test_referral_bandwidth": 13,
+        "verification.test_referral_integrity": 40,
+        "verification.test_referral_policy": 19,
+        "verification.test_reliability": 35,
+        "verification.test_report_config": 17,
+        "verification.test_round34_alerts": 14,
+        "verification.test_round37_bybit": 17,
+        "verification.test_round37_notice_language": 44,
+        "verification.test_round37_visibility": 28,
+        "verification.test_round38_visibility": 22,
+        "verification.test_round39_bybit": 11,
+        "verification.test_round39_callbacks": 18,
+        "verification.test_round40_network": 38,
+        "verification.test_round41_referrals": 19,
+        "verification.test_runtime_recovery": 42,
+        "verification.test_support": 31,
+        "verification.test_user_inspection": 40
+      }
+    },
+    "browser_tests": {
+      "suites": 14,
+      "failed": 0,
+      "new": "verification/test_referral_links_browser.cjs (3 checks)"
+    },
+    "python_compile": "passed",
+    "preservation": {
+      "definitions_before": 1347,
+      "definitions_after": 1360,
+      "removed": [],
+      "added": [
+        "_bot_main_app",
+        "_btn_l",
+        "_btn_lang_obj",
+        "_cms_copy_btn",
+        "_cms_copy_btn_l",
+        "_ms_auto_pay",
+        "_ref_links",
+        "_ref_screen_from_invite_txt",
+        "_ref_screen_migrate",
+        "_txt_l",
+        "ad_cms_extra",
+        "ref_auto_pay_enabled",
+        "refauto_toggle_cb"
+      ]
+    },
+    "referral_links": {
+      "bot": "https://t.me/<bot>?start=<id>",
+      "store": "https://t.me/<bot>?startapp=<id> (only when Main Mini App is enabled in BotFather)",
+      "both_register_the_referral": true,
+      "existing_customers_unchanged": true
+    },
+    "identity_check": "every new referral (policy 30) needs the emoji check on the website even after joining the forced channels; ref_dv on/off does not remove it",
+    "automatic_batch_reward": {
+      "setting": "ref_auto_pay (default on, toggle in referral settings)",
+      "threshold_and_reward": "from settings (production: 10 / $1.00, unchanged by owner's choice)",
+      "eligible": "new batches whose members all passed the site check (suspicious devices included, owner's choice)",
+      "old_pending_batches": "left for the admin (owner's choice)",
+      "admin_can_reject_after_payment": "value taken back automatically",
+      "negative_balance": "reward credited (owner's rule extended to the batch reward); deductions still wait for review"
+    },
+    "cms": {
+      "new_section": "التخصيص ← 🧩 نصوص وأزرار إضافية",
+      "texts": 22,
+      "buttons": 11,
+      "listed_existing_texts": 22,
+      "log_via_lines": [
+        "log_via_webapp",
+        "log_via_bot",
+        "log_via_api"
+      ],
+      "referral_screen": "ref_screen (the old customized invite_txt was never used by the screen; converted once with its premium emojis)"
+    },
+    "frontend_build": "lara-41.1"
   }
 }

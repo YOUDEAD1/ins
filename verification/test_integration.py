@@ -404,8 +404,26 @@ def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
     assert not [t for t in _admin_texts(mod) if 'مشكوك' in t]       # no message per referral
     assert not [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
     s, d, _ = _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
-    ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
+    # round 41: every member verified on the site → paid automatically (suspicious ones too, owner's choice);
+    # the admin still gets the device report and can reject a referral afterwards from the checklist
+    ms = [m for m in MESSAGES if 'صُرفت مكافأة إحالات تلقائيًا' in str(m[1])]
     assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'rfl_1001_1_0' in json.dumps(ms[0][2].get('reply_markup').to_dict())
+    assert mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})['status'] == 'paid'
+
+
+def test_suspicious_referral_waits_for_admin_when_automatic_reward_is_off(mod, server):
+    mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': '2'}}, upsert=True)
+    mod.db.settings.update_one({'key': 'ref_auto_pay'}, {'$set': {'value': 'off'}}, upsert=True)
+    for uid in (2001, 2002):
+        mod.db.users.insert_one({'user_id': uid, 'name': f'Inv{uid}', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
+        mod.register_new_referral(uid, 1001)
+        mod.db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'need'}})
+    ch = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
+    _verified_ref_request(mod, server, 2001, _ref_fp('a' * 32, wd=True), ch)
+    _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
+    ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
+    assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'refwd_ok_1001_1' in json.dumps(ms[0][2].get('reply_markup').to_dict())
+    assert mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})['status'] == 'pending'
 
 
 # ───── round 7: admin whole-database search (email / any part of an account line) ─────

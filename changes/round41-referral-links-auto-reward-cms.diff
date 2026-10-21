@@ -1,0 +1,1290 @@
+--- a/bot.py	2026-10-21 19:51:45.440060719 +0000
++++ b/bot.py	2026-10-21 20:07:35.230582949 +0000
+@@ -297,12 +297,19 @@
+     return getattr(_LOG_SRC, 'v', None)
+ 
+ 
++_LOG_SRC_KEYS = {'webapp': 'log_via_webapp', 'bot': 'log_via_bot', 'api': 'log_via_api'}
++
++
+ def _log_src(msg, default='bot'):
+-    """يضيف سطر المصدر للوق الشراء/الإيداع: Mini App أو محادثة البوت أو API."""
++    """يضيف سطر المصدر للوق الشراء/الإيداع: Mini App أو محادثة البوت أو API (النص قابل للتعديل من التخصيص)."""
+     try:
+         src = _log_src_get() or default
+         lab = _LOG_SRC_LABEL.get(src)
+-        if lab and isinstance(msg, str) and 'Via:</b>' not in msg:
++        try:
++            lab = _txt_l('en', _LOG_SRC_KEYS[src]) or lab          # قناة اللوق بالإنجليزي مثل باقي رسائلها
++        except Exception:
++            pass
++        if lab and isinstance(msg, str) and 'Via:</b>' not in msg and lab not in msg:
+             return f"{msg}\n{lab}"
+     except Exception:
+         pass
+@@ -4859,6 +4866,37 @@
+     return dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active', ms_batch={'$exists': False})
+ 
+ 
++# 🔗 Two referral links: the bot (/start) and the store (Main Mini App, startapp). The store link needs
++#    «Main Mini App» enabled in @BotFather — without it Telegram can't open the store from a link.
++_MAIN_APP_CACHE = {'at': 0.0, 'v': None}
++
++
++def _bot_main_app():
++    now = time.time()
++    if _MAIN_APP_CACHE['at'] and now - _MAIN_APP_CACHE['at'] < 600:
++        return _MAIN_APP_CACHE['v']
++    try:
++        value = bool(getattr(bot.get_me(), 'has_main_web_app', False))
++    except Exception:
++        _MAIN_APP_CACHE['at'] = now - 540                   # transient failure: keep the last answer, retry in a minute
++        return _MAIN_APP_CACHE['v']
++    _MAIN_APP_CACHE.update(at=now, v=value)
++    return value
++
++
++def _ref_links(uid):
++    bu = str(get_bot_username() or '')
++    bot_link = f"https://t.me/{bu}?start={int(uid)}"
++    app_link = None
++    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{3,31}', bu) and _bot_main_app():
++        app_link = f"https://t.me/{bu}?startapp={int(uid)}"
++    return {'bot': bot_link, 'app': app_link}
++
++
++def ref_auto_pay_enabled():
++    return str(get_setting('ref_auto_pay', 'on')) != 'off'
++
++
+ def ref_progress(referrer_id):
+     """(كم إحالة جديدة من آخر دفعة، حجم الدفعة الحالي، كم باقي). الإعدادات الجديدة تطبق على الجاي بس."""
+     th = max(1, int(get_referral_threshold()))
+@@ -4983,7 +5021,13 @@
+         if c['none']:
+             lines.append("<i>➖ بدون فحص = انحسبت قبل تشغيل التحقق أو والتحقق موقوف.</i>")
+     st = ms.get('status')
+-    if st == 'paid':
++    if st == 'paid' and ms.get('auto'):
++        lines = [("💸 <b>صُرفت مكافأة إحالات تلقائيًا</b>" if not ms.get('renotified_at') else lines[0])] + lines[1:]
++        lines += ["", "✅ <b>انصرفت المكافأة تلقائيًا</b> — كل إحالات الدفعة أكدت هويتها داخل الموقع.",
++                  "<i>تقدر ترفض أي إحالة من «قائمة الفحص»، ويرجع خصم قيمتها من المحيل تلقائيًا.</i>"]
++    elif st == 'paying':
++        lines += ["", "⏳ <b>جاري صرف المكافأة تلقائيًا</b> — تكتمل خلال دقيقة بدون تكرار."]
++    elif st == 'paid':
+         lines += ["", "✅ <b>انصرفت المكافأة.</b>"]
+     elif st == 'cancelled':
+         lines += ["", "❌ <b>الطلب ملغي.</b>"]
+@@ -5021,7 +5065,7 @@
+     pages = max(1, (len(recs) + _MS_PG - 1) // _MS_PG)
+     page = max(0, min(int(page), pages - 1))
+     chunk = recs[page * _MS_PG:(page + 1) * _MS_PG]
+-    open_ = ms.get('status') in (None, 'pending', 'reopened')
++    open_ = ms.get('status') in (None, 'pending', 'reopened') or (ms.get('status') == 'paid' and ms.get('auto'))
+     lines = [f"🔎 <b>قائمة فحص الإحالات</b> — الدفعة #{b}",
+              f"🤝 المحيل: {_dv_user_line(rid)}",
+              f"✅ {c['ok']} سليمة · ⚠️ {c['flag']} مشكوك · ➖ {c['none']} بدون فحص" + (f" · ❌ {c['rej']} مرفوضة" if c['rej'] else ''), ""]
+@@ -5157,10 +5201,102 @@
+                 logger.warning(f"milestone save {rid}#{batch_no}: {e}")
+                 return
+             db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': rid}, {'$set': {'ms_batch': batch_no}})
++            if ref_auto_pay_enabled():
++                _ms_auto_pay(rid, batch_no)        # 💸 تلقائي لو كل الدفعة أكدت هويتها في الموقع؛ وإلا تبقى لقرار الأدمن
+             txt, markup = _ms_summary_view(rid, batch_no)
+             _ms_send_admins(txt, markup)
+ 
+ 
++def _ref_screen_from_invite_txt(old):
++    """The old customized «invite_txt» (7 fixed values, hard-coded 10 / $0.10 / $2) → the new «ref_screen» with
++    live values and both links. Returns None when the text does not follow the old layout."""
++    if not old or old.count('{}') != 6 or '{:.2f}' not in old:
++        return None
++    t = old
++    t, n_link = re.subn(r'(?:🔗\s*)?(?:<b>[^<\n]{0,40}</b>\s*\n?\s*)?<code>https://t\.me/\{\}\?start=\{\}</code>', '{7}', t, count=1)
++    if not n_link:
++        return None
++    for i in range(4):
++        t = t.replace('{}', '{%d}' % i, 1)
++    t = t.replace('${:.2f}', '${6}', 1).replace('{:.2f}', '{6}', 1)
++    t = re.sub(r'<b>10</b>', '<b>{8}</b>', t, count=1)
++    t = re.sub(r'<b>\$0\.10</b>', '<b>${9}</b>', t, count=1)
++    t = re.sub(r'<b>\$2</b>', '<b>${10}</b>', t, count=1)
++    t = re.sub(r'<b>\$0\.10</b>', '<b>${11}</b>', t, count=1)
++    if '{}' in t:
++        return None
++    return t
++
++
++def _ref_screen_migrate():
++    try:
++        if str(get_setting('ref_screen_v1', '')) == 'done':
++            return
++        for l in ('ar', 'en'):
++            if db.custom_texts.find_one({'lang': l, 'key': 'ref_screen'}):
++                continue
++            old = db.custom_texts.find_one({'lang': l, 'key': 'invite_txt'})
++            new = _ref_screen_from_invite_txt((old or {}).get('value'))
++            if new:
++                db.custom_texts.update_one({'lang': l, 'key': 'ref_screen'}, {'$setOnInsert': {
++                    'lang': l, 'key': 'ref_screen', 'value': new, 'migrated_from': 'invite_txt'}}, upsert=True)
++        db.settings.update_one({'key': 'ref_screen_v1'}, {'$set': {'value': 'done'}}, upsert=True)
++        try:
++            _load_custom_texts_cache()
++        except Exception:
++            pass
++    except Exception as e:
++        logger.warning(f"referral screen text migration: {e}")
++
++
++threading.Thread(target=_ref_screen_migrate, daemon=True).start()
++
++
++def _ms_auto_pay(rid, batch_no):
++    """💸 A just-completed batch is paid at once when every member passed the identity check on the website
++    (emoji test). Suspicious devices are paid too (owner's choice); the admin can still reject one afterwards from
++    «قائمة الفحص» and its value is taken back automatically. Older referrals without the site check → admin decides."""
++    try:
++        rid, batch_no = int(rid), int(batch_no)
++        ms = db.referral_milestones.find_one({'referrer_id': rid, 'batch_no': batch_no, 'status': 'pending'})
++        if not ms or not ms.get('members'):
++            return False
++        th, reward = _ms_snap(ms)
++        recs = list(db.referrals_v2.find({'referrer_id': rid, 'status': 'active',
++                                          'invited_id': {'$in': [int(x) for x in ms['members']]}}))
++        if len(recs) < th or not all(_ref_web_verified(r) for r in recs):
++            return False
++        referrer = db.users.find_one({'user_id': rid}, {'is_banned': 1})
++        if not referrer or referrer.get('is_banned') == 1:
++            return False
++        if not db.referral_milestones.find_one_and_update({'_id': ms['_id'], 'status': 'pending'}, {'$set': {
++                'status': 'paying', 'paid_by': 'auto', 'paid_at': int(time.time()), 'auto': True}}):
++            return False
++        try:
++            credited = _ref_money(rid, reward, 'ref_reward', f"مكافأة إحالات · الدفعة #{batch_no} ({th} إحالة) · تلقائي",
++                                  event_key=f'milestone:{rid}:{batch_no}')
++        except Exception as e:
++            logger.info('Automatic referral reward saved for retry: referrer=%s batch=%s (%s)', rid, batch_no, e)
++            return True                                    # stays «paying»; the resume loop finishes it once
++        if not credited:
++            return True
++        db.referral_milestones.update_one({'_id': ms['_id']}, {'$set': {
++            'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
++        try:
++            receipt = credited['_ref_receipt']
++            msg = _notification_text(rid, 'ref_milestone_dm', th, f"{reward:.2f}", f"{receipt['balance_after']:.2f}")
++            if receipt['debt_delta'] < 0:
++                msg += _notification_text(rid, 'ref_settled_dm', -receipt['debt_delta'], receipt['balance_delta'])
++            bot.send_message(rid, msg, parse_mode="HTML")
++        except Exception:
++            pass
++        logger.info('💸 Referral batch paid automatically: referrer=%s batch=%s $%.2f', rid, batch_no, reward)
++        return True
++    except Exception as e:
++        logger.warning(f"automatic referral reward {rid}#{batch_no}: {e}")
++        return False
++
++
+ def _ref_batches_migrate():
+     """مرة وحدة: الإحالات اللي انحسبت قبل هذا التحديث (انصرفت تلقائي أو لها طلب إنجاز) تنعلّم إنها «انحسبت»،
+     عشان ما تنحسب مرة ثانية ولا تتسعّر بالسعر الجديد. والطلبات القديمة تاخذ سعرها وحجمها الحالي كسعر ثابت لها."""
+@@ -5297,7 +5433,7 @@
+             balance = _ref_units(user.get('balance'))
+             # Owner's rule (update 35): the purchase referral reward is always credited, even onto a negative
+             # balance — a credit can only reduce the deficit. Deductions on a negative balance still wait for review.
+-            if balance < 0 and not (kind == 'ref_purchase' and nominal > 0):
++            if balance < 0 and not (kind in ('ref_purchase', 'ref_reward') and nominal > 0):
+                 raise ValueError('Negative balance requires ledger review before referral movement')
+             debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
+             if nominal < 0:
+@@ -5612,7 +5748,7 @@
+         bot.answer_callback_query(call.id)
+         return
+     ms = _ms_doc(rid, b)
+-    if not ms or ms.get('status') not in ('pending', 'reopened'):
++    if not ms or (ms.get('status') not in ('pending', 'reopened') and not (ms.get('status') == 'paid' and ms.get('auto'))):
+         bot.answer_callback_query(call.id, "الطلب مقفول.", show_alert=True)
+         return
+     note = _refdv_apply(inv, verdict, call.from_user.id, call.from_user.first_name)
+@@ -7067,6 +7203,163 @@
+ for _shop_key, (_shop_label, _shop_ar, _shop_en) in SHOP_CMS_TEXTS.items():
+     LANG['ar'][_shop_key] = _shop_ar
+     LANG['en'][_shop_key] = _shop_en
++
++# ============================================================
++# 🧩 Texts and buttons that were written inside the code — now editable from «التخصيص» ← «🧩 نصوص وأزرار إضافية».
++#    Each entry: key → (section, label shown to the admin, Arabic default, English default).
++# ============================================================
++EXTRA_CMS_SECTIONS = [
++    ('ref', '👥 الإحالات (الشاشة والروابط والتحقق)'),
++    ('logs', '🧾 سطر المصدر في اللوق (عبر الموقع / البوت / API)'),
++    ('hist', '📜 سجل المشتريات والأكواد'),
++    ('api', '🔗 بيانات ربط الـ API'),
++    ('misc', '📦 رسائل أخرى (Bybit، GitHub، الدفع…)'),
++]
++EXTRA_CMS_TEXTS = {
++    'ref_screen': ('ref', 'رسالة قسم الإحالات (الإحصائيات والأرباح والروابط)',
++        "💎 <b>نظام الإحالات</b>\n\n━━━━━━━━━━━━━━\n📊 <b>إحصائياتك</b>\n━━━━━━━━━━━━━━\n\n"
++        "👥 الزيارات:  <b>{0}</b>\n⏳ معلق:  <b>{1}</b>\n✅ نشط:  <b>{2}</b>\n❌ غادر:  <b>{3}</b>\n\n"
++        "━━━━━━━━━━━━━━\n💰 <b>أرباحك</b>\n━━━━━━━━━━━━━━\n\n"
++        "🎯 من الإحالات:  <b>${4}</b>\n🛍 من المشتريات:  <b>${5}</b>\n💎 <b>المجموع:</b>  <b>${6}</b>\n{12}\n"
++        "━━━━━━━━━━━━━━\n{7}\n\n━━━━━━━━━━━━━━\n🎁 <b>طريقتان للربح:</b>\n\n"
++        "🔥 كل {8} إحالة مؤكدة = <b>${9}</b> (تنضاف تلقائيًا)\n💸 شراء صديق > ${10} = <b>${11}</b>\n\n"
++        "🛡 <i>الإحالة تنحسب بعد ما يأكد صديقك هويته داخل الموقع.</i>",
++        "💎 <b>Referral System</b>\n\n━━━━━━━━━━━━━━\n📊 <b>Your Stats</b>\n━━━━━━━━━━━━━━\n\n"
++        "👥 Clicks:  <b>{0}</b>\n⏳ Pending:  <b>{1}</b>\n✅ Active:  <b>{2}</b>\n❌ Left:  <b>{3}</b>\n\n"
++        "━━━━━━━━━━━━━━\n💰 <b>Your Earnings</b>\n━━━━━━━━━━━━━━\n\n"
++        "🎯 From referrals:  <b>${4}</b>\n🛍 From purchases:  <b>${5}</b>\n💎 <b>Total:</b>  <b>${6}</b>\n{12}\n"
++        "━━━━━━━━━━━━━━\n{7}\n\n━━━━━━━━━━━━━━\n🎁 <b>Two Ways to Earn:</b>\n\n"
++        "🔥 Every {8} verified referrals = <b>${9}</b> (added automatically)\n💸 Friend buys > ${10} = <b>${11}</b>\n\n"
++        "🛡 <i>A referral counts after your friend verifies on the website.</i>"),
++    'ref_links_both': ('الرابطان (البوت + الموقع) داخل رسالة الإحالات — {0} {1}',
++        "🔗 <b>اختر الرابط اللي تشاركه:</b>\n\n🤖 <b>رابط البوت:</b>\n<code>{0}</code>\n\n"
++        "🛍 <b>رابط الموقع (يفتح المتجر مباشرة):</b>\n<code>{1}</code>",
++        "🔗 <b>Pick the link you want to share:</b>\n\n🤖 <b>Bot link:</b>\n<code>{0}</code>\n\n"
++        "🛍 <b>Store link (opens the store directly):</b>\n<code>{1}</code>"),
++    'ref_links_bot': ('رابط البوت وحده (لو رابط الموقع غير مفعّل) — {0}',
++        "🔗 <b>رابطك:</b>\n<code>{0}</code>", "🔗 <b>Your link:</b>\n<code>{0}</code>"),
++    'ref_progress_line': ('سطر «باقي X للمكافأة» — {0} العدد، {1} المبلغ',
++        "⏳ باقي <b>{0}</b> إحالة مؤكدة للمكافأة الجاية (<b>${1}</b>)",
++        "⏳ <b>{0}</b> more verified referrals to the next reward (<b>${1}</b>)"),
++    'ref_debt_note': ('ملاحظة مستحق الاسترجاع — {0}',
++        "\n🧾 مستحق استرجاع إحالات: <b>${0}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.",
++        "\n🧾 Pending referral reversal: <b>${0}</b>. Future referral rewards settle this first; spendable balance is shown separately."),
++    'ref_list_title': ('عنوان «إحالاتي» — {0} الصفحة، {1} عدد الصفحات',
++        "👥 <b>إحالاتي</b> ({0}/{1})", "👥 <b>My Referrals</b> ({0}/{1})"),
++    'ref_list_empty': ('«لا يوجد إحالات بعد»', "📭 لا يوجد إحالات بعد.", "📭 No referrals yet."),
++    'ref_dv_prompt': ('رسالة «خطوة أخيرة» (تأكيد الهوية للمدعو)',
++        "🛡 <b>خطوة أخيرة</b>\n\nعشان نحمي المتجر من الحسابات الوهمية، اضغط الزر وتحقق من جهازك. "
++        "ياخذ ثواني، وما نجمع أي بيانات شخصية.",
++        "🛡 <b>One last step</b>\n\nTo keep the store safe from fake accounts, tap the button and verify your device. "
++        "It takes a few seconds and we don't collect personal data."),
++    'ref_dv_done': ('رسالة «تم التحقق»', "✅ <b>تم التحقق!</b> تقدر الحين تستخدم المتجر.",
++        "✅ <b>Verified!</b> You can use the store now."),
++    'fsub_unavailable': ('رسالة «تعذّر التحقق من الاشتراك»',
++        '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
++        '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'),
++    'log_via_webapp': ('logs', 'لوق: سطر «عبر الموقع (Mini App)»', '🌐 <b>Via:</b> Mini App', '🌐 <b>Via:</b> Mini App'),
++    'log_via_bot': ('logs', 'لوق: سطر «عبر البوت»', '💬 <b>Via:</b> Bot chat', '💬 <b>Via:</b> Bot chat'),
++    'log_via_api': ('logs', 'لوق: سطر «عبر API»', '🔌 <b>Via:</b> API', '🔌 <b>Via:</b> API'),
++    'hist_file_head': ('hist', 'أول سطر في ملف سجل المشتريات', "=== سجل المشتريات الخاص بك ===", "=== Your Purchase History ==="),
++    'hist_empty': ('hist', '«لا يوجد سجل مشتريات»', "📭 لا يوجد سجل مشتريات.", "📭 No purchases found."),
++    'hist_file_caption': ('hist', 'وصف ملف سجل المشتريات', "📄 ملف يحتوي على جميع مشترياتك وتواريخها.", "📄 Here are all your purchases."),
++    'hist_product_empty': ('hist', '«لا توجد مشتريات لهذا المنتج»', "❌ لا توجد مشتريات لهذا المنتج.", "❌ No purchases found for this product."),
++    'codes_file_caption': ('hist', 'وصف ملف الأكواد (TXT)', "📄 أكوادك في ملف TXT.", "📄 Your codes as a TXT file."),
++    'order_id_label': ('hist', 'عنوان «رقم الطلب»', "رقم الطلب", "Order ID"),
++    'api_creds_hidden': ('api', 'سطر «بيانات الربط مخفية»', "🔐 بيانات الربط مخفية — اضغط «🔑 عرض بيانات الربط».",
++        "🔐 Connection details are hidden — tap «🔑 Show connection details»."),
++    'api_no_key': ('api', 'تنبيه «ما عندك مفتاح API نشط»', "ما عندك مفتاح API نشط.", "No active API key."),
++    'cat_unavailable': ('misc', '«المجلد غير متاح»', '❌ المجلد غير متاح.', '❌ Category unavailable.'),
++}
++for _xk, _xv in list(EXTRA_CMS_TEXTS.items()):
++    if len(_xv) == 3:                                   # same section as the entry before it ('ref')
++        EXTRA_CMS_TEXTS[_xk] = _xv = ('ref',) + _xv
++    LANG['ar'].setdefault(_xk, _xv[2])
++    LANG['en'].setdefault(_xk, _xv[3])
++EXTRA_CMS_BUTTONS = {
++    'btn_my_refs': ('ref', 'زر «إحالاتي»', '👥 إحالاتي', '👥 My Referrals'),
++    'btn_copy_ref_bot': ('ref', 'زر نسخ رابط البوت', '📋 نسخ رابط البوت', '📋 Copy bot link'),
++    'btn_copy_ref_app': ('ref', 'زر نسخ رابط الموقع', '📋 نسخ رابط الموقع', '📋 Copy store link'),
++    'btn_ref_dv': ('ref', 'زر «تحقق من جهازك»', '🛡 تحقق من جهازك', '🛡 Verify my device'),
++    'btn_open_store': ('ref', 'زر «افتح المتجر» بعد التحقق', '🛍 افتح المتجر', '🛍 Open store'),
++    'btn_api_creds': ('api', 'زر «عرض بيانات الربط»', '🔑 عرض بيانات الربط', '🔑 Show connection details'),
++    'btn_copy_api_conn': ('api', 'زر نسخ كود الاتصال', '📋 نسخ كود الاتصال', '📋 Copy connection code'),
++    'btn_copy_api_base': ('api', 'زر نسخ الرابط الأساسي', '📋 نسخ الرابط الأساسي', '📋 Copy base URL'),
++    'btn_copy_api_key': ('api', 'زر نسخ المفتاح', '📋 نسخ المفتاح', '📋 Copy API key'),
++    'btn_api_hide': ('api', 'زر «إخفاء»', '🙈 إخفاء', '🙈 Hide'),
++    'btn_copy_order_id': ('hist', 'زر نسخ رقم الطلب', '📋 نسخ رقم الطلب', '📋 Copy order ID'),
++}
++for _xk, (_xs, _xl, _xa, _xe) in EXTRA_CMS_BUTTONS.items():
++    DEFAULT_BUTTONS.setdefault('ar', {}).setdefault(_xk, _xa)
++    DEFAULT_BUTTONS.setdefault('en', {}).setdefault(_xk, _xe)
++# texts already in LANG that no menu listed
++EXTRA_CMS_EXISTING = [
++    ('bybit_ask_uid', 'Bybit: طلب الـ UID'), ('bybit_warn_exact', 'Bybit: تنبيه المبلغ الدقيق'),
++    ('bybit_alert_popup', 'Bybit: النافذة المنبثقة'), ('bybit_btn_understood', 'Bybit: زر «فهمت»'),
++    ('pay_warn_exact', 'الدفع: تنبيه المبلغ الدقيق'), ('pay_alert_popup', 'الدفع: النافذة المنبثقة'),
++    ('pay_fee_general', 'الدفع: ملاحظة الرسوم'), ('pay_fee_bep20', 'الدفع: رسوم BEP20'),
++    ('dep_crypto_amount_line', 'الدفع: سطر مبلغ العملة'), ('gemini_desc', 'Gemini: وصف الخدمة'),
++    ('gh_desc', 'GitHub: وصف الخدمة'), ('gh_prompt_user', 'GitHub: طلب اسم المستخدم'),
++    ('gh_prompt_pass', 'GitHub: طلب كلمة المرور'), ('gh_prompt_2fa', 'GitHub: طلب رمز 2FA'),
++    ('gh_received', 'GitHub: تم الاستلام'), ('gh_processing', 'GitHub: جاري المعالجة'),
++    ('gh_submitted', 'GitHub: تم الإرسال'), ('gh_success', 'GitHub: نجاح'), ('gh_fail', 'GitHub: فشل'),
++    ('gh_deducted', 'GitHub: تم الخصم'), ('gh_timeout', 'GitHub: انتهت المهلة'), ('gh_conn_err', 'GitHub: خطأ اتصال'),
++]
++
++
++def _txt_l(lang, key, *args):
++    """Like get_text, for a known language (the admin's custom text first, then the default)."""
++    l = 'en' if lang == 'en' else 'ar'
++    try:
++        if not _CUSTOM_TEXTS_LOADED[0]:
++            _load_custom_texts_cache()
++        base = (_CUSTOM_TEXTS_CACHE.get((l, key)) or '').strip()
++    except Exception:
++        base = ''
++    default = LANG.get(l, LANG['ar']).get(key) or LANG['ar'].get(key, '')
++    base = base or default
++    if not args:
++        return base
++    try:
++        return base.format(*args)
++    except Exception:
++        try:
++            return default.format(*args)
++        except Exception:
++            return default
++
++
++def _btn_l(lang, key):
++    """(text, premium emoji id) of an editable button for a known language."""
++    l = 'en' if lang == 'en' else 'ar'
++    try:
++        custom = _custom_button_for_view(l, key)
++        if custom and str(custom.get('text') or '').strip():
++            return str(custom['text']).strip(), custom.get('emoji_id')
++        if custom:
++            return DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key), custom.get('emoji_id')
++    except Exception:
++        pass
++    return DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key), None
++
++
++def _btn_lang_obj(lang, key, **kwargs):
++    text, emj = _btn_l(lang, key)
++    return CustomInlineButton(text, icon_custom_emoji_id=emj, **kwargs) if emj else InlineKeyboardButton(text, **kwargs)
++
++
++def _cms_copy_btn_l(lang, key, value):
++    text, emj = _btn_l(lang, key)
++    try:
++        from telebot.types import CopyTextButton
++        kw = {'copy_text': CopyTextButton(text=str(value)[:256])}
++        return CustomInlineButton(text, icon_custom_emoji_id=emj, **kw) if emj else InlineKeyboardButton(text, **kw)
++    except Exception:
++        return _copy_button(text, value)
++
++
++def _cms_copy_btn(uid, key, value):
++    return _cms_copy_btn_l(get_lang(uid), key, value)
+ LANG['ar']['cg_expired_removed'] = '⌛ انتهت مدة اشتراك ChatGPT وأُلغي الوصول.\n📧 <code>{0}</code>\nيمكنك شراء اشتراك جديد من المتجر.'
+ LANG['en']['cg_expired_removed'] = '⌛ Your ChatGPT subscription expired and access was revoked.\n📧 <code>{0}</code>\nYou can purchase a new subscription in the store.'
+ 
+@@ -9573,7 +9866,7 @@
+         public_items = _wa_build_catalog(False)['products'] if not is_admin else []
+         allowed = {p['id'] for p in public_items if str(cat_id) in p.get('cats', [])}
+         if not is_admin and (cat.get('is_hidden') or not allowed):
+-            bot.send_message(chat_id, '❌ Category unavailable.' if lang == 'en' else '❌ المجلد غير متاح.')
++            bot.send_message(chat_id, _txt_l(lang, 'cat_unavailable'), parse_mode='HTML')
+             return False
+         emoji_id = cat.get('emoji_id')
+         name = cat.get('name_en', cat.get('name_ar', '')) if lang == 'en' else cat.get('name_ar', cat.get('name_en', ''))
+@@ -9893,11 +10186,7 @@
+         if subscription_state is None:
+             markup = InlineKeyboardMarkup()
+             markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
+-            bot.send_message(chat_id,
+-                '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'
+-                if lang == 'en' else
+-                '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
+-                reply_markup=markup)
++            bot.send_message(chat_id, _txt_l(lang, 'fsub_unavailable'), reply_markup=markup, parse_mode='HTML')
+             return
+         if ref_record:
+             current = ref_record.get('status', 'pending')
+@@ -10476,7 +10765,7 @@
+     if not recs:
+         return None, None
+     l = get_lang(uid)
+-    content = "=== Your Purchase History ===\n\n" if l == 'en' else "=== سجل المشتريات الخاص بك ===\n\n"
++    content = _txt_l(l, 'hist_file_head') + "\n\n"
+     for i, r in enumerate(recs, 1):
+         try:
+             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
+@@ -10507,12 +10796,11 @@
+     l = get_lang(uid)
+     content, fname = _purchases_txt(uid)
+     if not content:
+-        empty_msg = "📭 No purchases found." if l == 'en' else "📭 لا يوجد سجل مشتريات."
+-        bot.send_message(uid, empty_msg)
++        bot.send_message(uid, _txt_l(l, 'hist_empty'), parse_mode='HTML')
+         return
+     f = io.BytesIO(content.encode('utf-8'))
+     f.name = fname
+-    caption = "📄 Here are all your purchases." if l == 'en' else "📄 ملف يحتوي على جميع مشترياتك وتواريخها."
++    caption = _txt_l(l, 'hist_file_caption')
+     bot.send_document(call.message.chat.id, f, caption=caption)
+ 
+ @bot.callback_query_handler(func=lambda call: call.data.startswith("h_view_"))
+@@ -10665,8 +10953,7 @@
+         except: pass
+     
+     if not orders:
+-        msg = "❌ No purchases found for this product." if l == 'en' else "❌ لا توجد مشتريات لهذا المنتج."
+-        bot.send_message(uid, msg)
++        bot.send_message(uid, _txt_l(l, 'hist_product_empty'), parse_mode='HTML')
+         return
+     
+     # نجيب اسم المنتج
+@@ -10751,87 +11038,28 @@
+     if remaining_to_milestone == 0:
+         remaining_to_milestone = threshold
+ 
++    # 🔗 رابطان: البوت والموقع — العميل يختار اللي يناسبه (النصوص والأزرار من التخصيص)
++    links = _ref_links(uid)
+     markup = InlineKeyboardMarkup()
+-    markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
++    markup.add(_cms_copy_btn(uid, 'btn_copy_ref_bot', links['bot']))
++    if links['app']:
++        markup.add(_cms_copy_btn(uid, 'btn_copy_ref_app', links['app']))
++    markup.add(create_btn(uid, 'btn_my_refs', callback_data="ref_list_0"))
+     markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
+     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
+-    
+-    # نبني الرسالة يدوياً (نتجاوز LANG عشان نضمن العرض الجديد)
+-    if l == 'en':
+-        final_text = (
+-            f"💎 <b>Referral System</b>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"📊 <b>Your Stats</b>\n"
+-            f"━━━━━━━━━━━━━━\n\n"
+-            f"👥 Clicks:  <b>{total_clicks}</b>\n"
+-            f"⏳ Pending:  <b>{pending_count}</b>\n"
+-            f"✅ Active:  <b>{active_count}</b>\n"
+-            f"❌ Left:  <b>{left_count}</b>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"💰 <b>Your Earnings</b>\n"
+-            f"━━━━━━━━━━━━━━\n\n"
+-            f"🎯 From referrals:  <b>${earnings_from_referrals:.2f}</b>\n"
+-            f"🛍 From purchases:  <b>${earnings_from_purchases:.2f}</b>\n"
+-            f"💎 <b>Total:</b>  <b>${total_earnings:.2f}</b>\n"
+-        )
+-        
+-        if remaining_to_milestone > 0:
+-            final_text += (
+-                f"\n━━━━━━━━━━━━━━\n"
+-                f"⏳ <b>{remaining_to_milestone}</b> more active referrals to earn <b>${reward:.2f}</b>!\n"
+-            )
+-        
+-        final_text += (
+-            f"\n━━━━━━━━━━━━━━\n"
+-            f"🔗 <b>Your Link:</b>\n"
+-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"🎁 <b>Two Ways to Earn:</b>\n\n"
+-            f"🔥 Every {threshold} active joins = <b>${reward:.2f}</b>\n"
+-            f"💸 Friend buys > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+-            f"⚡ <i>Real-time updates</i>"
+-        )
+-    else:
+-        final_text = (
+-            f"💎 <b>نظام الإحالات</b>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"📊 <b>إحصائياتك</b>\n"
+-            f"━━━━━━━━━━━━━━\n\n"
+-            f"👥 الزيارات:  <b>{total_clicks}</b>\n"
+-            f"⏳ معلق:  <b>{pending_count}</b>\n"
+-            f"✅ نشط:  <b>{active_count}</b>\n"
+-            f"❌ غادر:  <b>{left_count}</b>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"💰 <b>أرباحك</b>\n"
+-            f"━━━━━━━━━━━━━━\n\n"
+-            f"🎯 من الإحالات:  <b>${earnings_from_referrals:.2f}</b>\n"
+-            f"🛍 من المشتريات:  <b>${earnings_from_purchases:.2f}</b>\n"
+-            f"💎 <b>المجموع:</b>  <b>${total_earnings:.2f}</b>\n"
+-        )
+-        
+-        if remaining_to_milestone > 0:
+-            final_text += (
+-                f"\n━━━━━━━━━━━━━━\n"
+-                f"⏳ باقي <b>{remaining_to_milestone}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n"
+-            )
+-        
+-        final_text += (
+-            f"\n━━━━━━━━━━━━━━\n"
+-            f"🔗 <b>رابطك:</b>\n"
+-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
+-            f"━━━━━━━━━━━━━━\n"
+-            f"🎁 <b>طريقتان للربح:</b>\n\n"
+-            f"🔥 كل {threshold} إحالة نشطة = <b>${reward:.2f}</b>\n"
+-            f"💸 شراء صديق > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
+-            f"⚡ <i>تحديثات لحظية</i>"
+-        )
+-    
++    links_block = (get_text(uid, 'ref_links_both', links['bot'], links['app']) if links['app']
++                   else get_text(uid, 'ref_links_bot', links['bot']))
++    progress_line = get_text(uid, 'ref_progress_line', remaining_to_milestone, f"{reward:.2f}") if remaining_to_milestone > 0 else ''
++    final_text = get_text(uid, 'ref_screen', total_clicks, pending_count, active_count, left_count,
++                          f"{earnings_from_referrals:.2f}", f"{earnings_from_purchases:.2f}", f"{total_earnings:.2f}",
++                          links_block, threshold, f"{reward:.2f}", f"{get_referral_min_purchase():.2f}",
++                          f"{get_referral_purchase_reward():.2f}", progress_line)
+     debt = max(0.0, float(u.get('ref_debt') or 0))
+-    final_text += ("\n\n🛡 Referrals count only after website verification." if l == 'en' else
+-                   "\n\n🛡 لا تُحسب الإحالة إلا بعد إكمال التحقق داخل الموقع.")
+     if debt:
+-        final_text += (f"\n🧾 Pending referral reversal: <b>${debt:.4f}</b>. Future referral rewards settle this first; spendable balance is shown separately."
+-                       if l == 'en' else f"\n🧾 مستحق استرجاع إحالات: <b>${debt:.4f}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.")
++        final_text += get_text(uid, 'ref_debt_note', f"{debt:.4f}")
++    if not links['app'] and (u.get('is_admin') == 1 or uid == OWNER_ID):
++        final_text += ("\n\n<i>👮 للأدمن فقط: رابط الموقع يظهر للعملاء بعد تفعيل Main Mini App من @BotFather "
++                       "(Bot Settings ← Configure Mini App ← Main App) بنفس رابط المتجر.</i>")
+ 
+     # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
+     sent_successfully = False
+@@ -10927,13 +11155,13 @@
+     end = start + PER_PAGE
+     page_refs = all_refs[start:end]
+     
+-    txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
++    txt = get_text(uid, 'ref_list_title', page + 1, total_pages) + "\n\n"
+     
+     u_data = get_user_data_full(uid)
+     is_admin = (u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID))
+     
+     if not all_refs:
+-        txt += "📭 No referrals yet." if l == 'en' else "📭 لا يوجد إحالات بعد."
++        txt += get_text(uid, 'ref_list_empty')
+     else:
+         for r in page_refs:
+             inv_id = r['id']
+@@ -10966,7 +11194,7 @@
+     if nav_buttons:
+         markup.add(*nav_buttons)
+     
+-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_invite"))
++    markup.add(create_btn(uid, 'btn_back', callback_data="open_invite"))
+     
+     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+     except: pass
+@@ -19881,6 +20109,7 @@
+         f"💵 الحد الأدنى لقيمة الشراء:\n"
+         f"   <b>${min_purchase:.2f}</b>\n\n"
+         f"🛡 التحقق داخل الموقع: <b>إجباري دائمًا</b>\n"
++        f"💸 صرف مكافأة كل {threshold} إحالة مؤكدة: <b>{'تلقائي' if ref_auto_pay_enabled() else 'بموافقة الأدمن'}</b>\n"
+         f"فحص الأجهزة الإضافي:\n"
+         f"   <b>{'مفعّل' if ref_dv_enabled() else 'موقوف'}</b>\n"
+         f"━━━━━━━━━━━━━━\n\n"
+@@ -19902,6 +20131,7 @@
+     except Exception:
+         _dv_on, _dv_n = True, 0
+     markup.add(InlineKeyboardButton(f"🛡 فحص الأجهزة الإضافي: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
++    markup.add(InlineKeyboardButton(f"💸 الصرف التلقائي: {'مفعّل ✅' if ref_auto_pay_enabled() else 'موقوف ⛔'}", callback_data="refauto_toggle"))
+     markup.add(InlineKeyboardButton('🧾 فحص وتسوية أرصدة الإحالات', callback_data='ad_ref_balance_audit'))
+     markup.add(InlineKeyboardButton(f"⚠️ إحالات مشكوك فيها ({_dv_n})", callback_data="refdv_list"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+@@ -23978,6 +24208,7 @@
+     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
+                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
+     markup.add(InlineKeyboardButton("🌐 إيموجي الموقع (Premium)", callback_data="ad_cms_site_0"))
++    markup.add(InlineKeyboardButton("🧩 نصوص وأزرار إضافية (الإحالات، اللوق، API…)", callback_data="ad_cms_x"))
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
+     bot.edit_message_text("✏️ <b>نظام التخصيص (CMS):</b>\nاختر ماذا تريد أن تخصص:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+ 
+@@ -24008,7 +24239,7 @@
+     markup.add(InlineKeyboardButton("❌ خطأ: الحد الأقصى $10K", callback_data="edit_txt_dep_err_max"))
+     markup.add(InlineKeyboardButton("❌ خطأ عام", callback_data="edit_txt_dep_err_general"))
+     markup.add(InlineKeyboardButton("❌ رسالة الإلغاء", callback_data="edit_txt_dep_cancelled"))
+-    markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_invite_txt"))
++    markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_ref_screen"))
+     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
+     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
+     markup.add(InlineKeyboardButton("🏪 عنوان المتجر", callback_data="edit_txt_store_title"))
+@@ -24030,6 +24261,9 @@
+     markup.add(InlineKeyboardButton("🎉 رسالة المُحيل (وصل للمكافأة)", callback_data="edit_txt_ref_milestone_dm"))
+     # 🆕 إشعارات اللوق العامة
+     markup.add(InlineKeyboardButton("🛒 لوق: شراء بنجاح", callback_data="edit_txt_log_purchase"))
++    markup.add(InlineKeyboardButton("🌐 لوق: سطر «عبر الموقع (Mini App)»", callback_data="edit_txt_log_via_webapp"))
++    markup.add(InlineKeyboardButton("💬 لوق: سطر «عبر البوت»", callback_data="edit_txt_log_via_bot"))
++    markup.add(InlineKeyboardButton("🔌 لوق: سطر «عبر API»", callback_data="edit_txt_log_via_api"))
+     markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
+     markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
+     markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
+@@ -24064,6 +24298,41 @@
+     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
+     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+ 
++@bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_x' or call.data.startswith('ad_cms_x_'))
++@admin_required
++def ad_cms_extra(call):
++    """🧩 Texts/buttons that used to be inside the code: every entry opens the usual editor."""
++    bot.answer_callback_query(call.id)
++    sec = call.data[len('ad_cms_x_'):] if call.data.startswith('ad_cms_x_') else ''
++    mk = InlineKeyboardMarkup(row_width=1)
++    titles = dict(EXTRA_CMS_SECTIONS)
++    if sec not in titles:
++        for sid, title in EXTRA_CMS_SECTIONS:
++            n = sum(1 for v in EXTRA_CMS_TEXTS.values() if v[0] == sid) + \
++                sum(1 for v in EXTRA_CMS_BUTTONS.values() if v[0] == sid) + (len(EXTRA_CMS_EXISTING) if sid == 'misc' else 0)
++            mk.add(InlineKeyboardButton(f"{title} ({n})", callback_data='ad_cms_x_' + sid))
++        mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_texts_main'))
++        text = ('🧩 <b>نصوص وأزرار إضافية</b>\n\nهذي كانت مكتوبة داخل الكود وما كانت تظهر في التخصيص. '
++                'اختر القسم ثم النص أو الزر — التعديل يطبق فورًا بالعربي والإنجليزي.')
++    else:
++        for key, (sid, label, _ar, _en) in EXTRA_CMS_TEXTS.items():
++            if sid == sec:
++                mk.add(InlineKeyboardButton('📝 ' + label, callback_data='edit_txt_' + key))
++        for key, (sid, label, _ar, _en) in EXTRA_CMS_BUTTONS.items():
++            if sid == sec:
++                mk.add(InlineKeyboardButton('🎛 ' + label, callback_data='edit_btn_' + key))
++        if sec == 'misc':
++            for key, label in EXTRA_CMS_EXISTING:
++                if key in LANG['ar']:
++                    mk.add(InlineKeyboardButton('📝 ' + label, callback_data='edit_txt_' + key))
++        mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_cms_x'))
++        text = f"🧩 <b>{html.escape(titles[sec])}</b>\n\n📝 = نص · 🎛 = زر (الاسم والإيموجي واللون)"
++    try:
++        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
++    except Exception:
++        bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=mk)
++
++
+ @bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_shop')
+ @admin_required
+ def ad_cms_shop(call):
+@@ -24193,6 +24462,19 @@
+     
+     # 🆕 شرح المتغيرات لكل نص (يساعد الأدمن)
+     placeholders_info = {
++        'ref_screen': (
++            "💡 <b>المتغيرات:</b>\n"
++            "<code>{0}</code> الزيارات · <code>{1}</code> معلق · <code>{2}</code> نشط · <code>{3}</code> غادر\n"
++            "<code>{4}</code> أرباح الإحالات · <code>{5}</code> أرباح المشتريات · <code>{6}</code> المجموع\n"
++            "<code>{7}</code> الرابطان (البوت + الموقع) · <code>{12}</code> سطر «باقي X للمكافأة»\n"
++            "<code>{8}</code> كل كم إحالة · <code>{9}</code> مبلغ الدفعة · <code>{10}</code> أقل شراء · <code>{11}</code> مكافأة الشراء\n"
++            "<i>الأرقام والروابط تتحدث تلقائيًا؛ لا تكتبها بنفسك.</i>"
++        ),
++        'ref_links_both': "💡 <code>{0}</code> رابط البوت · <code>{1}</code> رابط الموقع (Mini App)",
++        'ref_links_bot': "💡 <code>{0}</code> رابط البوت",
++        'ref_progress_line': "💡 <code>{0}</code> كم باقي · <code>{1}</code> مبلغ المكافأة",
++        'ref_list_title': "💡 <code>{0}</code> رقم الصفحة · <code>{1}</code> عدد الصفحات",
++        'ref_debt_note': "💡 <code>{0}</code> المبلغ المستحق",
+         'dep_msg_binance': (
+             "💡 <b>المتغيرات (3):</b>\n"
+             "<code>{0}</code> = المبلغ بالدولار (مثال: 10.0042)\n"
+@@ -29865,11 +30147,10 @@
+         txt += f"📦 Products: <b>{active_count}/{total_prods}</b>\n"
+         txt += f"📊 Orders: <b>{total_orders}</b> | Spent: <b>${total_spent:.2f}</b>\n"
+         txt += f"━━━━━━━━━━━━━━━━━━━\n"
+-        txt += ("🔐 Connection details are hidden — tap «🔑 Show connection details»." if l == 'en'
+-                else "🔐 بيانات الربط مخفية — اضغط «🔑 عرض بيانات الربط».")
++        txt += _txt_l(l, 'api_creds_hidden')
+ 
+         markup = InlineKeyboardMarkup(row_width=1)
+-        markup.add(InlineKeyboardButton("🔑 Show connection details" if l == 'en' else "🔑 عرض بيانات الربط", callback_data="api_creds"))
++        markup.add(_btn_lang_obj(l, 'btn_api_creds', callback_data="api_creds"))
+         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
+         markup.add(InlineKeyboardButton("🤖 برومبت جاهز للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "🤖 AI Build Prompt", callback_data="api_ai_prompt"))
+         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
+@@ -33537,7 +33818,8 @@
+     reward = _wa_fnum(get_referral_reward())
+     in_batch, threshold, _left = ref_progress(uid)
+     in_batch = in_batch % threshold
+-    return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
++    links = _ref_links(uid)
++    return 200, {'ok': True, 'link': links['bot'], 'links': links, 'auto_pay': ref_auto_pay_enabled(),
+                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
+                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
+                  'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
+@@ -34099,13 +34381,13 @@
+ def order_id_line(oid, lang='ar'):
+     if not oid:
+         return ''
+-    return f"\n🧾 <b>{'Order ID' if lang == 'en' else 'رقم الطلب'}:</b> <code>{html.escape(str(oid))}</code>"
++    return f"\n🧾 <b>{_txt_l(lang, 'order_id_label')}:</b> <code>{html.escape(str(oid))}</code>"
+ 
+ 
+ def order_copy_markup(oid, lang='ar', markup=None):
+     mk = markup or InlineKeyboardMarkup()
+     try:
+-        btn = _copy_button('📋 Copy order ID' if lang == 'en' else '📋 نسخ رقم الطلب', oid)
++        btn = _cms_copy_btn_l(lang, 'btn_copy_order_id', oid)
+         if btn:
+             mk.add(btn)
+     except Exception:
+@@ -37093,16 +37375,9 @@
+         return False
+     lang = lang or get_lang(uid)
+     url = url + '&l=' + ('en' if lang == 'en' else 'ar')      # شاشة التحميل بلغة العميل من أول لحظة
+-    if lang == 'en':
+-        text = ("🛡 <b>One last step</b>\n\nTo keep the store safe from fake accounts, tap the button and verify your device. "
+-                "It takes a few seconds and we don't collect personal data.")
+-        label = '🛡 Verify my device'
+-    else:
+-        text = ("🛡 <b>خطوة أخيرة</b>\n\nعشان نحمي المتجر من الحسابات الوهمية، اضغط الزر وتحقق من جهازك. "
+-                "ياخذ ثواني، وما نجمع أي بيانات شخصية.")
+-        label = '🛡 تحقق من جهازك'
++    text = _txt_l(lang, 'ref_dv_prompt')
+     kb = types.InlineKeyboardMarkup()
+-    kb.add(types.InlineKeyboardButton(label, web_app=types.WebAppInfo(url=url)))
++    kb.add(_btn_lang_obj(lang, 'btn_ref_dv', web_app=types.WebAppInfo(url=url)))
+     try:
+         bot.send_message(chat_id or uid, text, parse_mode='HTML', reply_markup=kb)
+         db.referrals_v2.update_one({'invited_id': int(uid), 'dv': {'$in': [None, 'need']}},
+@@ -37233,13 +37508,12 @@
+     try:
+         url = _wa_public_url()
+         if url:
+-            kb.add(types.InlineKeyboardButton('🛍 Open store' if lang == 'en' else '🛍 افتح المتجر', web_app=types.WebAppInfo(url=url)))
++            kb.add(_btn_lang_obj(lang, 'btn_open_store', web_app=types.WebAppInfo(url=url)))
+     except Exception:
+         pass
+-    kb.add(InlineKeyboardButton('🏠 Main menu' if lang == 'en' else '🏠 القائمة الرئيسية', callback_data='main_menu_refresh'))
++    kb.add(_btn_lang_obj(lang, 'btn_main_menu', callback_data='main_menu_refresh'))
+     try:
+-        bot.send_message(uid, "✅ <b>Verified!</b> You can use the store now." if lang == 'en'
+-                         else "✅ <b>تم التحقق!</b> تقدر الحين تستخدم المتجر.", parse_mode='HTML', reply_markup=kb)
++        bot.send_message(uid, _txt_l(lang, 'ref_dv_done'), parse_mode='HTML', reply_markup=kb)
+     except Exception:
+         pass
+ 
+@@ -37399,6 +37673,16 @@
+     ad_ref_settings_ui(call)
+ 
+ 
++@bot.callback_query_handler(func=lambda call: call.data == 'refauto_toggle')
++@admin_required
++def refauto_toggle_cb(call):
++    on = not ref_auto_pay_enabled()
++    db.settings.update_one({'key': 'ref_auto_pay'}, {'$set': {'value': 'on' if on else 'off'}}, upsert=True)
++    bot.answer_callback_query(call.id, "💸 الصرف التلقائي: " + ("مفعّل ✅ — كل دفعة مؤكدة تنصرف فورًا" if on
++                              else "موقوف ⛔ — الدفعات تنتظر موافقتك"), show_alert=True)
++    ad_ref_settings_ui(call)
++
++
+ @bot.callback_query_handler(func=lambda call: call.data == 'refdv_list')
+ @admin_required
+ def refdv_list_cb(call):
+@@ -38657,7 +38941,7 @@
+         f = io.BytesIO(content.encode('utf-8'))
+         f.name = fname
+         lang = get_lang(uid)
+-        bot.send_document(uid, f, caption=("📄 Your codes as a TXT file." if lang == 'en' else "📄 أكوادك في ملف TXT."))
++        bot.send_document(uid, f, caption=_txt_l(lang, 'codes_file_caption'), parse_mode='HTML')
+         return 200, {'ok': True, 'sent': True}
+     return 200, {'ok': True, 'url': f"/webapp/dl/{_txt_token(uid, gid, ref)}/{urllib.parse.quote(fname)}", 'name': fname}
+ 
+@@ -38690,7 +38974,7 @@
+     k = db.api_keys.find_one({'user_id': uid, 'is_active': True})
+     if not k:
+         try:
+-            bot.answer_callback_query(call.id, "No active API key." if l == 'en' else "ما عندك مفتاح API نشط.", show_alert=True)
++            bot.answer_callback_query(call.id, re.sub(r'<[^>]+>', '', _txt_l(l, 'api_no_key')), show_alert=True)
+         except Exception:
+             pass
+         return
+@@ -38718,11 +39002,11 @@
+         txt += ["🔑 مفتاح API:", f"<code>{html.escape(k['api_key'])}</code>", "", f"<i>⏱ الرسالة تنمسح لحالها بعد {_CREDS_TTL // 60} دقايق.</i>"]
+     mk = InlineKeyboardMarkup(row_width=1)
+     if conn:
+-        mk.add(_copy_button("📋 Copy connection code" if l == 'en' else "📋 نسخ كود الاتصال", conn))
++        mk.add(_cms_copy_btn_l(l, 'btn_copy_api_conn', conn))
+     if full:
+-        mk.add(_copy_button("📋 Copy base URL" if l == 'en' else "📋 نسخ الرابط الأساسي", full))
+-    mk.add(_copy_button("📋 Copy API key" if l == 'en' else "📋 نسخ المفتاح", k['api_key']))
+-    mk.add(InlineKeyboardButton("🙈 Hide" if l == 'en' else "🙈 إخفاء", callback_data="api_creds_hide"))
++        mk.add(_cms_copy_btn_l(l, 'btn_copy_api_base', full))
++    mk.add(_cms_copy_btn_l(l, 'btn_copy_api_key', k['api_key']))
++    mk.add(_btn_lang_obj(l, 'btn_api_hide', callback_data="api_creds_hide"))
+     m = bot.send_message(call.message.chat.id, '\n'.join(txt), parse_mode='HTML', reply_markup=mk, disable_web_page_preview=True)
+     try:
+         mid = getattr(m, 'message_id', None)
+--- a/webapp/index.html	2026-10-21 19:51:45.504060718 +0000
++++ b/webapp/index.html	2026-10-21 20:17:44.668618064 +0000
+@@ -32,7 +32,7 @@
+ /* Bounded diagnostics are installed before external scripts; never collect form values. */
+ (function(){
+  'use strict';
+- const build='lara-38.1',queue=[],recent=new Map();
++ const build='lara-41.1',queue=[],recent=new Map();
+  let connection=null,lastAction='',windowAt=0,windowCount=0;
+  function safe(value,limit){
+   return String(value||'').replace(/https?:\/\/[^\s)<>"']+/g,v=>v.split(/[?#]/)[0])
+@@ -1010,6 +1010,9 @@
+ .invite p{margin:3px 0 0;font-size:13px;color:var(--fg-2)}
+ .linkbox{display:flex;align-items:center;gap:8px;margin-top:14px;padding:6px 6px 6px 12px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line)}
+ .linkbox span{flex:1;min-width:0;font:500 12.5px/1.3 var(--f-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr;text-align:start}
++.ref-l{margin-top:12px}.ref-l .linkbox{margin-top:6px}
++.ref-lt{display:block;font-size:12.5px;font-weight:600;color:var(--fg-2)}
++.ref-pick{margin:12px 0 0!important;font-size:12.5px!important}
+ .bar{height:8px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin-top:12px}
+ .bar i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .6s}
+ .mini{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:12px}
+@@ -1726,7 +1729,7 @@
+ pay:'Payment',sendExactly:'Send exactly',toAddr:'To this address',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'Put your ID in the note',waiting:'Waiting for payment',autoCheck:'Checked automatically every few seconds',checkNow:"I've paid · Check now",checking:'Checking…',cancelPay:'Cancel payment',armCancel:'Tap again to cancel',timeUp:"Time's up. If you already paid, it will still be detected for a while.",
+ warnExact:"Copy the full amount with all its decimals and send exactly that. A different amount won't be detected.",warnBep:'The platform may deduct a network fee (about 0.1–0.2). Add it on top so the full amount arrives.',warnGen:'If the network deducts a fee, add it on top so the full amount arrives.',
+ paidTitle:'Balance added',paidBody:'{p} was added to your balance.',cancelled:'Payment cancelled',expired:'This payment expired',qr:'QR code',existsTitle:'You have an unfinished payment',existsBody:'{p} via {m}. Continue it or start a new one.',continueIt:'Continue it',startNew:'Start a new one',starsPaid:'Stars received. Your balance updates in a moment.',
+-profileTitle:'Profile',purchases:'Purchases',language:'Language',support:'Support',terms:'Terms of use',openChat:'Open the bot chat',inviteT:'Invite friends',inviteB:'Earn {r} for every {n} active friends, plus {pr} when a friend spends over {mp}.',share:'Share',clicks:'Visits',active:'Active',pendingR:'Pending',left:'Left',earned:'Earned',toNext:'{n} more active friends to earn {r}',admin:'Admin',
++profileTitle:'Profile',purchases:'Purchases',language:'Language',support:'Support',terms:'Terms of use',openChat:'Open the bot chat',inviteT:'Invite friends',refBotL:'Bot link',refAppL:'Store link (opens the store directly)',refPick:'Share the link you prefer — both count the same.',inviteB:'Earn {r} for every {n} active friends, plus {pr} when a friend spends over {mp}.',share:'Share',clicks:'Visits',active:'Active',pendingR:'Pending',left:'Left',earned:'Earned',toNext:'{n} more active friends to earn {r}',admin:'Admin',
+ joinT:'Join our channels',joinB:'Subscribe to keep using the store.',join:'Join',joined:"I've joined",notYet:"You haven't joined every channel yet",channel:'Channel',
+ banned:'Your account is blocked',bannedB:'Contact support if you think this is a mistake.',authT:'Session expired',authB:'Close the store and open it again from the bot.',close:'Close',noTgT:'Open it in Telegram',noTgB:'This store runs inside Telegram. Open it from the bot menu.',
+ activity:'Activity',noActivity:'Nothing here yet',translate:'Translate',original:'Show original',translating:'Translating…',demo:'Demo',loading:'Loading…',retry:'Try again',pcs:'pcs',
+@@ -1741,7 +1744,7 @@
+ pay:'الدفع',sendExactly:'أرسل هذا المبلغ بالضبط',toAddr:'إلى هذا العنوان',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'اكتب الآيدي الخاص بك في الملاحظة',waiting:'بانتظار الدفع',autoCheck:'يتم الفحص تلقائياً كل بضع ثوانٍ',checkNow:'دفعت · افحص الآن',checking:'جاري الفحص…',cancelPay:'إلغاء عملية الدفع',armCancel:'اضغط مرة ثانية للإلغاء',timeUp:'انتهى الوقت. إذا دفعت فعلاً سيتم اكتشاف دفعتك خلال فترة.',
+ warnExact:'انسخ المبلغ كاملاً بكل خاناته العشرية وأرسله بالضبط. أي فرق في الكسور يمنع اكتشاف التحويل.',warnBep:'المنصة قد تخصم رسوم شبكة (حوالي 0.1 – 0.2). أضفها فوق المبلغ ليصل كاملاً.',warnGen:'إذا خصمت الشبكة رسوماً، أضفها فوق المبلغ ليصل كاملاً.',
+ paidTitle:'تمت إضافة الرصيد',paidBody:'تمت إضافة {p} إلى رصيدك.',cancelled:'تم إلغاء عملية الدفع',expired:'انتهت صلاحية هذه الدفعة',qr:'رمز QR',existsTitle:'لديك عملية دفع غير مكتملة',existsBody:'{p} عبر {m}. أكملها أو ابدأ عملية جديدة.',continueIt:'إكمالها',startNew:'بدء عملية جديدة',starsPaid:'وصلت النجوم، سيتحدث رصيدك خلال لحظات.',
+-profileTitle:'حسابي',purchases:'المشتريات',language:'اللغة',support:'الدعم الفني',terms:'شروط الاستخدام',openChat:'فتح محادثة البوت',inviteT:'ادعُ أصدقاءك',inviteB:'اربح {r} عن كل {n} أصدقاء نشطين، و{pr} عندما يشتري صديقك بأكثر من {mp}.',share:'مشاركة',clicks:'الزيارات',active:'نشط',pendingR:'معلّق',left:'غادر',earned:'الأرباح',toNext:'باقي {n} إحالات نشطة لتربح {r}',admin:'أدمن',
++profileTitle:'حسابي',purchases:'المشتريات',language:'اللغة',support:'الدعم الفني',terms:'شروط الاستخدام',openChat:'فتح محادثة البوت',inviteT:'ادعُ أصدقاءك',refBotL:'رابط البوت',refAppL:'رابط الموقع (يفتح المتجر مباشرة)',refPick:'شارك الرابط اللي تفضّله — الاثنين ينحسبون نفس الشي.',inviteB:'اربح {r} عن كل {n} أصدقاء نشطين، و{pr} عندما يشتري صديقك بأكثر من {mp}.',share:'مشاركة',clicks:'الزيارات',active:'نشط',pendingR:'معلّق',left:'غادر',earned:'الأرباح',toNext:'باقي {n} إحالات نشطة لتربح {r}',admin:'أدمن',
+ joinT:'اشترك في قنواتنا',joinB:'الاشتراك مطلوب لمتابعة استخدام المتجر.',join:'اشتراك',joined:'اشتركت',notYet:'لم تشترك في كل القنوات بعد',channel:'القناة',
+ banned:'حسابك محظور',bannedB:'تواصل مع الدعم إذا كنت تعتقد أن هذا خطأ.',authT:'انتهت الجلسة',authB:'أغلق المتجر وافتحه من جديد من البوت.',close:'إغلاق',noTgT:'افتحه من تيليجرام',noTgB:'هذا المتجر يعمل داخل تيليجرام. افتحه من قائمة البوت.',
+ activity:'النشاط',noActivity:'لا يوجد شيء بعد',translate:'ترجمة',original:'عرض الأصل',translating:'جاري الترجمة…',demo:'معاينة',loading:'جاري التحميل…',retry:'إعادة المحاولة',pcs:'قطعة',
+@@ -1756,7 +1759,7 @@
+ pay:'Оплата',sendExactly:'Отправьте ровно',toAddr:'На этот адрес',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'Укажите ваш ID в комментарии',waiting:'Ожидаем оплату',autoCheck:'Проверяется автоматически каждые несколько секунд',checkNow:'Я оплатил · Проверить',checking:'Проверяем…',cancelPay:'Отменить оплату',armCancel:'Нажмите ещё раз для отмены',timeUp:'Время вышло. Если вы уже оплатили, платёж ещё будет найден.',
+ warnExact:'Скопируйте сумму целиком, со всеми знаками после запятой, и отправьте ровно её. Другая сумма не будет распознана.',warnBep:'Платформа может удержать комиссию сети (около 0.1–0.2). Добавьте её сверху, чтобы пришла полная сумма.',warnGen:'Если сеть удерживает комиссию, добавьте её сверху, чтобы пришла полная сумма.',
+ paidTitle:'Баланс пополнен',paidBody:'На баланс зачислено {p}.',cancelled:'Оплата отменена',expired:'Срок оплаты истёк',qr:'QR-код',existsTitle:'У вас есть незавершённая оплата',existsBody:'{p} через {m}. Продолжите её или начните новую.',continueIt:'Продолжить',startNew:'Начать новую',starsPaid:'Звёзды получены. Баланс скоро обновится.',
+-profileTitle:'Профиль',purchases:'Покупки',language:'Язык',support:'Поддержка',terms:'Условия использования',openChat:'Открыть чат с ботом',inviteT:'Приглашайте друзей',inviteB:'{r} за каждые {n} активных друзей и {pr}, когда друг потратит больше {mp}.',share:'Поделиться',clicks:'Переходы',active:'Активные',pendingR:'Ожидают',left:'Ушли',earned:'Заработано',toNext:'Ещё {n} активных друзей до {r}',admin:'Админ',
++profileTitle:'Профиль',purchases:'Покупки',language:'Язык',support:'Поддержка',terms:'Условия использования',openChat:'Открыть чат с ботом',inviteT:'Приглашайте друзей',refBotL:'Ссылка на бота',refAppL:'Ссылка на магазин (сразу откроет магазин)',refPick:'Поделитесь удобной ссылкой — обе засчитываются одинаково.',inviteB:'{r} за каждые {n} активных друзей и {pr}, когда друг потратит больше {mp}.',share:'Поделиться',clicks:'Переходы',active:'Активные',pendingR:'Ожидают',left:'Ушли',earned:'Заработано',toNext:'Ещё {n} активных друзей до {r}',admin:'Админ',
+ joinT:'Подпишитесь на каналы',joinB:'Подписка нужна, чтобы пользоваться магазином.',join:'Подписаться',joined:'Я подписался',notYet:'Вы подписались не на все каналы',channel:'Канал',
+ banned:'Аккаунт заблокирован',bannedB:'Напишите в поддержку, если считаете это ошибкой.',authT:'Сессия истекла',authB:'Закройте магазин и откройте его снова из бота.',close:'Закрыть',noTgT:'Откройте в Telegram',noTgB:'Магазин работает внутри Telegram. Откройте его из меню бота.',
+ activity:'Активность',noActivity:'Пока пусто',translate:'Перевести',original:'Оригинал',translating:'Перевод…',demo:'Демо',loading:'Загрузка…',retry:'Повторить',pcs:'шт.',
+@@ -1771,7 +1774,7 @@
+ pay:'支付',sendExactly:'请准确转账',toAddr:'收款地址',payId:'Binance Pay ID',bybitUid:'Bybit UID',noteId:'在备注中填写你的 ID',waiting:'等待付款',autoCheck:'每隔几秒自动检测',checkNow:'我已付款 · 立即检测',checking:'检测中…',cancelPay:'取消支付',armCancel:'再次点击取消',timeUp:'时间已到。如果已付款，系统仍会继续检测一段时间。',
+ warnExact:'请复制完整金额（含全部小数位）并准确转账，金额不符将无法识别。',warnBep:'平台可能扣除网络手续费（约 0.1–0.2），请额外加上，确保全额到账。',warnGen:'如网络扣除手续费，请额外加上，确保全额到账。',
+ paidTitle:'充值成功',paidBody:'{p} 已存入你的余额。',cancelled:'支付已取消',expired:'该笔支付已过期',qr:'二维码',existsTitle:'你有一笔未完成的支付',existsBody:'{p}，通过 {m}。继续完成或重新开始。',continueIt:'继续支付',startNew:'重新开始',starsPaid:'已收到星星，余额稍后更新。',
+-profileTitle:'我的',purchases:'购买次数',language:'语言',support:'客服',terms:'使用条款',openChat:'打开机器人聊天',inviteT:'邀请好友',inviteB:'每邀请 {n} 位活跃好友得 {r}，好友消费超过 {mp} 再得 {pr}。',share:'分享',clicks:'访问',active:'活跃',pendingR:'待确认',left:'已退出',earned:'收益',toNext:'再邀请 {n} 位活跃好友可得 {r}',admin:'管理员',
++profileTitle:'我的',purchases:'购买次数',language:'语言',support:'客服',terms:'使用条款',openChat:'打开机器人聊天',inviteT:'邀请好友',refBotL:'机器人链接',refAppL:'商店链接（直接打开商店）',refPick:'分享你喜欢的链接——两个链接的计算方式相同。',inviteB:'每邀请 {n} 位活跃好友得 {r}，好友消费超过 {mp} 再得 {pr}。',share:'分享',clicks:'访问',active:'活跃',pendingR:'待确认',left:'已退出',earned:'收益',toNext:'再邀请 {n} 位活跃好友可得 {r}',admin:'管理员',
+ joinT:'请关注我们的频道',joinB:'关注后才能继续使用商店。',join:'关注',joined:'我已关注',notYet:'你还没有关注全部频道',channel:'频道',
+ banned:'账号已被封禁',bannedB:'如有疑问请联系客服。',authT:'会话已过期',authB:'请关闭商店并从机器人重新打开。',close:'关闭',noTgT:'请在 Telegram 中打开',noTgB:'本商店在 Telegram 内运行，请从机器人菜单打开。',
+ activity:'动态',noActivity:'暂无内容',translate:'翻译',original:'查看原文',translating:'翻译中…',demo:'演示',loading:'加载中…',retry:'重试',pcs:'件',
+@@ -3660,6 +3663,14 @@
+   } });
+   sh.body(cgptSheetHtml(st));
+ }
++/* 🔗 Two referral links — the bot and the store (Main Mini App). The customer shares the one he prefers. */
++function refLinksHtml(r) {
++  const links = r && r.links && r.links.bot ? r.links : { bot: r && r.link, app: null };
++  const box = (cls, icon, label, url) => `<div class="ref-l ${cls}"><small class="ref-lt">${icon} ${esc(label)}</small><div class="linkbox"><span>${esc(url)}</span><button class="copy" data-act="copy" data-v="${esc(url)}" aria-label="copy">${ic.copy}</button><button class="btn primary sm" data-act="share" data-v="${esc(url)}">${ic.share}${esc(t('share'))}</button></div></div>`;
++  return (links.app ? `<p class="ref-pick">${esc(t('refPick'))}</p>` : '') +
++    (links.bot ? box('ref-bot', '🤖', t('refBotL'), links.bot) : '') +
++    (links.app ? box('ref-app', '🛍', t('refAppL'), links.app) : '');
++}
+ async function loadRefs() { const r = await api('referrals'); if (r.ok) { S.refs = r; if (S.tab === 'profile') renderView(); } }
+ function vProfile() {
+   const u = S.user || {}, r = S.refs;
+@@ -3668,7 +3679,7 @@
+   const lang = LANGS.find(l => l[0] === LANG);
+   const inv = r ? `<div class="invite">
+       <div class="ihead">${slot('invite', 'busts', 'ae')}<div><h3>${esc(t('inviteT'))}</h3><p>${esc(t('inviteB', { r: usd(r.reward), n: r.threshold, pr: usd(r.purchase_reward), mp: usd(r.min_purchase) }))}</p></div></div>
+-      <div class="linkbox"><span>${esc(r.link)}</span><button class="copy" data-act="copy" data-v="${esc(r.link)}" aria-label="copy">${ic.copy}</button><button class="btn primary sm" data-act="share" data-v="${esc(r.link)}">${ic.share}${esc(t('share'))}</button></div>
++      ${refLinksHtml(r)}
+       <div class="bar"><i style="width:${Math.round((r.progress / Math.max(1, r.threshold)) * 100)}%"></i></div>
+       <div class="hint">${esc(t('toNext', { n: r.threshold - r.progress, r: usd(r.reward) }))}</div>
+       <div class="mini"><div><b class="num">${r.clicks}</b><span>${esc(t('clicks'))}</span></div><div><b class="num">${r.active}</b><span>${esc(t('active'))}</span></div><div><b class="num">${r.pending}</b><span>${esc(t('pendingR'))}</span></div><div><b class="num">${usd(r.earned_refs + r.earned_buys)}</b><span>${esc(t('earned'))}</span></div></div>
+@@ -5907,7 +5918,7 @@
+       const per = b.per || 12, pages = Math.max(1, Math.ceil(all.length / per)), page = Math.min(b.page || 1, pages);
+       return { ok: true, items: all.slice((page - 1) * per, page * per), page, pages, total: all.length, sums: { deposits: 85, spent: all.filter(i => i.type === 'purchase').reduce((s, i) => s - i.amount, 0), adjust: 1.5 }, balance: this.bal, pending: this.pend };
+     }
+-    if (path === 'referrals') return { ok: true, link: 'https://t.me/LaraStockBot?start=784512369', pending: 2, active: 7, left: 1, clicks: 23, earned_refs: 0.1, earned_buys: 0.4, threshold: 10, reward: 0.1, progress: 7, purchase_reward: 0.1, min_purchase: 2, balance: this.bal };
++    if (path === 'referrals') return { ok: true, link: 'https://t.me/LaraStockBot?start=784512369', links: { bot: 'https://t.me/LaraStockBot?start=784512369', app: 'https://t.me/LaraStockBot?startapp=784512369' }, pending: 2, active: 7, left: 1, clicks: 23, earned_refs: 0.1, earned_buys: 0.4, threshold: 10, reward: 0.1, progress: 7, purchase_reward: 0.1, min_purchase: 2, balance: this.bal };
+     if (path === 'terms' && window.LARA_DATA && window.LARA_DATA.terms && (window.LARA_DATA.terms.ar || window.LARA_DATA.terms.en)) return { ok: true, html: (isAr() ? window.LARA_DATA.terms.ar : window.LARA_DATA.terms.en) || window.LARA_DATA.terms.en || window.LARA_DATA.terms.ar };
+     if (path === 'terms') return { ok: true, html: '📜 <b>Store terms</b>\n\n• Digital products are delivered instantly or manually as shown on each product.\n• Keep your codes private.\n• Contact support within 24 hours for any issue.' };
+     if (path.startsWith('api/')) return this.apiCall(path.slice(4), b);
+--- a/verification/test_integration.py	2026-10-21 19:51:45.460778673 +0000
++++ b/verification/test_integration.py	2026-10-21 20:08:43.431834869 +0000
+@@ -404,8 +404,26 @@
+     assert not [t for t in _admin_texts(mod) if 'مشكوك' in t]       # no message per referral
+     assert not [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
+     s, d, _ = _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
+-    ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
++    # round 41: every member verified on the site → paid automatically (suspicious ones too, owner's choice);
++    # the admin still gets the device report and can reject a referral afterwards from the checklist
++    ms = [m for m in MESSAGES if 'صُرفت مكافأة إحالات تلقائيًا' in str(m[1])]
+     assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'rfl_1001_1_0' in json.dumps(ms[0][2].get('reply_markup').to_dict())
++    assert mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})['status'] == 'paid'
++
++
++def test_suspicious_referral_waits_for_admin_when_automatic_reward_is_off(mod, server):
++    mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': '2'}}, upsert=True)
++    mod.db.settings.update_one({'key': 'ref_auto_pay'}, {'$set': {'value': 'off'}}, upsert=True)
++    for uid in (2001, 2002):
++        mod.db.users.insert_one({'user_id': uid, 'name': f'Inv{uid}', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
++        mod.register_new_referral(uid, 1001)
++        mod.db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'need'}})
++    ch = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
++    _verified_ref_request(mod, server, 2001, _ref_fp('a' * 32, wd=True), ch)
++    _verified_ref_request(mod, server, 2002, _ref_fp('b' * 32), ch)
++    ms = [m for m in MESSAGES if 'إنجاز إحالات' in str(m[1])]
++    assert ms and 'مشكوك فيها: <b>1</b>' in ms[0][1] and 'refwd_ok_1001_1' in json.dumps(ms[0][2].get('reply_markup').to_dict())
++    assert mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})['status'] == 'pending'
+ 
+ 
+ # ───── round 7: admin whole-database search (email / any part of an account line) ─────
+--- a/verification/test_referral_policy.py	2026-10-21 19:51:45.460778673 +0000
++++ b/verification/test_referral_policy.py	2026-10-21 20:08:43.432345983 +0000
+@@ -105,10 +105,13 @@
+     mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -60,
+         'new_balance': -50, 'date': dt.datetime.now()})
+     with pytest.raises(ValueError, match='ledger review'):
+-        mod._ref_money(1001, 1, 'ref_reward', 'Saved reward', event_key='await-review')
++        mod._ref_money(1001, -1, 'ref_clawback', 'Saved reversal', event_key='await-review')
+     assert mod.db.users.find_one({'user_id': 1001})['balance'] == -50
+     assert mod.db.ref_money_events.find_one({})['status'] == 'prepared'
+     assert not mod.db.ref_balance_reconciliations.count_documents({})
++    # owner's rule (rounds 35/41): a reward credit is never blocked — it only reduces the deficit
++    mod._ref_money(1001, 1, 'ref_reward', 'Batch reward', event_key='reward-on-negative')
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -49
+ 
+ 
+ def test_balance_diagnosis_accepts_username_and_id_without_writing_or_exposing_private_fields(mod):
+--- a/verification/test_client_diagnostics_browser.cjs	2026-10-21 19:51:45.460778673 +0000
++++ b/verification/test_client_diagnostics_browser.cjs	2026-10-21 20:07:48.074454465 +0000
+@@ -44,7 +44,7 @@
+   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
+   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
+   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
+-  assert.equal(runtime.build,'lara-38.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
++  assert.equal(runtime.build,'lara-41.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
+   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
+   const count=reports.length;
+@@ -61,7 +61,7 @@
+   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
+   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
+   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
+-  assert(diagnostics.some(r=>r.trace.includes('build: lara-38.1')));
++  assert(diagnostics.some(r=>r.trace.includes('build: lara-41.1')));
+   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
+   assert(diagnostics.every(r=>r.user_id===9001));
+   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);
+--- a/verification/test_extension_errors_browser.cjs	2026-10-21 19:51:45.460778673 +0000
++++ b/verification/test_extension_errors_browser.cjs	2026-10-21 20:07:48.075051188 +0000
+@@ -35,7 +35,7 @@
+   await page.evaluate(base=>window.dispatchEvent(new ErrorEvent('error',{message:'Store render failed',filename:base+'/__ref_test__/',lineno:12,colno:3,error:new Error('Store render failed')})),BASE);
+   await page.waitForTimeout(800);
+   const own=reports.find(r=>r.message==='Store render failed');
+-  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-38.1',JSON.stringify(reports));
+-  console.log('PASS the store\'s own error is still reported with its location and build lara-38.1');
++  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-41.1',JSON.stringify(reports));
++  console.log('PASS the store\'s own error is still reported with its location and build lara-41.1');
+  }finally{await browser.close();}
+ })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});
+--- a/verification/test_round34_alerts.py	2026-10-21 19:51:45.460778673 +0000
++++ b/verification/test_round34_alerts.py	2026-10-21 20:07:48.075509516 +0000
+@@ -175,4 +175,4 @@
+     boot = html[html.index('id="lara-error-bootstrap"'):html.index('__LARA_ERROR_REPORTER__=')]
+     assert 'chrome|moz|safari-web|safari|ms-browser' in boot and 'webkit-masked-url' in boot
+     assert 'if(fromExtension(locationText,extra.stack))return;' in boot
+-    assert "const build='lara-38.1'" in html
++    assert "const build='lara-41.1'" in html
+--- a/verification/test_round41_referrals.py	2026-10-20 02:23:37.488225162 +0000
++++ b/verification/test_round41_referrals.py	2026-10-21 20:10:46.131899983 +0000
+@@ -0,0 +1,258 @@
++"""Round 41: two referral links (bot + store) both register the referral; every new referral must pass the
++emoji identity check on the website even when it already joined the forced channels; every N site-verified
++referrals are paid automatically; texts/buttons that lived in the code are editable from the CMS."""
++import http.client
++import json
++
++import pytest
++from harness import MESSAGES, reply
++from test_integration import mod, isolate, server, request, signed, _verified_ref_request, _ref_fp  # noqa: F401
++from test_products_menu import dispatch, buttons
++from test_referral_policy import message
++
++CH = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
++
++
++@pytest.fixture(autouse=True)
++def keep_edited_buttons(mod, monkeypatch):
++    monkeypatch.setitem(mod._VC_ORIG, 'edit_message_text',
++                        lambda text, chat_id=None, message_id=None, **kw: reply(chat_id, text, **kw))
++
++
++def _site(server, path, uid, body=None, start_param=None):
++    extra = {'start_param': start_param} if start_param else {}
++    conn = http.client.HTTPConnection(*server, timeout=4)
++    conn.request('POST', path, json.dumps(body or {}),
++                 {'Content-Type': 'application/json', 'X-Telegram-Init-Data': signed(uid, **extra)})
++    res = conn.getresponse()
++    data = json.loads(res.read() or b'{}')
++    conn.close()
++    return res.status, data
++
++
++def _links_on(mod, monkeypatch, on=True):
++    monkeypatch.setattr(mod, '_bot_main_app', lambda: on)
++    monkeypatch.setattr(mod, 'get_bot_username', lambda: 'lara_local_test_bot')
++
++
++def _last_screen(uid=1001):
++    return next(r for r in reversed(MESSAGES) if r[0] == uid and buttons(r))
++
++
++def _copy_values(record):
++    return [b['copy_text']['text'] for row in buttons(record) for b in row if 'copy_text' in b]
++
++
++# ───────────────────────── 1) the two links ─────────────────────────
++def test_bot_referral_screen_offers_both_links(mod, monkeypatch):
++    _links_on(mod, monkeypatch)
++    dispatch(mod, 'open_invite', 1001)
++    rec = _last_screen()
++    bot_link, app_link = 'https://t.me/lara_local_test_bot?start=1001', 'https://t.me/lara_local_test_bot?startapp=1001'
++    assert bot_link in rec[1] and app_link in rec[1]
++    assert _copy_values(rec) == [bot_link, app_link]
++    assert any(b.get('callback_data') == 'ref_list_0' for row in buttons(rec) for b in row)
++
++
++def test_store_link_needs_main_mini_app_and_only_the_admin_sees_how(mod, monkeypatch):
++    _links_on(mod, monkeypatch, on=False)
++    dispatch(mod, 'open_invite', 1001)
++    rec = _last_screen()
++    assert '?start=1001' in rec[1] and 'startapp' not in rec[1] and 'BotFather' not in rec[1]
++    assert _copy_values(rec) == ['https://t.me/lara_local_test_bot?start=1001']
++    dispatch(mod, 'open_invite', 9001)
++    assert 'Main Mini App' in _last_screen(9001)[1]
++
++
++def test_site_referral_card_receives_both_links(mod, server, monkeypatch):
++    _links_on(mod, monkeypatch)
++    s, r, _ = request(server, '/webapp/referrals', {})
++    assert s == 200 and r['links'] == {'bot': 'https://t.me/lara_local_test_bot?start=1001',
++                                        'app': 'https://t.me/lara_local_test_bot?startapp=1001'}
++    assert r['link'] == r['links']['bot'] and r['auto_pay'] is True
++
++
++def test_bot_link_registers_and_still_requires_the_emoji_check_after_joining_channels(mod, server, monkeypatch):
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: True)          # already joined every channel
++    monkeypatch.setattr(mod, '_wa_public_url', lambda: 'https://local.example/app/')
++    mod.start_handler(message(mod, 3001, '/start 1001'))
++    rec = mod._ref_find(3001)
++    assert rec and rec['referrer_id'] == 1001 and rec['status'] == 'pending' and mod.ref_dv_required(rec)
++    mod.db.users.update_one({'user_id': 3001}, {'$set': {'lang_chosen': True, 'lang': 'en'}})
++    mod._invalidate_user_cache(3001)
++    sent = len(MESSAGES)
++    mod.start_handler(message(mod, 3001, '/start'))
++    gate = [m for m in MESSAGES[sent:] if m[0] == 3001]
++    assert gate and 'One last step' in gate[-1][1]                                # the verify button, not the menu
++    assert any('web_app' in b for row in buttons(gate[-1]) for b in row)
++    assert mod._ref_find(3001)['status'] == 'pending'                             # channels alone don't count
++    s, d, _ = _verified_ref_request(mod, server, 3001, _ref_fp('c' * 32), CH)
++    assert s == 200 and mod._ref_find(3001)['status'] == 'active'
++
++
++@pytest.mark.parametrize('device_check', ['on', 'off'])
++def test_store_link_registers_and_requires_the_emoji_check(mod, server, monkeypatch, device_check):
++    mod.db.settings.update_one({'key': 'ref_dv'}, {'$set': {'value': device_check}}, upsert=True)
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: True)
++    s, boot = _site(server, '/webapp/bootstrap', 3002, start_param='1001')
++    assert s == 200 and boot['verify'] is True                                    # the store opens on the check
++    rec = mod._ref_find(3002)
++    assert rec['referrer_id'] == 1001 and rec['status'] == 'pending'
++    s, d, _ = _verified_ref_request(mod, server, 3002, _ref_fp('d' * 32), CH)
++    assert s == 200 and mod._ref_find(3002)['status'] == 'active'
++    s, boot = _site(server, '/webapp/bootstrap', 3002)
++    assert boot['verify'] is False
++
++
++def test_store_link_never_rewrites_an_existing_customer(mod, server):
++    s, _ = _site(server, '/webapp/bootstrap', 1002, start_param='1001')
++    assert s == 200 and not mod._ref_find(1002)
++
++
++# ───────────────────────── 2) automatic reward every N site-verified referrals ─────────────────────────
++def _verified_batch(mod, server, monkeypatch, n=10, start=4000):
++    monkeypatch.setattr(mod, 'check_forced_sub', lambda *a, **k: True)
++    for i in range(n):
++        uid = start + i
++        mod.db.users.insert_one({'user_id': uid, 'name': f'Inv{uid}', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
++        mod.register_new_referral(uid, 1001)
++        s, d, _ = _verified_ref_request(mod, server, uid, _ref_fp('%032x' % uid), CH)
++        assert s == 200, d
++
++
++def test_ten_verified_referrals_pay_the_batch_reward_automatically(mod, server, monkeypatch):
++    reward = mod.get_referral_reward()
++    sent = len(MESSAGES)
++    _verified_batch(mod, server, monkeypatch)
++    ms = mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})
++    assert ms['status'] == 'paid' and ms['auto'] and ms['paid_by'] == 'auto' and ms['paid_amount'] == reward
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == round(100 + reward, 6)
++    new = MESSAGES[sent:]
++    assert [m for m in new if m[0] == 1001 and f"{reward:.2f}" in str(m[1])]          # the referrer is told
++    assert [m for m in new if 'صُرفت مكافأة إحالات تلقائيًا' in str(m[1])]             # the admin gets the report
++    mod._ref_resume_financial()
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == round(100 + reward, 6)   # never twice
++
++
++def test_nine_verified_referrals_pay_nothing_yet(mod, server, monkeypatch):
++    _verified_batch(mod, server, monkeypatch, n=9)
++    assert not mod.db.referral_milestones.count_documents({})
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_batch_with_an_older_unverified_referral_waits_for_the_admin(mod, server, monkeypatch):
++    mod.db.referrals_v2.insert_one({'invited_id': 3999, 'referrer_id': 1001, 'status': 'active', 'created_at': 1})  # pre-policy
++    _verified_batch(mod, server, monkeypatch, n=9)
++    ms = mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})
++    assert ms and ms['status'] == 'pending' and mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_old_pending_batches_stay_for_the_admin(mod, server, monkeypatch):
++    mod.db.referral_milestones.insert_one({'referrer_id': 1001, 'batch_no': 1, 'status': 'pending', 'threshold': 10,
++                                           'reward': 1.0, 'members': [3990 + i for i in range(10)], 'created_at': 1})
++    _verified_batch(mod, server, monkeypatch, n=10)
++    old = mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 1})
++    assert old['status'] == 'pending'                                  # not touched (owner's choice)
++    assert mod.db.referral_milestones.find_one({'referrer_id': 1001, 'batch_no': 2})['status'] == 'paid'
++
++
++def test_switch_off_returns_to_admin_approval(mod, server, monkeypatch):
++    mod.db.settings.update_one({'key': 'ref_auto_pay'}, {'$set': {'value': 'off'}}, upsert=True)
++    _verified_batch(mod, server, monkeypatch)
++    assert mod.db.referral_milestones.find_one({'batch_no': 1})['status'] == 'pending'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
++
++
++def test_admin_can_reject_after_the_automatic_payment_and_its_value_comes_back(mod, server, monkeypatch):
++    reward = mod.get_referral_reward()
++    _verified_batch(mod, server, monkeypatch)
++    dispatch(mod, 'rfd_no_4003_1001_1_0', 9001)
++    assert mod._ref_find(4003)['dv'] == 'rejected'
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == round(100 + reward - reward / 10, 6)
++
++
++def test_automatic_reward_reaches_a_referrer_with_a_negative_balance(mod, server, monkeypatch):
++    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -0.5}})
++    reward = mod.get_referral_reward()
++    _verified_batch(mod, server, monkeypatch)
++    assert mod.db.users.find_one({'user_id': 1001})['balance'] == round(-0.5 + reward, 6)
++
++
++# ───────────────────────── 3) CMS ─────────────────────────
++def _custom(mod, key, ar, en=None):
++    for lang, value in (('ar', ar), ('en', en if en is not None else ar)):
++        mod.db.custom_texts.update_one({'lang': lang, 'key': key}, {'$set': {'value': value}}, upsert=True)
++    mod._load_custom_texts_cache()
++
++
++def test_log_via_lines_are_editable(mod):
++    _custom(mod, 'log_via_webapp', '🛰 <b>From:</b> our site', '🛰 <b>From:</b> our site')
++    _custom(mod, 'log_via_bot', '🤖 <b>From:</b> the bot', '🤖 <b>From:</b> the bot')
++    with mod._error_scope():
++        mod._LOG_SRC.v = 'webapp'
++        assert mod._log_src('New purchase').endswith('🛰 <b>From:</b> our site')
++        mod._LOG_SRC.v = 'bot'
++        assert mod._log_src('New purchase').endswith('🤖 <b>From:</b> the bot')
++        out = mod._log_src(mod._log_src('Twice'))
++        assert out.count('From:') == 1
++        mod._LOG_SRC.v = None
++
++
++def test_referral_screen_and_buttons_follow_the_cms(mod, monkeypatch):
++    _links_on(mod, monkeypatch)
++    _custom(mod, 'ref_screen', 'شاشتي {2} نشط\n{7}', 'My screen: {2} active\n{7}')
++    mod.db.custom_buttons.insert_one({'lang': 'en', 'key': 'btn_copy_ref_app', 'text': '🛍 Copy shop link'})
++    dispatch(mod, 'open_invite', 1001)
++    rec = _last_screen()
++    assert rec[1].startswith('My screen: 0 active') and '?startapp=1001' in rec[1]
++    assert any(b.get('text') == '🛍 Copy shop link' for row in buttons(rec) for b in row)
++
++
++def test_the_admins_old_referral_design_becomes_the_new_editable_screen(mod, monkeypatch):
++    old_ar = ('<tg-emoji emoji-id="5235630047959727475">💎</tg-emoji> <b>نظام الإحالات</b>\n\n'
++              '👥 <b>الزيارات:</b>  <b>{}</b>\n⌛ <b>المعلق:</b>  <b>{}</b>\n✅ <b>النشط:</b>  <b>{}</b>\n❌ <b>غادر:</b>  <b>{}</b>\n\n'
++              '💵 <b>أرباحك:</b>  <code>${:.2f}</code>\n\n━━━━━━━━━━━━━━\n🔗 <b>رابطك:</b>\n<code>https://t.me/{}?start={}</code>\n\n'
++              '🔥 كل <b>10</b> اشتراكات نشطة = <b>$0.10</b>\n💵 شراء صديقك > <b>$2</b> = <b>$0.10</b>')
++    _custom(mod, 'invite_txt', old_ar, old_ar.replace('نظام الإحالات', 'Referral system'))
++    mod.db.settings.delete_many({'key': 'ref_screen_v1'})
++    mod._ref_screen_migrate()
++    new = mod.db.custom_texts.find_one({'lang': 'ar', 'key': 'ref_screen'})['value']
++    assert '5235630047959727475' in new and '{7}' in new and '<b>{8}</b>' in new and '{}' not in new
++    _links_on(mod, monkeypatch)
++    mod.db.users.update_one({'user_id': 1002}, {'$set': {'ref_v2_earned': 1.5}})
++    mod.db.settings.update_one({'key': 'referral_reward'}, {'$set': {'value': '1.0'}}, upsert=True)
++    dispatch(mod, 'open_invite', 1002)
++    text = _last_screen(1002)[1]
++    assert '$1.50' in text and '?start=1002' in text and '?startapp=1002' in text and '<b>$1.00</b>' in text
++    mod._ref_screen_migrate()                                           # once only
++    assert mod.db.custom_texts.count_documents({'key': 'ref_screen'}) == 2
++
++
++def test_every_extra_cms_entry_opens_an_editor(mod):
++    for key, (sec, label, ar, en) in mod.EXTRA_CMS_TEXTS.items():
++        assert sec in dict(mod.EXTRA_CMS_SECTIONS) and mod.LANG['ar'][key] and mod.LANG['en'][key], key
++    for key, (sec, label, ar, en) in mod.EXTRA_CMS_BUTTONS.items():
++        assert mod.DEFAULT_BUTTONS['ar'][key] == ar and mod.DEFAULT_BUTTONS['en'][key] == en
++    dispatch(mod, 'ad_cms_x', 9001)
++    menu = _last_screen(9001)
++    sections = [b['callback_data'] for row in buttons(menu) for b in row if b['callback_data'].startswith('ad_cms_x_')]
++    assert len(sections) == len(mod.EXTRA_CMS_SECTIONS)
++    seen = set()
++    for cb in sections:
++        dispatch(mod, cb, 9001)
++        seen |= {b['callback_data'] for row in buttons(_last_screen(9001)) for b in row}
++    for key in mod.EXTRA_CMS_TEXTS:
++        assert 'edit_txt_' + key in seen, key
++    for key in mod.EXTRA_CMS_BUTTONS:
++        assert 'edit_btn_' + key in seen, key
++    sent = len(MESSAGES)
++    dispatch(mod, 'edit_txt_ref_screen', 9001)
++    assert any('{7}' in str(m[1]) for m in MESSAGES[sent:])               # the admin sees what each value means
++
++
++def test_converted_texts_no_longer_hard_coded(mod):
++    src = (mod.__file__ and open(mod.__file__, encoding='utf-8').read())
++    for literal in ('"👥 My Referrals" if l == \'en\'', "'📋 Copy order ID' if lang == 'en'",
++                    '"📄 Here are all your purchases." if l == \'en\'', "\"🔑 Show connection details\" if l == 'en'",
++                    "'🛍 Open store' if lang == 'en'", "'❌ Category unavailable.' if lang == 'en'"):
++        assert literal not in src, literal
+--- a/verification/test_referral_links_browser.cjs	2026-10-20 02:23:37.488225162 +0000
++++ b/verification/test_referral_links_browser.cjs	2026-10-21 20:12:53.882895566 +0000
+@@ -0,0 +1,60 @@
++/* Round 41: the profile referral card offers the bot link and the store link (copy + share), in every language, no overflow. */
++const {spawn}=require('child_process'),assert=require('assert/strict');
++const {chromium}=require(process.env.LARA_TEST_PLAYWRIGHT||'playwright');
++const PORT='8793',BASE='http://127.0.0.1:'+PORT;
++const server=spawn(process.env.LARA_TEST_PYTHON||'python',['verification/serve_referral_test.py'],{
++ env:{...process.env,LARA_TEST_PORT:PORT},stdio:['ignore','pipe','pipe']});
++const ready=new Promise((resolve,reject)=>{
++ server.stdout.on('data',d=>{if(String(d).includes('LOCAL REFERRAL SERVER'))resolve();});
++ server.stderr.on('data',()=>{});server.once('exit',c=>reject(Error('Fixture exited '+c)));
++});
++(async()=>{
++ await ready;
++ const browser=await chromium.launch({headless:true,
++  ...(process.env.LARA_TEST_BROWSER_EXECUTABLE?{executablePath:process.env.LARA_TEST_BROWSER_EXECUTABLE}:{}),
++  args:['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1','--no-sandbox','--disable-dev-shm-usage','--disable-gpu']});
++ try{
++  const ctx=await browser.newContext({viewport:{width:390,height:844}});
++  const page=await ctx.newPage(),errors=[],opened=[];let withApp=true;
++  page.on('pageerror',e=>errors.push(e.message));
++  await page.route('**/*',r=>r.request().url().startsWith(BASE+'/')?r.continue():(opened.push(r.request().url()),r.abort()));
++  /* the fixture bot has no Main Mini App; add the store link the way a bot with it enabled answers */
++  await page.route('**/webapp/referrals',async route=>{
++   const res=await route.fetch();const data=await res.json();
++   assert.equal(data.links.bot,data.link);
++   if(withApp)data.links.app=data.links.bot.replace('?start=','?startapp=');
++   await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(data)});
++  });
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  await page.locator('.ref-app .linkbox').waitFor({timeout:15000});
++  const bot=await page.locator('.ref-bot .linkbox span').innerText(),app=await page.locator('.ref-app .linkbox span').innerText();
++  assert.match(bot,/^https:\/\/t\.me\/[A-Za-z0-9_]+\?start=1001$/);assert.match(app,/\?startapp=1001$/);
++  assert.equal(await page.locator('.ref-bot [data-act="copy"]').getAttribute('data-v'),bot);
++  assert.equal(await page.locator('.ref-app [data-act="share"]').getAttribute('data-v'),app);
++  assert(await page.locator('.ref-pick').isVisible());
++  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
++  await page.locator('.invite').screenshot({path:process.env.LARA_SHOT_DIR?process.env.LARA_SHOT_DIR+'/ref-links-en.png':'/dev/null'}).catch(()=>{});
++  await page.evaluate(()=>{window.__opened=[];const w=window.Telegram.WebApp;w.openTelegramLink=u=>window.__opened.push(u);});
++  await page.locator('.ref-app [data-act="share"]').click();
++  const shared=await page.evaluate(()=>window.__opened);
++  assert.deepEqual(shared,['https://t.me/share/url?url='+encodeURIComponent(app)]);
++  console.log('PASS the referral card shows the bot link and the store link, each with copy and share');
++  for(const [lang,label] of [['ar','رابط الموقع'],['ru','Ссылка на магазин'],['zh','商店链接']]){
++   await page.locator(`[data-act="lang"][data-v="${lang}"]`).first().click();
++   await page.locator('.ref-app .ref-lt').filter({hasText:label}).waitFor();
++   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),lang);
++  }
++  if(process.env.LARA_SHOT_DIR)await page.locator('.invite').screenshot({path:process.env.LARA_SHOT_DIR+'/ref-links-zh.png'});
++  await page.locator('[data-act="lang"][data-v="ar"]').first().click();
++  if(process.env.LARA_SHOT_DIR)await page.locator('.invite').screenshot({path:process.env.LARA_SHOT_DIR+'/ref-links-ar.png'});
++  console.log('PASS the labels follow Arabic, Russian and Chinese without horizontal overflow');
++  withApp=false;
++  await page.goto(BASE+'/__ref_test__/?uid=1001',{waitUntil:'domcontentloaded'});
++  await page.locator('[data-act="tab"][data-v="profile"]').first().click();
++  await page.locator('.ref-bot .linkbox').waitFor();
++  assert.equal(await page.locator('.ref-app').count(),0);assert.equal(await page.locator('.ref-pick').count(),0);
++  assert.deepEqual(errors,[]);
++  console.log('PASS without Main Mini App only the bot link is shown; zero JS errors');
++ }finally{await browser.close();}
++})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

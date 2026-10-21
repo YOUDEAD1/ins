@@ -297,12 +297,19 @@ def _log_src_get():
     return getattr(_LOG_SRC, 'v', None)
 
 
+_LOG_SRC_KEYS = {'webapp': 'log_via_webapp', 'bot': 'log_via_bot', 'api': 'log_via_api'}
+
+
 def _log_src(msg, default='bot'):
-    """يضيف سطر المصدر للوق الشراء/الإيداع: Mini App أو محادثة البوت أو API."""
+    """يضيف سطر المصدر للوق الشراء/الإيداع: Mini App أو محادثة البوت أو API (النص قابل للتعديل من التخصيص)."""
     try:
         src = _log_src_get() or default
         lab = _LOG_SRC_LABEL.get(src)
-        if lab and isinstance(msg, str) and 'Via:</b>' not in msg:
+        try:
+            lab = _txt_l('en', _LOG_SRC_KEYS[src]) or lab          # قناة اللوق بالإنجليزي مثل باقي رسائلها
+        except Exception:
+            pass
+        if lab and isinstance(msg, str) and 'Via:</b>' not in msg and lab not in msg:
             return f"{msg}\n{lab}"
     except Exception:
         pass
@@ -4859,6 +4866,37 @@ def _ms_fresh_q(referrer_id):
     return dict(_ref_verified_query(), referrer_id=int(referrer_id), status='active', ms_batch={'$exists': False})
 
 
+# 🔗 Two referral links: the bot (/start) and the store (Main Mini App, startapp). The store link needs
+#    «Main Mini App» enabled in @BotFather — without it Telegram can't open the store from a link.
+_MAIN_APP_CACHE = {'at': 0.0, 'v': None}
+
+
+def _bot_main_app():
+    now = time.time()
+    if _MAIN_APP_CACHE['at'] and now - _MAIN_APP_CACHE['at'] < 600:
+        return _MAIN_APP_CACHE['v']
+    try:
+        value = bool(getattr(bot.get_me(), 'has_main_web_app', False))
+    except Exception:
+        _MAIN_APP_CACHE['at'] = now - 540                   # transient failure: keep the last answer, retry in a minute
+        return _MAIN_APP_CACHE['v']
+    _MAIN_APP_CACHE.update(at=now, v=value)
+    return value
+
+
+def _ref_links(uid):
+    bu = str(get_bot_username() or '')
+    bot_link = f"https://t.me/{bu}?start={int(uid)}"
+    app_link = None
+    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{3,31}', bu) and _bot_main_app():
+        app_link = f"https://t.me/{bu}?startapp={int(uid)}"
+    return {'bot': bot_link, 'app': app_link}
+
+
+def ref_auto_pay_enabled():
+    return str(get_setting('ref_auto_pay', 'on')) != 'off'
+
+
 def ref_progress(referrer_id):
     """(كم إحالة جديدة من آخر دفعة، حجم الدفعة الحالي، كم باقي). الإعدادات الجديدة تطبق على الجاي بس."""
     th = max(1, int(get_referral_threshold()))
@@ -4983,7 +5021,13 @@ def _ms_summary_view(referrer_id, batch_no):
         if c['none']:
             lines.append("<i>➖ بدون فحص = انحسبت قبل تشغيل التحقق أو والتحقق موقوف.</i>")
     st = ms.get('status')
-    if st == 'paid':
+    if st == 'paid' and ms.get('auto'):
+        lines = [("💸 <b>صُرفت مكافأة إحالات تلقائيًا</b>" if not ms.get('renotified_at') else lines[0])] + lines[1:]
+        lines += ["", "✅ <b>انصرفت المكافأة تلقائيًا</b> — كل إحالات الدفعة أكدت هويتها داخل الموقع.",
+                  "<i>تقدر ترفض أي إحالة من «قائمة الفحص»، ويرجع خصم قيمتها من المحيل تلقائيًا.</i>"]
+    elif st == 'paying':
+        lines += ["", "⏳ <b>جاري صرف المكافأة تلقائيًا</b> — تكتمل خلال دقيقة بدون تكرار."]
+    elif st == 'paid':
         lines += ["", "✅ <b>انصرفت المكافأة.</b>"]
     elif st == 'cancelled':
         lines += ["", "❌ <b>الطلب ملغي.</b>"]
@@ -5021,7 +5065,7 @@ def _ms_list_view(referrer_id, batch_no, page=0):
     pages = max(1, (len(recs) + _MS_PG - 1) // _MS_PG)
     page = max(0, min(int(page), pages - 1))
     chunk = recs[page * _MS_PG:(page + 1) * _MS_PG]
-    open_ = ms.get('status') in (None, 'pending', 'reopened')
+    open_ = ms.get('status') in (None, 'pending', 'reopened') or (ms.get('status') == 'paid' and ms.get('auto'))
     lines = [f"🔎 <b>قائمة فحص الإحالات</b> — الدفعة #{b}",
              f"🤝 المحيل: {_dv_user_line(rid)}",
              f"✅ {c['ok']} سليمة · ⚠️ {c['flag']} مشكوك · ➖ {c['none']} بدون فحص" + (f" · ❌ {c['rej']} مرفوضة" if c['rej'] else ''), ""]
@@ -5157,8 +5201,100 @@ def _notify_admin_referral_milestone(referrer_id):
                 logger.warning(f"milestone save {rid}#{batch_no}: {e}")
                 return
             db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': rid}, {'$set': {'ms_batch': batch_no}})
+            if ref_auto_pay_enabled():
+                _ms_auto_pay(rid, batch_no)        # 💸 تلقائي لو كل الدفعة أكدت هويتها في الموقع؛ وإلا تبقى لقرار الأدمن
             txt, markup = _ms_summary_view(rid, batch_no)
             _ms_send_admins(txt, markup)
+
+
+def _ref_screen_from_invite_txt(old):
+    """The old customized «invite_txt» (7 fixed values, hard-coded 10 / $0.10 / $2) → the new «ref_screen» with
+    live values and both links. Returns None when the text does not follow the old layout."""
+    if not old or old.count('{}') != 6 or '{:.2f}' not in old:
+        return None
+    t = old
+    t, n_link = re.subn(r'(?:🔗\s*)?(?:<b>[^<\n]{0,40}</b>\s*\n?\s*)?<code>https://t\.me/\{\}\?start=\{\}</code>', '{7}', t, count=1)
+    if not n_link:
+        return None
+    for i in range(4):
+        t = t.replace('{}', '{%d}' % i, 1)
+    t = t.replace('${:.2f}', '${6}', 1).replace('{:.2f}', '{6}', 1)
+    t = re.sub(r'<b>10</b>', '<b>{8}</b>', t, count=1)
+    t = re.sub(r'<b>\$0\.10</b>', '<b>${9}</b>', t, count=1)
+    t = re.sub(r'<b>\$2</b>', '<b>${10}</b>', t, count=1)
+    t = re.sub(r'<b>\$0\.10</b>', '<b>${11}</b>', t, count=1)
+    if '{}' in t:
+        return None
+    return t
+
+
+def _ref_screen_migrate():
+    try:
+        if str(get_setting('ref_screen_v1', '')) == 'done':
+            return
+        for l in ('ar', 'en'):
+            if db.custom_texts.find_one({'lang': l, 'key': 'ref_screen'}):
+                continue
+            old = db.custom_texts.find_one({'lang': l, 'key': 'invite_txt'})
+            new = _ref_screen_from_invite_txt((old or {}).get('value'))
+            if new:
+                db.custom_texts.update_one({'lang': l, 'key': 'ref_screen'}, {'$setOnInsert': {
+                    'lang': l, 'key': 'ref_screen', 'value': new, 'migrated_from': 'invite_txt'}}, upsert=True)
+        db.settings.update_one({'key': 'ref_screen_v1'}, {'$set': {'value': 'done'}}, upsert=True)
+        try:
+            _load_custom_texts_cache()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"referral screen text migration: {e}")
+
+
+threading.Thread(target=_ref_screen_migrate, daemon=True).start()
+
+
+def _ms_auto_pay(rid, batch_no):
+    """💸 A just-completed batch is paid at once when every member passed the identity check on the website
+    (emoji test). Suspicious devices are paid too (owner's choice); the admin can still reject one afterwards from
+    «قائمة الفحص» and its value is taken back automatically. Older referrals without the site check → admin decides."""
+    try:
+        rid, batch_no = int(rid), int(batch_no)
+        ms = db.referral_milestones.find_one({'referrer_id': rid, 'batch_no': batch_no, 'status': 'pending'})
+        if not ms or not ms.get('members'):
+            return False
+        th, reward = _ms_snap(ms)
+        recs = list(db.referrals_v2.find({'referrer_id': rid, 'status': 'active',
+                                          'invited_id': {'$in': [int(x) for x in ms['members']]}}))
+        if len(recs) < th or not all(_ref_web_verified(r) for r in recs):
+            return False
+        referrer = db.users.find_one({'user_id': rid}, {'is_banned': 1})
+        if not referrer or referrer.get('is_banned') == 1:
+            return False
+        if not db.referral_milestones.find_one_and_update({'_id': ms['_id'], 'status': 'pending'}, {'$set': {
+                'status': 'paying', 'paid_by': 'auto', 'paid_at': int(time.time()), 'auto': True}}):
+            return False
+        try:
+            credited = _ref_money(rid, reward, 'ref_reward', f"مكافأة إحالات · الدفعة #{batch_no} ({th} إحالة) · تلقائي",
+                                  event_key=f'milestone:{rid}:{batch_no}')
+        except Exception as e:
+            logger.info('Automatic referral reward saved for retry: referrer=%s batch=%s (%s)', rid, batch_no, e)
+            return True                                    # stays «paying»; the resume loop finishes it once
+        if not credited:
+            return True
+        db.referral_milestones.update_one({'_id': ms['_id']}, {'$set': {
+            'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
+        try:
+            receipt = credited['_ref_receipt']
+            msg = _notification_text(rid, 'ref_milestone_dm', th, f"{reward:.2f}", f"{receipt['balance_after']:.2f}")
+            if receipt['debt_delta'] < 0:
+                msg += _notification_text(rid, 'ref_settled_dm', -receipt['debt_delta'], receipt['balance_delta'])
+            bot.send_message(rid, msg, parse_mode="HTML")
+        except Exception:
+            pass
+        logger.info('💸 Referral batch paid automatically: referrer=%s batch=%s $%.2f', rid, batch_no, reward)
+        return True
+    except Exception as e:
+        logger.warning(f"automatic referral reward {rid}#{batch_no}: {e}")
+        return False
 
 
 def _ref_batches_migrate():
@@ -5297,7 +5433,7 @@ def _ref_money(rid, delta, kind, note, event_key=None):
             balance = _ref_units(user.get('balance'))
             # Owner's rule (update 35): the purchase referral reward is always credited, even onto a negative
             # balance — a credit can only reduce the deficit. Deductions on a negative balance still wait for review.
-            if balance < 0 and not (kind == 'ref_purchase' and nominal > 0):
+            if balance < 0 and not (kind in ('ref_purchase', 'ref_reward') and nominal > 0):
                 raise ValueError('Negative balance requires ledger review before referral movement')
             debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
             if nominal < 0:
@@ -5612,7 +5748,7 @@ def ref_milestone_decide_cb(call):
         bot.answer_callback_query(call.id)
         return
     ms = _ms_doc(rid, b)
-    if not ms or ms.get('status') not in ('pending', 'reopened'):
+    if not ms or (ms.get('status') not in ('pending', 'reopened') and not (ms.get('status') == 'paid' and ms.get('auto'))):
         bot.answer_callback_query(call.id, "الطلب مقفول.", show_alert=True)
         return
     note = _refdv_apply(inv, verdict, call.from_user.id, call.from_user.first_name)
@@ -7067,6 +7203,163 @@ SHOP_CMS_TEXTS = {
 for _shop_key, (_shop_label, _shop_ar, _shop_en) in SHOP_CMS_TEXTS.items():
     LANG['ar'][_shop_key] = _shop_ar
     LANG['en'][_shop_key] = _shop_en
+
+# ============================================================
+# 🧩 Texts and buttons that were written inside the code — now editable from «التخصيص» ← «🧩 نصوص وأزرار إضافية».
+#    Each entry: key → (section, label shown to the admin, Arabic default, English default).
+# ============================================================
+EXTRA_CMS_SECTIONS = [
+    ('ref', '👥 الإحالات (الشاشة والروابط والتحقق)'),
+    ('logs', '🧾 سطر المصدر في اللوق (عبر الموقع / البوت / API)'),
+    ('hist', '📜 سجل المشتريات والأكواد'),
+    ('api', '🔗 بيانات ربط الـ API'),
+    ('misc', '📦 رسائل أخرى (Bybit، GitHub، الدفع…)'),
+]
+EXTRA_CMS_TEXTS = {
+    'ref_screen': ('ref', 'رسالة قسم الإحالات (الإحصائيات والأرباح والروابط)',
+        "💎 <b>نظام الإحالات</b>\n\n━━━━━━━━━━━━━━\n📊 <b>إحصائياتك</b>\n━━━━━━━━━━━━━━\n\n"
+        "👥 الزيارات:  <b>{0}</b>\n⏳ معلق:  <b>{1}</b>\n✅ نشط:  <b>{2}</b>\n❌ غادر:  <b>{3}</b>\n\n"
+        "━━━━━━━━━━━━━━\n💰 <b>أرباحك</b>\n━━━━━━━━━━━━━━\n\n"
+        "🎯 من الإحالات:  <b>${4}</b>\n🛍 من المشتريات:  <b>${5}</b>\n💎 <b>المجموع:</b>  <b>${6}</b>\n{12}\n"
+        "━━━━━━━━━━━━━━\n{7}\n\n━━━━━━━━━━━━━━\n🎁 <b>طريقتان للربح:</b>\n\n"
+        "🔥 كل {8} إحالة مؤكدة = <b>${9}</b> (تنضاف تلقائيًا)\n💸 شراء صديق > ${10} = <b>${11}</b>\n\n"
+        "🛡 <i>الإحالة تنحسب بعد ما يأكد صديقك هويته داخل الموقع.</i>",
+        "💎 <b>Referral System</b>\n\n━━━━━━━━━━━━━━\n📊 <b>Your Stats</b>\n━━━━━━━━━━━━━━\n\n"
+        "👥 Clicks:  <b>{0}</b>\n⏳ Pending:  <b>{1}</b>\n✅ Active:  <b>{2}</b>\n❌ Left:  <b>{3}</b>\n\n"
+        "━━━━━━━━━━━━━━\n💰 <b>Your Earnings</b>\n━━━━━━━━━━━━━━\n\n"
+        "🎯 From referrals:  <b>${4}</b>\n🛍 From purchases:  <b>${5}</b>\n💎 <b>Total:</b>  <b>${6}</b>\n{12}\n"
+        "━━━━━━━━━━━━━━\n{7}\n\n━━━━━━━━━━━━━━\n🎁 <b>Two Ways to Earn:</b>\n\n"
+        "🔥 Every {8} verified referrals = <b>${9}</b> (added automatically)\n💸 Friend buys > ${10} = <b>${11}</b>\n\n"
+        "🛡 <i>A referral counts after your friend verifies on the website.</i>"),
+    'ref_links_both': ('الرابطان (البوت + الموقع) داخل رسالة الإحالات — {0} {1}',
+        "🔗 <b>اختر الرابط اللي تشاركه:</b>\n\n🤖 <b>رابط البوت:</b>\n<code>{0}</code>\n\n"
+        "🛍 <b>رابط الموقع (يفتح المتجر مباشرة):</b>\n<code>{1}</code>",
+        "🔗 <b>Pick the link you want to share:</b>\n\n🤖 <b>Bot link:</b>\n<code>{0}</code>\n\n"
+        "🛍 <b>Store link (opens the store directly):</b>\n<code>{1}</code>"),
+    'ref_links_bot': ('رابط البوت وحده (لو رابط الموقع غير مفعّل) — {0}',
+        "🔗 <b>رابطك:</b>\n<code>{0}</code>", "🔗 <b>Your link:</b>\n<code>{0}</code>"),
+    'ref_progress_line': ('سطر «باقي X للمكافأة» — {0} العدد، {1} المبلغ',
+        "⏳ باقي <b>{0}</b> إحالة مؤكدة للمكافأة الجاية (<b>${1}</b>)",
+        "⏳ <b>{0}</b> more verified referrals to the next reward (<b>${1}</b>)"),
+    'ref_debt_note': ('ملاحظة مستحق الاسترجاع — {0}',
+        "\n🧾 مستحق استرجاع إحالات: <b>${0}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.",
+        "\n🧾 Pending referral reversal: <b>${0}</b>. Future referral rewards settle this first; spendable balance is shown separately."),
+    'ref_list_title': ('عنوان «إحالاتي» — {0} الصفحة، {1} عدد الصفحات',
+        "👥 <b>إحالاتي</b> ({0}/{1})", "👥 <b>My Referrals</b> ({0}/{1})"),
+    'ref_list_empty': ('«لا يوجد إحالات بعد»', "📭 لا يوجد إحالات بعد.", "📭 No referrals yet."),
+    'ref_dv_prompt': ('رسالة «خطوة أخيرة» (تأكيد الهوية للمدعو)',
+        "🛡 <b>خطوة أخيرة</b>\n\nعشان نحمي المتجر من الحسابات الوهمية، اضغط الزر وتحقق من جهازك. "
+        "ياخذ ثواني، وما نجمع أي بيانات شخصية.",
+        "🛡 <b>One last step</b>\n\nTo keep the store safe from fake accounts, tap the button and verify your device. "
+        "It takes a few seconds and we don't collect personal data."),
+    'ref_dv_done': ('رسالة «تم التحقق»', "✅ <b>تم التحقق!</b> تقدر الحين تستخدم المتجر.",
+        "✅ <b>Verified!</b> You can use the store now."),
+    'fsub_unavailable': ('رسالة «تعذّر التحقق من الاشتراك»',
+        '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
+        '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'),
+    'log_via_webapp': ('logs', 'لوق: سطر «عبر الموقع (Mini App)»', '🌐 <b>Via:</b> Mini App', '🌐 <b>Via:</b> Mini App'),
+    'log_via_bot': ('logs', 'لوق: سطر «عبر البوت»', '💬 <b>Via:</b> Bot chat', '💬 <b>Via:</b> Bot chat'),
+    'log_via_api': ('logs', 'لوق: سطر «عبر API»', '🔌 <b>Via:</b> API', '🔌 <b>Via:</b> API'),
+    'hist_file_head': ('hist', 'أول سطر في ملف سجل المشتريات', "=== سجل المشتريات الخاص بك ===", "=== Your Purchase History ==="),
+    'hist_empty': ('hist', '«لا يوجد سجل مشتريات»', "📭 لا يوجد سجل مشتريات.", "📭 No purchases found."),
+    'hist_file_caption': ('hist', 'وصف ملف سجل المشتريات', "📄 ملف يحتوي على جميع مشترياتك وتواريخها.", "📄 Here are all your purchases."),
+    'hist_product_empty': ('hist', '«لا توجد مشتريات لهذا المنتج»', "❌ لا توجد مشتريات لهذا المنتج.", "❌ No purchases found for this product."),
+    'codes_file_caption': ('hist', 'وصف ملف الأكواد (TXT)', "📄 أكوادك في ملف TXT.", "📄 Your codes as a TXT file."),
+    'order_id_label': ('hist', 'عنوان «رقم الطلب»', "رقم الطلب", "Order ID"),
+    'api_creds_hidden': ('api', 'سطر «بيانات الربط مخفية»', "🔐 بيانات الربط مخفية — اضغط «🔑 عرض بيانات الربط».",
+        "🔐 Connection details are hidden — tap «🔑 Show connection details»."),
+    'api_no_key': ('api', 'تنبيه «ما عندك مفتاح API نشط»', "ما عندك مفتاح API نشط.", "No active API key."),
+    'cat_unavailable': ('misc', '«المجلد غير متاح»', '❌ المجلد غير متاح.', '❌ Category unavailable.'),
+}
+for _xk, _xv in list(EXTRA_CMS_TEXTS.items()):
+    if len(_xv) == 3:                                   # same section as the entry before it ('ref')
+        EXTRA_CMS_TEXTS[_xk] = _xv = ('ref',) + _xv
+    LANG['ar'].setdefault(_xk, _xv[2])
+    LANG['en'].setdefault(_xk, _xv[3])
+EXTRA_CMS_BUTTONS = {
+    'btn_my_refs': ('ref', 'زر «إحالاتي»', '👥 إحالاتي', '👥 My Referrals'),
+    'btn_copy_ref_bot': ('ref', 'زر نسخ رابط البوت', '📋 نسخ رابط البوت', '📋 Copy bot link'),
+    'btn_copy_ref_app': ('ref', 'زر نسخ رابط الموقع', '📋 نسخ رابط الموقع', '📋 Copy store link'),
+    'btn_ref_dv': ('ref', 'زر «تحقق من جهازك»', '🛡 تحقق من جهازك', '🛡 Verify my device'),
+    'btn_open_store': ('ref', 'زر «افتح المتجر» بعد التحقق', '🛍 افتح المتجر', '🛍 Open store'),
+    'btn_api_creds': ('api', 'زر «عرض بيانات الربط»', '🔑 عرض بيانات الربط', '🔑 Show connection details'),
+    'btn_copy_api_conn': ('api', 'زر نسخ كود الاتصال', '📋 نسخ كود الاتصال', '📋 Copy connection code'),
+    'btn_copy_api_base': ('api', 'زر نسخ الرابط الأساسي', '📋 نسخ الرابط الأساسي', '📋 Copy base URL'),
+    'btn_copy_api_key': ('api', 'زر نسخ المفتاح', '📋 نسخ المفتاح', '📋 Copy API key'),
+    'btn_api_hide': ('api', 'زر «إخفاء»', '🙈 إخفاء', '🙈 Hide'),
+    'btn_copy_order_id': ('hist', 'زر نسخ رقم الطلب', '📋 نسخ رقم الطلب', '📋 Copy order ID'),
+}
+for _xk, (_xs, _xl, _xa, _xe) in EXTRA_CMS_BUTTONS.items():
+    DEFAULT_BUTTONS.setdefault('ar', {}).setdefault(_xk, _xa)
+    DEFAULT_BUTTONS.setdefault('en', {}).setdefault(_xk, _xe)
+# texts already in LANG that no menu listed
+EXTRA_CMS_EXISTING = [
+    ('bybit_ask_uid', 'Bybit: طلب الـ UID'), ('bybit_warn_exact', 'Bybit: تنبيه المبلغ الدقيق'),
+    ('bybit_alert_popup', 'Bybit: النافذة المنبثقة'), ('bybit_btn_understood', 'Bybit: زر «فهمت»'),
+    ('pay_warn_exact', 'الدفع: تنبيه المبلغ الدقيق'), ('pay_alert_popup', 'الدفع: النافذة المنبثقة'),
+    ('pay_fee_general', 'الدفع: ملاحظة الرسوم'), ('pay_fee_bep20', 'الدفع: رسوم BEP20'),
+    ('dep_crypto_amount_line', 'الدفع: سطر مبلغ العملة'), ('gemini_desc', 'Gemini: وصف الخدمة'),
+    ('gh_desc', 'GitHub: وصف الخدمة'), ('gh_prompt_user', 'GitHub: طلب اسم المستخدم'),
+    ('gh_prompt_pass', 'GitHub: طلب كلمة المرور'), ('gh_prompt_2fa', 'GitHub: طلب رمز 2FA'),
+    ('gh_received', 'GitHub: تم الاستلام'), ('gh_processing', 'GitHub: جاري المعالجة'),
+    ('gh_submitted', 'GitHub: تم الإرسال'), ('gh_success', 'GitHub: نجاح'), ('gh_fail', 'GitHub: فشل'),
+    ('gh_deducted', 'GitHub: تم الخصم'), ('gh_timeout', 'GitHub: انتهت المهلة'), ('gh_conn_err', 'GitHub: خطأ اتصال'),
+]
+
+
+def _txt_l(lang, key, *args):
+    """Like get_text, for a known language (the admin's custom text first, then the default)."""
+    l = 'en' if lang == 'en' else 'ar'
+    try:
+        if not _CUSTOM_TEXTS_LOADED[0]:
+            _load_custom_texts_cache()
+        base = (_CUSTOM_TEXTS_CACHE.get((l, key)) or '').strip()
+    except Exception:
+        base = ''
+    default = LANG.get(l, LANG['ar']).get(key) or LANG['ar'].get(key, '')
+    base = base or default
+    if not args:
+        return base
+    try:
+        return base.format(*args)
+    except Exception:
+        try:
+            return default.format(*args)
+        except Exception:
+            return default
+
+
+def _btn_l(lang, key):
+    """(text, premium emoji id) of an editable button for a known language."""
+    l = 'en' if lang == 'en' else 'ar'
+    try:
+        custom = _custom_button_for_view(l, key)
+        if custom and str(custom.get('text') or '').strip():
+            return str(custom['text']).strip(), custom.get('emoji_id')
+        if custom:
+            return DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key), custom.get('emoji_id')
+    except Exception:
+        pass
+    return DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key), None
+
+
+def _btn_lang_obj(lang, key, **kwargs):
+    text, emj = _btn_l(lang, key)
+    return CustomInlineButton(text, icon_custom_emoji_id=emj, **kwargs) if emj else InlineKeyboardButton(text, **kwargs)
+
+
+def _cms_copy_btn_l(lang, key, value):
+    text, emj = _btn_l(lang, key)
+    try:
+        from telebot.types import CopyTextButton
+        kw = {'copy_text': CopyTextButton(text=str(value)[:256])}
+        return CustomInlineButton(text, icon_custom_emoji_id=emj, **kw) if emj else InlineKeyboardButton(text, **kw)
+    except Exception:
+        return _copy_button(text, value)
+
+
+def _cms_copy_btn(uid, key, value):
+    return _cms_copy_btn_l(get_lang(uid), key, value)
 LANG['ar']['cg_expired_removed'] = '⌛ انتهت مدة اشتراك ChatGPT وأُلغي الوصول.\n📧 <code>{0}</code>\nيمكنك شراء اشتراك جديد من المتجر.'
 LANG['en']['cg_expired_removed'] = '⌛ Your ChatGPT subscription expired and access was revoked.\n📧 <code>{0}</code>\nYou can purchase a new subscription in the store.'
 
@@ -9573,7 +9866,7 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         public_items = _wa_build_catalog(False)['products'] if not is_admin else []
         allowed = {p['id'] for p in public_items if str(cat_id) in p.get('cats', [])}
         if not is_admin and (cat.get('is_hidden') or not allowed):
-            bot.send_message(chat_id, '❌ Category unavailable.' if lang == 'en' else '❌ المجلد غير متاح.')
+            bot.send_message(chat_id, _txt_l(lang, 'cat_unavailable'), parse_mode='HTML')
             return False
         emoji_id = cat.get('emoji_id')
         name = cat.get('name_en', cat.get('name_ar', '')) if lang == 'en' else cat.get('name_ar', cat.get('name_en', ''))
@@ -9893,11 +10186,7 @@ def start_handler(message):
         if subscription_state is None:
             markup = InlineKeyboardMarkup()
             markup.add(create_btn(uid, 'btn_check_sub', callback_data="main_menu_refresh"))
-            bot.send_message(chat_id,
-                '⏳ Unable to verify channel membership right now. Please try again; your referral balance was not changed.'
-                if lang == 'en' else
-                '⏳ تعذّر التحقق من الاشتراك الآن. أعد المحاولة؛ لم تتغير حالة الإحالة أو رصيدها.',
-                reply_markup=markup)
+            bot.send_message(chat_id, _txt_l(lang, 'fsub_unavailable'), reply_markup=markup, parse_mode='HTML')
             return
         if ref_record:
             current = ref_record.get('status', 'pending')
@@ -10476,7 +10765,7 @@ def _purchases_txt(uid):
     if not recs:
         return None, None
     l = get_lang(uid)
-    content = "=== Your Purchase History ===\n\n" if l == 'en' else "=== سجل المشتريات الخاص بك ===\n\n"
+    content = _txt_l(l, 'hist_file_head') + "\n\n"
     for i, r in enumerate(recs, 1):
         try:
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
@@ -10507,12 +10796,11 @@ def user_download_buy_hist(call):
     l = get_lang(uid)
     content, fname = _purchases_txt(uid)
     if not content:
-        empty_msg = "📭 No purchases found." if l == 'en' else "📭 لا يوجد سجل مشتريات."
-        bot.send_message(uid, empty_msg)
+        bot.send_message(uid, _txt_l(l, 'hist_empty'), parse_mode='HTML')
         return
     f = io.BytesIO(content.encode('utf-8'))
     f.name = fname
-    caption = "📄 Here are all your purchases." if l == 'en' else "📄 ملف يحتوي على جميع مشترياتك وتواريخها."
+    caption = _txt_l(l, 'hist_file_caption')
     bot.send_document(call.message.chat.id, f, caption=caption)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("h_view_"))
@@ -10665,8 +10953,7 @@ def download_product_history(call):
         except: pass
     
     if not orders:
-        msg = "❌ No purchases found for this product." if l == 'en' else "❌ لا توجد مشتريات لهذا المنتج."
-        bot.send_message(uid, msg)
+        bot.send_message(uid, _txt_l(l, 'hist_product_empty'), parse_mode='HTML')
         return
     
     # نجيب اسم المنتج
@@ -10751,87 +11038,28 @@ def invite_ui(call):
     if remaining_to_milestone == 0:
         remaining_to_milestone = threshold
 
+    # 🔗 رابطان: البوت والموقع — العميل يختار اللي يناسبه (النصوص والأزرار من التخصيص)
+    links = _ref_links(uid)
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("👥 My Referrals" if l == 'en' else "👥 إحالاتي", callback_data="ref_list_0"))
+    markup.add(_cms_copy_btn(uid, 'btn_copy_ref_bot', links['bot']))
+    if links['app']:
+        markup.add(_cms_copy_btn(uid, 'btn_copy_ref_app', links['app']))
+    markup.add(create_btn(uid, 'btn_my_refs', callback_data="ref_list_0"))
     markup.add(create_btn(uid, 'btn_refresh', callback_data="open_invite"))
     markup.add(create_btn(uid, 'btn_main_menu', callback_data="main_menu_refresh"))
-    
-    # نبني الرسالة يدوياً (نتجاوز LANG عشان نضمن العرض الجديد)
-    if l == 'en':
-        final_text = (
-            f"💎 <b>Referral System</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📊 <b>Your Stats</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"👥 Clicks:  <b>{total_clicks}</b>\n"
-            f"⏳ Pending:  <b>{pending_count}</b>\n"
-            f"✅ Active:  <b>{active_count}</b>\n"
-            f"❌ Left:  <b>{left_count}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>Your Earnings</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"🎯 From referrals:  <b>${earnings_from_referrals:.2f}</b>\n"
-            f"🛍 From purchases:  <b>${earnings_from_purchases:.2f}</b>\n"
-            f"💎 <b>Total:</b>  <b>${total_earnings:.2f}</b>\n"
-        )
-        
-        if remaining_to_milestone > 0:
-            final_text += (
-                f"\n━━━━━━━━━━━━━━\n"
-                f"⏳ <b>{remaining_to_milestone}</b> more active referrals to earn <b>${reward:.2f}</b>!\n"
-            )
-        
-        final_text += (
-            f"\n━━━━━━━━━━━━━━\n"
-            f"🔗 <b>Your Link:</b>\n"
-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🎁 <b>Two Ways to Earn:</b>\n\n"
-            f"🔥 Every {threshold} active joins = <b>${reward:.2f}</b>\n"
-            f"💸 Friend buys > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
-            f"⚡ <i>Real-time updates</i>"
-        )
-    else:
-        final_text = (
-            f"💎 <b>نظام الإحالات</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📊 <b>إحصائياتك</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"👥 الزيارات:  <b>{total_clicks}</b>\n"
-            f"⏳ معلق:  <b>{pending_count}</b>\n"
-            f"✅ نشط:  <b>{active_count}</b>\n"
-            f"❌ غادر:  <b>{left_count}</b>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"💰 <b>أرباحك</b>\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"🎯 من الإحالات:  <b>${earnings_from_referrals:.2f}</b>\n"
-            f"🛍 من المشتريات:  <b>${earnings_from_purchases:.2f}</b>\n"
-            f"💎 <b>المجموع:</b>  <b>${total_earnings:.2f}</b>\n"
-        )
-        
-        if remaining_to_milestone > 0:
-            final_text += (
-                f"\n━━━━━━━━━━━━━━\n"
-                f"⏳ باقي <b>{remaining_to_milestone}</b> إحالة فقط للحصول على <b>${reward:.2f}</b>!\n"
-            )
-        
-        final_text += (
-            f"\n━━━━━━━━━━━━━━\n"
-            f"🔗 <b>رابطك:</b>\n"
-            f"<code>https://t.me/{b_n}?start={uid}</code>\n\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"🎁 <b>طريقتان للربح:</b>\n\n"
-            f"🔥 كل {threshold} إحالة نشطة = <b>${reward:.2f}</b>\n"
-            f"💸 شراء صديق > ${get_referral_min_purchase():.2f} = <b>${get_referral_purchase_reward():.2f}</b>\n\n"
-            f"⚡ <i>تحديثات لحظية</i>"
-        )
-    
+    links_block = (get_text(uid, 'ref_links_both', links['bot'], links['app']) if links['app']
+                   else get_text(uid, 'ref_links_bot', links['bot']))
+    progress_line = get_text(uid, 'ref_progress_line', remaining_to_milestone, f"{reward:.2f}") if remaining_to_milestone > 0 else ''
+    final_text = get_text(uid, 'ref_screen', total_clicks, pending_count, active_count, left_count,
+                          f"{earnings_from_referrals:.2f}", f"{earnings_from_purchases:.2f}", f"{total_earnings:.2f}",
+                          links_block, threshold, f"{reward:.2f}", f"{get_referral_min_purchase():.2f}",
+                          f"{get_referral_purchase_reward():.2f}", progress_line)
     debt = max(0.0, float(u.get('ref_debt') or 0))
-    final_text += ("\n\n🛡 Referrals count only after website verification." if l == 'en' else
-                   "\n\n🛡 لا تُحسب الإحالة إلا بعد إكمال التحقق داخل الموقع.")
     if debt:
-        final_text += (f"\n🧾 Pending referral reversal: <b>${debt:.4f}</b>. Future referral rewards settle this first; spendable balance is shown separately."
-                       if l == 'en' else f"\n🧾 مستحق استرجاع إحالات: <b>${debt:.4f}</b>. يُسوّى من مكافآت الإحالات القادمة، ويظهر الرصيد المتاح بصورة منفصلة.")
+        final_text += get_text(uid, 'ref_debt_note', f"{debt:.4f}")
+    if not links['app'] and (u.get('is_admin') == 1 or uid == OWNER_ID):
+        final_text += ("\n\n<i>👮 للأدمن فقط: رابط الموقع يظهر للعملاء بعد تفعيل Main Mini App من @BotFather "
+                       "(Bot Settings ← Configure Mini App ← Main App) بنفس رابط المتجر.</i>")
 
     # 🛡 محاولة الإرسال - مع 3 محاولات لو فشل بسبب HTML
     sent_successfully = False
@@ -10927,13 +11155,13 @@ def referral_list_page(call):
     end = start + PER_PAGE
     page_refs = all_refs[start:end]
     
-    txt = f"👥 <b>{'My Referrals' if l == 'en' else 'إحالاتي'}</b> ({page+1}/{total_pages})\n\n"
+    txt = get_text(uid, 'ref_list_title', page + 1, total_pages) + "\n\n"
     
     u_data = get_user_data_full(uid)
     is_admin = (u_data and (u_data.get('is_admin') == 1 or uid == OWNER_ID))
     
     if not all_refs:
-        txt += "📭 No referrals yet." if l == 'en' else "📭 لا يوجد إحالات بعد."
+        txt += get_text(uid, 'ref_list_empty')
     else:
         for r in page_refs:
             inv_id = r['id']
@@ -10966,7 +11194,7 @@ def referral_list_page(call):
     if nav_buttons:
         markup.add(*nav_buttons)
     
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_invite"))
+    markup.add(create_btn(uid, 'btn_back', callback_data="open_invite"))
     
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
@@ -19881,6 +20109,7 @@ def ad_ref_settings_ui(call):
         f"💵 الحد الأدنى لقيمة الشراء:\n"
         f"   <b>${min_purchase:.2f}</b>\n\n"
         f"🛡 التحقق داخل الموقع: <b>إجباري دائمًا</b>\n"
+        f"💸 صرف مكافأة كل {threshold} إحالة مؤكدة: <b>{'تلقائي' if ref_auto_pay_enabled() else 'بموافقة الأدمن'}</b>\n"
         f"فحص الأجهزة الإضافي:\n"
         f"   <b>{'مفعّل' if ref_dv_enabled() else 'موقوف'}</b>\n"
         f"━━━━━━━━━━━━━━\n\n"
@@ -19902,6 +20131,7 @@ def ad_ref_settings_ui(call):
     except Exception:
         _dv_on, _dv_n = True, 0
     markup.add(InlineKeyboardButton(f"🛡 فحص الأجهزة الإضافي: {'مفعّل ✅' if _dv_on else 'موقوف ⛔'}", callback_data="refdv_toggle"))
+    markup.add(InlineKeyboardButton(f"💸 الصرف التلقائي: {'مفعّل ✅' if ref_auto_pay_enabled() else 'موقوف ⛔'}", callback_data="refauto_toggle"))
     markup.add(InlineKeyboardButton('🧾 فحص وتسوية أرصدة الإحالات', callback_data='ad_ref_balance_audit'))
     markup.add(InlineKeyboardButton(f"⚠️ إحالات مشكوك فيها ({_dv_n})", callback_data="refdv_list"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
@@ -23978,6 +24208,7 @@ def ad_texts_main_ui(call):
     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
     markup.add(InlineKeyboardButton("🌐 إيموجي الموقع (Premium)", callback_data="ad_cms_site_0"))
+    markup.add(InlineKeyboardButton("🧩 نصوص وأزرار إضافية (الإحالات، اللوق، API…)", callback_data="ad_cms_x"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
     bot.edit_message_text("✏️ <b>نظام التخصيص (CMS):</b>\nاختر ماذا تريد أن تخصص:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
@@ -24008,7 +24239,7 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("❌ خطأ: الحد الأقصى $10K", callback_data="edit_txt_dep_err_max"))
     markup.add(InlineKeyboardButton("❌ خطأ عام", callback_data="edit_txt_dep_err_general"))
     markup.add(InlineKeyboardButton("❌ رسالة الإلغاء", callback_data="edit_txt_dep_cancelled"))
-    markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_invite_txt"))
+    markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_ref_screen"))
     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
     markup.add(InlineKeyboardButton("🏪 عنوان المتجر", callback_data="edit_txt_store_title"))
@@ -24030,6 +24261,9 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("🎉 رسالة المُحيل (وصل للمكافأة)", callback_data="edit_txt_ref_milestone_dm"))
     # 🆕 إشعارات اللوق العامة
     markup.add(InlineKeyboardButton("🛒 لوق: شراء بنجاح", callback_data="edit_txt_log_purchase"))
+    markup.add(InlineKeyboardButton("🌐 لوق: سطر «عبر الموقع (Mini App)»", callback_data="edit_txt_log_via_webapp"))
+    markup.add(InlineKeyboardButton("💬 لوق: سطر «عبر البوت»", callback_data="edit_txt_log_via_bot"))
+    markup.add(InlineKeyboardButton("🔌 لوق: سطر «عبر API»", callback_data="edit_txt_log_via_api"))
     markup.add(InlineKeyboardButton("💳 لوق: إيداع بنجاح", callback_data="edit_txt_log_deposit"))
     markup.add(InlineKeyboardButton("✨ لوق: تفعيل Gemini", callback_data="edit_txt_log_gemini"))
     markup.add(InlineKeyboardButton("🎓 لوق: تفعيل GitHub", callback_data="edit_txt_log_github"))
@@ -24063,6 +24297,41 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("⚠️ رسالة معاملة مستخدمة", callback_data="edit_txt_tx_used"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_x' or call.data.startswith('ad_cms_x_'))
+@admin_required
+def ad_cms_extra(call):
+    """🧩 Texts/buttons that used to be inside the code: every entry opens the usual editor."""
+    bot.answer_callback_query(call.id)
+    sec = call.data[len('ad_cms_x_'):] if call.data.startswith('ad_cms_x_') else ''
+    mk = InlineKeyboardMarkup(row_width=1)
+    titles = dict(EXTRA_CMS_SECTIONS)
+    if sec not in titles:
+        for sid, title in EXTRA_CMS_SECTIONS:
+            n = sum(1 for v in EXTRA_CMS_TEXTS.values() if v[0] == sid) + \
+                sum(1 for v in EXTRA_CMS_BUTTONS.values() if v[0] == sid) + (len(EXTRA_CMS_EXISTING) if sid == 'misc' else 0)
+            mk.add(InlineKeyboardButton(f"{title} ({n})", callback_data='ad_cms_x_' + sid))
+        mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_texts_main'))
+        text = ('🧩 <b>نصوص وأزرار إضافية</b>\n\nهذي كانت مكتوبة داخل الكود وما كانت تظهر في التخصيص. '
+                'اختر القسم ثم النص أو الزر — التعديل يطبق فورًا بالعربي والإنجليزي.')
+    else:
+        for key, (sid, label, _ar, _en) in EXTRA_CMS_TEXTS.items():
+            if sid == sec:
+                mk.add(InlineKeyboardButton('📝 ' + label, callback_data='edit_txt_' + key))
+        for key, (sid, label, _ar, _en) in EXTRA_CMS_BUTTONS.items():
+            if sid == sec:
+                mk.add(InlineKeyboardButton('🎛 ' + label, callback_data='edit_btn_' + key))
+        if sec == 'misc':
+            for key, label in EXTRA_CMS_EXISTING:
+                if key in LANG['ar']:
+                    mk.add(InlineKeyboardButton('📝 ' + label, callback_data='edit_txt_' + key))
+        mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_cms_x'))
+        text = f"🧩 <b>{html.escape(titles[sec])}</b>\n\n📝 = نص · 🎛 = زر (الاسم والإيموجي واللون)"
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=mk)
+    except Exception:
+        bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=mk)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_shop')
 @admin_required
@@ -24193,6 +24462,19 @@ def ad_edit_txt_prompt(call):
     
     # 🆕 شرح المتغيرات لكل نص (يساعد الأدمن)
     placeholders_info = {
+        'ref_screen': (
+            "💡 <b>المتغيرات:</b>\n"
+            "<code>{0}</code> الزيارات · <code>{1}</code> معلق · <code>{2}</code> نشط · <code>{3}</code> غادر\n"
+            "<code>{4}</code> أرباح الإحالات · <code>{5}</code> أرباح المشتريات · <code>{6}</code> المجموع\n"
+            "<code>{7}</code> الرابطان (البوت + الموقع) · <code>{12}</code> سطر «باقي X للمكافأة»\n"
+            "<code>{8}</code> كل كم إحالة · <code>{9}</code> مبلغ الدفعة · <code>{10}</code> أقل شراء · <code>{11}</code> مكافأة الشراء\n"
+            "<i>الأرقام والروابط تتحدث تلقائيًا؛ لا تكتبها بنفسك.</i>"
+        ),
+        'ref_links_both': "💡 <code>{0}</code> رابط البوت · <code>{1}</code> رابط الموقع (Mini App)",
+        'ref_links_bot': "💡 <code>{0}</code> رابط البوت",
+        'ref_progress_line': "💡 <code>{0}</code> كم باقي · <code>{1}</code> مبلغ المكافأة",
+        'ref_list_title': "💡 <code>{0}</code> رقم الصفحة · <code>{1}</code> عدد الصفحات",
+        'ref_debt_note': "💡 <code>{0}</code> المبلغ المستحق",
         'dep_msg_binance': (
             "💡 <b>المتغيرات (3):</b>\n"
             "<code>{0}</code> = المبلغ بالدولار (مثال: 10.0042)\n"
@@ -29865,11 +30147,10 @@ def open_api(call):
         txt += f"📦 Products: <b>{active_count}/{total_prods}</b>\n"
         txt += f"📊 Orders: <b>{total_orders}</b> | Spent: <b>${total_spent:.2f}</b>\n"
         txt += f"━━━━━━━━━━━━━━━━━━━\n"
-        txt += ("🔐 Connection details are hidden — tap «🔑 Show connection details»." if l == 'en'
-                else "🔐 بيانات الربط مخفية — اضغط «🔑 عرض بيانات الربط».")
+        txt += _txt_l(l, 'api_creds_hidden')
 
         markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(InlineKeyboardButton("🔑 Show connection details" if l == 'en' else "🔑 عرض بيانات الربط", callback_data="api_creds"))
+        markup.add(_btn_lang_obj(l, 'btn_api_creds', callback_data="api_creds"))
         markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
         markup.add(InlineKeyboardButton("🤖 برومبت جاهز للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "🤖 AI Build Prompt", callback_data="api_ai_prompt"))
         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
@@ -33537,7 +33818,8 @@ def _wa_referrals(identity, body):
     reward = _wa_fnum(get_referral_reward())
     in_batch, threshold, _left = ref_progress(uid)
     in_batch = in_batch % threshold
-    return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
+    links = _ref_links(uid)
+    return 200, {'ok': True, 'link': links['bot'], 'links': links, 'auto_pay': ref_auto_pay_enabled(),
                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
                  'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
@@ -34099,13 +34381,13 @@ def is_order_id(text):
 def order_id_line(oid, lang='ar'):
     if not oid:
         return ''
-    return f"\n🧾 <b>{'Order ID' if lang == 'en' else 'رقم الطلب'}:</b> <code>{html.escape(str(oid))}</code>"
+    return f"\n🧾 <b>{_txt_l(lang, 'order_id_label')}:</b> <code>{html.escape(str(oid))}</code>"
 
 
 def order_copy_markup(oid, lang='ar', markup=None):
     mk = markup or InlineKeyboardMarkup()
     try:
-        btn = _copy_button('📋 Copy order ID' if lang == 'en' else '📋 نسخ رقم الطلب', oid)
+        btn = _cms_copy_btn_l(lang, 'btn_copy_order_id', oid)
         if btn:
             mk.add(btn)
     except Exception:
@@ -37093,16 +37375,9 @@ def _ref_dv_prompt(uid, chat_id=None, lang=None):
         return False
     lang = lang or get_lang(uid)
     url = url + '&l=' + ('en' if lang == 'en' else 'ar')      # شاشة التحميل بلغة العميل من أول لحظة
-    if lang == 'en':
-        text = ("🛡 <b>One last step</b>\n\nTo keep the store safe from fake accounts, tap the button and verify your device. "
-                "It takes a few seconds and we don't collect personal data.")
-        label = '🛡 Verify my device'
-    else:
-        text = ("🛡 <b>خطوة أخيرة</b>\n\nعشان نحمي المتجر من الحسابات الوهمية، اضغط الزر وتحقق من جهازك. "
-                "ياخذ ثواني، وما نجمع أي بيانات شخصية.")
-        label = '🛡 تحقق من جهازك'
+    text = _txt_l(lang, 'ref_dv_prompt')
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(label, web_app=types.WebAppInfo(url=url)))
+    kb.add(_btn_lang_obj(lang, 'btn_ref_dv', web_app=types.WebAppInfo(url=url)))
     try:
         bot.send_message(chat_id or uid, text, parse_mode='HTML', reply_markup=kb)
         db.referrals_v2.update_one({'invited_id': int(uid), 'dv': {'$in': [None, 'need']}},
@@ -37233,13 +37508,12 @@ def _dv_user_done(uid):
     try:
         url = _wa_public_url()
         if url:
-            kb.add(types.InlineKeyboardButton('🛍 Open store' if lang == 'en' else '🛍 افتح المتجر', web_app=types.WebAppInfo(url=url)))
+            kb.add(_btn_lang_obj(lang, 'btn_open_store', web_app=types.WebAppInfo(url=url)))
     except Exception:
         pass
-    kb.add(InlineKeyboardButton('🏠 Main menu' if lang == 'en' else '🏠 القائمة الرئيسية', callback_data='main_menu_refresh'))
+    kb.add(_btn_lang_obj(lang, 'btn_main_menu', callback_data='main_menu_refresh'))
     try:
-        bot.send_message(uid, "✅ <b>Verified!</b> You can use the store now." if lang == 'en'
-                         else "✅ <b>تم التحقق!</b> تقدر الحين تستخدم المتجر.", parse_mode='HTML', reply_markup=kb)
+        bot.send_message(uid, _txt_l(lang, 'ref_dv_done'), parse_mode='HTML', reply_markup=kb)
     except Exception:
         pass
 
@@ -37396,6 +37670,16 @@ def refdv_toggle_cb(call):
     if on:
         _ref_dv_since()
     bot.answer_callback_query(call.id, "🛡 تحقق الجهاز: " + ("مفعّل ✅" if on else "موقوف ⛔"), show_alert=True)
+    ad_ref_settings_ui(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'refauto_toggle')
+@admin_required
+def refauto_toggle_cb(call):
+    on = not ref_auto_pay_enabled()
+    db.settings.update_one({'key': 'ref_auto_pay'}, {'$set': {'value': 'on' if on else 'off'}}, upsert=True)
+    bot.answer_callback_query(call.id, "💸 الصرف التلقائي: " + ("مفعّل ✅ — كل دفعة مؤكدة تنصرف فورًا" if on
+                              else "موقوف ⛔ — الدفعات تنتظر موافقتك"), show_alert=True)
     ad_ref_settings_ui(call)
 
 
@@ -38657,7 +38941,7 @@ def _wa_codes_txt(identity, body):
         f = io.BytesIO(content.encode('utf-8'))
         f.name = fname
         lang = get_lang(uid)
-        bot.send_document(uid, f, caption=("📄 Your codes as a TXT file." if lang == 'en' else "📄 أكوادك في ملف TXT."))
+        bot.send_document(uid, f, caption=_txt_l(lang, 'codes_file_caption'), parse_mode='HTML')
         return 200, {'ok': True, 'sent': True}
     return 200, {'ok': True, 'url': f"/webapp/dl/{_txt_token(uid, gid, ref)}/{urllib.parse.quote(fname)}", 'name': fname}
 
@@ -38690,7 +38974,7 @@ def api_creds_cb(call):
     k = db.api_keys.find_one({'user_id': uid, 'is_active': True})
     if not k:
         try:
-            bot.answer_callback_query(call.id, "No active API key." if l == 'en' else "ما عندك مفتاح API نشط.", show_alert=True)
+            bot.answer_callback_query(call.id, re.sub(r'<[^>]+>', '', _txt_l(l, 'api_no_key')), show_alert=True)
         except Exception:
             pass
         return
@@ -38718,11 +39002,11 @@ def api_creds_cb(call):
         txt += ["🔑 مفتاح API:", f"<code>{html.escape(k['api_key'])}</code>", "", f"<i>⏱ الرسالة تنمسح لحالها بعد {_CREDS_TTL // 60} دقايق.</i>"]
     mk = InlineKeyboardMarkup(row_width=1)
     if conn:
-        mk.add(_copy_button("📋 Copy connection code" if l == 'en' else "📋 نسخ كود الاتصال", conn))
+        mk.add(_cms_copy_btn_l(l, 'btn_copy_api_conn', conn))
     if full:
-        mk.add(_copy_button("📋 Copy base URL" if l == 'en' else "📋 نسخ الرابط الأساسي", full))
-    mk.add(_copy_button("📋 Copy API key" if l == 'en' else "📋 نسخ المفتاح", k['api_key']))
-    mk.add(InlineKeyboardButton("🙈 Hide" if l == 'en' else "🙈 إخفاء", callback_data="api_creds_hide"))
+        mk.add(_cms_copy_btn_l(l, 'btn_copy_api_base', full))
+    mk.add(_cms_copy_btn_l(l, 'btn_copy_api_key', k['api_key']))
+    mk.add(_btn_lang_obj(l, 'btn_api_hide', callback_data="api_creds_hide"))
     m = bot.send_message(call.message.chat.id, '\n'.join(txt), parse_mode='HTML', reply_markup=mk, disable_web_page_preview=True)
     try:
         mid = getattr(m, 'message_id', None)
