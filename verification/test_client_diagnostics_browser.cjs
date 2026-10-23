@@ -44,7 +44,7 @@ const ready=new Promise((resolve,reject)=>{
   for(let n=0;n<100&&!reports.some(r=>r.message.includes('Runtime proof'));n++)await new Promise(r=>setTimeout(r,20));
   const runtime=reports.find(r=>r.message.includes('Runtime proof'));
   assert(runtime.stack.includes('realBrowserProof'));assert.equal(runtime.last_action,'diagnostic-proof');
-  assert.equal(runtime.build,'lara-41.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
+  assert.equal(runtime.build,'lara-38.1');assert(!JSON.stringify(runtime).includes('PRIVATE_PASSWORD'));
   assert(!JSON.stringify(runtime).includes('DO-NOT-COLLECT-PASSWORD'));
   console.log('PASS actual runtime exception includes stack, build and action without form/button values');
   const count=reports.length;
@@ -61,7 +61,7 @@ const ready=new Promise((resolve,reject)=>{
   assert(reports.some(r=>r.operation==='script-load'&&r.location.includes('missing-proof-script.js')));
   assert(!JSON.stringify(reports).includes('PRIVATE_QUERY'));
   const diagnostics=await(await page.request.get(BASE+'/__user_test__/diagnostics')).json();
-  assert(diagnostics.some(r=>r.trace.includes('build: lara-41.1')));
+  assert(diagnostics.some(r=>r.trace.includes('build: lara-38.1')));
   assert(diagnostics.some(r=>r.trace.includes('cannot be identified')));
   assert(diagnostics.every(r=>r.user_id===9001));
   const state=await(await page.request.get(BASE+'/__user_test__/state')).json();assert.equal(state.balance,100);assert.equal(state.balance_logs,0);

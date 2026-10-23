@@ -35,7 +35,7 @@ const ready=new Promise((resolve,reject)=>{
   await page.evaluate(base=>window.dispatchEvent(new ErrorEvent('error',{message:'Store render failed',filename:base+'/__ref_test__/',lineno:12,colno:3,error:new Error('Store render failed')})),BASE);
   await page.waitForTimeout(800);
   const own=reports.find(r=>r.message==='Store render failed');
-  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-41.1',JSON.stringify(reports));
-  console.log('PASS the store\'s own error is still reported with its location and build lara-41.1');
+  assert(own&&/__ref_test__/.test(own.location)&&own.build==='lara-38.1',JSON.stringify(reports));
+  console.log('PASS the store\'s own error is still reported with its location and build lara-38.1');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{server.kill();setTimeout(()=>process.exit(process.exitCode||0),200);});

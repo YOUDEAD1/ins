@@ -1,0 +1,104 @@
+bot.py:155:5: `global VERIFIED_PROXIES` is unused: name is never assigned in scope
+bot.py:171:5: `global LAST_GOOD_PROXY` is unused: name is never assigned in scope
+bot.py:767:13: f-string is missing placeholders
+bot.py:1042:25: local variable 'plan' is assigned to but never used
+bot.py:1671:14: f-string is missing placeholders
+bot.py:1839:13: local variable 'prod_id' is assigned to but never used
+bot.py:2607:17: local variable 'ep_desc' is assigned to but never used
+bot.py:4056:1: redefinition of unused 'base64' from line 18
+bot.py:4057:1: 'hashlib.sha256' imported but unused
+bot.py:4345:21: local variable 'ids_to_keep' is assigned to but never used
+bot.py:4641:41: f-string is missing placeholders
+bot.py:4667:17: f-string is missing placeholders
+bot.py:4999:37: f-string is missing placeholders
+bot.py:6388:104: f-string is missing placeholders
+bot.py:6478:5: `global ACTIVE_GEMINI_SESSION` is unused: name is never assigned in scope
+bot.py:7487:1: redefinition of unused '_translate_text_raw' from line 7402
+bot.py:9605:9: local variable 'emoji_id' is assigned to but never used
+bot.py:9858:5: local variable 'user_was_new' is assigned to but never used
+bot.py:10139:5: local variable 'l' is assigned to but never used
+bot.py:10158:5: local variable 'l' is assigned to but never used
+bot.py:10208:5: local variable 'l' is assigned to but never used
+bot.py:10251:5: local variable 'l' is assigned to but never used
+bot.py:10267:5: local variable 'l' is assigned to but never used
+bot.py:10490:5: local variable 'l' is assigned to but never used
+bot.py:10576:23: f-string is missing placeholders
+bot.py:10581:23: f-string is missing placeholders
+bot.py:11396:5: local variable 'l' is assigned to but never used
+bot.py:11473:5: local variable 'l' is assigned to but never used
+bot.py:11664:13: local variable '_cgpt_top' is assigned to but never used
+bot.py:11933:17: local variable 'price' is assigned to but never used
+bot.py:12126:9: local variable 'cat_id_back' is assigned to but never used
+bot.py:12157:13: f-string is missing placeholders
+bot.py:12172:13: f-string is missing placeholders
+bot.py:12635:5: local variable 'days' is assigned to but never used
+bot.py:12648:9: local variable 'buyer_m' is assigned to but never used
+bot.py:12732:9: local variable 'buyer_m' is assigned to but never used
+bot.py:12874:9: local variable 'unit_price' is assigned to but never used
+bot.py:12927:71: f-string is missing placeholders
+bot.py:14158:9: local variable 'unique_amount' is assigned to but never used
+bot.py:15642:9: local variable 'onchain_match_coins' is assigned to but never used
+bot.py:16282:9: local variable 'back_lbl' is assigned to but never used
+bot.py:17127:9: local variable 'emoji_id' is assigned to but never used
+bot.py:17129:9: local variable 'stk' is assigned to but never used
+bot.py:17130:9: local variable '_nu' is assigned to but never used
+bot.py:17173:9: local variable 'emoji_id' is assigned to but never used
+bot.py:17174:9: local variable '_nu' is assigned to but never used
+bot.py:17216:9: local variable 'emoji_id' is assigned to but never used
+bot.py:17217:9: local variable '_nu' is assigned to but never used
+bot.py:17475:17: local variable 'old_stock' is assigned to but never used
+bot.py:18601:19: f-string is missing placeholders
+bot.py:18697:24: f-string is missing placeholders
+bot.py:19031:5: local variable 'e' is assigned to but never used
+bot.py:19509:9: local variable 'cancel_msg_en' is assigned to but never used
+bot.py:19820:67: f-string is missing placeholders
+bot.py:19890:5: local variable 'uid' is assigned to but never used
+bot.py:20566:31: f-string is missing placeholders
+bot.py:20568:31: f-string is missing placeholders
+bot.py:21031:5: local variable 'added' is assigned to but never used
+bot.py:21623:9: local variable 'visible' is assigned to but never used
+bot.py:22094:138: f-string is missing placeholders
+bot.py:22097:124: f-string is missing placeholders
+bot.py:24478:5: local variable 'info_block' is assigned to but never used
+bot.py:24500:13: local variable 'preview_sent' is assigned to but never used
+bot.py:25462:9: local variable 'e' is assigned to but never used
+bot.py:25721:5: local variable 'acc_id' is assigned to but never used
+bot.py:25762:5: local variable 'emoji_id' is assigned to but never used
+bot.py:25769:9: local variable '_nu' is assigned to but never used
+bot.py:25789:21: local variable 'btn' is assigned to but never used
+bot.py:26537:5: 'bson.ObjectId' imported but unused
+bot.py:26928:5: local variable 'link' is assigned to but never used
+bot.py:27153:5: local variable 'unit_price' is assigned to but never used
+bot.py:27257:15: f-string is missing placeholders
+bot.py:27438:43: f-string is missing placeholders
+bot.py:27484:21: local variable '_nu' is assigned to but never used
+bot.py:27505:29: local variable '_btn_txt' is assigned to but never used
+bot.py:27520:9: local variable 'e' is assigned to but never used
+bot.py:27521:47: f-string is missing placeholders
+bot.py:27831:13: local variable '_nu' is assigned to but never used
+bot.py:27867:21: local variable 'btn_label' is assigned to but never used
+bot.py:28351:15: f-string is missing placeholders
+bot.py:28544:34: f-string is missing placeholders
+bot.py:28544:5: local variable 'e' is assigned to but never used
+bot.py:28753:5: 'datetime as _dt' imported but unused
+bot.py:29055:41: f-string is missing placeholders
+bot.py:29243:5: local variable '_nu_p' is assigned to but never used
+bot.py:29244:5: local variable '_nu_c' is assigned to but never used
+bot.py:29262:32: f-string is missing placeholders
+bot.py:29262:103: f-string is missing placeholders
+bot.py:29272:25: local variable 'btn_text' is assigned to but never used
+bot.py:29281:13: local variable 'err' is assigned to but never used
+bot.py:29643:16: f-string is missing placeholders
+bot.py:29984:5: 'bson.ObjectId' imported but unused
+bot.py:30049:5: local variable 'gw' is assigned to but never used
+bot.py:30065:9: local variable 'conn_code' is assigned to but never used
+bot.py:30067:15: f-string is missing placeholders
+bot.py:30068:16: f-string is missing placeholders
+bot.py:30069:16: f-string is missing placeholders
+bot.py:30073:16: f-string is missing placeholders
+bot.py:31836:10: f-string is missing placeholders
+bot.py:33997:9: local variable 'intro' is assigned to but never used
+bot.py:37232:143: f-string is missing placeholders
+bot.py:38170:5: local variable 'e' is assigned to but never used
+bot.py:38504:13: f-string is missing placeholders
+bot.py:40335:17: local variable 'ep_desc' is assigned to but never used

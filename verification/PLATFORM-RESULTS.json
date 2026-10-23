@@ -1,0 +1,141 @@
+{
+  "nss": {
+    "original_lines": 41042,
+    "original_definitions_and_classes": 1378,
+    "unchanged_original_definitions_and_classes": 1364,
+    "original_nonsecret_files_checked": 223,
+    "changed_original_files": [
+      "bot.py"
+    ],
+    "other_original_code_changed": [],
+    "retained_original_definitions_and_classes": 1378,
+    "missing_original_definitions": [],
+    "modified_original_definitions": [
+      ".parse_button_input#1",
+      ".get_text#1",
+      ".get_btn_data#1",
+      ".create_btn#1",
+      ".ad_texts_main_ui#1",
+      ".ad_cms_msgs_ui#1",
+      ".ad_cms_btns_cats_ui#1",
+      ".ad_cms_btns_list#1",
+      ".ad_edit_txt_prompt#1",
+      ".ad_reset_text_to_default#1",
+      ".ad_save_custom_text#1",
+      ".ad_edit_btn_prompt#1",
+      ".ad_save_custom_btn#1",
+      ".ad_set_btn_style#1"
+    ],
+    "change_scope": "Native CMS integration, button language lookup and UTF-16 Premium parsing; no original functions/classes removed",
+    "original_website_files_unchanged": 62,
+    "parallel_customization_module_removed": true
+  },
+  "wwc": {
+    "original_source_files": 98,
+    "original_named_functions_and_classes": 972,
+    "missing": [],
+    "definition_count_includes": "Named functions, classes, methods and variable-bound arrow/function expressions"
+  },
+  "date_utc": "2026-10-22T19:53:29.912096+00:00",
+  "python_compile": "passed",
+  "typescript_typecheck": "passed",
+  "typescript_build": "passed",
+  "nss_pytest": {
+    "tests": 904,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "wwc_node_tests": {
+    "tests": 82,
+    "pass": 82,
+    "fail": 0,
+    "skipped": 0
+  },
+  "worker_offline_benchmark": {
+    "type": "benchmark",
+    "rss": 101838848,
+    "heap": 30310952,
+    "requests": 16,
+    "telegram": [
+      "getMe",
+      "sendMessage",
+      "answerCallbackQuery",
+      "sendMessage"
+    ],
+    "sessions": 1,
+    "offline": true,
+    "live_services_tested": false
+  },
+  "production_databases_modified": false,
+  "real_payments_tested": false,
+  "live_deployment_performed": false,
+  "public_https_integration_still_requires_operator_setup": true,
+  "wallet_payment": {
+    "default_method": "nss_wallet",
+    "requires_operator_price": "WWC_SUBSCRIPTION_USD",
+    "price_assumed": false,
+    "explicit_confirmation": true,
+    "balance_and_debit_receipt_atomic": true,
+    "crash_recovery_tested": true,
+    "concurrent_confirmation_tested": true,
+    "insufficient_balance_tested": true,
+    "old_stars_receipts_retained": true
+  },
+  "runtime_status_displayed": true,
+  "real_wallets_modified": false,
+  "customization": {
+    "native_nss_cms_reused": true,
+    "nss_platform_entries": 62,
+    "nss_message_entries": 44,
+    "nss_button_entries": 18,
+    "nss_edit_handlers": [
+      "ad_save_custom_text",
+      "ad_save_custom_btn",
+      "ad_set_btn_style",
+      "ad_reset_text_to_default"
+    ],
+    "nss_runtime_readers": [
+      "get_text",
+      "get_btn_data",
+      "create_btn"
+    ],
+    "nss_storage": [
+      "custom_texts",
+      "custom_buttons"
+    ],
+    "parallel_nss_editor_removed": true,
+    "legacy_values_preserved_without_overwriting_native": true,
+    "wwc_existing_customization_reused": true,
+    "wwc_original_advanced_controls_reachable": true,
+    "wwc_platform_entries": 24,
+    "languages": [
+      "ar",
+      "en",
+      "vi",
+      "zh"
+    ],
+    "nss_selected_language_no_translation_http": true,
+    "nss_auto_translation_mode_retained": true,
+    "nss_save_behavior": "Original immediate save on message; selected language optional for WWC platform keys",
+    "wwc_save_behavior": "Existing preview and Save button",
+    "dashboard_native_button_snapshot_queries": 1,
+    "premium_icons_colors_and_runtime_menu_tested": true
+  },
+  "audit": {
+    "production_dependency_known_vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "python_addon_static_analysis": "passed",
+    "python_core_undefined_names": 0,
+    "python_core_legacy_cleanup_diagnostics": 104,
+    "offline_website_purchase_navigation_languages": "passed",
+    "real_accounts_and_payments_tested": false,
+    "required_existing_wwc_migration": "0046_platform_metadata.sql"
+  }
+}

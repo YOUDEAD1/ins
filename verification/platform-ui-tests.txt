@@ -1,0 +1,25 @@
+PASS frontend product -> confirmation -> real backend purchase -> delivered code
+PASS frontend tab profile
+PASS frontend tab orders
+PASS frontend tab balance
+PASS frontend tab api
+PASS frontend tab store
+PASS frontend language ar
+PASS frontend language ru
+PASS frontend language zh
+PASS frontend language en
+UI integration tests passed; JavaScript errors: 0; requests: [
+  '/webapp/bootstrap',
+  '/webapp/lang',
+  '/webapp/buy',
+  '/webapp/catalog',
+  '/webapp/referrals',
+  '/webapp/cgpt/subs',
+  '/webapp/orders',
+  '/webapp/history',
+  '/webapp/api/state',
+  '/webapp/lang',
+  '/webapp/lang',
+  '/webapp/lang',
+  '/webapp/lang'
+]

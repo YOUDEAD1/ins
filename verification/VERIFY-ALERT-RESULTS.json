@@ -1,0 +1,36 @@
+{
+  "generated_at_utc": "2026-10-23T15:28:02.858856+00:00",
+  "change": "Suppress only the handled HTTP 503 verification_unavailable response from /webapp/verify as an admin incident.",
+  "validation": {
+    "compile": "passed",
+    "new_regression_tests_passed": 8,
+    "full_project_tests_passed": 964,
+    "test_log": "verification/verify-alert-full-tests.txt",
+    "external_services": "mocked; no production bot, payments, or database used"
+  },
+  "preservation": {
+    "original_file_count": 263,
+    "original_files_removed": 0,
+    "changed_existing_files": [
+      "LARA-STOCK/bot.py"
+    ],
+    "original_bot_lines": 41270,
+    "updated_bot_lines": 41278,
+    "bot_lines_added": 8,
+    "bot_lines_removed": 0,
+    "all_function_and_class_definitions_preserved": true,
+    "unchanged_website_assets": 62
+  },
+  "behavior": {
+    "verification_unavailable_http_status": 503,
+    "website_error_message_preserved": true,
+    "referrals_remain_unverified_until_success": true,
+    "challenge_remains_available_for_retry": true,
+    "other_error_alerts_preserved": true,
+    "historical_error_records_unchanged": true,
+    "added_background_tasks": 0,
+    "added_http_requests": 0,
+    "added_database_writes": 0
+  },
+  "deployment": "Replace project files, preserve the current .env, then restart the existing service once."
+}

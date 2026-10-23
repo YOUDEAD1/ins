@@ -1,0 +1,19 @@
+.......................................................                  [100%]
+=============================== warnings summary ===============================
+verification/test_wwc_platform.py::test_addon_handlers_precede_legacy_catchalls
+verification/test_wwc_platform.py::test_addon_handlers_precede_legacy_catchalls
+  /workspace/scratch/611bb45bcc11/capacity-update/test-venv/lib/python3.12/site-packages/binance/ws/websocket_api.py:4: DeprecationWarning: websockets.WebSocketClientProtocol is deprecated
+    from websockets import WebSocketClientProtocol  # type: ignore
+
+verification/test_wwc_platform.py::test_addon_handlers_precede_legacy_catchalls
+  /workspace/scratch/611bb45bcc11/capacity-update/test-venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+verification/test_wwc_platform.py: 108 warnings
+verification/test_wwc_wallet.py: 120 warnings
+verification/test_wwc_customization.py: 240 warnings
+  /workspace/scratch/611bb45bcc11/capacity-update/test-venv/lib/python3.12/site-packages/mongomock/helpers.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+55 passed, 471 warnings in 2.65s

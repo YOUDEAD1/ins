@@ -1,0 +1,22 @@
+...........................................................              [100%]
+=============================== warnings summary ===============================
+verification/test_channel_broadcast.py::test_two_broadcast_modes_keep_original_member_flow
+verification/test_channel_broadcast.py::test_two_broadcast_modes_keep_original_member_flow
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/binance/ws/websocket_api.py:4: DeprecationWarning: websockets.WebSocketClientProtocol is deprecated
+    from websockets import WebSocketClientProtocol  # type: ignore
+
+verification/test_channel_broadcast.py::test_two_broadcast_modes_keep_original_member_flow
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+verification/test_channel_broadcast.py: 1671 warnings
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/mongomock/helpers.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+verification/test_channel_broadcast.py::test_normal_price_stock_and_chatgpt_announcements_have_two_buttons[price]
+verification/test_channel_broadcast.py::test_normal_price_stock_and_chatgpt_announcements_have_two_buttons[stock]
+  /workspace/scratch/611bb45bcc11/broadcast-repair/LARA-STOCK/bot.py:2026: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'created_at': datetime.datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+59 passed, 1676 warnings in 3.16s

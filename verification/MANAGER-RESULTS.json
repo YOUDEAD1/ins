@@ -1,0 +1,132 @@
+{
+  "date_utc": "2026-10-23T01:34:51.022568+00:00",
+  "architecture": "Dedicated management bot hosted inside the existing WWC controller; existing NSS MongoDB wallet and WWC Supabase registry; no data migration",
+  "implemented": [
+    "Dedicated multilingual Telegram manager",
+    "One-time language selection and persistent encrypted setup drafts",
+    "SQL document delivery and activation checks",
+    "Store dashboards and owner-only platform overview",
+    "Four-language folder-based native settings console with previews, Premium icons and button styles",
+    "NSS wallet quotes, explicit confirmation, atomic existing ledger, durable receipt/outbox reuse",
+    "Free/paid and inactivity rules retained",
+    "20 active stores by default with one lazy worker and bounded queue",
+    "Existing NSS menu and child subscription links route to manager when configured",
+    "Fresh npm test builds compiled worker fixtures before tests"
+  ],
+  "checks": {
+    "NSS_pytest_passed": 918,
+    "NSS_pytest_failed": 0,
+    "WWC_full_node_passed": 102,
+    "WWC_full_node_failed": 0,
+    "WWC_final_manager_focused_passed": 15,
+    "typescript_typecheck": "passed",
+    "typescript_build": "passed",
+    "python_compile_bot_and_addons": "passed",
+    "addon_pyflakes": "passed",
+    "eslint_errors": 0,
+    "eslint_warnings": 29,
+    "node_test_runtime": "24.19.0",
+    "python_test_runtime": "3.12"
+  },
+  "preservation": {
+    "NSS_bot_py_byte_identical": true,
+    "NSS_website_assets_unchanged": 62,
+    "WWC_existing_source_files": 106,
+    "WWC_existing_named_functions_classes_methods_arrows_retained": 1064,
+    "original_packaged_files_missing": 0
+  },
+  "benchmark": {
+    "date_utc": "2026-10-23T01:32:30.159Z",
+    "offline": true,
+    "live_services_tested": false,
+    "shops": 20,
+    "products_per_shop": 50,
+    "max_warm_workers": 1,
+    "worker_heap_limit_mb": 128,
+    "queue_limit": 32,
+    "queue_wait_seconds": 15,
+    "launched_processes": 40,
+    "peak_live_workers": 1,
+    "peak_queued_requests": 19,
+    "controller_peak_rss_bytes": 85008384,
+    "controller_plus_worker_peak_rss_bytes": 155340800,
+    "worker_peak_rss_bytes": 90542080,
+    "worker_peak_heap_bytes": 38751312,
+    "inbound_http_requests": 160,
+    "inbound_json_bytes": 42880,
+    "http_response_json_bytes": 1760,
+    "worker_outbound_http_requests": 1300,
+    "worker_outbound_json_bytes": 282280,
+    "worker_inbound_json_bytes": 446980,
+    "controller_registry_reads_mocked": 20,
+    "cold_start_request_count": {
+      "min": 15,
+      "median": 15,
+      "p95": 15,
+      "max": 15
+    },
+    "cold_start_latency_ms": {
+      "min": 292.5619290000004,
+      "median": 319.962476,
+      "p95": 338.9924279999998,
+      "max": 365.02843600000006
+    },
+    "warm_action_request_count": {
+      "min": 5,
+      "median": 5,
+      "p95": 5,
+      "max": 5
+    },
+    "warm_action_outbound_json_bytes": {
+      "min": 1950,
+      "median": 1950,
+      "p95": 1950,
+      "max": 1950
+    },
+    "warm_action_inbound_json_bytes": {
+      "min": 392,
+      "median": 393,
+      "p95": 393,
+      "max": 393
+    },
+    "warm_action_latency_ms": {
+      "min": 2.8658949999999095,
+      "median": 4.679634000000078,
+      "p95": 5.982062000000042,
+      "max": 6.8419620000000805
+    },
+    "twenty_simultaneous_updates": {
+      "successes": 20,
+      "capacity_retries": 0,
+      "wall_ms": 6128.522628,
+      "latency_ms": {
+        "min": 337.69147899999916,
+        "median": 3377.6599589999996,
+        "p95": 5803.217379000001,
+        "max": 6124.576996000001
+      }
+    },
+    "duration_ms": 13420.167078999999,
+    "limitations": [
+      "External Telegram/Supabase responses are synthetic, without production network latency.",
+      "Controller registry is mocked; its database requests are excluded from worker HTTP totals.",
+      "Request/response sizes count JSON bodies only; TLS, headers, file transfers and catalog source sync are excluded.",
+      "This is browsing with 50 products, not real checkout/payment or 24-hour production load."
+    ]
+  },
+  "live_services_tested": false,
+  "deployment_performed": false,
+  "required_activation": [
+    "Create a separate manager bot in BotFather",
+    "Apply central migration 0047 after previous migrations",
+    "Set WWC_MANAGER_TOKEN and WWC_MANAGER_USERNAME on WWC; matching username on NSS",
+    "Keep current shared secret, encryption keys, database URLs, public HTTPS origins and owner IDs",
+    "Run one NSS instance and one WWC platform instance"
+  ],
+  "limits": [
+    "Offline benchmarks use synthetic Telegram/Supabase responses and mock central registry reads",
+    "No real payment, hosting or physical handset verification",
+    "Capacity is active store count, not twenty permanent processes or a production latency guarantee",
+    "Monthly request estimates and hosting free-tier limits are documented separately"
+  ]
+}

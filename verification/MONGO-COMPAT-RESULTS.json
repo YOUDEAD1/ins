@@ -1,0 +1,10 @@
+{
+  "original_files_preserved": true,
+  "missing": [],
+  "core_bot_byte_identical": true,
+  "core_sha256": "4c7815238c3bbd676b1f031155230aed1b41f3c5c9ec2d58f8195166d462566a",
+  "webapp_files_checked": 62,
+  "changed_webapp_files": [],
+  "function_names_checked": 1432,
+  "offline_tests_passed": 936
+}

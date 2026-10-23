@@ -1,0 +1,14 @@
+{
+  "old_files": 240,
+  "missing": [],
+  "changed": [
+    ".env.example",
+    "NSS-WWC-PLATFORM-AR.md",
+    "WWC-STORE-SETUP.sql",
+    "verification/test_wwc_customization.py",
+    "wwc_platform.py"
+  ],
+  "bot_py_byte_identical": true,
+  "web_files": 62,
+  "web_files_changed": []
+}

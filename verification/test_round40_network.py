@@ -293,6 +293,12 @@ def test_products_response_diagnostics_identify_consumer_and_304_without_exposin
     r = conn.getresponse(); assert r.status == 304 and r.read() == b''
     conn.close()
     origins = {r['origin'] for r in mod._NET_METER.snapshot()['details']}
+    # Receiving the body does not imply that the server thread's finally block
+    # has committed its metrics yet. Wait for that lifecycle boundary.
+    deadline=time.monotonic()+1
+    while 'api_products:customer_1001:304' not in origins and time.monotonic()<deadline:
+        time.sleep(0.005)
+        origins={r['origin'] for r in mod._NET_METER.snapshot()['details']}
     assert {'api_products:customer_1001:200', 'api_products:customer_1001:304'} <= origins
     assert key not in json.dumps(mod._NET_METER.snapshot())
 

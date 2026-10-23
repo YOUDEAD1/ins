@@ -1,0 +1,746 @@
+[
+  {
+    "key": "wwc.open",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.open",
+    "defaults": {
+      "en": "🏪 Open your store",
+      "ar": "🏪 افتح متجرك",
+      "vi": "🏪 Mở cửa hàng",
+      "zh": "🏪 开设商店"
+    }
+  },
+  {
+    "key": "wwc.mine",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.mine",
+    "defaults": {
+      "en": "📊 My stores",
+      "ar": "📊 متاجري",
+      "vi": "📊 Cửa hàng của tôi",
+      "zh": "📊 我的商店"
+    }
+  },
+  {
+    "key": "wwc.super",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.super",
+    "defaults": {
+      "en": "🛡 Super admin · stores",
+      "ar": "🛡 سوبر أدمن · المتاجر",
+      "vi": "🛡 Quản trị nền tảng",
+      "zh": "🛡 平台超级管理员"
+    }
+  },
+  {
+    "key": "wwc.intro",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.intro",
+    "defaults": {
+      "en": "Create your WWC store. Free stores sell NSS products and may edit names, descriptions, prices and margins. Adding products, accounts, stock or suppliers needs a subscription. Your NSS wallet pays supplier costs; your customers have separate wallets in your store.\n\nCreate a bot with @BotFather, open that bot and send /start, then send its token here. /cancelstore cancels setup.",
+      "ar": "افتح متجرك على WWC. المجاني يبيع منتجات NSS ويسمح بتعديل الاسم والوصف والسعر ونسبة الربح. إضافة المنتجات والحسابات والمخزون والموردين تحتاج اشتراكًا. تكلفة المورد تخصم من رصيدك في NSS، وأرصدة عملاء متجرك مستقلة.\n\nأنشئ بوتًا من @BotFather وافتحه وأرسل له /start، ثم أرسل توكنه هنا. للإلغاء: /cancelstore",
+      "vi": "Tạo cửa hàng WWC. Gói miễn phí bán sản phẩm NSS, cho đổi tên, mô tả, giá và lợi nhuận. Thêm sản phẩm, tài khoản, kho hoặc nhà cung cấp cần trả phí. Chi phí NSS trừ từ ví NSS riêng của bạn; ví khách trong cửa hàng độc lập.\n\nTạo bot tại @BotFather, mở bot đó và gửi /start, sau đó gửi token ở đây. /cancelstore để hủy.",
+      "zh": "创建 WWC 商店。免费套餐销售 NSS 商品，可修改名称、描述、售价和利润率。添加商品、账户、库存或供应商需要订阅。NSS 成本从您的独立 NSS 钱包支付，客户的本店钱包独立。\n\n在 @BotFather 创建机器人，打开它并发送 /start，然后在此发送令牌。/cancelstore 可取消。"
+    }
+  },
+  {
+    "key": "wwc.url",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.url",
+    "defaults": {
+      "en": "Send a separate Supabase project URL: https://YOUR-PROJECT.supabase.co",
+      "ar": "أرسل رابط مشروع Supabase مستقل: https://YOUR-PROJECT.supabase.co",
+      "vi": "Gửi URL dự án Supabase riêng: https://YOUR-PROJECT.supabase.co",
+      "zh": "发送独立 Supabase 项目网址：https://YOUR-PROJECT.supabase.co"
+    }
+  },
+  {
+    "key": "wwc.key",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.key",
+    "defaults": {
+      "en": "Send the Supabase secret key (sb_secret_...) or legacy service_role from Project Settings → API. Do not use an anon/public key. Your message will be deleted when Telegram permits.",
+      "ar": "أرسل المفتاح السري sb_secret_... أو service_role من Project Settings ثم API. لا تستخدم المفتاح العام/anon. سنحذف الرسالة عندما يسمح Telegram.",
+      "vi": "Gửi khóa bí mật sb_secret_... hoặc service_role từ Project Settings → API. Không dùng khóa anon/công khai. Tin nhắn sẽ được xóa khi Telegram cho phép.",
+      "zh": "发送 Project Settings → API 的秘密密钥 sb_secret_... 或 service_role。不要使用 anon/公开密钥。Telegram 允许时将删除消息。"
+    }
+  },
+  {
+    "key": "wwc.sql",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.sql",
+    "defaults": {
+      "en": "Download this SQL file. Open your Supabase project → SQL Editor → New query. Paste the whole file and press Run. Then press Check & activate.",
+      "ar": "نزّل ملف SQL. افتح مشروعك في Supabase ثم SQL Editor ثم New query. الصق الملف كاملًا واضغط Run. بعد نجاح التنفيذ اضغط فحص وتفعيل.",
+      "vi": "Tải SQL này. Mở dự án Supabase → SQL Editor → New query. Dán toàn bộ tệp rồi nhấn Run. Sau đó nhấn Kiểm tra và kích hoạt.",
+      "zh": "下载 SQL 文件。打开 Supabase 项目 → SQL Editor → New query，粘贴完整文件并点击 Run，然后点击检查并激活。"
+    }
+  },
+  {
+    "key": "wwc.activate",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.activate",
+    "defaults": {
+      "en": "✅ Check & activate",
+      "ar": "✅ فحص وتفعيل",
+      "vi": "✅ Kiểm tra và kích hoạt",
+      "zh": "✅ 检查并激活"
+    }
+  },
+  {
+    "key": "wwc.sqlbtn",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.sqlbtn",
+    "defaults": {
+      "en": "📄 Send SQL again",
+      "ar": "📄 إرسال SQL مجددًا",
+      "vi": "📄 Gửi lại SQL",
+      "zh": "📄 再次发送 SQL"
+    }
+  },
+  {
+    "key": "wwc.subscribe",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.subscribe",
+    "defaults": {
+      "en": "💎 Subscribe",
+      "ar": "💎 اشتراك",
+      "vi": "💎 Đăng ký",
+      "zh": "💎 订阅"
+    }
+  },
+  {
+    "key": "wwc.resume",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.resume",
+    "defaults": {
+      "en": "▶️ Resume",
+      "ar": "▶️ تشغيل",
+      "vi": "▶️ Chạy lại",
+      "zh": "▶️ 恢复"
+    }
+  },
+  {
+    "key": "wwc.pause",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.pause",
+    "defaults": {
+      "en": "⏸ Pause",
+      "ar": "⏸ إيقاف",
+      "vi": "⏸ Tạm dừng",
+      "zh": "⏸ 暂停"
+    }
+  },
+  {
+    "key": "wwc.unlock",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.unlock",
+    "defaults": {
+      "en": "🔓 Owner unlock",
+      "ar": "🔓 فتح من المالك",
+      "vi": "🔓 Chủ nền tảng mở khóa",
+      "zh": "🔓 平台所有者解锁"
+    }
+  },
+  {
+    "key": "wwc.grant",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.grant",
+    "defaults": {
+      "en": "🎁 Grant subscription",
+      "ar": "🎁 منح اشتراك",
+      "vi": "🎁 Tặng gói",
+      "zh": "🎁 赠送订阅"
+    }
+  },
+  {
+    "key": "wwc.refresh",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.refresh",
+    "defaults": {
+      "en": "🔄 Refresh",
+      "ar": "🔄 تحديث",
+      "vi": "🔄 Làm mới",
+      "zh": "🔄 刷新"
+    }
+  },
+  {
+    "key": "wwc.back",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.back",
+    "defaults": {
+      "en": "⬅️ My stores",
+      "ar": "⬅️ متاجري",
+      "vi": "⬅️ Cửa hàng của tôi",
+      "zh": "⬅️ 我的商店"
+    }
+  },
+  {
+    "key": "wwc.next",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.next",
+    "defaults": {
+      "en": "Next ▶️",
+      "ar": "التالي ▶️",
+      "vi": "Tiếp ▶️",
+      "zh": "下一页 ▶️"
+    }
+  },
+  {
+    "key": "wwc.credentials",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.credentials",
+    "defaults": {
+      "en": "🔑 Update store credentials",
+      "ar": "🔑 تحديث بيانات المتجر",
+      "vi": "🔑 Đổi thông tin cửa hàng",
+      "zh": "🔑 更新商店凭据"
+    }
+  },
+  {
+    "key": "wwc.empty",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.empty",
+    "defaults": {
+      "en": "You have no stores yet.",
+      "ar": "لا توجد متاجر لك بعد.",
+      "vi": "Bạn chưa có cửa hàng.",
+      "zh": "您还没有商店。"
+    }
+  },
+  {
+    "key": "wwc.cancelled",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.cancelled",
+    "defaults": {
+      "en": "Setup cancelled. Existing stores are unchanged.",
+      "ar": "تم إلغاء خطوات الإنشاء. المتاجر الموجودة لم تتغير.",
+      "vi": "Đã hủy thiết lập. Cửa hàng hiện có không thay đổi.",
+      "zh": "已取消设置，现有商店不变。"
+    }
+  },
+  {
+    "key": "wwc.busy",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.busy",
+    "defaults": {
+      "en": "Setup is already saved. Finish it from My stores or use /cancelstore.",
+      "ar": "خطوات إنشاء محفوظة بالفعل. أكملها من متاجري أو أرسل /cancelstore.",
+      "vi": "Đã có thiết lập lưu. Hoàn tất từ Cửa hàng của tôi hoặc gửi /cancelstore.",
+      "zh": "已有保存的设置，请在我的商店完成或发送 /cancelstore 取消。"
+    }
+  },
+  {
+    "key": "wwc.active",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.active",
+    "defaults": {
+      "en": "✅ Store activated. Open your bot, send /start, then /admin to manage it. Return here with /myshops.",
+      "ar": "✅ تم تفعيل المتجر. افتح بوتك وأرسل /start ثم /admin للإدارة. للمتابعة هنا: /myshops",
+      "vi": "✅ Đã kích hoạt. Mở bot của bạn, gửi /start rồi /admin để quản lý. Dùng /myshops để theo dõi.",
+      "zh": "✅ 已激活。打开您的机器人并发送 /start 和 /admin 管理。使用 /myshops 返回查看。"
+    }
+  },
+  {
+    "key": "wwc.queued",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.queued",
+    "defaults": {
+      "en": "Activation queued: the host reached its configured capacity. Your store bot will notify you when a slot is available. No need to resubmit credentials.",
+      "ar": "حُفظ طلب التفعيل في الطابور لأن الاستضافة بلغت الحد المحدد. سيصلك إشعار في بوت متجرك عند توفر مكان. لا يلزم إعادة إرسال البيانات.",
+      "vi": "Đã xếp hàng kích hoạt do máy chủ đủ công suất. Bot cửa hàng sẽ báo khi có chỗ. Không cần gửi lại thông tin.",
+      "zh": "激活已排队，主机已达容量上限。空位可用时商店机器人会通知您，无需重新提交凭据。"
+    }
+  },
+  {
+    "key": "wwc.heading",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.heading",
+    "defaults": {
+      "en": "Store",
+      "ar": "المتجر",
+      "vi": "Cửa hàng",
+      "zh": "商店"
+    }
+  },
+  {
+    "key": "wwc.state",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.state",
+    "defaults": {
+      "en": "Status",
+      "ar": "الحالة",
+      "vi": "Trạng thái",
+      "zh": "状态"
+    }
+  },
+  {
+    "key": "wwc.plan",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.plan",
+    "defaults": {
+      "en": "Plan",
+      "ar": "الخطة",
+      "vi": "Gói",
+      "zh": "套餐"
+    }
+  },
+  {
+    "key": "wwc.members",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.members",
+    "defaults": {
+      "en": "Registered accounts",
+      "ar": "الحسابات المسجلة",
+      "vi": "Tài khoản đăng ký",
+      "zh": "注册账户"
+    }
+  },
+  {
+    "key": "wwc.orders",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.orders",
+    "defaults": {
+      "en": "Paid orders",
+      "ar": "الطلبات المدفوعة",
+      "vi": "Đơn đã trả",
+      "zh": "已付款订单"
+    }
+  },
+  {
+    "key": "wwc.revenue",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.revenue",
+    "defaults": {
+      "en": "Sales revenue",
+      "ar": "إيراد المبيعات",
+      "vi": "Doanh thu",
+      "zh": "销售收入"
+    }
+  },
+  {
+    "key": "wwc.profit",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.profit",
+    "defaults": {
+      "en": "Known supplier profit",
+      "ar": "ربح المورد المعروف",
+      "vi": "Lợi nhuận nhà cung cấp đã biết",
+      "zh": "已知供应商利润"
+    }
+  },
+  {
+    "key": "wwc.profitnote",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.profitnote",
+    "defaults": {
+      "en": "Known profit only includes orders with recorded supplier costs, before other expenses.",
+      "ar": "الربح المعروف يشمل الطلبات ذات تكلفة المورد المسجلة فقط، وقبل بقية المصاريف.",
+      "vi": "Chỉ gồm đơn có giá vốn ghi nhận, chưa trừ chi phí khác.",
+      "zh": "仅包括记录了供应商成本的订单，尚未扣除其他费用。"
+    }
+  },
+  {
+    "key": "wwc.strikes",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.strikes",
+    "defaults": {
+      "en": "Inactivity pauses",
+      "ar": "إيقافات الخمول",
+      "vi": "Lần dừng do không hoạt động",
+      "zh": "不活跃暂停次数"
+    }
+  },
+  {
+    "key": "wwc.until",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.until",
+    "defaults": {
+      "en": "Paid until",
+      "ar": "المدفوع حتى",
+      "vi": "Trả phí đến",
+      "zh": "付费有效期"
+    }
+  },
+  {
+    "key": "wwc.free",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.free",
+    "defaults": {
+      "en": "Free · no expiry",
+      "ar": "مجاني · بلا انتهاء",
+      "vi": "Miễn phí · không hết hạn",
+      "zh": "免费 · 无到期日"
+    }
+  },
+  {
+    "key": "wwc.configured",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.configured",
+    "defaults": {
+      "en": "Workers wake on customer messages. A cold start can take a few seconds.",
+      "ar": "عامل التشغيل يستيقظ عند رسائل العملاء. قد تستغرق البداية بضع ثوانٍ.",
+      "vi": "Tiến trình thức dậy khi khách gửi tin nhắn. Khởi động có thể mất vài giây.",
+      "zh": "收到客户消息时启动工作进程。冷启动可能需要几秒。"
+    }
+  },
+  {
+    "key": "wwc.error",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.error",
+    "defaults": {
+      "en": "Action unavailable. Reason: {reason}",
+      "ar": "تعذر تنفيذ الإجراء. السبب: {reason}",
+      "vi": "Không thể thực hiện. Lý do: {reason}",
+      "zh": "操作失败，原因：{reason}"
+    }
+  },
+  {
+    "key": "wwc.notready",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.notready",
+    "defaults": {
+      "en": "The platform owner must configure WWC_PLATFORM_URL, WWC_PLATFORM_SECRET and WWC_DRAFT_ENCRYPTION_KEY.",
+      "ar": "يلزم عند المالك ضبط WWC_PLATFORM_URL وWWC_PLATFORM_SECRET وWWC_DRAFT_ENCRYPTION_KEY.",
+      "vi": "Chủ cần đặt WWC_PLATFORM_URL, WWC_PLATFORM_SECRET và WWC_DRAFT_ENCRYPTION_KEY.",
+      "zh": "所有者需设置 WWC_PLATFORM_URL、WWC_PLATFORM_SECRET 和 WWC_DRAFT_ENCRYPTION_KEY。"
+    }
+  },
+  {
+    "key": "wwc.pending",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.pending",
+    "defaults": {
+      "en": "Payment saved. Subscription activation is queued; do not pay again. Use Refresh to check.",
+      "ar": "تم حفظ الدفع. التفعيل في الطابور؛ لا تدفع مرة ثانية. اضغط تحديث للمتابعة.",
+      "vi": "Đã lưu thanh toán, đang chờ kích hoạt. Đừng trả tiền lần nữa; nhấn Làm mới.",
+      "zh": "付款已保存，订阅排队激活中。请勿重复付款，点击刷新查看。"
+    }
+  },
+  {
+    "key": "wwc.paid",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.paid",
+    "defaults": {
+      "en": "✅ Subscription activated. Open your store admin panel.",
+      "ar": "✅ تم تفعيل الاشتراك. افتح لوحة أدمن متجرك.",
+      "vi": "✅ Đã kích hoạt gói. Mở quản trị cửa hàng.",
+      "zh": "✅ 订阅已激活，请打开商店管理面板。"
+    }
+  },
+  {
+    "key": "wwc.invoice",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.invoice",
+    "defaults": {
+      "en": "WWC store subscription",
+      "ar": "اشتراك متجر WWC",
+      "vi": "Gói cửa hàng WWC",
+      "zh": "WWC 商店订阅"
+    }
+  },
+  {
+    "key": "wwc.invoicedesc",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.invoicedesc",
+    "defaults": {
+      "en": "Full WWC store administration for {days} days. Store data is retained when a plan expires.",
+      "ar": "إدارة متجر WWC كاملة لمدة {days} يومًا. تبقى البيانات عند انتهاء الاشتراك.",
+      "vi": "Quản trị WWC đầy đủ trong {days} ngày. Dữ liệu giữ lại khi hết gói.",
+      "zh": "{days} 天完整 WWC 管理功能，套餐到期后保留商店数据。"
+    }
+  },
+  {
+    "key": "wwc.confirm",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.confirm",
+    "defaults": {
+      "en": "Confirm this action for the store.",
+      "ar": "تأكيد تنفيذ هذا الإجراء على المتجر.",
+      "vi": "Xác nhận thao tác cho cửa hàng.",
+      "zh": "确认对商店执行此操作。"
+    }
+  },
+  {
+    "key": "wwc.yes",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.yes",
+    "defaults": {
+      "en": "✅ Confirm",
+      "ar": "✅ موافق",
+      "vi": "✅ Xác nhận",
+      "zh": "✅ 确认"
+    }
+  },
+  {
+    "key": "wwc.invalid",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.invalid",
+    "defaults": {
+      "en": "Invalid value. Check the requested format and send it again.",
+      "ar": "القيمة غير صحيحة. راجع الصيغة المطلوبة وأرسلها مجددًا.",
+      "vi": "Giá trị không hợp lệ. Kiểm tra định dạng rồi gửi lại.",
+      "zh": "无效输入，请检查格式后重试。"
+    }
+  },
+  {
+    "key": "wwc.wallet_title",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_title",
+    "defaults": {
+      "en": "💎 Store subscription · NSS wallet",
+      "ar": "💎 اشتراك المتجر من محفظة NSS",
+      "vi": "💎 Đăng ký cửa hàng · Ví NSS",
+      "zh": "💎 商店订阅 · NSS 钱包"
+    }
+  },
+  {
+    "key": "wwc.wallet_quote",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_quote",
+    "defaults": {
+      "en": "Store: @{bot}\nDuration: {days} days\nPrice: ${amount}\nCurrent NSS balance: ${balance}\n\nConfirm to pay from your NSS wallet and activate or extend the subscription.",
+      "ar": "المتجر: @{bot}\nالمدة: {days} يومًا\nالسعر: ${amount}\nرصيد NSS الحالي: ${balance}\n\nبعد التأكيد يُخصم المبلغ من محفظتك في NSS ويُفعّل الاشتراك أو تُمدد مدته.",
+      "vi": "Cửa hàng: @{bot}\nThời hạn: {days} ngày\nGiá: ${amount}\nSố dư NSS: ${balance}\n\nXác nhận thanh toán bằng ví NSS để kích hoạt hoặc gia hạn.",
+      "zh": "商店：@{bot}\n期限：{days} 天\n价格：${amount}\n当前 NSS 余额：${balance}\n\n确认后将从 NSS 钱包扣款，并激活或延长订阅。"
+    }
+  },
+  {
+    "key": "wwc.wallet_pay",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.wallet_pay",
+    "defaults": {
+      "en": "✅ Pay ${amount} from NSS balance",
+      "ar": "✅ تأكيد الدفع ${amount} من رصيد NSS",
+      "vi": "✅ Trả ${amount} bằng ví NSS",
+      "zh": "✅ 从 NSS 余额支付 ${amount}"
+    }
+  },
+  {
+    "key": "wwc.wallet_cancel",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.wallet_cancel",
+    "defaults": {
+      "en": "❌ Cancel purchase",
+      "ar": "❌ إلغاء الشراء",
+      "vi": "❌ Hủy mua",
+      "zh": "❌ 取消购买"
+    }
+  },
+  {
+    "key": "wwc.wallet_deposit",
+    "kind": "button",
+    "native_folder": "ad_cms_b_wwc",
+    "edit_callback": "edit_btn_wwc.wallet_deposit",
+    "defaults": {
+      "en": "💰 Add funds to NSS",
+      "ar": "💰 شحن محفظة NSS",
+      "vi": "💰 Nạp ví NSS",
+      "zh": "💰 为 NSS 钱包充值"
+    }
+  },
+  {
+    "key": "wwc.wallet_insufficient",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_insufficient",
+    "defaults": {
+      "en": "Insufficient NSS balance. Required: ${amount}; available: ${balance}. Nothing was charged. Add funds, then confirm payment.",
+      "ar": "رصيد NSS غير كافٍ. المطلوب ${amount} ورصيدك ${balance}. لم يُخصم شيء؛ اشحن محفظتك ثم أكد الدفع.",
+      "vi": "Số dư NSS không đủ. Cần ${amount}; hiện có ${balance}. Chưa trừ tiền. Hãy nạp ví rồi xác nhận.",
+      "zh": "NSS 余额不足。需要 ${amount}；当前 ${balance}。未扣款。请先充值再确认。"
+    }
+  },
+  {
+    "key": "wwc.wallet_expired",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_expired",
+    "defaults": {
+      "en": "This quote expired or was cancelled. Press Subscribe for a new quote. Nothing was charged.",
+      "ar": "انتهى عرض السعر أو أُلغي. اضغط اشتراك لعرض سعر جديد. لم يُخصم شيء.",
+      "vi": "Báo giá đã hết hạn hoặc bị hủy. Nhấn Đăng ký để lấy giá mới. Chưa trừ tiền.",
+      "zh": "报价已过期或取消。点击订阅获取新报价。未扣款。"
+    }
+  },
+  {
+    "key": "wwc.wallet_disabled",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_disabled",
+    "defaults": {
+      "en": "The platform owner has not set the wallet subscription price yet. Please try again later.",
+      "ar": "لم يحدد مالك المنصة سعر الاشتراك من المحفظة بعد. يرجى المحاولة لاحقًا.",
+      "vi": "Chủ nền tảng chưa đặt giá đăng ký qua ví. Vui lòng thử lại sau.",
+      "zh": "平台所有者尚未设置钱包订阅价格，请稍后重试。"
+    }
+  },
+  {
+    "key": "wwc.wallet_cancelled",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_cancelled",
+    "defaults": {
+      "en": "Subscription purchase cancelled. Nothing was charged.",
+      "ar": "تم إلغاء شراء الاشتراك. لم يُخصم شيء.",
+      "vi": "Đã hủy mua đăng ký. Chưa trừ tiền.",
+      "zh": "已取消购买订阅，未扣款。"
+    }
+  },
+  {
+    "key": "wwc.wallet_receipt",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.wallet_receipt",
+    "defaults": {
+      "en": "Payment reference: {reference}\nCharged: ${amount}\nNSS balance after payment: ${balance}",
+      "ar": "عملية الدفع: {reference}\nالمبلغ المخصوم: ${amount}\nرصيد NSS بعد الخصم: ${balance}",
+      "vi": "Mã thanh toán: {reference}\nĐã trừ: ${amount}\nSố dư NSS sau thanh toán: ${balance}",
+      "zh": "支付编号：{reference}\n扣款金额：${amount}\n扣款后 NSS 余额：${balance}"
+    }
+  },
+  {
+    "key": "wwc.runtime",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.runtime",
+    "defaults": {
+      "en": "Runtime check",
+      "ar": "فحص التشغيل",
+      "vi": "Kiểm tra chạy",
+      "zh": "运行检查"
+    }
+  },
+  {
+    "key": "wwc.runtime_ready",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.runtime_ready",
+    "defaults": {
+      "en": "🟢 Connected and ready",
+      "ar": "🟢 متصل وجاهز",
+      "vi": "🟢 Đã kết nối và sẵn sàng",
+      "zh": "🟢 已连接并就绪"
+    }
+  },
+  {
+    "key": "wwc.runtime_cold",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.runtime_cold",
+    "defaults": {
+      "en": "🟢 Connected; wakes on demand",
+      "ar": "🟢 متصل؛ يستيقظ عند الطلب",
+      "vi": "🟢 Đã kết nối; chạy khi có yêu cầu",
+      "zh": "🟢 已连接，按需唤醒"
+    }
+  },
+  {
+    "key": "wwc.runtime_bad",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.runtime_bad",
+    "defaults": {
+      "en": "🔴 Connection check failed",
+      "ar": "🔴 لم يجتز فحص الاتصال",
+      "vi": "🔴 Kiểm tra kết nối thất bại",
+      "zh": "🔴 连接检查失败"
+    }
+  },
+  {
+    "key": "wwc.runtime_unknown",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.runtime_unknown",
+    "defaults": {
+      "en": "⚪ Could not verify now",
+      "ar": "⚪ تعذر التحقق الآن",
+      "vi": "⚪ Chưa xác minh được",
+      "zh": "⚪ 暂时无法确认"
+    }
+  },
+  {
+    "key": "wwc.dashboard_template",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.dashboard_template",
+    "defaults": {
+      "en": "{details}",
+      "ar": "{details}",
+      "vi": "{details}",
+      "zh": "{details}"
+    }
+  },
+  {
+    "key": "wwc.invalid_invoice",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.invalid_invoice",
+    "defaults": {
+      "en": "Invalid or already used subscription invoice.",
+      "ar": "فاتورة الاشتراك غير صحيحة أو استُخدمت سابقًا.",
+      "vi": "Hóa đơn đăng ký không hợp lệ hoặc đã dùng.",
+      "zh": "订阅账单无效或已使用。"
+    }
+  },
+  {
+    "key": "wwc.start_required",
+    "kind": "text",
+    "native_folder": "ad_cms_wwc_0",
+    "edit_callback": "edit_txt_wwc.start_required",
+    "defaults": {
+      "en": "Send /start first to register your account.",
+      "ar": "أرسل /start أولًا لتسجيل حسابك.",
+      "vi": "Gửi /start trước để đăng ký tài khoản.",
+      "zh": "请先发送 /start 注册账户。"
+    }
+  }
+]

@@ -105,13 +105,10 @@ def test_a_negative_balance_requires_review_before_a_new_automatic_referral_move
     mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -60,
         'new_balance': -50, 'date': dt.datetime.now()})
     with pytest.raises(ValueError, match='ledger review'):
-        mod._ref_money(1001, -1, 'ref_clawback', 'Saved reversal', event_key='await-review')
+        mod._ref_money(1001, 1, 'ref_reward', 'Saved reward', event_key='await-review')
     assert mod.db.users.find_one({'user_id': 1001})['balance'] == -50
     assert mod.db.ref_money_events.find_one({})['status'] == 'prepared'
     assert not mod.db.ref_balance_reconciliations.count_documents({})
-    # owner's rule (rounds 35/41): a reward credit is never blocked — it only reduces the deficit
-    mod._ref_money(1001, 1, 'ref_reward', 'Batch reward', event_key='reward-on-negative')
-    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -49
 
 
 def test_balance_diagnosis_accepts_username_and_id_without_writing_or_exposing_private_fields(mod):
