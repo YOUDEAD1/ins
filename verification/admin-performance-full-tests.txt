@@ -1,0 +1,154 @@
+........................................................................ [  6%]
+........................................................................ [ 13%]
+........................................................................ [ 20%]
+........................................................................ [ 27%]
+........................................................................ [ 33%]
+........................................................................ [ 40%]
+........................................................................ [ 47%]
+........................................................................ [ 54%]
+........................................................................ [ 61%]
+........................................................................ [ 67%]
+........................................................................ [ 74%]
+........................................................................ [ 81%]
+........................................................................ [ 88%]
+........................................................................ [ 95%]
+....................................................                     [100%]
+=============================== warnings summary ===============================
+verification/test_admin_performance.py::test_bootstrap_admin_menu_contains_every_existing_section_without_running_reports
+verification/test_admin_performance.py::test_bootstrap_admin_menu_contains_every_existing_section_without_running_reports
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/binance/ws/websocket_api.py:4: DeprecationWarning: websockets.WebSocketClientProtocol is deprecated
+    from websockets import WebSocketClientProtocol  # type: ignore
+
+verification/test_admin_performance.py::test_bootstrap_admin_menu_contains_every_existing_section_without_running_reports
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+verification/test_admin_performance.py: 192 warnings
+verification/test_cart.py: 554 warnings
+verification/test_channel_broadcast.py: 1789 warnings
+verification/test_channel_composer.py: 1345 warnings
+verification/test_client_diagnostics.py: 208 warnings
+verification/test_deposit_buttons.py: 290 warnings
+verification/test_error_monitor.py: 307 warnings
+verification/test_integration.py: 1848 warnings
+verification/test_money_dust.py: 70 warnings
+verification/test_network.py: 470 warnings
+verification/test_products_menu.py: 270 warnings
+verification/test_referral_auto_rewards.py: 4471 warnings
+verification/test_referral_bandwidth.py: 130 warnings
+verification/test_referral_integrity.py: 449 warnings
+verification/test_referral_policy.py: 250 warnings
+verification/test_reliability.py: 350 warnings
+verification/test_report_config.py: 190 warnings
+verification/test_round34_alerts.py: 188 warnings
+verification/test_round37_bybit.py: 170 warnings
+verification/test_round37_notice_language.py: 440 warnings
+verification/test_round37_visibility.py: 290 warnings
+verification/test_round38_visibility.py: 220 warnings
+verification/test_round39_bybit.py: 124 warnings
+verification/test_round39_callbacks.py: 180 warnings
+verification/test_round40_network.py: 380 warnings
+verification/test_runtime_recovery.py: 558 warnings
+verification/test_standalone_manager_routing.py: 180 warnings
+verification/test_support.py: 372 warnings
+verification/test_translation_repair.py: 264 warnings
+verification/test_user_inspection.py: 480 warnings
+verification/test_verify_spam.py: 189 warnings
+verification/test_wwc_customization.py: 360 warnings
+verification/test_wwc_manager_bridge.py: 220 warnings
+verification/test_wwc_platform.py: 172 warnings
+verification/test_wwc_wallet.py: 210 warnings
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/mongomock/helpers.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+verification/test_admin_performance.py: 23 warnings
+verification/test_integration.py: 4 warnings
+verification/test_products_menu.py: 1 warning
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:37699: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.datetime.utcnow()
+
+verification/test_admin_performance.py: 7 warnings
+verification/test_integration.py: 2 warnings
+verification/test_products_menu.py: 1 warning
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:35223: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    since = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(days=7))
+
+verification/test_cart.py: 22 warnings
+verification/test_round37_visibility.py: 2 warnings
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:39629: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'expires_at': datetime.datetime.utcnow() + datetime.timedelta(days=30)})
+
+verification/test_cart.py: 8 warnings
+verification/test_channel_broadcast.py: 2 warnings
+verification/test_integration.py: 22 warnings
+verification/test_money_dust.py: 2 warnings
+verification/test_reliability.py: 5 warnings
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:2034: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'created_at': datetime.datetime.utcnow(),
+
+verification/test_cart.py::test_duplicate_lines_bulk_discount_and_vip
+verification/test_cart.py::test_quote_changes_require_new_confirmation[vip]
+verification/test_integration.py::test_quantity_and_vip_price_same_in_bot_and_web
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:31244: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.vip_products.update_one({'_id': key}, {'$set': {'cls': cls, 'at': datetime.datetime.utcnow()}}, upsert=True)
+
+verification/test_cart.py::test_duplicate_lines_bulk_discount_and_vip
+verification/test_integration.py::test_quantity_and_vip_price_same_in_bot_and_web
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:31358: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'total': q['total'], 'saved': q['saved'], 'at': datetime.datetime.utcnow()})
+
+verification/test_integration.py: 19 warnings
+verification/test_products_menu.py: 3 warnings
+verification/test_user_inspection.py: 4 warnings
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:35123: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'via': 'webapp', 'at': datetime.datetime.utcnow()})
+
+verification/test_integration.py::test_virtual_admin_sections_execute_original_handlers[ad_vip]
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:31585: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    month0 = datetime.datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+verification/test_integration.py::test_duplicate_credit_never_increases_balance_twice
+verification/test_integration.py::test_admin_deposit_notice_says_bot
+verification/test_round37_notice_language.py::test_customer_notices_use_latest_app_language_despite_stale_base_cache[deposit-ar]
+verification/test_round37_notice_language.py::test_customer_notices_use_latest_app_language_despite_stale_base_cache[deposit-en]
+verification/test_round37_notice_language.py::test_customer_notices_use_latest_app_language_despite_stale_base_cache[deposit-ru]
+verification/test_round37_notice_language.py::test_customer_notices_use_latest_app_language_despite_stale_base_cache[deposit-zh]
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:327: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    since = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(hours=3))
+
+verification/test_integration.py: 2 warnings
+verification/test_reliability.py: 5 warnings
+verification/test_round37_notice_language.py: 4 warnings
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:31379: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'note': str(note or '')[:120], 'by_admin': by_admin, 'created_at': datetime.datetime.utcnow()}
+
+verification/test_integration.py::test_price_change_keeps_old_profit_and_reports_new_one
+verification/test_integration.py::test_price_change_keeps_old_profit_and_reports_new_one
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/verification/test_integration.py:611: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    return _dt.datetime.utcfromtimestamp(ts)
+
+verification/test_integration.py::test_price_change_keeps_old_profit_and_reports_new_one
+verification/test_integration.py::test_price_change_keeps_old_profit_and_reports_new_one
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:35451: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    since = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(days=days))
+
+verification/test_integration.py::test_codes_txt_download_link_and_chat
+verification/test_integration.py::test_codes_txt_download_link_and_chat
+verification/test_integration.py::test_codes_txt_download_link_and_chat
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:38868: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    when = datetime.datetime.utcfromtimestamp(int(g.get('ts') or 0)).strftime('%Y-%m-%d %H:%M') if g.get('ts') else ''
+
+verification/test_report_config.py::test_admin_balance_log_uses_the_atomic_wallet_result_instead_of_a_stale_snapshot[compensation--30.0]
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:28675: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'date': _dt.datetime.utcnow()
+
+verification/test_report_config.py::test_admin_balance_log_uses_the_atomic_wallet_result_instead_of_a_stale_snapshot[manual-0.001]
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:28744: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'date': _dt.datetime.utcnow()
+
+verification/test_report_config.py::test_admin_balance_log_uses_the_atomic_wallet_result_instead_of_a_stale_snapshot[manual-0.001]
+  /workspace/scratch/611bb45bcc11/lara-admin-performance/work/LARA-STOCK/bot.py:28756: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'used_at': _dt.datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1060 passed, 18343 warnings in 37.18s

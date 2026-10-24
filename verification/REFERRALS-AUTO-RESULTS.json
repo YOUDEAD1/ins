@@ -1,0 +1,75 @@
+{
+  "generated_at_utc": "2026-10-24T20:48:04.885740+00:00",
+  "source_archive": "LARA-STOCK-TRANSLATION-FIX.zip",
+  "source_archive_sha256": "d87353ca433c14cf8fe5e11f121469baf7cd82ff6a7ad325a20243d04dc31ab4",
+  "validation": {
+    "full_project_tests": {
+      "tests": 1038,
+      "errors": 0,
+      "failures": 0,
+      "skipped": 0
+    },
+    "automatic_referral_tests": 52,
+    "python_files_parsed": 51,
+    "bot_py_compile": "passed",
+    "new_module_pyflakes": "passed",
+    "production_database_writes": false,
+    "telegram_or_payment_api_calls": false,
+    "http_testing": "signed Telegram identity against local HTTP server; external services mocked",
+    "full_test_log": "verification/referrals-auto-full-tests.txt"
+  },
+  "behavior": {
+    "scope": "newly registered referrals only",
+    "website_challenge_required": true,
+    "channel_subscription_alone_activates": false,
+    "administrator_alone_can_bypass_website": false,
+    "automatic_batch_size": 10,
+    "reward_value": "existing referral_reward setting, frozen when batch completes",
+    "suspicious_device_referrals": "pending review through the existing admin buttons",
+    "legacy_referrals_and_batches": "existing policy retained; excluded from new automatic batches",
+    "wallet": "existing atomic LARA STOCK wallet and ledger",
+    "payment_recovery": "database lease, fixed batch, idempotent event, stale-reader fence, existing minute loop",
+    "notifications": "existing CMS reward message in current user language; bounded delivery retry",
+    "old_negative_balances": "preserved for existing ledger review; never reset during startup"
+  },
+  "preservation": {
+    "original_files_retained": 275,
+    "changed_existing_files": [
+      {
+        "file": "bot.py",
+        "added_lines": 30,
+        "deleted_lines": 0
+      },
+      {
+        "file": "verification/test_integration.py",
+        "added_lines": 4,
+        "deleted_lines": 0
+      }
+    ],
+    "original_bot_definitions_retained": 1382,
+    "all_old_functions_and_classes_preserved": true,
+    "original_lines_deleted": 0,
+    "website_files_unchanged": 62,
+    "original_environment_templates_preserved": true
+  },
+  "resource_policy": {
+    "new_background_threads": 0,
+    "new_external_polling_loops": 0,
+    "retry_loop": "existing referral background loop",
+    "maximum_owners_per_retry_tick": 25,
+    "maximum_batches_per_owner_per_pass": 20,
+    "membership_checks_for_unverified_new_referrals": 0,
+    "new_mongodb_collection": "ref_auto_locks (short-lived leases with TTL index)",
+    "paid_referrals_excluded_from_fresh_reward_scan": true
+  },
+  "tested_source_sha256": {
+    "bot.py": "d9aa4dc05bb53da82f24b7608ea1c30cd9f2b222c200134821faa73707cb110b",
+    "referral_auto_rewards.py": "cbee53094a35bb5fbec88b6250407d7ba61fc3ba568bc93e3ca4bf7d8f4032e0",
+    "verification/test_integration.py": "6f90d03e87f0a8fae4ba248efef5b72e1c26f07c014c21e638605792968cfcb7",
+    "verification/test_referral_auto_rewards.py": "426bc6984348510ef7cd5228ca9c59f1302ae4d9ad1c1a1f6fc60b53f3f295ca"
+  },
+  "limitations": [
+    "Local mocked validation only; the live hosting service was not deployed or exercised.",
+    "Real Telegram delivery and production MongoDB availability depend on the existing hosting configuration."
+  ]
+}

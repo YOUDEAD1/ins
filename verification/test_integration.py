@@ -391,10 +391,14 @@ def _verified_ref_request(mod, server, uid, fp, ch):
         'ch': dict(ch, answer=challenge['target'])}, uid=uid)
 
 def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
+    # Historical manual batches keep their original device-review semantics.
+    # The prospective automatic policy has independent HTTP/financial tests.
     mod.db.settings.update_one({'key': 'referral_threshold'}, {'$set': {'value': '2'}}, upsert=True)
     for uid in (2001, 2002):
         mod.db.users.insert_one({'user_id': uid, 'name': f'Inv{uid}', 'balance': 0., 'lang': 'en', 'is_admin': 0, 'is_banned': 0})
         mod.register_new_referral(uid, 1001)
+        mod.db.referrals_v2.update_one({'invited_id': uid},
+            {'$unset': {'ref_auto_version': '', 'auto_reward_pending': ''}})
         mod.db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'need'}})
     ch = {'ok': True, 'ms': 1500, 'trusted': True, 'tries': 1}
     s, d, _ = _verified_ref_request(mod, server, 2001, _ref_fp('a' * 32, wd=True), ch)

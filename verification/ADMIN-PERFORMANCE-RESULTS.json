@@ -1,0 +1,92 @@
+{
+  "generated_at_utc": "2026-10-24T21:13:04.065547+00:00",
+  "source_archive": "LARA-STOCK-REFERRALS.zip",
+  "source_sha256": "91401fbaa3e3443708d64787bacbf4f2ab3301c043ac65e3cc9188eb9b7c8744",
+  "validation": {
+    "full_python_suite": {
+      "tests": 1060,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "new_admin_backend_tests": 22,
+    "new_module_pyflakes": "passed",
+    "bot_py_compile": "passed",
+    "inline_javascript_syntax": "passed",
+    "real_chromium": {
+      "browser": "Chromium",
+      "scope": "signed local HTTP; in-memory DB; external requests blocked",
+      "first_menu_before_statistics": true,
+      "first_menu_ms": 95,
+      "usable_product_panel_while_statistics_pending_ms": 433,
+      "initial_dashboard_requests": 1,
+      "refresh_failure_keeps_buttons_and_real_figures": true,
+      "first_load_failure_keeps_buttons_without_false_zero_figures": true,
+      "manual_refresh": true,
+      "failed_refresh_retry_loop": false,
+      "mobile_and_desktop_layout": "passed",
+      "languages_checked": [
+        "ar",
+        "en",
+        "ru",
+        "zh"
+      ],
+      "javascript_errors": []
+    },
+    "production_database_changes": false,
+    "production_deployment": false
+  },
+  "changes": {
+    "navigation": "original buttons render from authorized bootstrap menu metadata before report response",
+    "statistics": "original profit calculation; server-side four-period facets; 30-second shared read cache",
+    "invalidation": "local relevant writes invalidate reports; manual refresh bypasses caches",
+    "stock_and_roles": "live per request; not part of report cache",
+    "buyer_counts": "MongoDB returns scalar buyer counts instead of lists of all buyer IDs",
+    "product_lists": "only original display fields are loaded; original detail endpoints preserved",
+    "failure_ui": "buttons remain usable; previous valid figures retained; first-load missing figures never shown as zero",
+    "request_count": "one existing admin/home request; no extra shell request or periodic job",
+    "authentication": "signed identity and current role checked on every admin request"
+  },
+  "benchmark": {
+    "scope": "local memory DB with 20ms injected per database operation; not production latency",
+    "period_window_requests_before": 12,
+    "period_window_requests_after": 3,
+    "before_seconds": 0.2500720419998288,
+    "after_seconds": 0.06307247099994129,
+    "fresh_repeated_stats_database_queries": 0
+  },
+  "preservation": {
+    "original_files_retained": 282,
+    "existing_files_changed": [
+      {
+        "file": "bot.py",
+        "added_lines": 19,
+        "deleted_lines": 0
+      },
+      {
+        "file": "webapp/index.html",
+        "added_lines": 86,
+        "deleted_lines": 0
+      }
+    ],
+    "deleted_original_lines": 0,
+    "all_original_bot_definitions_preserved": true,
+    "original_bot_definitions": 1382,
+    "unchanged_website_assets": 61,
+    "previous_referral_update_preserved": true,
+    "environment_templates_unchanged": true,
+    "new_background_threads": 0,
+    "new_mongodb_collections": 0
+  },
+  "tested_sha256": {
+    "bot.py": "d98825b51bf5773a4cd3c2fdad4dc876863d245b4c569c88f4aea013df2b10e1",
+    "admin_performance.py": "9a2de07a2195ac5eac5ae700c5f12c2310e34a4614068bf8ac01753a96845f13",
+    "webapp/index.html": "a3ffe811359e142451c05b13903da1ba724dc7ca97c263817858933642a07c90",
+    "referral_auto_rewards.py": "cbee53094a35bb5fbec88b6250407d7ba61fc3ba568bc93e3ca4bf7d8f4032e0",
+    "verification/test_admin_performance.py": "2d99bc150fa3b464b4ecb1f28f67ec67fcb64a2aa764b014da13d17fd6e022b4"
+  },
+  "limits": [
+    "Measurements are local, not production Render timings.",
+    "Database timing benchmark injects 20 ms per operation; Chromium holds the statistics response to verify interactive navigation."
+  ]
+}

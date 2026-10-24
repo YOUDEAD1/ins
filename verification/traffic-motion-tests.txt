@@ -1,0 +1,5 @@
+PASS original loader, all product animations, advancing Lottie/native WebP frames: weak Android
+PASS original loader, all product animations, advancing Lottie/native WebP frames: data saver Android
+PASS original loader, all product animations, advancing Lottie/native WebP frames: strong Android
+PASS original loader, all product animations, advancing Lottie/native WebP frames: iOS without hardware hints
+PASS original loader, all product animations, advancing Lottie/native WebP frames: no IntersectionObserver

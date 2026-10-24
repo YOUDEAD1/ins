@@ -1,0 +1,8 @@
+{
+  "scope": "local memory DB with 20ms injected per database operation; not production latency",
+  "period_window_requests_before": 12,
+  "period_window_requests_after": 3,
+  "before_seconds": 0.24566108399994846,
+  "after_seconds": 0.0629121470001337,
+  "fresh_repeated_stats_database_queries": 0
+}

@@ -1,0 +1,194 @@
+{
+  "generated_at_utc": "2026-10-24T21:50:55.777627+00:00",
+  "source_archive": "LARA-STOCK-ADMIN-FAST.zip",
+  "source_sha256": "b7403cedabd4a91a0b232b09de12ba57bb2c393bd60d2b57fac3cc300edf464b",
+  "validation": {
+    "full_python_suite": {
+      "tests": 1086,
+      "errors": 0,
+      "failures": 0,
+      "skipped": 0
+    },
+    "new_backend_tests": 26,
+    "py_compile": "passed",
+    "new_module_pyflakes": "passed",
+    "inline_javascript_syntax": "passed",
+    "chromium_emoji_transfer_comparison": {
+      "scope": "Local Chromium; original full-frame animations unchanged; external requests blocked",
+      "avoided_bytes_for_one_successful_premium_purse": 321350,
+      "results": [
+        {
+          "mode": "baseline",
+          "native_animation_requests": 1,
+          "custom_animation_played": true,
+          "failed_or_stalled_native_frames_changed": false,
+          "javascript_errors": []
+        },
+        {
+          "mode": "optimized",
+          "native_animation_requests": 0,
+          "custom_animation_played": true,
+          "failed_or_stalled_native_frames_changed": false,
+          "javascript_errors": []
+        },
+        {
+          "mode": "failed",
+          "native_animation_requests": 1,
+          "custom_animation_played": false,
+          "failed_or_stalled_native_frames_changed": true,
+          "javascript_errors": []
+        },
+        {
+          "mode": "stalled",
+          "native_animation_requests": 1,
+          "custom_animation_played": true,
+          "failed_or_stalled_native_frames_changed": true,
+          "javascript_errors": []
+        }
+      ]
+    },
+    "chromium_animation_profiles": [
+      {
+        "profile": "weak Android",
+        "passed": true,
+        "playing": 11,
+        "loader": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "lite": false,
+          "unlimited": true
+        },
+        "native_webp_frames_changed": true,
+        "poster_requests": 0
+      },
+      {
+        "profile": "data saver Android",
+        "passed": true,
+        "playing": 8,
+        "loader": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "lite": false,
+          "unlimited": true
+        },
+        "native_webp_frames_changed": true,
+        "poster_requests": 0
+      },
+      {
+        "profile": "strong Android",
+        "passed": true,
+        "playing": 9,
+        "loader": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "lite": false,
+          "unlimited": true
+        },
+        "native_webp_frames_changed": true,
+        "poster_requests": 0
+      },
+      {
+        "profile": "iOS without hardware hints",
+        "passed": true,
+        "playing": 9,
+        "loader": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "lite": false,
+          "unlimited": true
+        },
+        "native_webp_frames_changed": true,
+        "poster_requests": 0
+      },
+      {
+        "profile": "no IntersectionObserver",
+        "passed": true,
+        "playing": 18,
+        "loader": {
+          "mask": "url(\"#lmDraw\")",
+          "draw": "ldDraw",
+          "lite": false,
+          "unlimited": true
+        },
+        "native_webp_frames_changed": true,
+        "poster_requests": 0
+      }
+    ],
+    "production_database_changes": false,
+    "production_api_or_payment_calls": false,
+    "production_deployment": false
+  },
+  "screenshot_evidence": {
+    "hours": 29.72,
+    "mongo_commands": 2940382,
+    "mongo_received_gib_before_compression": 9.551,
+    "mongo_sent_mib_before_compression": 826.33,
+    "http_responses": 141920,
+    "http_response_sent_gib": 2.36,
+    "telegram_sendMessage_attempts": 502170,
+    "telegram_sendMessage_sent_mib": 747.7,
+    "builtin_emoji_sent_gib": 1.219,
+    "api_products_requests": 42678,
+    "api_products_sent_mib": 658.62,
+    "limits": "The old global detail bucket overflowed; screenshots cannot establish the main Telegram source."
+  },
+  "reductions": {
+    "used_transaction_precheck": {
+      "old_rows": 100,
+      "individual_reads_before": 100,
+      "bulk_projected_reads_after": 1,
+      "unpaid_rows": "original checks remain; no negative-result cache"
+    },
+    "wakeups": "early notifications cannot bypass configured active intervals; idle wakeup retained",
+    "bybit": "only relevant history kinds are requested; selection outages retain both paths",
+    "emoji": "avoid native animated placeholder download on Premium success; moving native fallback restored on failure/stall"
+  },
+  "diagnostics": {
+    "legacy_total_fields_preserved": true,
+    "per_method_adaptive_hotspots": true,
+    "failure_counts_visible": true,
+    "api_consumers_visible": true,
+    "maximum_method_buckets": 100,
+    "maximum_origins_per_method": 24,
+    "origin_counts": "observed since admission; estimates and error bounds exported; totals unchanged",
+    "http_server_inbound_measured": false,
+    "new_background_threads": 0,
+    "new_database_collections": 0,
+    "credential_or_message_payload_storage": false
+  },
+  "preservation": {
+    "original_files_retained": 293,
+    "changed_existing_files": [
+      {
+        "file": "bot.py",
+        "added_lines": 25,
+        "deleted_lines": 0
+      },
+      {
+        "file": "webapp/index.html",
+        "added_lines": 47,
+        "deleted_lines": 0
+      }
+    ],
+    "deleted_original_lines": 0,
+    "original_bot_definitions_preserved": 1382,
+    "unchanged_website_assets": 61,
+    "prior_admin_referral_translation_and_channel_updates_preserved": true,
+    "historical_benchmark_preserved": "verification/ADMIN-PERFORMANCE-BENCHMARK.json",
+    "current_run_benchmark": "verification/traffic-run-admin-benchmark.json"
+  },
+  "render_reference": "https://render.com/docs/outbound-bandwidth",
+  "tested_sha256": {
+    "bot.py": "eb354ac798ca1cbe51e379c92d046380ebaaa420dd4a93caa2390e9e8116770f",
+    "traffic_efficiency.py": "42dccf02133004b2044f540c45289b6de44fedcfecee09798eaf160d6aec75d9",
+    "webapp/index.html": "e32168e3bda9ed18497abca862895c1e50cc4a44a67c73ff5a8f3abb5441047a",
+    "admin_performance.py": "9a2de07a2195ac5eac5ae700c5f12c2310e34a4614068bf8ac01753a96845f13",
+    "referral_auto_rewards.py": "cbee53094a35bb5fbec88b6250407d7ba61fc3ba568bc93e3ca4bf7d8f4032e0",
+    "verification/test_traffic_efficiency.py": "445724349284df925a50348682a75260c856f9be06756f3622263b968566694e"
+  },
+  "limits": [
+    "Local in-memory payment and loopback HTTP tests; no live deposit testing.",
+    "Savings depend on provider history and Premium usage; no monthly billing guarantee.",
+    "Use the improved authenticated JSON export to attribute ongoing Telegram traffic."
+  ]
+}

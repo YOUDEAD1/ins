@@ -1,0 +1,39 @@
+........................................................................ [ 69%]
+...............................                                          [100%]
+=============================== warnings summary ===============================
+verification/test_client_diagnostics.py::test_only_unprotected_arabic_letters_count_as_translation_residue[Search\u060c type\u060c]
+verification/test_client_diagnostics.py::test_only_unprotected_arabic_letters_count_as_translation_residue[Search\u060c type\u060c]
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/binance/ws/websocket_api.py:4: DeprecationWarning: websockets.WebSocketClientProtocol is deprecated
+    from websockets import WebSocketClientProtocol  # type: ignore
+
+verification/test_client_diagnostics.py::test_only_unprotected_arabic_letters_count_as_translation_residue[Search\u060c type\u060c]
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+verification/test_client_diagnostics.py: 140 warnings
+verification/test_channel_broadcast.py: 1671 warnings
+verification/test_products_menu.py: 216 warnings
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/mongomock/helpers.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+verification/test_channel_broadcast.py::test_normal_price_stock_and_chatgpt_announcements_have_two_buttons[price]
+verification/test_channel_broadcast.py::test_normal_price_stock_and_chatgpt_announcements_have_two_buttons[stock]
+  /workspace/scratch/611bb45bcc11/translation-fix/LARA-STOCK/bot.py:2034: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'created_at': datetime.datetime.utcnow(),
+
+verification/test_products_menu.py::test_authenticated_console_edits_button_premium_color_and_message_end_to_end
+verification/test_products_menu.py::test_authenticated_console_edits_button_premium_color_and_message_end_to_end
+verification/test_products_menu.py::test_authenticated_console_edits_button_premium_color_and_message_end_to_end
+  /workspace/scratch/611bb45bcc11/translation-fix/LARA-STOCK/bot.py:35089: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    'via': 'webapp', 'at': datetime.datetime.utcnow()})
+
+verification/test_products_menu.py::test_console_exposes_only_requested_customization_and_keeps_other_cms_routing
+  /workspace/scratch/611bb45bcc11/translation-fix/LARA-STOCK/bot.py:35187: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    since = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(days=7))
+
+verification/test_products_menu.py::test_console_exposes_only_requested_customization_and_keeps_other_cms_routing
+  /workspace/scratch/611bb45bcc11/translation-fix/LARA-STOCK/bot.py:37661: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+103 passed, 2037 warnings in 3.63s

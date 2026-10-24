@@ -1,0 +1,18 @@
+.......................................                                  [100%]
+=============================== warnings summary ===============================
+verification/test_translation_repair.py::test_legitimate_error_messages_translate_and_save_in_the_existing_cms[\u062d\u0627\u0648\u0644 \u0644\u0627\u062d\u0642\u064b\u0627-Please try again later]
+verification/test_translation_repair.py::test_legitimate_error_messages_translate_and_save_in_the_existing_cms[\u062d\u0627\u0648\u0644 \u0644\u0627\u062d\u0642\u064b\u0627-Please try again later]
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/binance/ws/websocket_api.py:4: DeprecationWarning: websockets.WebSocketClientProtocol is deprecated
+    from websockets import WebSocketClientProtocol  # type: ignore
+
+verification/test_translation_repair.py::test_legitimate_error_messages_translate_and_save_in_the_existing_cms[\u062d\u0627\u0648\u0644 \u0644\u0627\u062d\u0642\u064b\u0627-Please try again later]
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+verification/test_translation_repair.py: 132 warnings
+verification/test_client_diagnostics.py: 140 warnings
+  /workspace/scratch/611bb45bcc11/review20/test-env/lib/python3.12/site-packages/mongomock/helpers.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+39 passed, 275 warnings in 1.97s

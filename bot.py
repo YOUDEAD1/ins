@@ -4194,6 +4194,9 @@ def _install_settings_cache_hook():
                         return original(self, *args, **kwargs)
                     finally:
                         # Even an acknowledgement failure may follow a committed write.
+                        _admin_cache = globals().get('_ADMIN_PERFORMANCE')
+                        if _admin_cache is not None:
+                            _admin_cache.changed(self, getattr(original, '__name__', ''), args, kwargs)
                         if self.name == 'settings':
                             _settings_cache_invalidate()
                         elif self.name == 'required_channels':
@@ -4709,6 +4712,8 @@ def register_new_referral(invited_id, referrer_id):
             db.referrals_v2.insert_one({
                 'invited_id': invited_id,
                 'referrer_id': referrer_id,
+                'ref_auto_version': 1,  # Only registrations after this update use automatic website batches.
+                'auto_reward_pending': True,
                 'ref_policy_version': 30,
                 'status': 'pending',
                 'created_at': int(time.time()),
@@ -5298,6 +5303,10 @@ def _ref_money(rid, delta, kind, note, event_key=None):
         field = 'ref_v2_purchase_earned' if kind == 'ref_purchase' else 'ref_v2_earned'
         for _attempt in range(12):
             user = db.users.find_one({'user_id': rid})
+            if event.get('reward_mode') == 'website_auto_v1':
+                completed = db.ref_money_events.find_one({'_id': key, 'status': 'applied'})
+                if completed:
+                    return _ref_money_finish(completed, completed['receipt'])
             if not user:
                 return None
             saved = (user.get('_ref_ops') or {}).get(key)
@@ -6214,6 +6223,8 @@ def _ref_resume_financial():
     except Exception:
         logger.debug('Unrecorded referral rewards will be adopted on the next pass')
     for event in db.ref_money_events.find({'$or': [{'status': 'prepared'}, {'ledger_pending': True}]}).limit(100):
+        if globals().get('_REF_AUTO_REWARDS') and _REF_AUTO_REWARDS.handles_event(event):
+            continue  # The automatic-batch payer resumes this intent under its database lease.
         if not event.get('operation_key'):
             continue
         try:
@@ -6335,6 +6346,15 @@ def background_referral_checker_v2():
 
 # 🆕 فاحص فوري للإحالات الجديدة عند الـ /start
 # هذا الـ thread الرئيسي يدور بهدوء، والتحديث الفوري يحصل في start_handler
+# Install before any referral background work can run. Missing policy code fails
+# startup explicitly rather than activating new referrals under an older rule.
+import importlib.util as _ref_auto_importlib
+_ref_auto_spec = _ref_auto_importlib.spec_from_file_location(
+    'lara_referral_auto_rewards', os.path.join(os.path.dirname(__file__), 'referral_auto_rewards.py'))
+_ref_auto_module = _ref_auto_importlib.module_from_spec(_ref_auto_spec)
+_ref_auto_spec.loader.exec_module(_ref_auto_module)
+_REF_AUTO_REWARDS = _ref_auto_module.install(globals())
+
 threading.Thread(target=background_referral_checker_v2, daemon=True).start()
 
 # ============================================================
@@ -8340,6 +8360,11 @@ def get_lang(uid):
 
 
 _NOTIFICATION_TEXTS = {
+    'ref_auto_rules': {
+        'ar': '\n\n🛡 الإحالات الجديدة لا تنشط بمجرد الاشتراك؛ يجب إكمال التحقق داخل الموقع. تُضاف مكافأة كل 10 إحالات نشطة تلقائيًا. الإحالات قيد مراجعة الجهاز تنتظر اعتمادها.',
+        'en': '\n\n🛡 New referrals activate after website verification; joining channels alone is not enough. Every 10 active new referrals earn an automatic reward. Device reviews must be approved first.',
+        'ru': '\n\n🛡 Новые рефералы активируются после проверки на сайте; одной подписки недостаточно. За каждые 10 новых активных рефералов бонус начисляется автоматически. Проверка подозрительных устройств требует одобрения.',
+        'zh': '\n\n🛡 新邀请须完成网站验证才会激活，仅加入频道不计入。每满 10 位新的有效邀请将自动发放奖励。存在设备疑点的邀请需先通过审核。'},
     'ref_purchase_dm': {
         'ar': '🎉 <b>مكافأة شراء من إحالاتك!</b>\n\n🛒 اشترى أحد المدعوين (<b>{0}</b>).\n💵 مكافأتك: <b>+${1}</b>\n💼 رصيدك الجديد: <b>${2}</b>',
         'ru': '🎉 <b>Бонус за покупку реферала!</b>\n\n🛒 Ваш реферал (<b>{0}</b>) совершил покупку.\n💵 Ваш бонус: <b>+${1}</b>\n💼 Новый баланс: <b>${2}</b>',
@@ -8401,6 +8426,10 @@ _NOTIFICATION_TEXTS = {
         'ar': '\n📝 الملاحظة: <code>{0}</code>', 'en': '\n📝 Note: <code>{0}</code>',
         'ru': '\n📝 Примечание: <code>{0}</code>', 'zh': '\n📝 备注：<code>{0}</code>'},
 }
+
+
+for _ref_auto_lang, _ref_auto_copy in _NOTIFICATION_TEXTS['ref_auto_rules'].items():
+    LANG.setdefault(_ref_auto_lang, {}).setdefault('ref_auto_rules', _ref_auto_copy)
 
 
 def _notification_language(uid):
@@ -10862,6 +10891,7 @@ def invite_ui(call):
         )
     
     debt = max(0.0, float(u.get('ref_debt') or 0))
+    final_text += _notification_text(uid, 'ref_auto_rules')
     final_text += ("\n\n🛡 Referrals count only after website verification." if l == 'en' else
                    "\n\n🛡 لا تُحسب الإحالة إلا بعد إكمال التحقق داخل الموقع.")
     if debt:
@@ -14981,6 +15011,8 @@ def check_binance_pay_auto():
 
         current_time_ms = int(time.time() * 1000)
         cutoff_ms = current_time_ms - (24 * 60 * 60 * 1000)  # آخر 24 ساعة
+        _traffic_paid = (_TRAFFIC_EFFICIENCY.known_used(transactions, 'binance')
+                         if globals().get('_TRAFFIC_EFFICIENCY') else frozenset())
 
         for tx in transactions:
             try:
@@ -15000,6 +15032,8 @@ def check_binance_pay_auto():
                     continue
 
                 tx_id_norm = normalize_tx_id(tx_id)
+                if tx_id_norm in _traffic_paid:
+                    continue
 
                 if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
                     continue
@@ -15660,14 +15694,20 @@ def check_bybit_auto():
 
         # نافذة أوسع من عمر الإيداع المعلّق (30 دقيقة) + هامش، تحسّباً لتأخّر المستخدم
         cutoff_ms = int(time.time() * 1000) - (90 * 60 * 1000)  # آخر 90 دقيقة
+        _traffic_kinds = (_TRAFFIC_EFFICIENCY.bybit_kinds()
+                          if globals().get('_TRAFFIC_EFFICIENCY') else {'internal', 'onchain'})
 
         for kind, label in (('internal', 'Bybit (UID Transfer)'),
                             ('onchain', 'Bybit (Network)')):
+            if kind not in _traffic_kinds:
+                continue
             try:
                 rows = get_bybit_deposits(kind=kind, limit=200)
             except Exception as e:
                 logger.debug(f"[BYBIT] fetch {kind} err: {e}")
                 continue
+            _traffic_paid = (_TRAFFIC_EFFICIENCY.known_used(rows, 'bybit')
+                             if globals().get('_TRAFFIC_EFFICIENCY') else frozenset())
 
             for row in rows or []:
                 try:
@@ -15682,6 +15722,8 @@ def check_bybit_auto():
                     if not raw_tx:
                         continue
                     tx_norm = normalize_tx_id(raw_tx)
+                    if tx_norm in _traffic_paid:
+                        continue
 
                     if db.used_transactions.find_one({'transaction_id': tx_norm}):
                         continue
@@ -19928,6 +19970,8 @@ def ad_ref_settings_ui(call):
     
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton(f"🎯 عدد الإحالات المطلوبة ({threshold})", callback_data="ad_ref_set_threshold"))
+    text += ('\n\n🆕 <b>الإحالات المسجّلة بعد هذا التحديث:</b> مكافأتها تلقائية لكل 10 إحالات نشطة بعد تحقق الموقع. '
+             'العدد القابل للتعديل أعلاه يبقى للدفعات القديمة، وقيمة المكافأة تُحفظ عند اكتمال كل دفعة جديدة.')
     markup.add(InlineKeyboardButton(f"💰 قيمة مكافأة الإحالات (${reward:.2f})", callback_data="ad_ref_set_reward"))
     markup.add(InlineKeyboardButton(f"🛍 قيمة مكافأة الشراء (${purchase_reward:.2f})", callback_data="ad_ref_set_purchase_reward"))
     markup.add(InlineKeyboardButton(f"💵 الحد الأدنى للشراء (${min_purchase:.2f})", callback_data="ad_ref_set_min_purchase"))
@@ -24106,6 +24150,7 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("❌ خطأ عام", callback_data="edit_txt_dep_err_general"))
     markup.add(InlineKeyboardButton("❌ رسالة الإلغاء", callback_data="edit_txt_dep_cancelled"))
     markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_invite_txt"))
+    markup.add(InlineKeyboardButton("🛡 تعليمات الإحالات الجديدة والصرف التلقائي", callback_data="edit_txt_ref_auto_rules"))
     markup.add(InlineKeyboardButton("🔔 إشعار توفر ستوك", callback_data="edit_txt_new_stock"))
     markup.add(InlineKeyboardButton("📉 إشعار التخفيضات", callback_data="edit_txt_price_drop"))
     markup.add(InlineKeyboardButton("🏪 عنوان المتجر", callback_data="edit_txt_store_title"))
@@ -33088,6 +33133,7 @@ def _wa_bootstrap(identity, body):
     _wa_prefetch_emoji(emoji_ids)
     return 200, {
         'ok': True,
+        **({'admin_shell': _ADMIN_PERFORMANCE.shell(uid)} if is_admin and globals().get('_ADMIN_PERFORMANCE') else {}),
         'user': dict({'id': uid,
                       'first_name': identity.get('first_name') or _wa_plain(u.get('name'), 60),
                       'last_name': identity.get('last_name') or '',
@@ -35178,6 +35224,8 @@ def _wa_admin_home(identity, body):
     uid, err = _wa_admin(identity)
     if err:
         return err
+    if globals().get('_ADMIN_PERFORMANCE'):
+        _ADMIN_PERFORMANCE.refresh(body)
     prods = _adm_products_raw()
     sellable = [p for p in prods if not p['hidden'] and not p['manual'] and p['type'] == 'standard']
     oos = sorted([p for p in sellable if p['stock'] <= 0], key=lambda p: p['name'].lower())
@@ -35205,6 +35253,8 @@ def _wa_admin_home(identity, body):
         pass
     return 200, {'ok': True,
                  'stats': _adm_stats_all(),
+                 'stats_generated_at': _ADMIN_PERFORMANCE.generated_at() if globals().get('_ADMIN_PERFORMANCE') else time.time(),
+                 'stats_partial': _ADMIN_PERFORMANCE.partial() if globals().get('_ADMIN_PERFORMANCE') else False,
                  'alerts': {'oos': oos[:40], 'oos_n': len(oos), 'low': low[:20], **counts},
                  'top': top, 'protection': is_amount_protection_enabled(),
                  'vip_enabled': bool(vip_config()['enabled']),
@@ -40637,6 +40687,8 @@ def _net_size_text(value):
 @bot.callback_query_handler(func=lambda call: call.data == 'ad_network')
 @admin_required
 def ad_network(call):
+    if globals().get('_TRAFFIC_EFFICIENCY'):
+        return _TRAFFIC_EFFICIENCY.show_network(call)
     if call.id:
         bot.answer_callback_query(call.id)
     data = _NET_METER.snapshot()
@@ -41189,6 +41241,16 @@ def _up_vc_back(session):
 
 
 
+# Additive translation repair; preserve the existing CMS and all legacy code.
+try:
+    import importlib.util as _tr_importlib
+    _tr_spec = _tr_importlib.spec_from_file_location('lara_translation_repair', os.path.join(os.path.dirname(__file__), 'translation_repair.py'))
+    _tr_module = _tr_importlib.module_from_spec(_tr_spec)
+    _tr_spec.loader.exec_module(_tr_module)
+    _tr_module.install(globals())
+except Exception:
+    logger.exception('Translation repair unavailable; legacy translator remains active')
+
 # Additive NSS / WWC platform integration. Existing handlers remain intact.
 try:
     import importlib.util as _wwc_importlib
@@ -41208,6 +41270,28 @@ try:
     _chbc_module.install(globals())
 except Exception:
     logger.exception('Channel composer add-on unavailable; original publishing remains active')
+
+# Additive dashboard performance: keep every original report and admin handler.
+try:
+    import importlib.util as _admin_perf_importlib
+    _admin_perf_spec = _admin_perf_importlib.spec_from_file_location(
+        'lara_admin_performance', os.path.join(os.path.dirname(__file__), 'admin_performance.py'))
+    _admin_perf_module = _admin_perf_importlib.module_from_spec(_admin_perf_spec)
+    _admin_perf_spec.loader.exec_module(_admin_perf_module)
+    _ADMIN_PERFORMANCE = _admin_perf_module.install(globals())
+except Exception:
+    logger.exception('Dashboard acceleration unavailable; original admin handlers remain active')
+
+# Additive request reductions; original financial matching and totals remain.
+try:
+    import importlib.util as _traffic_importlib
+    _traffic_spec = _traffic_importlib.spec_from_file_location(
+        'lara_traffic_efficiency', os.path.join(os.path.dirname(__file__), 'traffic_efficiency.py'))
+    _traffic_module = _traffic_importlib.module_from_spec(_traffic_spec)
+    _traffic_spec.loader.exec_module(_traffic_module)
+    _TRAFFIC_EFFICIENCY = _traffic_module.install(globals())
+except Exception:
+    logger.exception('Request optimization unavailable; original checks remain active')
 
 # 🚀 15. التشغيل
 # ============================================================

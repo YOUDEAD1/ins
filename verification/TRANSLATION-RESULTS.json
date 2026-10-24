@@ -1,0 +1,41 @@
+{
+  "generated_at_utc": "2026-10-23T16:05:23.481769+00:00",
+  "source_archive": "LARA-STOCK-READY_35 (5).zip",
+  "validation": {
+    "regression_tests": 22,
+    "full_project_tests_passed": 986,
+    "compile": "passed",
+    "pyflakes_translation_module": "passed",
+    "http_and_database": "mocked; no production calls",
+    "full_log": "verification/translation-full-tests.txt"
+  },
+  "preservation": {
+    "original_files_preserved": 267,
+    "existing_files_changed": [
+      "bot.py"
+    ],
+    "original_bot_lines": 41278,
+    "updated_bot_lines": 41288,
+    "added_lines": 10,
+    "deleted_lines": 0,
+    "all_old_function_and_class_definitions_preserved": true,
+    "website_files_unchanged": true,
+    "verification_alert_fix_preserved": true,
+    "wallet_and_referral_rules_unchanged": true
+  },
+  "request_policy": {
+    "usual_google_requests_per_uncached_plain_fragment": 1,
+    "fallback_requests": 1,
+    "identical_concurrent_requests": "coalesced",
+    "provider_failure_cooldown_seconds": 30,
+    "maximum_concurrent_translation_requests": 2,
+    "cache_entries": 256,
+    "cache_bytes": 524288,
+    "new_background_jobs": 0,
+    "new_database_collections": 0
+  },
+  "limitations": [
+    "Provider accessibility from the production host was not tested.",
+    "HTTP failures retain the existing English copy; each locale remains manually editable in the existing CMS."
+  ]
+}

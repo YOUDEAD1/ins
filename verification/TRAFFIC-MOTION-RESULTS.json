@@ -1,0 +1,67 @@
+[
+  {
+    "profile": "weak Android",
+    "passed": true,
+    "playing": 11,
+    "loader": {
+      "mask": "url(\"#lmDraw\")",
+      "draw": "ldDraw",
+      "lite": false,
+      "unlimited": true
+    },
+    "native_webp_frames_changed": true,
+    "poster_requests": 0
+  },
+  {
+    "profile": "data saver Android",
+    "passed": true,
+    "playing": 8,
+    "loader": {
+      "mask": "url(\"#lmDraw\")",
+      "draw": "ldDraw",
+      "lite": false,
+      "unlimited": true
+    },
+    "native_webp_frames_changed": true,
+    "poster_requests": 0
+  },
+  {
+    "profile": "strong Android",
+    "passed": true,
+    "playing": 9,
+    "loader": {
+      "mask": "url(\"#lmDraw\")",
+      "draw": "ldDraw",
+      "lite": false,
+      "unlimited": true
+    },
+    "native_webp_frames_changed": true,
+    "poster_requests": 0
+  },
+  {
+    "profile": "iOS without hardware hints",
+    "passed": true,
+    "playing": 9,
+    "loader": {
+      "mask": "url(\"#lmDraw\")",
+      "draw": "ldDraw",
+      "lite": false,
+      "unlimited": true
+    },
+    "native_webp_frames_changed": true,
+    "poster_requests": 0
+  },
+  {
+    "profile": "no IntersectionObserver",
+    "passed": true,
+    "playing": 18,
+    "loader": {
+      "mask": "url(\"#lmDraw\")",
+      "draw": "ldDraw",
+      "lite": false,
+      "unlimited": true
+    },
+    "native_webp_frames_changed": true,
+    "poster_requests": 0
+  }
+]

@@ -1927,6 +1927,7 @@ function syncPageLoading() {
   }
 }
 function pageLoadBegin(path) {
+  if (path === 'admin/home') return 0; // Bounded fetch timeout; admin buttons stay usable without a page overlay.
   const fresh = path === 'bootstrap' || (path === 'orders' && !S.orders) ||
     (path === 'history' && !S.hist.data) || (path === 'referrals' && !S.refs) ||
     (path === 'cgpt/subs' && S.cgpt?.loading) || (path === 'api/state' && !S.api);
@@ -5569,6 +5570,7 @@ async function boot() {
     renderAll(); return;
   }
   S.user = r.user; S.cartEnabled = r.cart_enabled !== false; cartLoad(); S.vip = r.vip || null; S.store = r.store || {}; S.deposit = r.deposit || { methods: [] }; S.nav = r.nav || {}; S.texts = r.texts || {}; S.forced = r.forced;
+  adminFastReset(r);
   S.catalogVersion = r.catalog_version || ''; S.catalogs = r.catalogs || []; S.products = r.products || []; S.pending = r.pending; S.locked = r.locked;
   S.offset = r.server_time ? r.server_time - Date.now() / 1000 : 0;
   lastCat = Date.now();
@@ -5949,6 +5951,137 @@ if (window.LARA_DATA && Array.isArray(window.LARA_DATA.products)) {
   if ((D.methods || []).length) Demo.methods = D.methods;
   Demo.store = D.store || null; Demo.nav = D.nav || {};
 }
+/* Admin navigation is independent of statistics; keep all original renderers. */
+const AdminFast = {
+  seq: 0, last: null, seed: null,
+  render: vAdmin, action: admAction, load: loadAdmin,
+  labels: {
+    ar: ['جاري تحميل الإحصاءات…', 'تعذّر تحديث الإحصاءات. يمكنك استخدام الأزرار أو إعادة المحاولة.', 'جاري تحديث الإحصاءات…'],
+    en: ['Loading statistics…', 'Statistics could not be updated. You can use the buttons or retry.', 'Updating statistics…'],
+    ru: ['Загрузка статистики…', 'Не удалось обновить статистику. Кнопки доступны; можно повторить попытку.', 'Обновление статистики…'],
+    zh: ['正在加载统计…', '统计更新失败。功能按钮仍可使用，也可以重试。', '正在更新统计…']
+  }
+};
+function adminFastReset(response) {
+  AdminFast.seq++; AdminFast.last = null;
+  AdminFast.seed = response.user?.is_admin ? response.admin_shell || null : null;
+  S.adm = null; S.admLoading = false; S.admForce = false;
+}
+function adminFastPrepare() {
+  if (S.adm || !isAdmin()) return;
+  const fallback = { ok: true, sections: ADM_SECTIONS_DEMO.map(([k, e, ar, en, cb]) => ({ k, e, ar, en, cb })),
+    protection: !!S.deposit?.protection, vip_enabled: !!S.vip?.enabled, is_owner: false };
+  const previous = AdminFast.last;
+  S.adm = Object.assign({ stats: {}, alerts: {}, top: [] }, previous || AdminFast.seed || fallback,
+    { _pending: true, _statsError: false, _hasStats: !!previous?._hasStats, _t: previous?._t || Date.now() });
+  loadAdmin();
+}
+function adminFastPatch(html) {
+  const data = S.adm;
+  if (!data || data.err || (!data._pending && !data._statsError)) return html;
+  const words = AdminFast.labels[LANG] || AdminFast.labels.en;
+  const message = data._statsError ? words[1] : data._hasStats ? words[2] : words[0];
+  if (!data._hasStats) {
+    const start = html.indexOf('<section class="ad-led">');
+    const end = start < 0 ? -1 : html.indexOf('</section>', start);
+    if (end >= 0) html = html.slice(0, start) + `<section class="ad-led" aria-busy="${!!data._pending}">
+      <div role="status">${esc(message)}</div><div class="skel" style="height:46px;margin-top:14px"></div>
+      <div class="skel" style="height:56px;margin-top:12px"></div></section>` + html.slice(end + 10);
+    const chips = html.indexOf('<div class="ad-chips">');
+    const chipsEnd = chips < 0 ? -1 : html.indexOf('</div>', chips);
+    if (chipsEnd >= 0) html = html.slice(0, chips) + '<div class="ad-chips" aria-busy="' + !!data._pending + '"></div>' + html.slice(chipsEnd + 6);
+  }
+  const header = html.indexOf('<div class="ad-ht">');
+  const small = header < 0 ? -1 : html.indexOf('<small>', header);
+  const smallEnd = small < 0 ? -1 : html.indexOf('</small>', small);
+  if (smallEnd >= 0) html = html.slice(0, small) + '<small role="status">' + esc(message) + '</small>' + html.slice(smallEnd + 8);
+  return html;
+}
+vAdmin = function () {
+  adminFastPrepare();
+  if (S.adm?._statsError) S.adm._t = Date.now(); // A failed metrics read waits for explicit retry.
+  return adminFastPatch(AdminFast.render());
+};
+loadAdmin = async function () {
+  if (S.admLoading || !isAdmin()) return;
+  const token = ++AdminFast.seq, user = String(S.user.id), protection = S.adm?.protection;
+  const force = !!S.admForce; S.admForce = false; S.admLoading = true;
+  if (S.adm) S.adm._pending = true;
+  let response;
+  try { response = await api('admin/home', force ? { refresh: true } : {}); }
+  catch (_) { response = { error: 'network' }; }
+  if (token !== AdminFast.seq || String(S.user?.id) !== user) return;
+  S.admLoading = false;
+  if (response?.ok && !response.stats_partial) {
+    if (S.adm && S.adm.protection !== protection) response.protection = S.adm.protection;
+    const age = response.stats_generated_at ? Math.max(0, Date.now() / 1000 + (S.offset || 0) - response.stats_generated_at) : 0;
+    S.adm = Object.assign(response, { _pending: false, _statsError: false, _hasStats: true,
+      _t: Date.now() - Math.min(age, 300) * 1000 });
+    AdminFast.last = S.adm;
+  } else if (response?.error === 'forbidden' || response?.error === 'auth') {
+    AdminFast.last = null; AdminFast.seed = null;
+    S.adm = { err: response.error, _t: Date.now() };
+  } else {
+    S.adm = Object.assign({}, S.adm || AdminFast.last || AdminFast.seed || {},
+      { _pending: false, _statsError: true, _t: Date.now() });
+  }
+  if (S.tab === 'admin') renderView();
+};
+admAction = async function (action, element) {
+  if (action === 'adm-reload') {
+    if (S.admLoading) return true;
+    S.admForce = true;
+  }
+  return AdminFast.action(action, element);
+};
+
+/* A Premium emoji must not download a second full animation just as a placeholder. */
+const NativeFallback = {
+  ce: ce, ceH: ceH, mount: ceMount,
+  pending: new WeakMap(), scheduled: new WeakSet(),
+  symbols: {cart:'🛒',store:'🛍',purse:'👛',rocket:'🚀',party:'🎉',key:'🔑',star:'⭐',crown:'👑',
+    profile:'👤',gem:'💎',fire:'🔥',bolt:'⚡',check:'✅',cross:'❌',lock:'🔒',sparkles:'✨',
+    hourglass:'⏳',moneybag:'💰',moneywings:'💸',coin:'🪙',speech:'💬',megaphone:'📢',
+    busts:'👥',search:'🔍',memo:'📝',idcard:'🪪'}
+};
+function deferNativeFallback(markup) {
+  return markup.replace(/<img\b([^>]*?)\bsrc="emoji\/([a-z0-9_-]+)\.webp"([^>]*)>/g, (all, before, name, after) => {
+    const classes = ((before + after).match(/\bclass="([^"]*)"/) || [null, 'ae'])[1];
+    if (!/(?:^|\s)ae(?:\s|$)/.test(classes)) return all;
+    return `<span class="${esc(classes)}" data-native-fallback="${esc(name)}" data-native-class="${esc(classes.replace(/(?:^|\s)ae(?=\s|$)/, '').trim())}" aria-hidden="true">${NativeFallback.symbols[name] || '✨'}</span>`;
+  });
+}
+function restoreNativeFallback(element) {
+  if (!element.isConnected) return;
+  element.querySelectorAll('[data-native-fallback]').forEach(node => {
+    node.outerHTML = ae(node.dataset.nativeFallback, node.dataset.nativeClass || '');
+  });
+}
+ce = function (id, fallback, cls) {
+  const markup = NativeFallback.ce(id, fallback, cls);
+  return ceOK(id) ? deferNativeFallback(markup) : markup;
+};
+ceH = function (id, fallback, cls, tile) {
+  const markup = NativeFallback.ceH(id, fallback, cls, tile);
+  return ceOK(id) ? deferNativeFallback(markup) : markup;
+};
+ceMount = function (element) {
+  if (NativeFallback.pending.has(element)) return NativeFallback.pending.get(element);
+  if (element.querySelector('[data-native-fallback]') && !NativeFallback.scheduled.has(element)) {
+    NativeFallback.scheduled.add(element);
+    setTimeout(() => restoreNativeFallback(element), 3000); // A stalled Premium request also recovers the moving native emoji.
+  }
+  const job = (async () => {
+    await NativeFallback.mount(element);
+    if (!element.isConnected || !element.querySelector('[data-native-fallback]')) return;
+    const data = CE.data.get(element);
+    if (!data || (data.kind === 'lottie' && !CE.anims.has(element))) restoreNativeFallback(element);
+  })();
+  NativeFallback.pending.set(element, job);
+  job.finally(() => NativeFallback.pending.delete(element));
+  return job;
+};
+
 boot();
 })();
 </script>
