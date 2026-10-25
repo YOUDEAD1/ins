@@ -1,0 +1,79 @@
+{
+  "python_compile": "passed",
+  "full_tests": 1120,
+  "new_tests": 34,
+  "failures": 0,
+  "errors": 0,
+  "browser_admin": {
+    "browser": "Chromium",
+    "scope": "signed local HTTP; in-memory DB; external requests blocked",
+    "first_menu_before_statistics": true,
+    "first_menu_ms": 121,
+    "usable_product_panel_while_statistics_pending_ms": 436,
+    "initial_dashboard_requests": 1,
+    "refresh_failure_keeps_buttons_and_real_figures": true,
+    "first_load_failure_keeps_buttons_without_false_zero_figures": true,
+    "manual_refresh": true,
+    "failed_refresh_retry_loop": false,
+    "mobile_and_desktop_layout": "passed",
+    "languages_checked": [
+      "ar",
+      "en",
+      "ru",
+      "zh"
+    ],
+    "javascript_errors": []
+  },
+  "browser_emoji": {
+    "scope": "Local Chromium; original full-frame animations unchanged; external requests blocked",
+    "avoided_bytes_for_one_successful_premium_purse": 321350,
+    "results": [
+      {
+        "mode": "baseline",
+        "native_animation_requests": 1,
+        "custom_animation_played": true,
+        "failed_or_stalled_native_frames_changed": false,
+        "javascript_errors": []
+      },
+      {
+        "mode": "optimized",
+        "native_animation_requests": 0,
+        "custom_animation_played": true,
+        "failed_or_stalled_native_frames_changed": false,
+        "javascript_errors": []
+      },
+      {
+        "mode": "failed",
+        "native_animation_requests": 1,
+        "custom_animation_played": false,
+        "failed_or_stalled_native_frames_changed": true,
+        "javascript_errors": []
+      },
+      {
+        "mode": "stalled",
+        "native_animation_requests": 1,
+        "custom_animation_played": true,
+        "failed_or_stalled_native_frames_changed": true,
+        "javascript_errors": []
+      }
+    ]
+  },
+  "preservation": {
+    "previous_files": 306,
+    "previous_files_retained": true,
+    "unchanged_except_bot": true,
+    "bot_added_lines": 36,
+    "bot_deleted_lines": 0,
+    "original_function_class_definitions_retained": true,
+    "webapp_and_emoji_bytes_unchanged": true
+  },
+  "source_sha256": {
+    "bot.py": "7c3204abbfc8d54cde6e8fbcb2058a31abab14818b93df373b863d7f5ca92511",
+    "network_report_fixes.py": "bcd70cc5db15960fc4bc35d043892bb3e9a8657eba30e5c74d9bd8bb0cad138f",
+    "traffic_efficiency.py": "42dccf02133004b2044f540c45289b6de44fedcfecee09798eaf160d6aec75d9",
+    "webapp/index.html": "e32168e3bda9ed18497abca862895c1e50cc4a44a67c73ff5a8f3abb5441047a",
+    "referral_auto_rewards.py": "cbee53094a35bb5fbec88b6250407d7ba61fc3ba568bc93e3ca4bf7d8f4032e0",
+    "admin_performance.py": "9a2de07a2195ac5eac5ae700c5f12c2310e34a4614068bf8ac01753a96845f13"
+  },
+  "live_integrations": "Not called; isolated memory DB, fake credentials and blocked external requests"
+}

@@ -1,0 +1,15 @@
+{
+  "consumers": 20,
+  "outputs_identical": true,
+  "cgpt_account_reads_before": 20,
+  "cgpt_account_reads_after": 1,
+  "heavy_account_bytes_per_read_in_fixture": 200000,
+  "shared_source_loads_after": {
+    "products": 2,
+    "stock_counts": 1,
+    "ext_products": 1,
+    "cgpt_products": 1,
+    "seat_count": 1
+  },
+  "scope": "Synthetic local comparison, same original API builder; not a production bandwidth promise"
+}

@@ -1,0 +1,69 @@
+{
+  "source_filename": "lara-network-report.json",
+  "source_sha256": "841919f7d46a2d408857d0f57f3a08f5a948d8ca4ff28d590b776d0468d2535d",
+  "hours": 13.955397007948616,
+  "totals": {
+    "mongo": {
+      "requests": 701322,
+      "sent": 227979316,
+      "received": 4458487456,
+      "errors": 1
+    },
+    "http_client": {
+      "requests": 118873,
+      "sent": 120652948,
+      "received": 91867293,
+      "errors": 24291
+    },
+    "curl_client": {
+      "requests": 2905,
+      "sent": 19922448,
+      "received": 19797193,
+      "errors": 98
+    },
+    "http_server": {
+      "requests": 51305,
+      "sent": 544437056,
+      "received": 0,
+      "errors": 4607
+    }
+  },
+  "catalogue_heavy_read_received_bytes": 3890830478,
+  "catalogue_heavy_read_share_of_mongo_received": 0.8726794717710651,
+  "measurement_limits": [
+    "MongoDB sizes are BSON before connection compression.",
+    "Received bytes are separate from bytes sent; do not add incoming reads to outbound billing.",
+    "TLS, connection overhead and other Render resources are not included.",
+    "Function names, collection names and API consumer numeric IDs only; no request values or credentials."
+  ],
+  "observed_send_message_origins": [
+    {
+      "group": "http_client",
+      "label": "api.telegram.org/sendMessage",
+      "origin": "broadcast_new_stock",
+      "requests": 60999,
+      "estimated_requests": 61010,
+      "admission_error_bound": 11,
+      "sent": 93520021,
+      "received": 69606057,
+      "errors": 18862
+    },
+    {
+      "group": "http_client",
+      "label": "api.telegram.org/sendMessage",
+      "origin": "broadcast_price_drop",
+      "requests": 1496,
+      "estimated_requests": 1521,
+      "admission_error_bound": 25,
+      "sent": 2002642,
+      "received": 1441043,
+      "errors": 482
+    }
+  ],
+  "uncertainties": [
+    "Per-recipient errors are not present; cannot label every failure as a blocked user.",
+    "Aggregate /api/products error count has no HTTP status breakdown in the supplied report.",
+    "Broadcast volume alone does not prove duplicate events or an infinite loop.",
+    "Traffic and BSON estimates are process-local; synthetic benchmark savings are not a billing forecast."
+  ]
+}

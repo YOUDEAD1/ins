@@ -3958,6 +3958,12 @@ def _net_install_server():
             try:
                 return original(self, *args, **kwargs)
             finally:
+                _report_fixes = globals().get('_NETWORK_REPORT_FIXES')
+                if _report_fixes is not None:
+                    try:
+                        _report_fixes.http_result(self)
+                    except Exception:
+                        pass  # Diagnostics must not interrupt an already written response.
                 _NET_METER.record('http_server', _net_server_route(getattr(self, 'path', '')),
                     sent=max(0, getattr(self, '_net_written', before) - before),
                     errors=int(getattr(self, '_net_status', 0) >= 400), detail=self._net_origin)
@@ -4194,6 +4200,12 @@ def _install_settings_cache_hook():
                         return original(self, *args, **kwargs)
                     finally:
                         # Even an acknowledgement failure may follow a committed write.
+                        _report_fixes = globals().get('_NETWORK_REPORT_FIXES')
+                        if _report_fixes is not None:
+                            try:
+                                _report_fixes.changed(self, getattr(original, '__name__', ''), args, kwargs)
+                            except Exception:
+                                logger.debug('Display cache invalidation deferred; original write result preserved')
                         _admin_cache = globals().get('_ADMIN_PERFORMANCE')
                         if _admin_cache is not None:
                             _admin_cache.changed(self, getattr(original, '__name__', ''), args, kwargs)
@@ -27523,6 +27535,9 @@ def admin_save_edit(message, field, pid, cat_id_back=None):
             # برودكاست فقط لو السعر نزل
             if new_price < old_price:
                 def broadcast_price_drop(admin_id):
+                    _report_fixes = globals().get('_NETWORK_REPORT_FIXES')
+                    if _report_fixes is not None and not _report_fixes.in_fanout():
+                        return _report_fixes.fanout(broadcast_price_drop, admin_id)
                     # 🔘 زر الانتقال للمنتج (كان الإشعار يُرسل بلا زر إطلاقاً!)
                     # نطبّع الـ pid بنفس طريقة أزرار المتجر (نشيل بادئة cgpt_main_)
                     # وإلا الزر ينكسر مع منتجات ChatGPT.
@@ -27849,6 +27864,10 @@ def admin_stock_save(message, pid):
             db.product_stock.insert_one({'product_id': str(pid), 'code_line': l.strip(), 'is_sold': False})
             count += 1
 
+    if count <= 0:
+        bot.send_message(message.chat.id, 'ℹ️ لم تتم إضافة أكواد؛ لن يُرسل إشعار توفر بلا مخزون جديد.')
+        return
+
     # 🔄 بث حدث للمزامنة — ستوك أُضيف
     if count > 0:
         try:
@@ -27872,12 +27891,18 @@ def admin_stock_save(message, pid):
     )
 
     def broadcast_new_stock(pid_for_thread, admin_id):
+        _report_fixes = globals().get('_NETWORK_REPORT_FIXES')
+        if _report_fixes is not None and not _report_fixes.in_fanout():
+            return _report_fixes.fanout(broadcast_new_stock, pid_for_thread, admin_id)
         try:
             logger.info(f"📢 Thread بدأ - admin_id={admin_id}, pid={pid_for_thread}")
             p = find_product(pid_for_thread)
             if not p: 
                 logger.error(f"❌ المنتج غير موجود في broadcast_new_stock: {pid_for_thread}")
                 bot.send_message(admin_id, "❌ فشل البرودكاست: المنتج غير موجود.")
+                return
+            if not _customer_product_visible(p):
+                bot.send_message(admin_id, 'ℹ️ المنتج أو مجلده مخفي؛ تم حفظ المخزون دون بث إشعار.')
                 return
             stk_total = get_product_stock_count(pid_for_thread)
             custom_emoji_id = p.get('custom_emoji_id')
@@ -41292,6 +41317,17 @@ try:
     _TRAFFIC_EFFICIENCY = _traffic_module.install(globals())
 except Exception:
     logger.exception('Request optimization unavailable; original checks remain active')
+
+# Fix confirmed sources in the exported network report; preserve all legacy paths.
+try:
+    import importlib.util as _report_importlib
+    _report_spec = _report_importlib.spec_from_file_location(
+        'lara_network_report_fixes', os.path.join(os.path.dirname(__file__), 'network_report_fixes.py'))
+    _report_module = _report_importlib.module_from_spec(_report_spec)
+    _report_spec.loader.exec_module(_report_module)
+    _NETWORK_REPORT_FIXES = _report_module.install(globals())
+except Exception:
+    logger.exception('Network report fixes unavailable; original service remains active')
 
 # 🚀 15. التشغيل
 # ============================================================

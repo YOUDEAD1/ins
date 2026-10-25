@@ -1,0 +1,20 @@
+{
+  "browser": "Chromium",
+  "scope": "signed local HTTP; in-memory DB; external requests blocked",
+  "first_menu_before_statistics": true,
+  "first_menu_ms": 121,
+  "usable_product_panel_while_statistics_pending_ms": 436,
+  "initial_dashboard_requests": 1,
+  "refresh_failure_keeps_buttons_and_real_figures": true,
+  "first_load_failure_keeps_buttons_without_false_zero_figures": true,
+  "manual_refresh": true,
+  "failed_refresh_retry_loop": false,
+  "mobile_and_desktop_layout": "passed",
+  "languages_checked": [
+    "ar",
+    "en",
+    "ru",
+    "zh"
+  ],
+  "javascript_errors": []
+}
