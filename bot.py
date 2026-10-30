@@ -12,6 +12,7 @@ import html
 import io
 import random
 import json
+import math
 import urllib.parse
 import hashlib
 import hmac
@@ -443,6 +444,22 @@ def _api_json_body(handler):
     return data
 
 
+def _api_price_value(value):
+    """Parse a reseller price as finite, cent-precision money."""
+    if isinstance(value, bool):
+        raise ValueError('price must be a finite number')
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite():
+            raise ValueError('price must be a finite number')
+        amount = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
+        raise ValueError('price must be a finite number') from None
+    if amount < 0 or amount > Decimal('9999.00'):
+        raise ValueError('price must be between 0 and 9999')
+    return float(amount)
+
+
 def _webapp_telegram_user(init_data):
     """Verify Telegram Mini App initData before reading a user's shop records."""
     try:
@@ -660,22 +677,34 @@ def _api_idem_finish(ref, code, data):
 
 
 def _read_body(h):
-    """قراءة body آمنة تدعم Content-Length و chunked encoding"""
+    """Read a bounded JSON body; reject oversized fixed and chunked requests."""
+    max_bytes = 1_000_000
     try:
         cl = h.headers.get('Content-Length')
         if cl:
-            return h.rfile.read(int(cl)).decode('utf-8')
-        # chunked أو بدون Content-Length
+            size = int(cl)
+            if size < 0 or size > max_bytes:
+                return ''
+            return h.rfile.read(size).decode('utf-8')
         te = h.headers.get('Transfer-Encoding', '').lower()
         if 'chunked' in te:
             chunks = []
+            total = 0
             while True:
-                line = h.rfile.readline().decode('utf-8').strip()
+                raw_line = h.rfile.readline(128)
+                if not raw_line or len(raw_line) >= 128:
+                    return ''
+                line = raw_line.decode('ascii').split(';', 1)[0].strip()
                 size = int(line, 16)
                 if size == 0:
                     break
-                chunks.append(h.rfile.read(size).decode('utf-8'))
-                h.rfile.readline()
+                if size < 0 or total + size > max_bytes:
+                    return ''
+                chunk = h.rfile.read(size)
+                if len(chunk) != size or h.rfile.readline(2) != b'\r\n':
+                    return ''
+                chunks.append(chunk.decode('utf-8'))
+                total += size
             return ''.join(chunks)
         return ''
     except Exception:
@@ -2066,6 +2095,18 @@ def _sign_webhook_body(secret, body_bytes, timestamp):
     return _hmac.new(secret.encode('utf-8'), msg, _hashlib.sha256).hexdigest()
 
 
+def _api_event_visible_to_user(evt, uid):
+    """Keep tenant purchase events private while sharing public catalog changes."""
+    data = evt.get('data') or {}
+    event_type = str(evt.get('event_type', ''))
+    if event_type.startswith('order.'):
+        return data.get('api_user_id') == uid
+    owner = data.get('api_user_id')
+    if owner is not None and owner != uid:
+        return False
+    return 'buyer_user_id' not in data
+
+
 def _url_is_public(url):
     """http(s) URL whose host resolves only to public internet addresses."""
     try:
@@ -2167,6 +2208,8 @@ def _webhook_worker():
             # كل webhooks النشطة
             hooks = list(db.api_webhooks.find({'is_active': True}))
             for h in hooks:
+                if not _api_event_visible_to_user(evt, h.get('api_user_id')):
+                    continue
                 # نشغل كل تسليم في thread صغير عشان webhook بطيء ما يعطّل البقية
                 threading.Thread(
                     target=_deliver_webhook,
@@ -2524,6 +2567,13 @@ class APIHandler(BaseHTTPRequestHandler):
         if not key:
             return None, None
         doc, user = _get_api_user(key)
+        # Ban state is security-sensitive: do not use the short-lived profile cache.
+        if doc:
+            user = db.users.find_one({'user_id': doc.get('user_id')})
+        # A platform ban revokes every authenticated surface, including keys
+        # issued before the account was banned.
+        if not doc or not user or user.get('is_banned') == 1:
+            return None, None
         context = globals().get('_ERROR_CONTEXT')
         current = getattr(context, 'value', None)
         if doc and user and current is not None:
@@ -2795,7 +2845,14 @@ class APIHandler(BaseHTTPRequestHandler):
             # فلترة اختيارية بنوع
             ev_type = params.get('event_type', [None])[0]
 
-            query = {'timestamp': {'$gt': since}}
+            query = {'timestamp': {'$gt': since}, '$and': [
+                {'$or': [
+                    {'data.api_user_id': uid},
+                    {'data.api_user_id': {'$exists': False},
+                     'event_type': {'$not': {'$regex': '^order\\.'}}}
+                ]},
+                {'data.buyer_user_id': {'$exists': False}}
+            ]}
             if ev_type:
                 query['event_type'] = ev_type
 
@@ -2808,6 +2865,8 @@ class APIHandler(BaseHTTPRequestHandler):
             result = []
             latest_ts = since
             for e in events:
+                if not _api_event_visible_to_user(e, uid):
+                    continue
                 ts = e.get('timestamp', 0)
                 if ts > latest_ts: latest_ts = ts
                 result.append({
@@ -3251,16 +3310,13 @@ class APIHandler(BaseHTTPRequestHandler):
                 return _json_resp(self, 404, {'error': 'Product not found'})
 
             pid = str(pr.get('id', str(pr.get('_id', ''))))
-            base_price = float(pr.get('price', 0))
-
             try:
-                sell_price = round(float(sell_price), 2)
-                if sell_price < base_price:
-                    return _json_resp(self, 400, {'error': f'Price cannot be less than base price (${base_price:.2f})'})
-                if sell_price > 9999:
-                    return _json_resp(self, 400, {'error': 'Price too high'})
-            except (TypeError, ValueError):
-                return _json_resp(self, 400, {'error': 'price must be a number'})
+                base_price = _api_price_value(pr.get('price', 0))
+                sell_price = _api_price_value(sell_price)
+            except ValueError as exc:
+                return _json_resp(self, 400, {'error': str(exc)})
+            if sell_price < base_price:
+                return _json_resp(self, 400, {'error': f'Price cannot be less than base price (${base_price:.2f})'})
 
             import datetime as _dt2
             db.api_pricing.update_one(
@@ -3393,12 +3449,13 @@ class APIHandler(BaseHTTPRequestHandler):
             if 'desc_en' in body: update['desc_en'] = str(body['desc_en'])[:500]
             if 'price' in body:
                 try:
-                    sp = round(float(body['price']), 2)
-                    base_price = float(pr.get('price', 0))
+                    sp = _api_price_value(body['price'])
+                    base_price = _api_price_value(pr.get('price', 0))
                     if sp < base_price:
                         return _json_resp(self, 400, {'error': f'Price cannot be less than ${base_price:.2f}'})
                     update['sell_price'] = sp
-                except: pass
+                except ValueError as exc:
+                    return _json_resp(self, 400, {'error': str(exc)})
 
             if not update:
                 return _json_resp(self, 400, {'error': 'Nothing to update. Send: name_ar, name_en, desc_ar, desc_en, or price'})
@@ -3467,6 +3524,7 @@ bot.answer_callback_query = _safe_answer_cbq
 _ALLOWED_LOCKED_CB_PREFIXES = (
     'cancel_deposit',       # زر إلغاء الدفع
     'binance_check_',       # زر فحص الدفع
+    'binance_manual_',      # إدخال معرّف معاملة Binance أثناء الإيداع
     'copy_fb',              # fallback نسخ
     'open_support',         # يظل الدعم متاحاً أثناء الدفع
 )
@@ -13721,8 +13779,12 @@ def ask_binance_deposit_amount(message):
         bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML', reply_markup=markup)
         return
 
-    # نولّد مبلغ فريد بـ 4 خانات عشرية = 9000 احتمال
+    # نولّد مبلغ Binance Pay بدقة 4 خانات لأن هذه هي الدقة المعروضة للمستخدم.
     unique_amount = generate_unique_amount_for_user(base_amount, uid, 'BINANCE')
+    if unique_amount is None:
+        bot.send_message(uid, 'تعذر إنشاء مبلغ فريد الآن. حاول بعد قليل.' if get_lang(uid) == 'ar'
+                         else 'Could not reserve a unique amount right now. Please try again shortly.')
+        return
 
     # نسجّل في DB
     pending = register_pending_deposit(uid, base_amount, unique_amount, 'BINANCE')
@@ -13772,107 +13834,211 @@ def binance_check_payment(call):
     
     found = False
     try:
+        pending = db.pending_deposits.find_one({
+            'user_id': uid, 'coin': 'BINANCE', 'status': 'pending',
+            'expires_at': {'$gt': int(time.time())}
+        })
+        if not pending:
+            raise ValueError('No active Binance Pay deposit')
         pay_response = execute_binance_call(
             lambda c: c.get_pay_trade_history(),
             max_retries=5
         )
-        
+
         if pay_response:
             pay_history = pay_response.get('data', [])
-            uid_str = str(uid)
-            current_time_ms = int(time.time() * 1000)
-            cutoff_ms = current_time_ms - (24 * 60 * 60 * 1000)
-            
-            import re as re_module
-            
             for tx in pay_history[:50]:
                 try:
-                    # نجلب الـ Order ID
-                    tx_id = str(
-                        tx.get('orderId') or tx.get('transactionId') or
-                        tx.get('merchantTradeNo') or ''
-                    )
-                    if not tx_id:
-                        continue
-                    
-                    # نفحص الوقت
-                    tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
-                    if tx_time and tx_time < cutoff_ms:
-                        continue
-                    
-                    tx_id_norm = normalize_tx_id(tx_id)
-                    
-                    # لو مستخدم مسبقاً
-                    if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
-                        continue
-                    
-                    # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
-                    _raw_amount = float(tx.get('amount') or tx.get('totalFee') or 0)
-                    _tx_cur = _binance_tx_currency(tx) or 'USDT'
-                    amount, _price_used = binance_amount_to_usd(_raw_amount, _tx_cur)
-                    if amount is None or amount <= 0:
-                        continue
-                    
-                    # نقرأ كل الحقول الممكنة للـ remark
-                    remark = str(
-                        tx.get('remarks') or tx.get('remark') or
-                        tx.get('memo') or tx.get('note') or
-                        tx.get('orderInfo') or ''
-                    ).strip()
-                    
-                    # نشوف لو الـ uid موجود في الـ remark
-                    if uid_str not in remark:
-                        continue
-                    
-                    # تأكيد: الـ uid موجود كرقم في الـ remark
-                    if not re_module.search(r'\b' + re_module.escape(uid_str) + r'\b', remark):
-                        continue
-                    
-                    # ✅ وجدنا الحوالة!
-                    credit_user(uid, amount, tx_id_norm, l, "Binance Pay")
-                    # 🔓 نُغلق الإيداع المعلّق ونفكّ القفل (وإلا يظل "لديك عملية دفع معلقة")
-                    close_user_pending_and_unlock(uid, tx_id_norm, via='binance_check_button')
-                    found = True
-                    
-                    try:
-                        bot.delete_message(uid, checking_msg.message_id)
-                    except: pass
-                    break
-                    
-                except Exception:
-                    continue
-    
+                    if _credit_binance_pending_record(uid, pending, tx, l, 'binance_check_button'):
+                        found = True
+                        break
+                except Exception as tx_err:
+                    logger.debug('Skipping Binance Pay history row: %s', tx_err)
+
+    except ValueError:
+        bot.edit_message_text(
+            bil(uid, 'لا يوجد طلب Binance Pay معلّق صالح. ابدأ طلب إيداع جديد.',
+                'There is no active Binance Pay deposit. Start a new deposit.'),
+            uid, checking_msg.message_id, parse_mode='HTML')
+        return
     except Exception as e:
         logger.error(f"binance_check_payment error: {e}")
-    
+
+    if found:
+        try:
+            bot.delete_message(uid, checking_msg.message_id)
+        except Exception:
+            pass
+
     if not found:
         try:
             bot.edit_message_text(
                 bil(uid,
-                    "❌ <b>لم نجد حوالة بعد!</b>\n\n"
-                    "💡 تأكد من:\n"
-                    "• وضع رقمك في الملاحظة بالضبط\n"
-                    f"• الرقم: <code>{uid}</code>\n"
-                    "• إتمام التحويل بالكامل\n\n"
-                    "🔄 حاول مرة ثانية بعد دقيقة.",
-                    "❌ <b>No transaction found yet!</b>\n\n"
-                    "💡 Make sure:\n"
-                    "• Your ID is in the Remark exactly\n"
-                    f"• Your ID: <code>{uid}</code>\n"
-                    "• Transfer is completed\n\n"
-                    "🔄 Try again in a minute."
-                ),
+                    "❌ <b>لم نجد الإيداع بعد.</b> إذا كان مكتملًا في Binance، أدخل معرّف المعاملة للتحقق اليدوي.",
+                    "❌ <b>Deposit not found yet.</b> If Binance shows it as completed, enter its transaction ID for manual verification."),
                 uid, checking_msg.message_id,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup().add(
-                    InlineKeyboardButton(
-                        "🔄 أعد المحاولة" if l == 'ar' else "🔄 Try Again",
-                        callback_data=f"binance_check_{uid}"
-                    )
+                reply_markup=InlineKeyboardMarkup(row_width=1).add(
+                    InlineKeyboardButton("🔄 أعد الفحص" if l == 'ar' else "🔄 Check again",
+                                         callback_data=f"binance_check_{uid}"),
+                    InlineKeyboardButton("🧾 إدخال معرّف المعاملة" if l == 'ar' else "🧾 Enter transaction ID",
+                                         callback_data='binance_manual_start')
                 )
             )
-        except: pass
+        except Exception:
+            pass
 
+
+def _binance_history_tx_ids(tx):
+    """Provider identifiers are compared whole; never accept a substring."""
+    return [str(tx.get(k) or '').strip() for k in ('transactionId', 'orderId', 'merchantTradeNo')
+            if str(tx.get(k) or '').strip()]
+
+
+def _binance_pending_match(pending, tx):
+    """Require a completed incoming Binance Pay record matching one live request."""
+    if not isinstance(tx, dict) or str(tx.get('orderType') or '').upper() != 'PAY':
+        return False
+    try:
+        raw = float(tx.get('amount'))
+        if not math.isfinite(raw) or raw <= 0:
+            return False
+        amount_usd, _ = binance_amount_to_usd(raw, _binance_tx_currency(tx) or 'USDT')
+        if amount_usd is None or not math.isfinite(float(amount_usd)):
+            return False
+        # Binance Pay deposits request four decimal places; allow only provider rounding.
+        if abs(float(amount_usd) - float(pending.get('unique_amount_usd', 0))) > 0.00005:
+            return False
+        tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
+        created_ms = int(pending.get('created_at', 0)) * 1000
+        if not tx_time or tx_time < created_ms - 120000 or tx_time > int(time.time() * 1000) + 120000:
+            return False
+        return bool(_binance_history_tx_ids(tx))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _credit_binance_pending_record(uid, pending, tx, lang, via):
+    """Claim the pending deposit before crediting; unique transaction IDs prevent replay."""
+    if not pending or pending.get('user_id') != uid or pending.get('coin') != 'BINANCE':
+        return False
+    if pending.get('status') != 'pending' or int(pending.get('expires_at', 0)) <= int(time.time()):
+        return False
+    if not _binance_pending_match(pending, tx):
+        return False
+    tx_id = _binance_history_tx_ids(tx)[0]
+    tx_id_norm = normalize_tx_id(tx_id)
+    if not tx_id_norm:
+        return False
+    with tx_lock:
+        if tx_id_norm in PROCESSING_TXS:
+            return False
+        PROCESSING_TXS.add(tx_id_norm)
+    claimed = False
+    try:
+        claim = db.pending_deposits.update_one(
+            {'pending_id': pending['pending_id'], 'user_id': uid, 'coin': 'BINANCE', 'status': 'pending',
+             'expires_at': {'$gt': int(time.time())}},
+            {'$set': {'status': 'processing', 'processing_tx_id': tx_id_norm}}
+        )
+        claimed = bool(getattr(claim, 'modified_count', 0))
+        if not claimed:
+            return False
+        credited = credit_user(uid, float(pending['base_amount_usd']), tx_id_norm, lang,
+                               'Binance Pay', trusted_txid=True)
+        if credited is not True:
+            db.pending_deposits.update_one(
+                {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
+                 'processing_tx_id': tx_id_norm},
+                {'$set': {'status': 'pending'}, '$unset': {'processing_tx_id': ''}}
+            )
+            return False
+        db.pending_deposits.update_one(
+            {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
+             'processing_tx_id': tx_id_norm},
+            {'$set': {'status': 'completed', 'completed_at': int(time.time()),
+                      'completed_via': via, 'tx_id_detected': tx_id_norm},
+             '$unset': {'processing_tx_id': ''}}
+        )
+        unlock_deposit(uid)
+        return True
+    except Exception:
+        if claimed:
+            try:
+                db.pending_deposits.update_one(
+                    {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
+                     'processing_tx_id': tx_id_norm},
+                    {'$set': {'status': 'pending'}, '$unset': {'processing_tx_id': ''}}
+                )
+            except Exception:
+                pass
+        raise
+    finally:
+        with tx_lock:
+            PROCESSING_TXS.discard(tx_id_norm)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'binance_manual_start')
+def binance_manual_start(call):
+    uid = call.from_user.id
+    bot.answer_callback_query(call.id)
+    if is_user_banned(uid):
+        return
+    pending = db.pending_deposits.find_one({
+        'user_id': uid, 'coin': 'BINANCE', 'status': 'pending',
+        'expires_at': {'$gt': int(time.time())}
+    })
+    if not pending:
+        bot.send_message(uid, 'لا يوجد طلب Binance Pay معلّق صالح.' if get_lang(uid) == 'ar'
+                         else 'There is no active Binance Pay deposit.')
+        return
+    prompt = ('أرسل معرّف المعاملة أو Order ID الظاهر في سجل Binance Pay. سيتم قبول الإيداع فقط إذا طابق طلبك الحالي ومبلغه.'
+              if get_lang(uid) == 'ar' else
+              'Send the transaction ID or Order ID shown in Binance Pay history. The deposit is accepted only if it matches your active request and amount.')
+    msg = bot.send_message(uid, prompt, reply_markup=InlineKeyboardMarkup().add(
+        InlineKeyboardButton('❌ إلغاء' if get_lang(uid) == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+    bot.register_next_step_handler(msg, verify_binance_pay, get_lang(uid))
+
+
+@safe_next_step
+def verify_binance_pay(message, lang):
+    """Manual Binance-only fallback, constrained to the user's current pending deposit."""
+    uid = message.from_user.id
+    if is_user_banned(uid) or not message.text:
+        return
+    supplied = message.text.strip()
+    if supplied.lower() in ('cancel', 'الغاء', 'إلغاء', 'الغاء العملية') or supplied.startswith('/'):
+        return
+    if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', supplied, flags=re.ASCII):
+        bot.send_message(uid, '❌ معرّف غير صالح. أرسله كما يظهر في Binance.' if lang == 'ar'
+                         else '❌ Invalid ID. Send it exactly as shown in Binance.')
+        return
+    pending = db.pending_deposits.find_one({
+        'user_id': uid, 'coin': 'BINANCE', 'status': 'pending',
+        'expires_at': {'$gt': int(time.time())}
+    })
+    if not pending:
+        bot.send_message(uid, 'لا يوجد طلب Binance Pay معلّق صالح.' if lang == 'ar'
+                         else 'There is no active Binance Pay deposit.')
+        return
+    try:
+        response = execute_binance_call(lambda c: c.get_pay_trade_history(), max_retries=3)
+        rows = (response or {}).get('data') or []
+        if not isinstance(rows, list):
+            rows = []
+        wanted = supplied.casefold()
+        tx = next((row for row in rows if isinstance(row, dict) and
+                   any(value.casefold() == wanted for value in _binance_history_tx_ids(row))), None)
+        if tx and _credit_binance_pending_record(uid, pending, tx, lang, 'binance_manual'):
+            bot.send_message(uid, '✅ تم التحقق من Binance Pay وإضافة مبلغ طلبك.' if lang == 'ar'
+                             else '✅ Binance Pay was verified and your requested amount was credited.')
+            return
+        bot.send_message(uid, '❌ لم يطابق المعرّف طلبك الحالي أو المبلغ أو معاملة Binance مكتملة.' if lang == 'ar'
+                         else '❌ The ID did not match your active request, amount, or a completed Binance payment.')
+    except Exception as exc:
+        logger.error('Manual Binance Pay verification failed: %s', exc)
+        bot.send_message(uid, '⚠️ تعذر التحقق الآن. حاول لاحقًا.' if lang == 'ar'
+                         else '⚠️ Verification is temporarily unavailable. Try again later.')
 # ============================================================
 # 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
 # ============================================================
@@ -13895,6 +14061,7 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
     """
     base = float(base_amount_usd)
     is_bybit = str(coin).startswith('BYBIT')
+    is_binance_pay = str(coin) == 'BINANCE'
 
     # عدد الخانات ومسافة الأمان حسب العملة
     if is_bybit:
@@ -13903,6 +14070,11 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
         # الكسور بوحدات 0.01: من 0.01 إلى 0.09 (حد أقصى تسعة سنتات)
         lo, hi, div = 1, 9, 100.0
         lo2, hi2 = 1, 9            # نفس المدى (خانتان محدودتان أصلاً)
+    elif is_binance_pay:
+        decimals = 4
+        MIN_SPACING = 0.0002
+        lo, hi, div = 1, 99, 10000.0
+        lo2, hi2 = 1, 99
     else:
         decimals = 6
         MIN_SPACING = 0.0002
@@ -13934,7 +14106,7 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
             })
             return clash is None
         except Exception:
-            return False if is_bybit else True
+            return False if (is_bybit or is_binance_pay) else True
 
     if is_bybit:
         # Try the cheapest distinct amount first. Never widen the surcharge.
@@ -13944,6 +14116,18 @@ def generate_unique_amount_for_user(base_amount_usd, uid, coin):
             candidate = (base_decimal + Decimal(cents) / 100).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             difference = candidate - base_decimal
             if Decimal('0') < difference <= Decimal('0.09') and _is_free(float(candidate)):
+                return float(candidate)
+        return None
+
+    if is_binance_pay:
+        from decimal import Decimal, ROUND_HALF_UP
+        base_decimal = Decimal(str(base_amount_usd))
+        # Match the four decimals shown in the payment instructions exactly.
+        for _ in range(800):
+            cents = random.randint(lo, hi)
+            candidate = (base_decimal + Decimal(cents) / Decimal('10000')).quantize(
+                Decimal('0.0001'), rounding=ROUND_HALF_UP)
+            if candidate > base_decimal and _is_free(float(candidate)):
                 return float(candidate)
         return None
 
@@ -18147,149 +18331,6 @@ def _dep_crypto_real(call):
     else: bot.register_next_step_handler(msg, verify_crypto_tx, l, coin)
 
 @safe_next_step
-def verify_binance_pay(message, lang):
-    uid = message.from_user.id
-    if is_user_banned(uid): return
-    if not message.text:
-        bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML"); return
-
-    tx_id = message.text.strip()
-    
-    # 🛡 رفض أوامر البوت والرسائل العادية (مو tx_id فعلاً)
-    if tx_id.startswith('/') or tx_id.lower() in ['الغاء', 'cancel', 'إلغاء', 'الغاء', 'اغلاق']:
-        # المستخدم يستخدم أمر، نوقف عملية التحقق بصمت
-        return
-    
-    if len(tx_id) < 5:
-        bot.send_message(uid, bil(uid, "❌ <b>رقم العملية غير صحيح! الرجاء إرسال الـ Order ID بشكل صحيح.</b>", "❌ <b>Invalid Order ID! Please send a valid Order ID.</b>"), parse_mode="HTML")
-        return
-    
-    # 🛡 توحيد الـ tx_id لمنع الالتفاف بـ 0x أو أحرف كبيرة
-    tx_id_normalized = normalize_tx_id(tx_id)
-    
-    with tx_lock:
-        if tx_id_normalized in PROCESSING_TXS:
-            bot.send_message(uid, bil(uid, "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>", "⏳ <b>This transaction is already being processed, please do not repeat.</b>"), parse_mode="HTML")
-            return
-        if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
-            bot.reply_to(message, get_text(uid, 'tx_used')); return
-        PROCESSING_TXS.add(tx_id_normalized)
-    
-    # 🛡 حماية ضد سرقة الحوالات: حجز الـ hash لأول مستخدم
-    claim_status = claim_tx_hash(tx_id_normalized, uid)
-    if claim_status == 'stolen_attempt':
-        bot.send_message(
-            uid,
-            "❌ <b>هذه الحوالة تخص مستخدم آخر!</b>\n\n"
-            "🚫 لا يمكن استخدام نفس رقم العملية لأكثر من حساب.\n\n"
-            "⚠️ <i>تم تسجيل المحاولة. أي محاولة سرقة قد تؤدي إلى حظر دائم.</i>",
-            parse_mode="HTML"
-        )
-        PROCESSING_TXS.discard(tx_id_normalized)
-        return
-    elif claim_status == 'already_used':
-        bot.reply_to(message, get_text(uid, 'tx_used'))
-        PROCESSING_TXS.discard(tx_id_normalized)
-        return
-        
-    try:
-        bot.send_message(uid, get_text(uid, 'crypto_checking'), parse_mode="HTML")
-        
-        pay_response = None
-        attempt_num = 0
-        max_total_time = 90  # 90 ثانية كحد أقصى (يحاول طوال هالمدة)
-        start_time = time.time()
-        
-        # 🔥 حلقة محاولة مستمرة - ما توقف إلا لما تنجح
-        while pay_response is None and (time.time() - start_time) < max_total_time:
-            attempt_num += 1
-            pay_response = execute_binance_call(
-                lambda c: c.get_pay_trade_history(),
-                max_retries=10,  # 10 بروكسيات في كل جولة
-            )
-            
-            if pay_response is not None:
-                break  # نجحنا!
-            
-            # كل 3 محاولات، نجلب بروكسيات جديدة بصمت
-            if attempt_num % 3 == 0:
-                try:
-                    refresh_proxies(force=True)
-                except: pass
-            
-            # محاولة بدون بروكسي بين المحاولات
-            if attempt_num % 2 == 0:
-                try:
-                    direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 8})
-                    pay_response = direct_client.get_pay_trade_history()
-                    if pay_response is not None:
-                        break
-                except: pass
-            
-            time.sleep(0.3)  # وقفة صغيرة بين المحاولات
-        
-        # ✅ لو وصلنا هنا ولسا None بعد 90 ثانية، شي غريب جداً صار
-        # لكن ما نطلع رسالة خطأ - نحاول مرة أخيرة بدون بروكسي
-        if pay_response is None:
-            try:
-                direct_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET, requests_params={'timeout': 15})
-                pay_response = direct_client.get_pay_trade_history()
-            except:
-                pass
-        
-        # ⚠️ في الحالة شبه المستحيلة - نعتبر الحوالة غير موجودة (مو خطأ سيرفر)
-        if pay_response is None:
-            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
-            return
-        
-        pay_h = pay_response.get('data', [])
-
-        found = False; amt_raw = 0.0; amt_currency = 'USDT'
-        current_time_ms = int(time.time() * 1000)
-        
-        for d in pay_h:
-            if tx_id.lower() == str(d.get('orderId', '')).lower():
-                tx_time = int(d.get('transactionTime', 0))
-                if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
-                    bot.send_message(uid, bil(uid,
-                        "❌ <b>مرفوض:</b> الحوالة قديمة جداً.",
-                        "❌ <b>Rejected:</b> This transaction is too old."),
-                        parse_mode="HTML")
-                    return
-                found = True
-                amt_raw = float(d.get('amount', 0.0))
-                amt_currency = _binance_tx_currency(d) or 'USDT'
-                break
-                
-        if found:
-            # نحوّل المبلغ للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
-            amt_usd, _pu = binance_amount_to_usd(amt_raw, amt_currency)
-            if amt_usd is None or amt_usd <= 0:
-                bot.send_message(
-                    uid,
-                    f"⚠️ <b>استلمنا حوالتك بعملة {html.escape(amt_currency)} لكن تعذّر تحديد قيمتها بالدولار الآن.</b>\n\n"
-                    f"💡 انتظر دقيقة وحاول مرة ثانية، أو تواصل مع الإدارة وأعطهم رقم العملية.",
-                    parse_mode="HTML"
-                )
-            else:
-                method_lbl = "Binance Pay" if amt_currency in USD_STABLECOINS else f"Binance Pay ({amt_currency}→USD)"
-                credit_user(uid, amt_usd, tx_id_normalized, lang, method_lbl)
-                # 🔓 نُغلق الإيداع المعلّق ونفكّ القفل
-                close_user_pending_and_unlock(uid, tx_id_normalized, via='binance_pay_manual')
-        else:
-            bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
-    except Exception as e:
-        logger.debug(f"Unexpected error in verify_binance_tx: {e}")
-        bot.send_message(
-            uid, 
-            "⚠️ <b>تعذر الاتصال بسيرفر التحقق حالياً.</b>\n\n"
-            "💡 انتظر دقيقة وحاول مرة ثانية، أو تواصل مع الإدارة.", 
-            parse_mode="HTML"
-        )
-    finally:
-        PROCESSING_TXS.discard(tx_id_normalized)
-
-@safe_next_step
 def verify_crypto_tx(message, lang, coin):
     """
     🛡 توجيه ذكي: TON يفحص من TONCenter (الـ blockchain العام)
@@ -18396,12 +18437,12 @@ def verify_crypto_tx(message, lang, coin):
             bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
             return
 
-        found = False; status = -1; amt = 0.0
+        found = False; status = -1; amt = 0.0; matched_txid = ''
         current_time_ms = int(time.time() * 1000)
         
         for d in res:
-            api_txid = str(d.get('txId', '')).lower()
-            if tx_id in api_txid:
+            api_txid = normalize_tx_id(str(d.get('txId', '')).lower())
+            if api_txid and tx_id_normalized == api_txid:
                 tx_time = int(d.get('insertTime', 0))
                 if (current_time_ms - tx_time) > 24 * 60 * 60 * 1000:
                     bot.send_message(uid, bil(uid,
@@ -18410,6 +18451,7 @@ def verify_crypto_tx(message, lang, coin):
                         parse_mode="HTML")
                     return
                 found = True
+                matched_txid = api_txid
                 status = int(d.get('status', -1))
                 amt = float(d.get('amount', 0.0))
                 break
@@ -18441,9 +18483,9 @@ def verify_crypto_tx(message, lang, coin):
                     
                     mark_pending_deposit_used(pending['pending_id'])
                     base_amount = pending.get('base_amount_usd', amt)
-                    credit_user(uid, base_amount, tx_id_normalized, lang, f"Crypto {coin}")
+                    credit_user(uid, base_amount, matched_txid, lang, f"Crypto {coin}")
                 else:
-                    credit_user(uid, amt, tx_id_normalized, lang, f"Crypto {coin}")
+                    credit_user(uid, amt, matched_txid, lang, f"Crypto {coin}")
             else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
@@ -19903,6 +19945,8 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
             bot.send_message(log_ch, _log_src(pub_msg, _dep_src(uid)), parse_mode="HTML")
         except Exception as log_err: 
             logger.debug(f"Log channel deposit error: {log_err}")
+
+    return True
 
 # ============================================================
 # 👑 14. لوحة الإدارة ونظام التقارير 
@@ -24044,6 +24088,67 @@ WWC_CMS_BUTTONS = {}
 WWC_CMS_VALIDATE = None
 
 
+def _cms_status_snapshot(markup, kind):
+    """Annotate editable CMS rows from one DB read; DB failures stay visibly unknown."""
+    prefix = 'edit_txt_' if kind == 'text' else 'edit_btn_'
+    keys = set()
+    for row in getattr(markup, 'keyboard', []) or []:
+        for button in row:
+            data = str(getattr(button, 'callback_data', '') or '')
+            if data.startswith(prefix):
+                key, _lang = _cms_edit_target(data[len(prefix):])
+                keys.add(key)
+    try:
+        collection = db.custom_texts if kind == 'text' else db.custom_buttons
+        docs = list(collection.find({'key': {'$in': list(keys)}})) if keys else []
+    except Exception:
+        docs = None
+
+    by_key_lang = {}
+    for doc in docs or []:
+        by_key_lang[(doc.get('key'), doc.get('lang'))] = doc
+
+    for row in getattr(markup, 'keyboard', []) or []:
+        for button in row:
+            data = str(getattr(button, 'callback_data', '') or '')
+            if not data.startswith(prefix):
+                continue
+            key, edit_lang = _cms_edit_target(data[len(prefix):])
+            if docs is None:
+                mark = '❓'
+            else:
+                langs = (edit_lang,) if edit_lang else ('ar', 'en', 'vi', 'zh')
+                eligible = []
+                changed = 0
+                for lang in langs:
+                    if kind == 'text':
+                        default = LANG.get(lang, {}).get(key)
+                    else:
+                        default = DEFAULT_BUTTONS.get(lang, {}).get(key)
+                    if default is None:
+                        continue
+                    eligible.append(lang)
+                    doc = by_key_lang.get((key, lang)) or {}
+                    if kind == 'text':
+                        value = doc.get('value')
+                        is_changed = value is not None and str(value).strip() != str(default).strip()
+                    else:
+                        value = doc.get('text')
+                        is_changed = (
+                            (value is not None and str(value).strip() != str(default).strip()) or
+                            bool(doc.get('emoji_id')) or bool(doc.get('style'))
+                        )
+                    changed += int(is_changed)
+                if not eligible or changed == 0:
+                    mark = '❌'
+                elif changed == len(eligible):
+                    mark = '✅'
+                else:
+                    mark = '🟡'
+            button.text = f"{button.text} {mark}"
+    return markup
+
+
 def _cms_edit_target(value):
     key, separator, lang = value.rpartition(':')
     if separator and key in WWC_CMS_TEXTS and lang in ('ar', 'en', 'vi', 'zh'):
@@ -24086,6 +24191,7 @@ def ad_cms_wwc_texts(call):
         markup.row(*nav)
     markup.add(InlineKeyboardButton('🎛 أزرار المتاجر', callback_data='ad_cms_b_wwc'))
     markup.add(InlineKeyboardButton('🔙 نصوص الرسائل', callback_data='ad_cms_msgs'))
+    _cms_status_snapshot(markup, 'text')
     bot.edit_message_text('🏪 <b>نصوص المتاجر والاشتراك</b>\n'
                           'تُعدّل وتحفظ من نظام التخصيص نفسه. اختر النص ثم اللغة.\n'
                           'احتفظ بمتغيرات النص؛ بيانات الرصيد والدفع تُملأ تلقائيًا.',
@@ -24110,6 +24216,8 @@ def ad_cms_cgpt(call):
         markup.add(InlineKeyboardButton('📝 ' + title, callback_data='edit_txt_' + key))
     markup.add(InlineKeyboardButton('📦 أسماء المنتجات وأوصافها ومددها', callback_data='cgpt_products_list'))
     markup.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_texts_main'))
+    _cms_status_snapshot(markup, 'text')
+    _cms_status_snapshot(markup, 'button')
     bot.edit_message_text('🤖 <b>تخصيص ChatGPT Business</b>\n\nاختر الزر أو النص. اكتب بالعربية وستعمل آلية الترجمة المعتادة للإنجليزية.\nاحتفظ بمتغيرات النص مثل {0} و{1}؛ تُملأ ببيانات الطلب تلقائياً.\nاسم زر الشراء قابل للتعديل، وتُضاف المدة والسعر إليه تلقائياً.', call.message.chat.id,
                          call.message.message_id, parse_mode='HTML', reply_markup=markup)
 
@@ -24216,6 +24324,7 @@ def ad_cms_msgs_ui(call):
     markup.add(InlineKeyboardButton("❌ رسالة الإيداع فشل", callback_data="edit_txt_dep_fail"))
     markup.add(InlineKeyboardButton("⚠️ رسالة معاملة مستخدمة", callback_data="edit_txt_tx_used"))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
+    _cms_status_snapshot(markup, 'text')
     bot.edit_message_text("📝 <b>تخصيص نصوص الرسائل:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ad_cms_shop')
@@ -24230,6 +24339,8 @@ def ad_cms_shop(call):
         mk.add(InlineKeyboardButton(f"✏️ {label}", callback_data=f"edit_txt_{key}"))
     back = 'admin_panel_main' if _vc_active(call.message.chat.id) else 'ad_texts_main'
     mk.add(InlineKeyboardButton('🔙 رجوع', callback_data=back))
+    _cms_status_snapshot(mk, 'text')
+    _cms_status_snapshot(mk, 'button')
     bot.edit_message_text('🔎 <b>تخصيص البحث والمتوفر</b>\nعدّل أسماء الأزرار وإيموجي Premium وألوانها، أو نصوص الرسائل بالعربية والإنجليزية.\n'
                           'المنتجات والأسعار والمخزون وروابط الأسماء تُضاف تلقائياً من المتجر.\n'
                           'عنوان الجدول يقبل إيموجي Premium؛ سطر العدد يستخدم <code>{0}</code>.',
@@ -24280,6 +24391,7 @@ def ad_cms_btns_list(call):
         markup.add(InlineKeyboardButton(f"✏️ {text}", callback_data=f"edit_btn_{key}"))
         
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_cms_btns_cats"))
+    _cms_status_snapshot(markup, 'button')
     bot.edit_message_text("👇 <b>اختر الزر الذي تريد تغيير اسمه أو الإيموجي الخاص به:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
 # ----------- دوال تعديل النصوص (الرسائل) -----------
@@ -31895,12 +32007,13 @@ def ad_cms_vip(call):
     bot.answer_callback_query(call.id)
     mk = InlineKeyboardMarkup(row_width=1)
     for key, label in VIP_CMS_KEYS:
-        mark = '✅' if _vip_customized(key) else ('⏸' if key in VIP_GATED_TEXTS else '⚪')
-        mk.add(InlineKeyboardButton(f"{mark} {label}", callback_data=f"edit_txt_{key}"))
+        mk.add(InlineKeyboardButton(f"{label}", callback_data=f"edit_txt_{key}"))
     mk.add(InlineKeyboardButton("✏️ زر VIP (الاسم والإيموجي)", callback_data="edit_btn_btn_vip"))
     mk.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_vip"))
+    _cms_status_snapshot(mk, 'text')
+    _cms_status_snapshot(mk, 'button')
     text = ("✏️ <b>نصوص VIP</b>\n\n"
-            "✅ = عدّلته\n⏸ = <b>موقوف</b> — ما ينرسل لأحد لين تعدّله وتحفظه\n⚪ = النص الافتراضي شغّال\n\n"
+            "✅ = مخصص في كل اللغات · 🟡 = مخصص جزئيًا · ❌ = افتراضي · ❓ = تعذر الفحص\n\n"
             "<i>تقدر تحط إيموجيات مميزة (Premium) في أي نص.</i>")
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=mk, parse_mode="HTML")
@@ -38551,7 +38664,7 @@ def ad_cms_site_list(call):
     PER = 10
     pages = max(1, (len(slots) + PER - 1) // PER)
     page = max(0, min(page, pages - 1))
-    lines = ["🌐 <b>إيموجي الموقع (Premium)</b>", "",
+    lines = ["🌐 <b>إيموجي الموقع (Premium)</b>", "✅ = مخصص يدويًا · ❌ = تلقائي/افتراضي", "",
              "كل خانة في الموقع تاخذ الإيموجي المميز من زر البوت المربوط فيها (من «🎛 أزرار البوت»)، "
              "أو تحط لها إيموجي هنا مباشرة. التغيير يطلع في الموقع من أول فتح جديد.", ""]
     mk = InlineKeyboardMarkup(row_width=1)
@@ -38559,7 +38672,7 @@ def ad_cms_site_list(call):
         e = cur.get(slot)
         src = _cms_site_src(slot, ov, e)
         lines.append((f'<tg-emoji emoji-id="{e}">✨</tg-emoji> ' if e else '▫️ ') + f"<b>{html.escape(label)}</b> — <i>{src}</i>")
-        mk.add(InlineKeyboardButton(f"{'✅' if ov.get(slot) else '✏️'} {label}"[:60], callback_data=f"wasl_{slot}"))
+        mk.add(InlineKeyboardButton(f"{'✅' if ov.get(slot) else '❌'} {label}"[:60], callback_data=f"wasl_{slot}"))
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"ad_cms_site_{page - 1}"))
@@ -39961,6 +40074,7 @@ def ad_cms_notice(call):
     for key in ('btn_notice_site', 'btn_notice_bot'):
         mk.add(InlineKeyboardButton(get_btn_data(call.from_user.id, key)[0], callback_data='edit_btn_' + key))
     mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_bc'))
+    _cms_status_snapshot(mk, 'button')
     bot.send_message(call.message.chat.id,
         '📢 <b>تخصيص أزرار النشر</b>\nالنص وإيموجي Premium واللون يستخدمون CMS نفسه، بالعربية والإنجليزية.\n'
         'اللون الافتراضي أخضر. لإضافة الإيموجي فقط، أرسله وحده وسيبقى اسم الزر الحالي.\n'

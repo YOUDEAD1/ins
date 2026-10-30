@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
+import uuid
 
 
 def _connection_values(values, source):
@@ -119,6 +121,44 @@ def build_report(db, target):
     return {'report_version': 2, 'state': 'found', 'read_only': True, 'account': user, 'ledger_totals': totals, 'recent_changes': recent, 'recent_limit': 250, 'stored_clawback_reasons': reasons, 'referrals_by_status': statuses, 'assessment': assessment, 'financial_tables': tables, 'referral_settings': referral_settings, 'legacy_referrals': db.referrals_v2.count_documents({'referrer_id': uid, 'ref_policy_version': {'$ne': 30}}), 'explanation': 'Recorded left/rejected reasons do not prove that Telegram membership actually changed. No credit, deduction, reclassification or debt forgiveness was performed.'}
 
 
+def _write_private_report(report, user_id):
+    """Save sensitive account data in a per-user state directory, never cwd."""
+    if os.name == 'nt':
+        state_root = os.environ.get('LOCALAPPDATA')
+        if not state_root:
+            raise OSError('LOCALAPPDATA is unavailable; refusing to write a financial report to the working directory.')
+        state_root = Path(state_root)
+    else:
+        state_root = Path(os.environ.get('XDG_STATE_HOME') or (Path.home() / '.local' / 'state'))
+    if not state_root.is_absolute():
+        raise OSError('The per-user state directory must be an absolute path.')
+
+    folder = state_root / 'lara-stock' / 'referral-reports'
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'nt':
+        os.chmod(folder, 0o700)
+
+    filename = f"referral-report-{int(user_id)}-{int(time.time())}-{uuid.uuid4().hex[:12]}.json"
+    path = folder / filename
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2, default=str)
+            stream.write('\n')
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    if os.name != 'nt':
+        os.chmod(path, 0o600)
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Read-only referral balance diagnosis')
     parser.add_argument('target', nargs='?', help='Telegram numeric ID or @username')
@@ -147,11 +187,10 @@ def main(argv=None):
             print(json.dumps(report, ensure_ascii=False))
             return 3
         user = report['account']
-        path = Path.cwd() / ('referral-report-' + str(int(user['user_id'])) + '.json')
-        path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        path = _write_private_report(report, user['user_id'])
         print('READ ONLY: no database data or balance was changed.')
         print('User ID:', user['user_id'], 'Balance:', user.get('balance', 0))
-        print('Report:', path.name)
+        print('Report:', path)
         return 0
     except Exception as exc:
         print('Database report unavailable (' + type(exc).__name__ + ').')
