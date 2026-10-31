@@ -130,12 +130,16 @@ def test_missing_settings_are_handled_before_asking_for_the_username(report, mon
 
 def test_selected_settings_produce_the_report_with_readonly_calls_only(report, mod, monkeypatch, tmp_path, capsys):
     import pymongo
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
     p = settings(tmp_path / 'bot settings.env', db=mod.db.name)
     connect = Mock(return_value=mod.db.client); monkeypatch.setattr(pymongo, 'MongoClient', connect)
     snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
     assert report.main(['1001', '--env', str(p), '--no-input']) == 0
     assert connect.call_args.args[0].startswith('mongodb://fake.test/')
-    saved = json.loads(Path('referral-report-1001.json').read_text())
+    files = list((tmp_path / 'lara-stock' / 'referral-reports').glob('referral-report-1001-*.json'))
+    assert len(files) == 1
+    saved = json.loads(files[0].read_text(encoding='utf-8'))
     assert saved['read_only'] and saved['account']['balance'] == 100
     assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
     assert 'TEST_PRIVATE_VALUE' not in capsys.readouterr().out

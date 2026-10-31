@@ -21,7 +21,7 @@ def credentials(mod, monkeypatch):
 
 
 def binance_row(tx='900001', **extra):
-    return {'orderId': tx, 'amount': '5', 'currency': 'USDT',
+    return {'orderType': 'C2C', 'orderId': tx, 'amount': '5', 'currency': 'USDT',
             'transactionTime': int(time.time() * 1000), **extra}
 
 
@@ -52,6 +52,17 @@ def test_a_new_binance_note_transaction_still_credits_once_after_the_bulk_read(m
     mod.check_binance_pay_auto(); mod.check_binance_pay_auto()
     assert mod.db.users.find_one({'user_id': uid})['balance'] == 5
     assert mod.db.used_transactions.count_documents({'transaction_id': '900001'}) == 1
+
+
+@pytest.mark.parametrize('saved_field', ['orderId', 'transactionId'])
+def test_paid_binance_aliases_are_recognized_by_the_bulk_read(mod, monkeypatch, saved_field):
+    row = binance_row('123456789012345678', transactionId='PA_FIXTURE_ALREADY_PAID')
+    mod.db.used_transactions.insert_one({'transaction_id': mod.normalize_tx_id(row[saved_field])})
+    monkeypatch.setattr(mod, '_binance_pay_request', lambda: [row])
+    one = Mock(wraps=mod.db.used_transactions.find_one)
+    monkeypatch.setattr(mod.db.used_transactions, 'find_one', one)
+    mod.check_binance_pay_auto()
+    assert one.call_count == 0
 
 
 def test_unmatched_binance_rows_are_not_negatively_cached_and_match_a_later_pending_deposit(mod, monkeypatch):

@@ -158,10 +158,14 @@ def test_standalone_report_matches_bot_readonly_report_and_never_starts_the_bot(
     monkeypatch.setenv('MONGO_DB_NAME', mod.db.name)
     monkeypatch.setattr(pymongo, 'MongoClient', lambda *a, **k: mod.db.client)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path))
     snapshot = {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
     assert report_module.build_report(mod.db, '1001') == mod._ref_balance_diagnosis('1001')
     assert report_module.main(['1001']) == 0
-    saved = json.loads((tmp_path / 'referral-report-1001.json').read_text())
+    files = list((tmp_path / 'lara-stock' / 'referral-reports').glob('referral-report-1001-*.json'))
+    assert len(files) == 1
+    saved = json.loads(files[0].read_text(encoding='utf-8'))
     assert saved['read_only'] and saved['account']['balance'] == 100
     assert snapshot == {n: list(mod.db[n].find({})) for n in mod.db.list_collection_names()}
 

@@ -2679,7 +2679,7 @@ class APIHandler(BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p in ('', '/'):
-            return _json_resp(self, 200, {'status': 'online'})
+            return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3'})
         if p == '/__lara/ping':
             n = str((params.get('n') or [''])[0])[:64]
             return _json_resp(self, 200, {'ok': True, 'app': 'lara', 'sig': _baseurl_sig(n)})
@@ -14083,6 +14083,50 @@ def _binance_history_tx_ids(tx):
             if str(tx.get(k) or '').strip()]
 
 
+def _binance_id_key(value):
+    value = str(value or '').strip().casefold()
+    # The Pay history can wrap the full numeric ID in a provider prefix.
+    # Compare the entire numeric payload, never a partial ID or arbitrary suffix.
+    match = re.fullmatch(r'(?:m_p_|p_)(\d{8,30})', value, re.ASCII)
+    return match.group(1) if match else value
+
+
+def _binance_manual_lookup(supplied):
+    """Search bounded history windows, without assuming Binance's row ordering."""
+    now = int(time.time() * 1000)
+    windows = [(now - 90 * 86400000 + 120000, now)]
+    deadline = time.monotonic() + 40
+    wanted = _binance_id_key(supplied)
+    for _ in range(16):
+        if not windows:
+            return None
+        if time.monotonic() >= deadline:
+            break
+        start, end = windows.pop()
+        response = execute_binance_call(
+            lambda c, lo=start, hi=end: c.get_pay_trade_history(startTime=lo, endTime=hi, limit=100),
+            max_retries=2, total_timeout=max(1, min(10, deadline - time.monotonic())))
+        if (not isinstance(response, dict) or response.get('success') is False or
+                str(response.get('code', '000000')) not in ('000000', '0') or
+                str(response.get('status', 'SUCCESS')).upper() not in ('SUCCESS', '200')):
+            raise ConnectionError('Binance history request failed')
+        rows = response.get('data')
+        if not isinstance(rows, list):
+            raise ConnectionError('Binance history response has no transaction list')
+        matches = [row for row in rows if isinstance(row, dict) and any(
+            _binance_id_key(value) == wanted for value in _binance_history_tx_ids(row))]
+        if len(matches) > 1:
+            raise ValueError('ambiguous_binance_id')
+        if matches:
+            return matches[0]
+        if len(rows) >= 100:
+            if start >= end:
+                break
+            mid = (start + end) // 2
+            windows.extend([(start, mid), (mid + 1, end)])
+    raise ConnectionError('Binance history search incomplete; retry with a narrower time window')
+
+
 def _binance_row_used_keys(tx):
     """كل معرّفات صف Binance Pay — أي واحد منها مسجّل يعني إن الحوالة انحسبت (زر الفحص يسجّل transactionId
     والفحص التلقائي يسجّل orderId، فلازم نفحص الاثنين عشان ما تنحسب مرتين)."""
@@ -14091,6 +14135,7 @@ def _binance_row_used_keys(tx):
         v = str(tx.get(k) or '').strip()
         if v:
             keys.add(normalize_tx_id(v))
+            keys.add(normalize_tx_id(_binance_id_key(v)))
     keys.discard('')
     return list(keys)
 
@@ -14114,7 +14159,7 @@ def _binance_pending_match(pending, tx, allow_amount_mismatch=False):
                 abs(float(amount_usd) - float(pending.get('unique_amount_usd', 0))) > 0.00005):
             return False
         tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
-        created_ms = int(pending.get('created_at', 0)) * 1000
+        created_ms = (int(time.time()) - 90 * 86400) * 1000 if allow_amount_mismatch else int(pending.get('created_at', 0)) * 1000
         if not tx_time or tx_time < created_ms - 120000 or tx_time > int(time.time() * 1000) + 120000:
             return False
         return bool(_binance_history_tx_ids(tx))
@@ -14176,7 +14221,8 @@ def _credit_binance_pending_record(uid, pending, tx, lang, via, allow_amount_mis
             {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
              'processing_tx_id': tx_id_norm},
             {'$set': {'status': 'completed', 'completed_at': int(time.time()),
-                      'completed_via': via, 'tx_id_detected': tx_id_norm},
+                      'completed_via': via, 'tx_id_detected': tx_id_norm,
+                      'credited_amount_usd': credit_amount, 'last_manual_check': 'completed'},
              '$unset': {'processing_tx_id': ''}}
         )
         unlock_deposit(uid)
@@ -14211,9 +14257,9 @@ def binance_manual_start(call):
         bot.send_message(uid, 'لا يوجد طلب Binance Pay معلّق صالح.' if get_lang(uid) == 'ar'
                          else 'There is no active Binance Pay deposit.')
         return
-    prompt = ('أرسل معرّف المعاملة أو Order ID الظاهر في سجل Binance Pay. سيتم قبول الإيداع فقط إذا طابق طلبك الحالي ومبلغه.'
+    prompt = ('أرسل معرّف المعاملة أو Order ID الظاهر في سجل Binance Pay. سنفحص الإيداع الوارد ونضيف المبلغ المستلم فعليًا، حتى لو اختلف عن المبلغ الذي طلبته.'
               if get_lang(uid) == 'ar' else
-              'Send the transaction ID or Order ID shown in Binance Pay history. The deposit is accepted only if it matches your active request and amount.')
+              'Send the transaction ID or Order ID from Binance Pay history. We verify the incoming payment and credit the actual amount received, even if it differs from your requested amount.')
     msg = bot.send_message(uid, prompt, reply_markup=InlineKeyboardMarkup().add(
         InlineKeyboardButton('❌ إلغاء' if get_lang(uid) == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
     bot.register_next_step_handler(msg, verify_binance_pay, get_lang(uid))
@@ -14225,12 +14271,14 @@ def verify_binance_pay(message, lang):
     uid = message.from_user.id
     if is_user_banned(uid) or not message.text:
         return
-    supplied = message.text.strip()
+    supplied = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]', '', message.text).strip()
+    supplied = supplied.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
     if supplied.lower() in ('cancel', 'الغاء', 'إلغاء', 'الغاء العملية') or supplied.startswith('/'):
         return
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', supplied, flags=re.ASCII):
-        bot.send_message(uid, '❌ معرّف غير صالح. أرسله كما يظهر في Binance.' if lang == 'ar'
+        msg = bot.send_message(uid, '❌ معرّف غير صالح. أرسله كما يظهر في Binance.' if lang == 'ar'
                          else '❌ Invalid ID. Send it exactly as shown in Binance.')
+        bot.register_next_step_handler(msg, verify_binance_pay, lang)
         return
     pending = db.pending_deposits.find_one({
         'user_id': uid, 'coin': 'BINANCE', 'status': 'pending',
@@ -14241,36 +14289,56 @@ def verify_binance_pay(message, lang):
                          else 'There is no active Binance Pay deposit.')
         return
     try:
-        response = execute_binance_call(lambda c: c.get_pay_trade_history(), max_retries=3)
-        if response is None:
-            raise ConnectionError('Binance Pay history unavailable')
-        rows = (response or {}).get('data') or []
-        if not isinstance(rows, list):
-            rows = []
-        wanted = supplied.casefold()
-        tx = next((row for row in rows if isinstance(row, dict) and
-                   any(value.casefold() == wanted for value in _binance_history_tx_ids(row))), None)
+        db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
+                                       {'$set': {'last_manual_check': 'checking'}})
+        tx = _binance_manual_lookup(supplied)
         if tx and _credit_binance_pending_record(
                 uid, pending, tx, lang, 'binance_manual', allow_amount_mismatch=True):
-            actual_usd, _price = binance_amount_to_usd(
-                float(tx.get('amount')), _binance_tx_currency(tx) or 'USDT')
+            completed = db.pending_deposits.find_one({'pending_id': pending['pending_id'], 'user_id': uid}) or {}
+            actual_usd = completed['credited_amount_usd']
             bot.send_message(uid,
                 f'✅ تم التحقق من المعاملة وإضافة المبلغ المستلم: ${float(actual_usd):.2f}.' if lang == 'ar'
                 else f'✅ Payment verified. The received amount ${float(actual_usd):.2f} was credited.')
             return
-        retry = ('❌ لم نعثر على معاملة مكتملة تطابق هذا المعرّف وطلبك الحالي. أرسل المعرّف مرة أخرى بعد التأكد من إكمال الدفع، أو ألغِ الطلب.'
-                 if lang == 'ar' else
-                 '❌ No completed payment matched this ID and your active request. Re-enter it after confirming payment is complete, or cancel the request.')
+        if tx and db.used_transactions.find_one({'transaction_id': {'$in': _binance_row_used_keys(tx)}}):
+            reason = 'already_credited'
+            retry = 'هذه المعاملة محسوبة سابقًا، ولن نضيفها مرة ثانية.' if lang == 'ar' else 'This payment has already been credited and cannot be credited again.'
+        elif tx:
+            reason = 'record_rejected'
+            retry = ('وجدنا المعرّف في Binance، لكن لم نتمكن من اعتماد إيداع وارد صالح. تواصل مع الإدارة بهذا المعرّف، ولا تعِد الدفع.' if lang == 'ar' else
+                     'We found the ID in Binance but could not confirm an eligible incoming payment. Contact support with this ID; do not pay again.')
+        else:
+            reason = 'not_in_history'
+            retry = ('لم يظهر هذا المعرّف في سجل Binance Pay لحساب الاستلام خلال آخر 90 يومًا. تأكد أنه معرّف Binance Pay، أو تواصل مع الإدارة. لا تعِد الدفع.' if lang == 'ar' else
+                     'This ID was not found in the receiving account\'s Binance Pay history for the last 90 days. Check the Binance Pay ID or contact support. Do not pay again.')
+        db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
+                                       {'$set': {'last_manual_check': reason, 'last_manual_checked_at': int(time.time())}})
         msg = bot.send_message(uid, retry, reply_markup=InlineKeyboardMarkup().add(
             InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
     except Exception as exc:
         logger.error('Manual Binance Pay verification failed: %s', exc)
-        msg = bot.send_message(uid, '⚠️ تعذر الاتصال بـ Binance الآن. أعد إرسال المعرّف بعد قليل أو ألغِ الطلب.' if lang == 'ar'
-                               else '⚠️ Binance is temporarily unreachable. Re-enter the ID shortly or cancel the request.',
+        db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
+                                       {'$set': {'last_manual_check': 'unavailable', 'last_manual_checked_at': int(time.time())}})
+        msg = bot.send_message(uid, '⚠️ تعذر إكمال فحص سجل Binance الآن. أعد المحاولة بعد قليل أو تواصل مع الإدارة بهذا المعرّف. لا تعِد الدفع.' if lang == 'ar'
+                               else '⚠️ The Binance history check could not finish. Retry shortly or contact support with this ID. Do not pay again.',
                                reply_markup=InlineKeyboardMarkup().add(
                                    InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
+
+
+@bot.message_handler(commands=['binance_status'])
+def binance_manual_status(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid) or message.chat.type != 'private':
+        return
+    bits = (message.text or '').split()
+    target = int(bits[1]) if len(bits) == 2 and bits[1].isdigit() else uid
+    record = db.pending_deposits.find_one({'user_id': target, 'coin': 'BINANCE'}, sort=[('created_at', -1)]) or {}
+    bot.send_message(uid, 'Binance verification: manual-v3\n'
+                     f"User: {target}\nDeposit: {record.get('status', 'none')}\n"
+                     f"Last check: {record.get('last_manual_check', 'none')}\n"
+                     f"Credited: {record.get('credited_amount_usd', 0)} USD")
 # ============================================================
 # 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
 # ============================================================
@@ -15447,23 +15515,22 @@ def check_binance_pay_auto():
 
         for tx in transactions:
             try:
-                # نفضّل orderId الرقمي
-                order_id = str(tx.get('orderId') or '').strip()
-                trans_id = str(tx.get('transactionId') or tx.get('bizOrderNo') or '').strip()
-                
-                if order_id and order_id.isdigit():
-                    tx_id = order_id
-                elif trans_id:
-                    tx_id = trans_id
-                else:
+                if str(tx.get('orderType') or '').upper() not in ('PAY', 'C2C'):
                     continue
+                # All automatic and manual paths use the same provider identity.
+                # Choosing orderId here and transactionId in manual verification
+                # lets concurrent workers credit the same payment twice.
+                ids = _binance_history_tx_ids(tx)
+                if not ids:
+                    continue
+                tx_id = ids[0]
 
                 tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
                 if tx_time and tx_time < cutoff_ms:
                     continue
 
                 tx_id_norm = normalize_tx_id(tx_id)
-                if tx_id_norm in _traffic_paid:
+                if tx_id_norm in _traffic_paid or any(k in _traffic_paid for k in _binance_row_used_keys(tx)):
                     continue
 
                 if db.used_transactions.find_one({'transaction_id': {'$in': _binance_row_used_keys(tx) or [tx_id_norm]}}):
@@ -15525,14 +15592,21 @@ def check_binance_pay_auto():
                     # لو حجزناها قبله، يفشل credit_user لأنه يحسبها duplicate ويرفض الإضافة.
                     user_lang = get_lang(target_uid_from_note)
                     try:
-                        credit_user(target_uid_from_note, amount, tx_id_norm, user_lang, "Binance Pay (Auto Note)")
-                        
-                        # 🔓 الإصلاح: نُغلق أي إيداع معلّق للمستخدم ونفكّ القفل.
-                        # بدونه: يُضاف الرصيد لكن يظل عالقاً في "لديك عملية دفع معلقة"
-                        # (لأنه سوّى deposit flow ثم دفع بالـ note بدل المبلغ الفريد).
-                        close_user_pending_and_unlock(
-                            target_uid_from_note, tx_id_norm, via='binance_note'
-                        )
+                        active = db.pending_deposits.find_one({
+                            'user_id': target_uid_from_note, 'coin': 'BINANCE',
+                            'status': {'$in': ['pending', 'processing']},
+                            'expires_at': {'$gt': int(time.time())}})
+                        if active:
+                            if active.get('status') == 'processing':
+                                continue
+                            success = _credit_binance_pending_record(
+                                target_uid_from_note, active, tx, user_lang, 'binance_note',
+                                allow_amount_mismatch=True)
+                        else:
+                            success = credit_user(target_uid_from_note, amount, tx_id_norm, user_lang,
+                                                  'Binance Pay (Auto Note)', trusted_txid=True)
+                        if success is not True:
+                            continue
                         
                         # بعد النجاح، نضيف معلومات الـ note للسجل (مش للحجز)
                         try:
@@ -15560,7 +15634,7 @@ def check_binance_pay_auto():
                         continue
 
                     logger.info(f"✅ Binance Pay AMOUNT MATCH: user {uid} amount=${amount:.4f} → base=${base_amount:.2f}")
-                    success = auto_credit_from_pending(pending, tx_id_norm, "Binance Pay")
+                    success = _credit_binance_pending_record(uid, pending, tx, get_lang(uid), 'binance_auto_amount')
                     if success:
                         logger.info(f"✅ Binance Pay credited (amount): user {uid} ${base_amount:.2f}")
                     continue
@@ -34045,7 +34119,8 @@ def _wa_deposit_status(identity, body):
         locked = False
     return 200, {'ok': True, 'status': status, 'balance': _wa_balance(uid), 'locked': bool(locked),
                  'pending': _wa_pending_view(uid, rec) if rec and status == 'pending' else None,
-                 'amount': _wa_fnum((rec or {}).get('base_amount_usd'))}
+                 'amount': _wa_fnum((rec or {}).get('credited_amount_usd', (rec or {}).get('base_amount_usd'))),
+                 'manual_status': (rec or {}).get('last_manual_check')}
 
 
 @_wa_deposit_guard
@@ -34067,15 +34142,27 @@ def _wa_deposit_cancel(identity, body):
 def _wa_deposit_check(identity, body):
     """زر (فحص الدفع) — يشغّل نفس فحص البوت الفوري لـ Binance/Bybit، والباقي يُفحص تلقائياً كل 12ث."""
     uid = identity['id']
+    if (db.users.find_one({'user_id': uid}, {'is_banned': 1}) or {}).get('is_banned') == 1:
+        return 403, {'error': 'banned'}
     rec = db.pending_deposits.find_one({'user_id': uid, 'status': 'pending'}, sort=[('created_at', -1)])
     if not rec:
         return 200, {'ok': True, 'status': None, 'balance': _wa_balance(uid)}
     if not _wa_rate_ok(f"depchk:{uid}", 2, 30):
         return 200, {'ok': True, 'status': 'pending', 'throttled': True}
     coin = str(rec.get('coin', ''))
+    if body.get('transaction_id') and coin != 'BINANCE':
+        return 400, {'error': 'bad_request'}
     target = None
     if coin == 'BINANCE':
-        target = lambda: binance_check_payment(_WACall(uid, f"binance_check_{uid}"))
+        supplied = str(body.get('transaction_id') or '').strip()
+        if supplied:
+            if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', supplied, re.ASCII):
+                return 400, {'error': 'bad_request'}
+            db.pending_deposits.update_one({'pending_id': rec['pending_id'], 'user_id': uid},
+                                           {'$set': {'last_manual_check': 'checking'}})
+            target = lambda: verify_binance_pay(_WAMessage(uid, supplied), get_lang(uid))
+        else:
+            target = lambda: binance_check_payment(_WACall(uid, f"binance_check_{uid}"))
     elif coin.startswith('BYBIT'):
         target = lambda: bybit_check_payment(_WACall(uid, f"bybit_check_{uid}"))
     if target:
@@ -34873,13 +34960,23 @@ def _order_extra(oid):
 
 # ─────────── البحث عن طلب ───────────
 def _doc_ts(d):
+    for key in ('created_at', 'purchased_at', 'date', 'timestamp', 'used_at'):
+        value = d.get(key)
+        try:
+            if isinstance(value, datetime.datetime):
+                return int(value.replace(tzinfo=value.tzinfo or datetime.timezone.utc).timestamp())
+            if isinstance(value, str) and not value.replace('.', '', 1).isdigit():
+                parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                return int(parsed.replace(tzinfo=parsed.tzinfo or datetime.timezone.utc).timestamp())
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric > 0:
+                return int(numeric / 1000 if numeric > 100000000000 else numeric)
+        except (TypeError, ValueError, OverflowError):
+            continue
     try:
         return int(d['_id'].generation_time.timestamp())
     except Exception:
-        try:
-            return int(d.get('created_at') or 0)
-        except Exception:
-            return 0
+        return 0
 
 
 def _doc_price(d):
@@ -34915,10 +35012,7 @@ def admin_user_brief(uid):
         pass
     st = vip_state(uid)
     uname = str(u.get('username') or '')
-    try:
-        joined = int(u['_id'].generation_time.timestamp())
-    except Exception:
-        joined = 0
+    joined = _doc_ts(u)
     return {'id': uid, 'name': _wa_plain(u.get('name') or uname or uid, 80), 'username': uname,
             'balance': round(_wa_fnum(u.get('balance')), 2), 'banned': u.get('is_banned') == 1,
             'is_admin': u.get('is_admin') == 1 or uid == OWNER_ID, 'is_owner': uid == OWNER_ID,
@@ -36688,9 +36782,10 @@ def _wa_maybe_handle_post(handler):
                 forwarded = handler.headers.get('X-Forwarded-For', '').split(',')
                 ip_text = (forwarded[-1].strip() if forwarded else '') or handler.client_address[0]
                 ip_text = str(ipaddress.ip_address(ip_text))
-                db.users.update_one({'user_id': uid, 'last_webapp_ip': {'$ne': ip_text}},
-                                    {'$set': {'last_webapp_ip': ip_text,
-                                              'last_webapp_seen': datetime.datetime.utcnow()}})
+                if 200 <= code < 400 and p in ('/webapp/bootstrap', '/webapp/me'):
+                    db.users.update_one({'user_id': uid, 'last_webapp_ip': {'$ne': ip_text}, 'is_banned': {'$ne': 1}},
+                                        {'$set': {'last_webapp_ip': ip_text,
+                                                  'last_webapp_seen': datetime.datetime.utcnow()}})
             except Exception:
                 pass
             _json_resp(handler, code, data)

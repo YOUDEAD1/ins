@@ -3575,6 +3575,7 @@ function renderPayment(sh, st) {
       ${p.method !== 'binance' && p.method !== 'bybit' && p.address ? `<button class="linkish" data-act="qr" style="display:inline-flex;align-items:center;gap:6px">${ic.qr}${esc(t('qr'))}</button><div id="qrbox"></div>` : ''}</div>
     ${p.note ? `<div class="paybox"><div class="k">${esc(t('noteId'))}</div><div class="v"><div class="addr">${esc(p.note)}</div><button class="copy-l" data-act="copy" data-v="${esc(p.note)}">${slotH('copy', ic.copy)}</button></div></div>` : ''}
     <div class="note warn">${slotH('warn', ic.warn)}<span>${esc(t('warnExact'))}<br><br>${esc(st.warnFee === 'bep20' ? t('warnBep') : t('warnGen'))}</span></div>
+    ${p.method === 'binance' ? `<div class="paybox"><label for="binance-order-id">Binance Order ID</label><input id="binance-order-id" type="text" dir="ltr" maxlength="128" autocomplete="off" value="${esc(st.manualId || '')}"><button class="btn ghost full" data-act="pay-manual" ${st.checking ? 'disabled' : ''}>${esc(isAr() ? 'التحقق من Order ID' : 'Verify Order ID')}</button><p class="hint" id="binance-manual-message"></p></div>` : ''}
     <p class="hint" id="ptimeup" hidden>${esc(t('timeUp'))}</p>`);
   sh.foot(`<div class="paybtns">
     ${manualCheck ? `<button class="btn primary full" data-act="pay-check" ${st.checking ? 'disabled' : ''}>${st.checking ? `<span class="spin"></span>${esc(t('checking'))}` : bem('check', ae('search')) + esc(t('checkNow'))}</button>` : ''}
@@ -3594,8 +3595,18 @@ async function pollPay(sh, st) {
   if (st.done || !sh.el.isConnected) return;
   const r = await api('deposit/status', { id: st.p.id });
   if (!r.ok) return;
-  const credited = typeof r.balance === 'number' && r.balance >= st.startBal + Math.max(0.09, (st.p.base || 0) * 0.9);
-  if (r.status === 'completed' || credited) finishPay(sh, st, 'completed', credited ? r.balance - st.startBal : r.amount);
+  const manualMessage = sh.el.querySelector('#binance-manual-message');
+  if (manualMessage && r.manual_status) {
+    const messages = {
+      checking: isAr() ? 'جاري فحص سجل Binance…' : 'Checking Binance history…',
+      not_in_history: isAr() ? 'لم يظهر المعرّف في سجل حساب الاستلام. تأكد منه أو تواصل مع الدعم؛ لا تعِد الدفع.' : 'ID not found in the receiving account history. Check the ID or contact support; do not pay again.',
+      unavailable: isAr() ? 'تعذر إكمال الفحص. أعد المحاولة أو تواصل مع الدعم؛ لا تعِد الدفع.' : 'The check could not finish. Retry or contact support; do not pay again.',
+      record_rejected: isAr() ? 'وجدنا المعرّف، لكن تعذر اعتماد إيداع وارد. تواصل مع الدعم.' : 'ID found, but the incoming deposit could not be approved. Contact support.',
+      already_credited: isAr() ? 'المعاملة محسوبة سابقًا.' : 'This payment was already credited.'
+    };
+    manualMessage.textContent = messages[r.manual_status] || '';
+  }
+  if (r.status === 'completed') finishPay(sh, st, 'completed', r.amount);
   else if (r.status === 'cancelled' || r.status === 'expired') finishPay(sh, st, r.status);
 }
 function finishPay(sh, st, status, amount) {
@@ -3607,7 +3618,19 @@ function finishPay(sh, st, status, amount) {
   if (S.tab === 'balance') loadWallet();
 }
 async function payAction(sh, st, act, el) {
+  if (act === 'pay-manual') {
+    st.manualId = String(sh.el.querySelector('#binance-order-id')?.value || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(st.manualId)) { toast(isAr() ? 'أدخل المعرّف كاملًا كما يظهر في Binance.' : 'Enter the full ID shown in Binance.', 'bad'); return true; }
+    st.checking = true; renderPayment(sh, st);
+    const r = await api('deposit/check', {transaction_id: st.manualId});
+    st.checking = false;
+    if (!r.ok) toast(errText(r), 'bad');
+    else if (r.throttled) toast(isAr() ? 'انتظر قليلًا ثم أعد المحاولة.' : 'Wait a moment before retrying.', 'bad');
+    if (!st.done && sh.el.isConnected) { renderPayment(sh, st); await pollPay(sh, st); }
+    return true;
+  }
   if (act === 'pay-check') {
+    st.manualId = String(sh.el.querySelector('#binance-order-id')?.value || st.manualId || '').trim();
     st.checking = true; renderPayment(sh, st);
     await api('deposit/check');
     setTimeout(async () => { await pollPay(sh, st); st.checking = false; if (!st.done && sh.el.isConnected) renderPayment(sh, st); }, 4000);

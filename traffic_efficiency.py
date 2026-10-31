@@ -35,8 +35,10 @@ class TrafficEfficiency:
                 continue
             try:
                 if provider == 'binance':
-                    order = str(row.get('orderId') or '').strip()
-                    raw = order if order.isdigit() else str(row.get('transactionId') or row.get('bizOrderNo') or '').strip()
+                    ids.update(self.ns['_binance_row_used_keys'](row))
+                    if len(ids) >= 512:
+                        break
+                    continue
                 else:
                     raw = self.ns['_bybit_row_txid'](row)
                 if raw:
