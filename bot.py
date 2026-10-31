@@ -1,5 +1,12 @@
 import sys
 import os
+
+# Coordinate before imports can start payment/referral threads or Telegram polling.
+# Test/import-only modules do not claim a production runtime lease.
+if __name__ == '__main__':
+    from runtime_handoff import acquire_runtime
+    _RUNTIME_HANDOFF = acquire_runtime()
+
 import functools
 import time
 import datetime
@@ -2680,7 +2687,9 @@ class APIHandler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p in ('', '/'):
             return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3',
-                                         'binance_receipt': 'order-id-v1'})
+                                         'binance_receipt': 'order-id-v1',
+                                         'runtime_handoff': 'single-active-v1',
+                                         'bot_active': bool(globals().get('_RUNTIME_HANDOFF'))})
         if p == '/__lara/ping':
             n = str((params.get('n') or [''])[0])[:64]
             return _json_resp(self, 200, {'ok': True, 'app': 'lara', 'sig': _baseurl_sig(n)})
