@@ -142,3 +142,38 @@ def test_note_scan_cannot_credit_while_manual_credit_has_not_written_its_receipt
         manual.result(timeout=8)
     assert mod._wa_balance(uid) == 3
     assert mod.db.used_transactions.count_documents({'user_id': uid}) == 1
+
+
+@pytest.mark.parametrize('flow', ['manual', 'auto_note', 'button'])
+def test_binance_receipt_displays_provider_order_id_but_retains_credit_identity(mod, monkeypatch, flow):
+    uid = 9123456
+    mod.db.users.insert_one({'user_id': uid, 'balance': 0., 'lang': 'en', 'is_banned': 0})
+    row = payment(transactionId='PA_Fixture_Received_123', orderId='123456789012345678', note=str(uid))
+    notices = []
+    monkeypatch.setattr(mod, 'notify_admins', notices.append)
+    monkeypatch.setattr(mod, 'BINANCE_API_KEY', 'FAKE')
+    monkeypatch.setattr(mod, 'BINANCE_API_SECRET', 'FAKE')
+    monkeypatch.setattr(mod, '_binance_pay_request', lambda: [row])
+    monkeypatch.setattr(mod, 'execute_binance_call', lambda fn, **kw: {'data': [row]})
+    if flow == 'auto_note':
+        mod.check_binance_pay_auto()
+    else:
+        mod.register_pending_deposit(uid, 3, 3, 'BINANCE')
+        if flow == 'manual':
+            mod.verify_binance_pay(_msg(mod, row['orderId'], uid), 'en')
+        else:
+            mod.binance_check_payment(mod._WACall(uid, f'binance_check_{uid}'))
+    receipt = mod.db.used_transactions.find_one({'user_id': uid})
+    assert receipt['transaction_id'] == mod.normalize_tx_id(row['transactionId'])
+    assert receipt['display_transaction_id'] == row['orderId']
+    assert any(f"<code>{row['orderId']}</code>" in message for message in notices)
+    assert not any('pafixturereceived123' in message for message in notices)
+    result = mod.admin_deep_search(row['orderId'])
+    assert result['deposits'][0]['tx'] == row['orderId']
+    mod.check_binance_pay_auto()
+    assert mod._wa_balance(uid) == 3
+
+
+def test_missing_order_id_displays_unmodified_provider_transaction_id(mod):
+    row = payment(transactionId='PA_Fixture_Original_123')
+    assert mod._binance_display_id(row) == row['transactionId']

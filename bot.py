@@ -2679,7 +2679,8 @@ class APIHandler(BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p in ('', '/'):
-            return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3'})
+            return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3',
+                                         'binance_receipt': 'order-id-v1'})
         if p == '/__lara/ping':
             n = str((params.get('n') or [''])[0])[:64]
             return _json_resp(self, 200, {'ok': True, 'app': 'lara', 'sig': _baseurl_sig(n)})
@@ -10927,7 +10928,7 @@ def show_hist_detail(call):
                     date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
                     amount = r.get('amount', 0)
                     method = r.get('method', '')
-                    tx_id = r.get('transaction_id', '')
+                    tx_id = r.get('display_transaction_id') or r.get('transaction_id', '')
                     
                     if l == 'en':
                         out += (
@@ -14083,6 +14084,12 @@ def _binance_history_tx_ids(tx):
             if str(tx.get(k) or '').strip()]
 
 
+def _binance_display_id(tx):
+    """Show the provider's Order ID while keeping the credit identity unchanged."""
+    order_id = str(tx.get('orderId') or '').strip()
+    return order_id or next(iter(_binance_history_tx_ids(tx)), '')
+
+
 def _binance_id_key(value):
     value = str(value or '').strip().casefold()
     # The Pay history can wrap the full numeric ID in a provider prefix.
@@ -14209,7 +14216,7 @@ def _credit_binance_pending_record(uid, pending, tx, lang, via, allow_amount_mis
         else:
             credit_amount = float(pending['base_amount_usd'])
         credited = credit_user(uid, credit_amount, tx_id_norm, lang,
-                               'Binance Pay', trusted_txid=True)
+                               'Binance Pay', trusted_txid=True, display_tx_id=_binance_display_id(tx))
         if credited is not True:
             db.pending_deposits.update_one(
                 {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
@@ -15604,7 +15611,8 @@ def check_binance_pay_auto():
                                 allow_amount_mismatch=True)
                         else:
                             success = credit_user(target_uid_from_note, amount, tx_id_norm, user_lang,
-                                                  'Binance Pay (Auto Note)', trusted_txid=True)
+                                                  'Binance Pay (Auto Note)', trusted_txid=True,
+                                                  display_tx_id=_binance_display_id(tx))
                         if success is not True:
                             continue
                         
@@ -20003,7 +20011,7 @@ def _cleanup_thread():
 threading.Thread(target=_cleanup_thread, daemon=True).start()
 
 
-def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
+def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False, display_tx_id=None):
     """
     🛡 إضافة رصيد للمستخدم بشكل atomic.
     trusted_txid: الـ tx_id فريد عالمياً (Bybit txID / hash بلوكشين) →
@@ -20011,6 +20019,7 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
     """
     # نحفظ النسخة الأصلية للعرض في الإشعارات
     tx_id_original = str(tx_id).strip() if tx_id else ''
+    tx_id_display = str(display_tx_id or tx_id_original).strip()
     # 🛡 الخطوة 0: Validation حرجة!
     try:
         amt = float(amt)
@@ -20175,6 +20184,7 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
     try:
         db.used_transactions.insert_one({
             'transaction_id': tx_id_clean,
+            **({'display_transaction_id': tx_id_display} if display_tx_id else {}),
             'fingerprint': tx_fingerprint,
             'amount': amt,
             'user_id': uid,
@@ -20262,7 +20272,7 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False):
     u = get_user_data_full(uid)
     buyer_m = f"@{u['username']}" if u and u.get('username') else f"مستخدم"
     
-    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>{admin_src_line(_dep_src(uid))}\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{tx_id_original}</code>"
+    admin_msg = f"🔐 <b>إشعار إدارة (إيداع)</b>{admin_src_line(_dep_src(uid))}\n\n👤 العميل: {buyer_m} (<code>{uid}</code>)\n💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {method}\n🆔 رقم العملية:\n<code>{html.escape(tx_id_display)}</code>"
     notify_admins(admin_msg)
     vip_on_deposit(uid, amt, tx_id_clean, method)   # 👑 صافي الشحن للـ VIP
     
@@ -23579,7 +23589,8 @@ def ad_check_tx_handle(message):
     seen_ids = set()  # عشان ما نكرر نفس النتيجة
     try:
         # 1) مطابقة كاملة (normalized)
-        for r in db.used_transactions.find({'transaction_id': query_norm}).limit(5):
+        for r in db.used_transactions.find({'$or': [{'transaction_id': query_norm},
+                                                   {'display_transaction_id': query}]}).limit(5):
             if r['_id'] not in seen_ids:
                 found.append(r); seen_ids.add(r['_id'])
         # 2) مطابقة كاملة (raw)
@@ -28801,7 +28812,7 @@ def ad_uh_dep_handler(call):
         date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M')
         amount = r.get('amount', 0)
         method = r.get('method', 'غير محدد')
-        tx_id = r.get('transaction_id', '')
+        tx_id = r.get('display_transaction_id') or r.get('transaction_id', '')
         
         text += (
             f"━━━━━━━━━━━━━━\n"
@@ -28838,7 +28849,7 @@ def ad_uh_dep_handler(call):
                 content += f"التاريخ: {date_str}\n"
                 content += f"المبلغ: ${r.get('amount', 0):.2f}\n"
                 content += f"الطريقة: {r.get('method', 'غير محدد')}\n"
-                content += f"الهاش: {r.get('transaction_id', '')}\n"
+                content += f"الهاش: {r.get('display_transaction_id') or r.get('transaction_id', '')}\n"
                 content += "-" * 40 + "\n"
             
             f = io.BytesIO(content.encode('utf-8'))
@@ -28903,7 +28914,7 @@ def ad_dldep_handler(call):
         content += f"التاريخ: {date_str}\n"
         content += f"المبلغ: ${r.get('amount', 0):.2f}\n"
         content += f"الطريقة: {r.get('method', 'غير محدد')}\n"
-        content += f"رقم العملية: {r.get('transaction_id', '')}\n"
+        content += f"رقم العملية: {r.get('display_transaction_id') or r.get('transaction_id', '')}\n"
         content += "-" * 50 + "\n"
     
     try:
@@ -28991,7 +29002,7 @@ def ad_full_history_handler(call):
             date_str = r['_id'].generation_time.strftime('%Y-%m-%d %H:%M:%S')
             amount = float(r.get('amount', 0))
             method = r.get('method', 'غير محدد')
-            tx_id = r.get('transaction_id', '-')
+            tx_id = r.get('display_transaction_id') or r.get('transaction_id', '-')
             total_deposited += amount
             m = method.lower()
             if 'admin' in m or 'gift' in m or 'هدية' in m or 'manual' in m:
@@ -34275,7 +34286,7 @@ def _wa_wallet(identity, body):
             ts = int(d['_id'].generation_time.timestamp())
         except Exception:
             ts = 0
-        tx = str(d.get('transaction_id', '') or '')
+        tx = str(d.get('display_transaction_id') or d.get('transaction_id') or '')
         items.append({'type': 'deposit', 'amount': round(_wa_fnum(d.get('amount')), 2),
                       'method': _wa_plain(d.get('method'), 60), 'tx': tx[:18] + ('…' if len(tx) > 18 else ''),
                       'ts': ts})
@@ -34367,7 +34378,7 @@ def _wa_history(identity, body):
         amt = round(_wa_fnum(d.get('amount')), 2)
         sums['deposits'] += amt
         items.append({'id': f"d{d['_id']}", 'type': 'deposit', 'amount': amt, 'ts': ts,
-                      'method': _wa_plain(d.get('method'), 80), 'tx': str(d.get('transaction_id') or '')[:200]})
+                      'method': _wa_plain(d.get('method'), 80), 'tx': str(d.get('display_transaction_id') or d.get('transaction_id') or '')[:200]})
     try:
         for b in db.balance_logs.find({'user_id': uid}).sort('_id', -1).limit(300):
             dt_ = b.get('date')
@@ -35314,9 +35325,9 @@ def admin_deep_search(q, limit=25):
     # 5) الإيداعات: هاش / Order ID / رقم العملية (نفس قاعدة بيانات «🔍 فحص معاملة»)
     deposits = []
     try:
-        for t in _ds_find(db.used_transactions, {'$or': [{'transaction_id': rx}, {'remark': rx}]}, limit=12, sort=('_id', -1)):
+        for t in _ds_find(db.used_transactions, {'$or': [{'transaction_id': rx}, {'display_transaction_id': rx}, {'remark': rx}]}, limit=12, sort=('_id', -1)):
             ts = int(t.get('created_at') or 0) or _doc_ts(t)
-            deposits.append({'tx': str(t.get('transaction_id') or ''), 'amount': round(_wa_fnum(t.get('amount')), 2),
+            deposits.append({'tx': str(t.get('display_transaction_id') or t.get('transaction_id') or ''), 'amount': round(_wa_fnum(t.get('amount')), 2),
                              'method': _wa_plain(t.get('method'), 60), 'ts': ts,
                              'user': _ds_user(t.get('user_id'), ucache) if t.get('user_id') is not None else None})
     except Exception:
@@ -35881,7 +35892,7 @@ def _wa_admin_user(identity, body):
     deps = []
     for d in db.used_transactions.find({'user_id': target}).sort('_id', -1).limit(15):
         deps.append({'amount': round(_wa_fnum(d.get('amount')), 2), 'method': _wa_plain(d.get('method'), 60),
-                     'tx': _wa_plain(d.get('transaction_id'), 80), 'ts': _doc_ts(d)})
+                     'tx': _wa_plain(d.get('display_transaction_id') or d.get('transaction_id'), 80), 'ts': _doc_ts(d)})
     logs = []
     for d in db.balance_logs.find({'user_id': target}).sort('_id', -1).limit(8):
         logs.append({'amount': round(_wa_fnum(d.get('amount')), 2), 'type': d.get('type'),
@@ -36174,7 +36185,7 @@ def _wa_admin_feed(identity, body):
         for d in db.used_transactions.find(q).sort('_id', -1).limit(30):
             last = str(d['_id'])
             items.append({'amount': round(_wa_fnum(d.get('amount')), 2), 'method': _wa_plain(d.get('method'), 60),
-                          'tx': _wa_plain(d.get('transaction_id'), 80), 'ts': _doc_ts(d),
+                          'tx': _wa_plain(d.get('display_transaction_id') or d.get('transaction_id'), 80), 'ts': _doc_ts(d),
                           'gift': 'gift' in str(d.get('method') or '').lower(),
                           'user': who(d.get('user_id')) if d.get('user_id') is not None else None})
     else:
