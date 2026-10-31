@@ -14095,8 +14095,8 @@ def _binance_row_used_keys(tx):
     return list(keys)
 
 
-def _binance_pending_match(pending, tx):
-    """Require a completed incoming Binance Pay record matching one live request."""
+def _binance_pending_match(pending, tx, allow_amount_mismatch=False):
+    """Validate an incoming Binance Pay record; only manual ID review can relax amount matching."""
     if not isinstance(tx, dict) or str(tx.get('orderType') or '').upper() != 'PAY':
         return False
     try:
@@ -14106,8 +14106,10 @@ def _binance_pending_match(pending, tx):
         amount_usd, _ = binance_amount_to_usd(raw, _binance_tx_currency(tx) or 'USDT')
         if amount_usd is None or not math.isfinite(float(amount_usd)):
             return False
-        # Binance Pay deposits request four decimal places; allow only provider rounding.
-        if abs(float(amount_usd) - float(pending.get('unique_amount_usd', 0))) > 0.00005:
+        # Automatic matching uses the unique amount. A user-entered full provider ID
+        # can use the actual received amount, but still needs a live owned request.
+        if (not allow_amount_mismatch and
+                abs(float(amount_usd) - float(pending.get('unique_amount_usd', 0))) > 0.00005):
             return False
         tx_time = int(tx.get('transactionTime') or tx.get('createTime') or 0)
         created_ms = int(pending.get('created_at', 0)) * 1000
@@ -14118,13 +14120,13 @@ def _binance_pending_match(pending, tx):
         return False
 
 
-def _credit_binance_pending_record(uid, pending, tx, lang, via):
+def _credit_binance_pending_record(uid, pending, tx, lang, via, allow_amount_mismatch=False):
     """Claim the pending deposit before crediting; unique transaction IDs prevent replay."""
     if not pending or pending.get('user_id') != uid or pending.get('coin') != 'BINANCE':
         return False
     if pending.get('status') != 'pending' or int(pending.get('expires_at', 0)) <= int(time.time()):
         return False
-    if not _binance_pending_match(pending, tx):
+    if not _binance_pending_match(pending, tx, allow_amount_mismatch=allow_amount_mismatch):
         return False
     tx_id = _binance_history_tx_ids(tx)[0]
     tx_id_norm = normalize_tx_id(tx_id)
@@ -14146,7 +14148,20 @@ def _credit_binance_pending_record(uid, pending, tx, lang, via):
         claimed = bool(getattr(claim, 'modified_count', 0))
         if not claimed:
             return False
-        credited = credit_user(uid, float(pending['base_amount_usd']), tx_id_norm, lang,
+        if allow_amount_mismatch:
+            actual_usd, _price = binance_amount_to_usd(
+                float(tx.get('amount')), _binance_tx_currency(tx) or 'USDT')
+            if actual_usd is None or not math.isfinite(float(actual_usd)) or float(actual_usd) <= 0:
+                db.pending_deposits.update_one(
+                    {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'processing',
+                     'processing_tx_id': tx_id_norm},
+                    {'$set': {'status': 'pending'}, '$unset': {'processing_tx_id': ''}}
+                )
+                return False
+            credit_amount = float(actual_usd)
+        else:
+            credit_amount = float(pending['base_amount_usd'])
+        credited = credit_user(uid, credit_amount, tx_id_norm, lang,
                                'Binance Pay', trusted_txid=True)
         if credited is not True:
             db.pending_deposits.update_one(
@@ -14233,9 +14248,13 @@ def verify_binance_pay(message, lang):
         wanted = supplied.casefold()
         tx = next((row for row in rows if isinstance(row, dict) and
                    any(value.casefold() == wanted for value in _binance_history_tx_ids(row))), None)
-        if tx and _credit_binance_pending_record(uid, pending, tx, lang, 'binance_manual'):
-            bot.send_message(uid, '✅ تم التحقق من Binance Pay وإضافة مبلغ طلبك.' if lang == 'ar'
-                             else '✅ Binance Pay was verified and your requested amount was credited.')
+        if tx and _credit_binance_pending_record(
+                uid, pending, tx, lang, 'binance_manual', allow_amount_mismatch=True):
+            actual_usd, _price = binance_amount_to_usd(
+                float(tx.get('amount')), _binance_tx_currency(tx) or 'USDT')
+            bot.send_message(uid,
+                f'✅ تم التحقق من المعاملة وإضافة المبلغ المستلم: ${float(actual_usd):.2f}.' if lang == 'ar'
+                else f'✅ Payment verified. The received amount ${float(actual_usd):.2f} was credited.')
             return
         retry = ('❌ لم نعثر على معاملة مكتملة تطابق هذا المعرّف وطلبك الحالي. أرسل المعرّف مرة أخرى بعد التأكد من إكمال الدفع، أو ألغِ الطلب.'
                  if lang == 'ar' else
