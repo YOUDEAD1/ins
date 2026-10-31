@@ -14078,7 +14078,8 @@ def binance_check_payment(call):
 
 def _binance_history_tx_ids(tx):
     """Provider identifiers are compared whole; never accept a substring."""
-    return [str(tx.get(k) or '').strip() for k in ('transactionId', 'orderId', 'merchantTradeNo')
+    return [str(tx.get(k) or '').strip() for k in
+            ('transactionId', 'orderId', 'merchantTradeNo', 'bizOrderNo', 'prepayId')
             if str(tx.get(k) or '').strip()]
 
 
@@ -14086,7 +14087,7 @@ def _binance_row_used_keys(tx):
     """كل معرّفات صف Binance Pay — أي واحد منها مسجّل يعني إن الحوالة انحسبت (زر الفحص يسجّل transactionId
     والفحص التلقائي يسجّل orderId، فلازم نفحص الاثنين عشان ما تنحسب مرتين)."""
     keys = set()
-    for k in ('transactionId', 'orderId', 'merchantTradeNo', 'bizOrderNo'):
+    for k in ('transactionId', 'orderId', 'merchantTradeNo', 'bizOrderNo', 'prepayId'):
         v = str(tx.get(k) or '').strip()
         if v:
             keys.add(normalize_tx_id(v))
@@ -14224,6 +14225,8 @@ def verify_binance_pay(message, lang):
         return
     try:
         response = execute_binance_call(lambda c: c.get_pay_trade_history(), max_retries=3)
+        if response is None:
+            raise ConnectionError('Binance Pay history unavailable')
         rows = (response or {}).get('data') or []
         if not isinstance(rows, list):
             rows = []
@@ -14234,12 +14237,19 @@ def verify_binance_pay(message, lang):
             bot.send_message(uid, '✅ تم التحقق من Binance Pay وإضافة مبلغ طلبك.' if lang == 'ar'
                              else '✅ Binance Pay was verified and your requested amount was credited.')
             return
-        bot.send_message(uid, '❌ لم يطابق المعرّف طلبك الحالي أو المبلغ أو معاملة Binance مكتملة.' if lang == 'ar'
-                         else '❌ The ID did not match your active request, amount, or a completed Binance payment.')
+        retry = ('❌ لم نعثر على معاملة مكتملة تطابق هذا المعرّف وطلبك الحالي. أرسل المعرّف مرة أخرى بعد التأكد من إكمال الدفع، أو ألغِ الطلب.'
+                 if lang == 'ar' else
+                 '❌ No completed payment matched this ID and your active request. Re-enter it after confirming payment is complete, or cancel the request.')
+        msg = bot.send_message(uid, retry, reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+        bot.register_next_step_handler(msg, verify_binance_pay, lang)
     except Exception as exc:
         logger.error('Manual Binance Pay verification failed: %s', exc)
-        bot.send_message(uid, '⚠️ تعذر التحقق الآن. حاول لاحقًا.' if lang == 'ar'
-                         else '⚠️ Verification is temporarily unavailable. Try again later.')
+        msg = bot.send_message(uid, '⚠️ تعذر الاتصال بـ Binance الآن. أعد إرسال المعرّف بعد قليل أو ألغِ الطلب.' if lang == 'ar'
+                               else '⚠️ Binance is temporarily unreachable. Re-enter the ID shortly or cancel the request.',
+                               reply_markup=InlineKeyboardMarkup().add(
+                                   InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+        bot.register_next_step_handler(msg, verify_binance_pay, lang)
 # ============================================================
 # 🛡 نظام المبلغ الفريد (يحمي من بوتات النصب اللي تراقب blockchain)
 # ============================================================
