@@ -454,6 +454,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .adm-oid{display:flex;align-items:center;gap:10px;padding:13px 14px;border-radius:16px;background:var(--surface-2);border:1px dashed var(--line-2)}
 .adm-oid .l{font-size:12px;color:var(--fg-2)}
 .adm-oid b{margin-inline-start:auto;font-size:17px;letter-spacing:.06em}
+.adm-oid .oid-copy-value{margin-inline-start:auto;padding:4px 0;border:0;background:transparent;color:var(--fg);font:600 17px var(--font-mono,monospace);letter-spacing:.06em;cursor:pointer;user-select:text;-webkit-user-select:text}
+.adm-oid .oid-copy-value:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
 .adm-user{margin-top:8px;padding:14px;border-radius:18px;background:var(--surface);border:1px solid var(--line)}
 .adm-user.u0{margin-top:0}
 .adm-uh{display:flex;align-items:center;gap:12px}
@@ -2385,12 +2387,18 @@ function toast(msg, kind) {
 async function copyText(text, btn, msg) {
   let ok = false;
   try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
-    try { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); ta.remove(); } catch (e2) {}
+    let ta;
+    try {
+      ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.opacity = '0'; ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta); ta.focus({ preventScroll: true }); ta.select(); ta.setSelectionRange(0, ta.value.length);
+      ok = document.execCommand('copy');
+    } catch (e2) {} finally { if (ta && ta.parentNode) ta.remove(); }
   }
   if (ok) {
     toast(msg || t('copied'), 'ok');
     if (btn) { btn.classList.add('done'); const h = btn.innerHTML; btn.innerHTML = ic.check; setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = h; }, 1500); }
-  }
+  } else toast('تعذر النسخ؛ جرّب الضغط على أيقونة النسخ.', 'bad');
 }
 
 /* ───────────────────────── sheets ───────────────────────── */
@@ -4440,7 +4448,7 @@ function openAdmOrder(c) {
   const kv = (k, v, raw) => v == null || v === '' ? '' : `<div class="kv"><span>${esc(k)}</span><b ${raw ? '' : 'dir="auto"'}>${raw ? v : esc(v)}</b></div>`;
   const codes = c.codes || [];
   const body = `
-    <div class="adm-oid"><span class="l">${esc(adt('orderId'))}</span><b class="mono" dir="ltr">${esc(c.order_id)}</b><button class="copy" data-act="copy" data-v="${esc(c.order_id)}" aria-label="${esc(adt('copyId'))}">${ic.copy}</button></div>
+    <div class="adm-oid"><span class="l">${esc(adt('orderId'))}</span><button type="button" class="oid-copy-value" data-act="copy" data-v="${esc(c.order_id)}" dir="ltr" aria-label="${esc(adt('copyId'))}">${esc(c.order_id)}</button><button type="button" class="copy" data-act="copy" data-v="${esc(c.order_id)}" aria-label="${esc(adt('copyId'))}">${ic.copy}</button></div>
     <div class="summary">
       ${kv(adt('status'), `<span class="status ${ADM_STC[c.status] || 'st-info'}">${esc(admSt(c.status))}</span>`, true)}
       ${kv(adt('product'), admName(c.product || {}))}

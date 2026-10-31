@@ -842,8 +842,8 @@ def _notify_all_admins_api_purchase(uid, pr, qty, total, order_id, buyer_info, i
             f"\U0001f4e6 <b>\u0627\u0644\u0645\u0646\u062a\u062c:</b> {product_display}\n"
             f"\U0001f522 <b>\u0627\u0644\u0643\u0645\u064a\u0629:</b> <b>{qty}</b>\n"
             f"\U0001f4b0 <b>\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a:</b> <b>${total:.2f}</b>\n"
-            f"\U0001f464 <b>\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u0634\u062a\u0631\u064a:</b> {buyer_info or 'N/A'}\n"
-            f"\U0001f194 <b>\u0631\u0642\u0645 \u0627\u0644\u0637\u0644\u0628:</b> <code>{order_id}</code>\n"
+            f"\U0001f464 <b>\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u0634\u062a\u0631\u064a:</b> {html.escape(str(buyer_info or 'N/A'))}\n"
+            f"\U0001f194 <b>\u0631\u0642\u0645 \u0627\u0644\u0637\u0644\u0628:</b> <code>{html.escape(str(order_id))}</code>\n"
             f"{status_line}"
         )
         _queue_api_purchase_notice(order_id, msg)
@@ -2038,6 +2038,24 @@ def _build_product_snapshot(pr):
     }
 
 
+def _api_catalog_event_data(data, product_id):
+    """تفاصيل المنتج تنشر فقط لو المطورين يقدرون يشوفونه (نفس قاعدة /product و /products)."""
+    if product_id is None:
+        return data
+    pid = str(product_id)
+    try:
+        prod = _api_find_external_product(pid) if pid.startswith('ext_') else find_product(pid)
+    except Exception:
+        prod = None
+    if prod is not None and _customer_product_visible(prod):
+        return data
+    minimal = {'product_id': pid, 'available': False}
+    for k in ('api_user_id', 'buyer_user_id'):
+        if k in (data or {}):
+            minimal[k] = data[k]
+    return minimal
+
+
 def _emit_event(event_type, data, product_id=None):
     """
     🔔 يبث حدث لكل المطورين (يُحفظ في DB + يُرسل لـ webhooks).
@@ -2054,6 +2072,8 @@ def _emit_event(event_type, data, product_id=None):
             invalidate_webapp = globals().get('_wa_invalidate_catalog')
             if invalidate_webapp:
                 invalidate_webapp()
+            # 🔐 المنتج المخفي ما تطلع تفاصيله للمطورين — بس إشعار إنه غير متاح
+            data = _api_catalog_event_data(data, product_id)
         import time as _t
         now = _t.time()
         evt = {
@@ -2107,26 +2127,67 @@ def _api_event_visible_to_user(evt, uid):
     return 'buyer_user_id' not in data
 
 
-def _url_is_public(url):
-    """http(s) URL whose host resolves only to public internet addresses."""
+def _resolve_public_url(url):
+    """يحلّ اسم الـ host مرة وحدة ويرجّع (parsed, port, ip) لو كل العناوين عامة، وإلا None."""
     try:
         import ipaddress, socket as _sock
         u = urllib.parse.urlparse(str(url or ''))
         if u.scheme not in ('http', 'https') or not u.hostname or u.username or u.password:
-            return False
+            return None
         host = u.hostname.strip().lower()
         if host in ('localhost',) or host.endswith('.local') or host.endswith('.internal'):
-            return False
-        infos = _sock.getaddrinfo(host, u.port or (443 if u.scheme == 'https' else 80), proto=_sock.IPPROTO_TCP)
+            return None
+        port = u.port or (443 if u.scheme == 'https' else 80)
+        infos = _sock.getaddrinfo(host, port, proto=_sock.IPPROTO_TCP)
         if not infos:
-            return False
+            return None
+        ips = []
         for info in infos:
             ip = ipaddress.ip_address(info[4][0])
             if not ip.is_global or ip.is_multicast:
-                return False
-        return True
+                return None
+            ips.append(ip)
+        return u, port, ips[0]
     except Exception:
-        return False
+        return None
+
+
+def _url_is_public(url):
+    """http(s) URL whose host resolves only to public internet addresses."""
+    return _resolve_public_url(url) is not None
+
+
+class _PinnedHostAdapter(requests.adapters.HTTPAdapter):
+    """يتصل بعنوان IP محدد مسبقاً مع إبقاء اسم الـ host للـ TLS (SNI + فحص الشهادة)."""
+
+    def __init__(self, hostname, *args, **kwargs):
+        self._pinned_hostname = hostname
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs['server_hostname'] = self._pinned_hostname
+        kwargs['assert_hostname'] = self._pinned_hostname
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _post_to_public_url(url, **kwargs):
+    """POST لعنوان عام فقط: نتحقق من الـ IP ثم نتصل بنفس الـ IP (يمنع DNS rebinding)."""
+    resolved = _resolve_public_url(url)
+    if not resolved:
+        return None
+    u, port, ip = resolved
+    ip_host = f'[{ip}]' if ip.version == 6 else str(ip)
+    default_port = 443 if u.scheme == 'https' else 80
+    netloc = ip_host if port == default_port else f'{ip_host}:{port}'
+    pinned = urllib.parse.urlunparse((u.scheme, netloc, u.path or '/', u.params, u.query, ''))
+    headers = dict(kwargs.pop('headers', None) or {})
+    headers['Host'] = u.netloc
+    kwargs['allow_redirects'] = False
+    with requests.Session() as s:
+        s.trust_env = False  # ما نمرّ عبر بروكسي من البيئة؛ الاتصال المباشر بالعنوان المتحقَّق منه
+        if u.scheme == 'https':
+            s.mount('https://', _PinnedHostAdapter(u.hostname))
+        return s.post(pinned, headers=headers, **kwargs)
 
 
 def _deliver_webhook(webhook_doc, evt):
@@ -2161,9 +2222,9 @@ def _deliver_webhook(webhook_doc, evt):
 
     for attempt in range(3):
         try:
-            if not _url_is_public(url):
+            r = _post_to_public_url(url, data=body, headers=headers, timeout=8)
+            if r is None:
                 return False
-            r = requests.post(url, data=body, headers=headers, timeout=8, allow_redirects=False)
             if 200 <= r.status_code < 300:
                 # نجاح — صفّر العداد
                 if webhook_doc.get('failures', 0) > 0:
@@ -2196,6 +2257,30 @@ def _deliver_webhook(webhook_doc, evt):
     return False
 
 
+def _webhook_subscriber_active(h):
+    """الـ webhook يستقبل فقط لو صاحبه غير محظور ومفتاحه اللي سجّله لسه شغّال."""
+    try:
+        uid = h.get('api_user_id')
+        owner = db.users.find_one({'user_id': uid}, {'is_banned': 1})
+        if not owner or owner.get('is_banned') == 1:
+            return False
+        key_q = {'user_id': uid, 'is_active': True}
+        if h.get('api_key_id') is not None:
+            key_q['_id'] = h['api_key_id']
+        return db.api_keys.find_one(key_q, {'_id': 1}) is not None
+    except Exception:
+        return False
+
+
+def _revoke_user_webhooks(uid, reason):
+    """يوقف كل webhooks المستخدم (عند تغيير المفتاح أو تعطيله أو الحظر)."""
+    try:
+        db.api_webhooks.update_many({'api_user_id': uid, 'is_active': True},
+                                    {'$set': {'is_active': False, 'disabled_reason': reason}})
+    except Exception as e:
+        logger.warning(f"webhook revoke failed for {uid}: {e}")
+
+
 def _webhook_worker():
     """Thread خلفي يسحب من queue ويوزع لكل المطورين المسجلين"""
     logger.info("[Webhook] worker started")
@@ -2209,6 +2294,8 @@ def _webhook_worker():
             hooks = list(db.api_webhooks.find({'is_active': True}))
             for h in hooks:
                 if not _api_event_visible_to_user(evt, h.get('api_user_id')):
+                    continue
+                if not _webhook_subscriber_active(h):
                     continue
                 # نشغل كل تسليم في thread صغير عشان webhook بطيء ما يعطّل البقية
                 threading.Thread(
@@ -3377,6 +3464,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 {'api_user_id': uid},
                 {'$set': {
                     'api_user_id': uid,
+                    'api_key_id': doc.get('_id'),
                     'url': url,
                     'secret': secret,
                     'event_filter': ev_filter,
@@ -3582,8 +3670,17 @@ def _is_admin_cb(data):
     return str(data or '').startswith(_ADMIN_CB_PREFIXES)
 
 
-@bot.callback_query_handler(func=lambda call: _is_admin_cb(call.data) and not _is_admin_check(call.from_user.id))
+@bot.callback_query_handler(func=lambda call: _is_admin_cb(call.data) and (
+    not _is_admin_check(call.from_user.id)
+    or not _admin_private_chat(call.from_user.id, getattr(getattr(call, 'message', None), 'chat', None))))
 def _admin_cb_guard(call):
+    if _is_admin_check(call.from_user.id):
+        try:
+            bot.answer_callback_query(call.id, "⚠️ لوحة الإدارة تعمل في المحادثة الخاصة مع البوت فقط.\n"
+                                      "Admin panel works only in your private chat with the bot.", show_alert=True)
+        except Exception:
+            pass
+        return
     _admin_only_middleware(call)        # يرد «ليس لديك صلاحية» ويسجّل المحاولة
 
 
@@ -3621,14 +3718,31 @@ def _deposit_lock_guard_message(message):
 
 # 🛡 دالة فحص صلاحية الأدمن (تُستخدم بكل دوال الأدمن)
 def _is_admin_check(uid):
-    """يتحقق إن المستخدم أدمن أو OWNER"""
+    """يتحقق إن المستخدم أدمن أو OWNER — الأدمن المحظور يفقد صلاحياته."""
     if uid == OWNER_ID:
         return True
     try:
         u = db.users.find_one({'user_id': int(uid)})
-        return u and u.get('is_admin') == 1
+        return bool(u) and u.get('is_admin') == 1 and u.get('is_banned') != 1
     except Exception:
         return False
+
+
+def _admin_private_chat(uid, chat):
+    """أزرار وخطوات الأدمن تشتغل في محادثته الخاصة فقط (في الجروب أي عضو يقدر يكمل الخطوة)."""
+    return chat is None or getattr(chat, 'id', None) == uid
+
+
+def admin_step(func):
+    """للخطوات (next-step): ينفذ فقط لو المرسل أدمن وفي محادثته الخاصة."""
+    @functools.wraps(func)
+    def wrapper(message, *args, **kwargs):
+        uid = getattr(getattr(message, 'from_user', None), 'id', None)
+        if uid is None or not _is_admin_check(uid) or not _admin_private_chat(uid, getattr(message, 'chat', None)):
+            logger.warning(f"🚨 admin step {func.__name__} rejected for {uid}")
+            return
+        return func(message, *args, **kwargs)
+    return wrapper
 
 
 # 🛡 Middleware: يفحص كل callback queries اللي تبدأ بـ ad_ أو admin_
@@ -3692,6 +3806,14 @@ def admin_required(func):
     """
     def wrapper(call, *args, **kwargs):
         uid = call.from_user.id
+        if _is_admin_check(uid) and not _admin_private_chat(uid, getattr(getattr(call, 'message', None), 'chat', None)):
+            try:
+                bot.answer_callback_query(call.id, bil(uid, "⚠️ لوحة الإدارة تعمل في المحادثة الخاصة مع البوت فقط.",
+                                                        "⚠️ The admin panel works only in your private chat with the bot."),
+                                          show_alert=True)
+            except Exception:
+                pass
+            return
         if not _is_admin_check(uid):
             try:
                 bot.answer_callback_query(
@@ -4354,6 +4476,39 @@ def normalize_tx_id(tx_id):
         s = re.sub(r'[^a-z0-9]', '', s)
     
     return s
+
+
+def _ton_hash_hex(h):
+    """هاش معاملة TON بصيغة واحدة (hex 64) — يقبل hex أو base64 فقط ويرفض أي زيادة أو نقص."""
+    t = re.sub(r'\s+', '', str(h or ''))
+    try:
+        if re.fullmatch(r'(?:0[xX])?[0-9a-fA-F]{64}', t):
+            raw = bytes.fromhex(t[-64:])
+        elif re.fullmatch(r'[A-Za-z0-9+/_-]{43}=?', t):
+            b = t.rstrip('=').replace('+', '-').replace('/', '_')
+            raw = base64.urlsafe_b64decode(b + '=')
+        else:
+            return ''
+    except Exception:
+        return ''
+    return raw.hex() if len(raw) == 32 else ''
+
+
+def _ton_tx_keys(canon_hex):
+    """كل المفاتيح اللي ممكن سُجّلت بها نفس المعاملة (الجديد + الصيغ القديمة) لمنع التكرار."""
+    raw = bytes.fromhex(canon_hex)
+    keys = {'ton' + canon_hex}
+    for form in (canon_hex, base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode()):
+        keys.add(normalize_tx_id(form))
+        keys.add(normalize_tx_id(form.rstrip('=')))
+    keys.discard('')
+    return keys
+
+
+def _ltc_txid(text):
+    """TxID لايتكوين: 64 hex بالضبط، بدون أي إضافات."""
+    t = str(text or '').strip().lower()
+    return t if re.fullmatch(r'[0-9a-f]{64}', t) else ''
 
 
 # 🛡 دالة منفصلة لإنشاء الـ unique indexes - تتنفذ في كل تشغيل
@@ -10409,9 +10564,10 @@ def process_gh_step_2fa(message):
     # 🛡 خصم atomic مع إعادة فحص الرصيد — يمنع الرصيد السالب / الشراء المزدوج.
     # (كان $inc بسيط بدون فحص؛ والرصيد فُحص فقط في البداية قبل دقائق —
     #  ثغرة TOCTOU لأن إدخال 2FA قد يتجاوز قفل الـ60 ثانية.)
+    _gh_marker = '_gh_debits.' + secrets.token_hex(8)
     _gh_updated = db.users.find_one_and_update(
         {'user_id': uid, 'balance': {'$gte': price - MONEY_EPS}},
-        {'$inc': {'balance': -price}},
+        {'$inc': {'balance': -price}, '$set': {_gh_marker: price}},
         return_document=True
     )
     if _gh_updated is None:
@@ -10422,7 +10578,24 @@ def process_gh_step_2fa(message):
         return
     status_msg = bot.send_message(uid, get_text(uid, 'gh_deducted'), parse_mode="HTML")
     
+    def _gh_refund_once():
+        """استرجاع مرة وحدة فقط — مربوط بعلامة الخصم (ما يتكرر ولا يصير بعد نجاح التفعيل)."""
+        db.users.update_one({'user_id': uid, _gh_marker: price},
+                            {'$inc': {'balance': price}, '$unset': {_gh_marker: ''}})
+        _invalidate_user_cache(uid)
+
+    def _gh_settle():
+        db.users.update_one({'user_id': uid}, {'$unset': {_gh_marker: ''}})
+
+    def _gh_ui(text):
+        # تعديل رسالة الحالة ما يأثر على الفلوس (العميل ممكن يحذف الرسالة أو يحظر البوت)
+        try:
+            bot.edit_message_text(text, chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+        except Exception:
+            pass
+
     def api_worker():
+        accepted = False
         try:
             if not GITHUB_API_KEY:
                 raise Exception("API Key not found in .env")
@@ -10447,11 +10620,13 @@ def process_gh_step_2fa(message):
                 res_data = res.json()
                 job_id = res_data.get("job_id")
                 
+                accepted = True
                 if not job_id:
-                    bot.edit_message_text(get_text(uid, 'gh_submitted'), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                    _gh_settle()
+                    _gh_ui(get_text(uid, 'gh_submitted'))
                     return
 
-                bot.edit_message_text(get_text(uid, 'gh_received', job_id), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                _gh_ui(get_text(uid, 'gh_received', job_id))
                 
                 for i in range(1, 35):
                     time.sleep(5) 
@@ -10467,8 +10642,9 @@ def process_gh_step_2fa(message):
                             if status == "submitted":
                                 app_id = s_data.get("app_id", "N/A")
                                 
+                                _gh_settle()
                                 db.orders.insert_one({'user_id': uid, 'product_id': 'GitHub_Student', 'code_delivered': f"Account: {g_user} | AppID: {app_id}"})
-                                bot.edit_message_text(get_text(uid, 'gh_success', g_user), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                _gh_ui(get_text(uid, 'gh_success', g_user))
                                 notify_admins(f"🔐 <b>إشعار إدارة (تفعيل GitHub) ⚡</b>\n\n👤 العميل: <code>{uid}</code>\n📦 الحساب: {g_user}\n🔖 رقم الطلب: <code>{job_id}</code>\n✅ الحالة: تم التفعيل بنجاح!")
                                 
                                 log_ch = get_setting('log_channel')
@@ -10497,8 +10673,8 @@ def process_gh_step_2fa(message):
                                 
                             elif status in ["failed", "error"]:
                                 err_reason = s_data.get("error", s_data.get("refund_reason", "بيانات تسجيل الدخول أو الـ 2FA غير صحيحة"))
-                                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-                                bot.edit_message_text(get_text(uid, 'gh_fail', err_reason, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                                _gh_refund_once()
+                                _gh_ui(get_text(uid, 'gh_fail', err_reason, price))
                                 return
                                 
                             else:
@@ -10512,20 +10688,29 @@ def process_gh_step_2fa(message):
                     except requests.exceptions.Timeout:
                         continue
                         
-                bot.edit_message_text(get_text(uid, 'gh_timeout'), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                _gh_ui(get_text(uid, 'gh_timeout'))
+                try:
+                    notify_admins(f"⏳ تفعيل GitHub بدون نتيجة نهائية — يحتاج مراجعة\n👤 <code>{uid}</code>\n🔖 <code>{job_id}</code>\n💰 ${price:.2f}")
+                except Exception:
+                    pass
 
             else:
                 try: error_msg = res.json().get("error", "Unknown Error")
                 except: error_msg = f"HTTP {res.status_code}"
                 
-                db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-                bot.edit_message_text(get_text(uid, 'gh_fail', error_msg, price), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
+                _gh_refund_once()
+                _gh_ui(get_text(uid, 'gh_fail', error_msg, price))
                 logger.error(f"GitHub API Fast Error: {res.status_code} - {res.text}")
                 
         except Exception as e:
-            db.users.update_one({'user_id': uid}, {'$inc': {'balance': price}})
-            try: bot.edit_message_text(get_text(uid, 'gh_conn_err', e), chat_id=uid, message_id=status_msg.message_id, parse_mode="HTML")
-            except: pass
+            if not accepted:
+                _gh_refund_once()      # الطلب ما انقبل عند المزود → استرجاع (مرة وحدة)
+            else:
+                try:
+                    notify_admins(f"⚠️ خطأ أثناء متابعة تفعيل GitHub بعد قبوله — راجع يدوياً\n👤 <code>{uid}</code>\n💰 ${price:.2f}")
+                except Exception:
+                    pass
+            _gh_ui(get_text(uid, 'gh_conn_err', e))
             logger.error(f"GitHub Connection Error: {e}")
         finally:
             # 🛡 تحرير قفل الشراء (سواء نجح أو فشل)
@@ -11566,7 +11751,7 @@ def _shop_item_btn(it, l):
 
 def _shop_is_admin(uid):
     u = get_user_data_full(uid) or {}
-    return u.get('is_admin') == 1 or uid == OWNER_ID
+    return uid == OWNER_ID or (u.get('is_admin') == 1 and u.get('is_banned') != 1)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == 'shop_search')
@@ -12599,7 +12784,10 @@ def _cancel_cgpt_purchase(uid, lang):
 def cgpt_cancel_buy_callback(call):
     try: bot.answer_callback_query(call.id)
     except: pass
-    uid = int(call.data.replace("cgpt_cancel_buy_", ""))
+    uid = call.from_user.id
+    # 🔐 المستخدم يلغي شراءه هو فقط — الأيدي في الزر ما يُوثق فيه
+    if call.data != f"cgpt_cancel_buy_{uid}":
+        return
     lang = get_lang(uid)
     _cancel_cgpt_purchase(uid, lang)
 
@@ -13154,17 +13342,16 @@ def _do_purchase(uid, pid, qty, lang):
                 except Exception:
                     _delivery_ok = False
 
-            # 🛡 لو فشل إيصال الأكواد نهائياً → نسترجع الرصيد ونعيد المخزون (وإلا العميل يخسر فلوسه بلا مقابل)
+            # 🛡 الأكواد انحفظت في سجل مشتريات العميل (يقرأها من الموقع أو «مشترياتي») قبل محاولة الإرسال،
+            # فلو فشلت رسالة تيليجرام (مثلاً العميل حاظر البوت) ما نسترجع الرصيد ولا نرجّع الأكواد للمخزون —
+            # وإلا يقرأ الأكواد ويسترد فلوسه وتنباع نفس الأكواد لعميل ثاني.
             if not _delivery_ok:
-                refunded = _stock_refund_attempt(uid, order_id, reservation_id, total_price,
-                    debit_field, [i['_id'] for i in reserved_items])
                 try:
-                    bot.send_message(uid, bil(uid,
-                        "⚠️ تعذّر تسليم الأكواد. أُعيد رصيدك بالكامل." if refunded else "⏳ تعذّر التسليم؛ جارٍ التحقق من الاسترجاع.",
-                        "⚠️ Delivery failed. Your balance was fully refunded." if refunded else "⏳ Delivery failed; your refund is being verified."))
+                    notify_admins(f"⚠️ <b>تعذّر إرسال أكواد الطلب للعميل عبر تيليجرام</b>\n👤 <code>{uid}</code>\n"
+                                  f"🧾 <code>{html.escape(str(order_id))}</code>\n"
+                                  f"ℹ️ الطلب مكتمل والأكواد محفوظة في سجل مشترياته (الموقع / مشترياتي).")
                 except Exception:
                     pass
-                return {'ok': False, 'error': 'purchase_failed', 'refunded': refunded}
             _stock_forget_debit(uid, debit_field)
 
             if _delivery_ok or not delivered_codes:
@@ -13895,6 +14082,18 @@ def _binance_history_tx_ids(tx):
             if str(tx.get(k) or '').strip()]
 
 
+def _binance_row_used_keys(tx):
+    """كل معرّفات صف Binance Pay — أي واحد منها مسجّل يعني إن الحوالة انحسبت (زر الفحص يسجّل transactionId
+    والفحص التلقائي يسجّل orderId، فلازم نفحص الاثنين عشان ما تنحسب مرتين)."""
+    keys = set()
+    for k in ('transactionId', 'orderId', 'merchantTradeNo', 'bizOrderNo'):
+        v = str(tx.get(k) or '').strip()
+        if v:
+            keys.add(normalize_tx_id(v))
+    keys.discard('')
+    return list(keys)
+
+
 def _binance_pending_match(pending, tx):
     """Require a completed incoming Binance Pay record matching one live request."""
     if not isinstance(tx, dict) or str(tx.get('orderType') or '').upper() != 'PAY':
@@ -13929,6 +14128,8 @@ def _credit_binance_pending_record(uid, pending, tx, lang, via):
     tx_id = _binance_history_tx_ids(tx)[0]
     tx_id_norm = normalize_tx_id(tx_id)
     if not tx_id_norm:
+        return False
+    if db.used_transactions.find_one({'transaction_id': {'$in': _binance_row_used_keys(tx)}}):
         return False
     with tx_lock:
         if tx_id_norm in PROCESSING_TXS:
@@ -14557,11 +14758,14 @@ def check_ton_blockchain_auto():
                 if tx_time and tx_time < cutoff_time:
                     continue
                 
-                tx_id_normalized = normalize_tx_id(tx_hash)
-                
-                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
+                ton_canon = _ton_hash_hex(tx_hash)
+                if not ton_canon:
                     continue
-                
+                # نفس المفتاح اللي يستخدمه التحقق اليدوي، ونفحص الصيغ القديمة كمان
+                tx_id_normalized = 'ton' + ton_canon
+                if db.used_transactions.find_one({'transaction_id': {'$in': list(_ton_tx_keys(ton_canon))}}):
+                    continue
+
                 # نحسب الـ TON المُستلم
                 in_msg = tx.get('in_msg', {})
                 value_nanoton = int(in_msg.get('value', 0))
@@ -15231,7 +15435,7 @@ def check_binance_pay_auto():
                 if tx_id_norm in _traffic_paid:
                     continue
 
-                if db.used_transactions.find_one({'transaction_id': tx_id_norm}):
+                if db.used_transactions.find_one({'transaction_id': {'$in': _binance_row_used_keys(tx) or [tx_id_norm]}}):
                     continue
 
                 # المبلغ — نحوّله للدولار حسب العملة (بيتكوين/BNB/... مو دولار!)
@@ -17680,6 +17884,21 @@ def _auto_sync_ext_stores():
                 # منتج مضاف: نتحقق من تغيّر التكلفة (سعر المتجر) أولاً — عالمي
                 new_cost = _f['cost_price']
                 old_cost = existing.get('cost_price', existing.get('base_price', 0)) or 0
+                # 🛡 تكلفة سالبة أو لا نهائية من المورد ما نعتمدها (كانت تخلي سعر البيع سالب/inf = رصيد مجاني)
+                try:
+                    _nc = float(new_cost) if new_cost else None
+                except (TypeError, ValueError):
+                    _nc = float('nan')
+                if _nc is not None and not (_vip_math.isfinite(_nc) and _nc > 0):
+                    if not existing.get('_invalid_supplier_price'):
+                        db.ext_products.update_one({'_id': existing['_id']},
+                            {'$set': {'hidden': True, '_invalid_supplier_price': True}})
+                        try:
+                            notify_admins(f"⚠️ المورد أرسل تكلفة غير صالحة لمنتج "
+                                          f"<b>{html.escape(str(existing.get('name', '')))}</b> — تم إخفاؤه للمراجعة.")
+                        except Exception:
+                            pass
+                    new_cost = None
                 if new_cost and abs(float(new_cost) - float(old_cost)) > 0.001:
                     # المتجر غيّر سعر التكلفة → نعيd حساب سعر البيع بنفس النسبة تلقائياً
                     mt = existing.get('markup_type', 'percent')
@@ -18657,10 +18876,17 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, bil(uid, "❌ <b>خطأ:</b> عنوان محفظة TON غير معين في البوت.", "❌ <b>Error:</b> TON wallet address not set in bot."), parse_mode="HTML")
         return
     
-    # 🛡 استخدام normalize_tx_id للحماية الموحدة
-    tx_track_key = normalize_tx_id(tx_id_clean)
+    # 🛡 مفتاح واحد للمعاملة مهما كانت صيغة الإدخال — أي زيادة أو نقص في الهاش مرفوضة
+    ton_canon = _ton_hash_hex(tx_id_clean)
+    if not ton_canon:
+        bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
+        return
+    tx_track_key = 'ton' + ton_canon
+    ton_all_keys = _ton_tx_keys(ton_canon)
     
     with tx_lock:
+        if db.used_transactions.find_one({'transaction_id': {'$in': list(ton_all_keys)}}):
+            bot.reply_to(message, get_text(uid, 'tx_used')); return
         if tx_track_key in PROCESSING_TXS:
             bot.send_message(uid, bil(uid,
                 "⏳ <b>يتم معالجة هذه العملية بالفعل، يرجى عدم التكرار.</b>",
@@ -18719,11 +18945,8 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
                         # هاش الـ tx
                         tx_hash = tx.get("transaction_id", {}).get("hash", "")
                         
-                        # نشيك على الـ hash بطرق مختلفة (TON يستخدم صيغ متعددة)
-                        if (tx_id_clean in tx_hash or 
-                            tx_hash in tx_id_clean or 
-                            tx_id_clean == tx_hash or
-                            tx_id_clean.lower() == tx_hash.lower()):
+                        # تطابق تام بعد توحيد الصيغة (hex/base64) — لا نقبل جزء من الهاش
+                        if _ton_hash_hex(tx_hash) == ton_canon:
                             
                             # تحقق من الوقت
                             tx_time = int(tx.get("utime", 0))
@@ -18766,9 +18989,7 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
                     for tx in transactions2:
                         tx_hash = tx.get("hash", "")
                         
-                        if (tx_id_clean in tx_hash or 
-                            tx_hash in tx_id_clean or 
-                            tx_id_clean.lower() == tx_hash.lower()):
+                        if _ton_hash_hex(tx_hash) == ton_canon:
                             
                             tx_time = int(tx.get("utime", 0))
                             if tx_time > 0 and (current_time - tx_time) > 24 * 60 * 60:
@@ -18799,13 +19020,17 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
             try:
                 # ندوّر الـ tx بشكل عام (بدون عنوان محدد)
                 url3 = f"https://toncenter.com/api/v2/getTransactionByHash"
-                params3 = {"hash": tx_id_clean}
+                params3 = {"hash": ton_canon}
                 
                 res3 = requests.get(url3, params=params3, timeout=15)
                 if res3.status_code == 200:
                     data3 = res3.json()
                     if data3.get("ok"):
                         tx = data3.get("result", {})
+                        if isinstance(tx, list):
+                            tx = tx[0] if tx else {}
+                        if _ton_hash_hex((tx.get("transaction_id") or {}).get("hash", "")) != ton_canon:
+                            tx = {}
                         tx_time = int(tx.get("utime", 0))
                         if tx_time > 0 and (current_time - tx_time) > 24 * 60 * 60:
                             is_old = True
@@ -18939,10 +19164,15 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
     if wallet_address == "Not Set" or len(wallet_address) < 10:
         bot.send_message(uid, bil(uid, "❌ <b>خطأ:</b> عنوان المحفظة غير معين.", "❌ <b>Error:</b> Wallet address not set."), parse_mode="HTML")
         return
-    
-    # 🛡 توحيد الـ tx_id لمنع الالتفاف
-    tx_id_normalized = normalize_tx_id(tx_id)
-    
+
+    # 🛡 TxID لايتكوين لازم يكون 64 hex بالضبط — أي إضافة (#… أو ?…) كانت تعطي مفتاح جديد لنفس الحوالة
+    tx_id = _ltc_txid(tx_id)
+    if not tx_id:
+        bot.send_message(uid, bil(uid, "❌ <b>رقم الهاش (TxID) غير صحيح! انسخه كاملاً (64 حرف).</b>",
+                                  "❌ <b>Invalid TxID! Copy the full 64-character hash.</b>"), parse_mode="HTML")
+        return
+    tx_id_normalized = tx_id
+
     with tx_lock:
         if tx_id_normalized in PROCESSING_TXS:
             bot.send_message(uid, bil(uid,
@@ -18986,6 +19216,8 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
+                if str((data or {}).get("txid", "")).lower() != tx_id:
+                    data = {}   # 🛡 لازم المستكشف يرجّع نفس المعاملة المطلوبة بالضبط
                 block_time = data.get("status", {}).get("block_time", 0)
                 if block_time > 0 and (current_time - block_time) > 24 * 60 * 60:
                     is_old = True
@@ -19025,6 +19257,8 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                 res2 = requests.get(url2, timeout=10)
                 if res2.status_code == 200:
                     data2 = res2.json()
+                    if str((data2 or {}).get("hash", "")).lower() != tx_id:
+                        data2 = {}   # 🛡 نفس المعاملة المطلوبة بالضبط
                     confirmed_str = data2.get("confirmed")
                     if confirmed_str:
                         try:
@@ -20831,6 +21065,7 @@ def ext_add_store(call):
     bot.register_next_step_handler(msg, _ext_save_store)
 
 
+@admin_step
 def _ext_save_store(message):
     if not message.text or message.text.strip() in ('الغاء', 'إلغاء', '/cancel'):
         bot.send_message(message.chat.id, "❌ أُلغيت الإضافة.")
@@ -21614,6 +21849,7 @@ def ext_price_input(call):
     bot.register_next_step_handler(msg, _ext_save_price, pid, ptype)
 
 
+@admin_step
 def _ext_save_price(message, pid, ptype):
     if not message.text:
         return
@@ -22067,13 +22303,19 @@ def _ext_execute_buy(message, epid, lang):
         bot.send_message(uid, "❌ المنتج لم يعد متاحاً.")
         return
 
-    price = vip_unit(uid, f"ext_{ep.get('_id')}", float(ep.get('sell_price', ep.get('base_price', 0))))[0]
+    raw_price = _ext_valid_price(ep)
+    if raw_price is None:
+        bot.send_message(uid, "❌ المنتج غير متاح حالياً." if l != 'en' else "❌ This product is unavailable right now.")
+        return {'ok': False, 'error': 'unavailable'}
+    price = vip_unit(uid, f"ext_{ep.get('_id')}", raw_price)[0]
     stock = ep.get('stock', 0)
     if not ep.get('unlimited') and stock and qty > stock:
         bot.send_message(uid, (f"❌ المتوفر فقط {stock} قطعة!" if l != 'en'
                                else f"❌ Only {stock} in stock!"))
         return
     total = round(price * qty, 2)
+    if not _vip_math.isfinite(total) or total <= 0:
+        return {'ok': False, 'error': 'unavailable'}
     if not _cart_guard_total(total):
         return {'ok': False, 'error': 'price_changed'}
 
@@ -27567,6 +27809,7 @@ def _emit_product_updated_after_edit(func):
 
 # ----------- حفظ تعديل المنتج + إشعار تخفيض السعر -----------
 @_emit_product_updated_after_edit
+@admin_step
 def admin_save_edit(message, field, pid, cat_id_back=None):
     val = message.text or ""
     
@@ -28224,6 +28467,7 @@ def ad_ban_start(call):
     msg = bot.send_message(call.message.chat.id, "🚫 <b>أرسل الأيدي (ID) أو معرف المستخدم (@username) للحظر أو فك الحظر:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, ad_ban_exec)
 
+@admin_step
 def ad_ban_exec(message):
     target = message.text.strip()
     if target.startswith('@') or not target.replace('-', '').isdigit():
@@ -28236,6 +28480,8 @@ def ad_ban_exec(message):
         current_status = u.get('is_banned', 0)
         new_status = 1 if current_status == 0 else 0
         db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_banned': new_status}})
+        if new_status == 1:
+            _revoke_user_webhooks(u['user_id'], 'owner_banned')
         _invalidate_user_cache(u['user_id'])
         status_text = "تم حظر 🚫" if new_status == 1 else "تم فك حظر ✅"
         bot.send_message(message.chat.id, f"✅ {status_text} المستخدم (<code>{u['user_id']}</code>) بنجاح.", parse_mode="HTML")
@@ -28795,6 +29041,7 @@ def ad_gift_comp_amount(call):
     bot.register_next_step_handler(msg, ad_gift_comp_exec, target_uid)
 
 
+@admin_step
 def ad_gift_comp_exec(message, target_uid):
     # ✅ فحص الإلغاء
     if _is_cancel_msg(message):
@@ -31121,6 +31368,7 @@ def api_regen(call):
     except: pass
     uid = call.from_user.id
     db.api_keys.update_many({'user_id': uid, 'is_active': True}, {'$set': {'is_active': False}})
+    _revoke_user_webhooks(uid, 'credential_revoked')
     key = _generate_api_key()
     db.api_keys.insert_one({'user_id': uid, 'api_key': key, 'is_active': True, 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'username': call.from_user.username or ''})
     gw = _get_api_gateway()
@@ -31142,6 +31390,7 @@ def api_disable(call):
     except: pass
     uid = call.from_user.id
     db.api_keys.update_many({'user_id': uid, 'is_active': True}, {'$set': {'is_active': False}})
+    _revoke_user_webhooks(uid, 'credential_revoked')
     bot.answer_callback_query(call.id, "✅ API Disabled", show_alert=True)
     open_api(call)
 
@@ -32316,6 +32565,15 @@ def _wa_norm_id(v):
     return s
 
 
+def _ext_valid_price(ep):
+    """سعر بيع منتج المورد: لازم يكون رقم موجب ومحدود، وإلا المنتج غير قابل للشراء (المورد ممكن يرسل سالب أو inf)."""
+    try:
+        v = float((ep or {}).get('sell_price', (ep or {}).get('base_price', 0)))
+    except (TypeError, ValueError):
+        return None
+    return v if _wa_math.isfinite(v) and v > 0 else None
+
+
 def _wa_fnum(v, default=0.0):
     try:
         f = float(v)
@@ -33117,7 +33375,7 @@ def _wa_user_doc(identity):
 
 def _wa_is_admin(uid, u=None):
     u = u or get_user_data_full(uid) or {}
-    return u.get('is_admin') == 1 or uid == OWNER_ID
+    return uid == OWNER_ID or (u.get('is_admin') == 1 and u.get('is_banned') != 1)
 
 
 def _wa_user_stats(uid):
@@ -33586,7 +33844,10 @@ def _wa_buy_ext(uid, epid, qty, lang):
         return 409, {'error': 'out_of_stock', 'available': 0}
     if qty > stock and not ep.get('unlimited'):
         return 409, {'error': 'not_enough_stock', 'available': stock}
-    total = vip_quote(uid, f'ext_{epid}', _wa_fnum(ep.get('sell_price', ep.get('base_price', 0))), qty)['total']
+    raw_price = _ext_valid_price(ep)
+    if raw_price is None:
+        return 409, {'error': 'unavailable'}
+    total = vip_quote(uid, f'ext_{epid}', raw_price, qty)['total']
     bal = _wa_balance(uid)
     if _wa_short(uid, total):
         return 402, {'error': 'insufficient_balance', 'required': total, 'balance': bal}
@@ -34103,6 +34364,7 @@ def _wa_api_regen(identity, body):
     if err:
         return err
     db.api_keys.update_many({'user_id': identity['id'], 'is_active': True}, {'$set': {'is_active': False}})
+    _revoke_user_webhooks(identity['id'], 'credential_revoked')
     _wa_api_new_key(identity)
     return _wa_api_state(identity, body)
 
@@ -34112,6 +34374,7 @@ def _wa_api_disable(identity, body):
     if err:
         return err
     db.api_keys.update_many({'user_id': identity['id'], 'is_active': True}, {'$set': {'is_active': False}})
+    _revoke_user_webhooks(identity['id'], 'credential_revoked')
     return _wa_api_state(identity, body)
 
 
@@ -34217,8 +34480,9 @@ def _wa_api_webhook(identity, body):
             return 400, {'error': 'private_url'}
         evf = [str(x) for x in (body.get('event_filter') or []) if str(x) in _WA_API_EVENTS]
         secret = secrets.token_hex(24)
+        active_key = db.api_keys.find_one({'user_id': uid, 'is_active': True}, {'_id': 1}) or {}
         db.api_webhooks.update_one({'api_user_id': uid}, {'$set': {
-            'api_user_id': uid, 'url': url, 'secret': secret, 'event_filter': evf, 'is_active': True,
+            'api_user_id': uid, 'api_key_id': active_key.get('_id'), 'url': url, 'secret': secret, 'event_filter': evf, 'is_active': True,
             'failures': 0, 'disabled_reason': None, 'updated_at': datetime.datetime.utcnow()}}, upsert=True)
         code, st = _wa_api_state(identity, body)
         st['secret'] = secret
@@ -35562,6 +35826,8 @@ def _wa_admin_ban(identity, body):
     if not db.users.find_one({'user_id': target}, {'_id': 1}):
         return 404, {'error': 'not_found'}
     db.users.update_one({'user_id': target}, {'$set': {'is_banned': 1 if ban else 0}})
+    if ban:
+        _revoke_user_webhooks(target, 'owner_banned')
     _invalidate_user_cache(target)
     _adm_audit(uid, 'ban' if ban else 'unban', target)
     return _wa_admin_user(identity, {'uid': target})
@@ -39710,7 +39976,7 @@ def _cart_line(uid, item, user=None):
         return dict(item, error='bad_qty')
     if needs_email and not _WA_EMAIL_RE.fullmatch(item['email']):
         return dict(item, error='bad_email')
-    if base < 0:
+    if base < 0 or (kind == 'ext' and _ext_valid_price(p) is None):
         return dict(item, error='unavailable')
     fresh_user = dict(user if user is not None else (db.users.find_one({'user_id': uid}) or {}))
     fresh_user.setdefault('vip_cents', 0)
