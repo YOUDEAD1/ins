@@ -34922,7 +34922,8 @@ def admin_user_brief(uid):
             'is_admin': u.get('is_admin') == 1 or uid == OWNER_ID, 'is_owner': uid == OWNER_ID,
             'lang': u.get('lang') or 'ar', 'orders': n_orders, 'spent': round(spent, 2), 'deposits': round(dep, 2),
             'vip': {'level': st['raw_level'], 'cents': st['cents'], 'override': st['override']},
-            'joined': joined, 'link': f"tg://user?id={uid}",
+            'joined': joined, 'ip': _wa_plain(u.get('last_webapp_ip') or u.get('ip_address') or u.get('ip'), 45),
+            'link': f"tg://user?id={uid}",
             'tme': f"https://t.me/{uname}" if re.fullmatch(r'[A-Za-z0-9_]{4,32}', uname) else None}
 
 
@@ -35114,11 +35115,15 @@ def _ds_user(uid, cache):
         return cache[uid]
     u = None
     try:
-        u = db.users.find_one({'user_id': uid}, {'name': 1, 'username': 1, 'is_banned': 1})
+        u = db.users.find_one({'user_id': uid}, {'name': 1, 'username': 1, 'is_banned': 1,
+                                                  'last_webapp_ip': 1, 'ip': 1, 'ip_address': 1})
     except Exception:
         pass
     cache[uid] = {'id': uid, 'name': _wa_plain((u or {}).get('name') or (u or {}).get('username') or uid, 60),
-                  'username': (u or {}).get('username') or '', 'banned': (u or {}).get('is_banned') == 1, 'missing': not u}
+                  'username': (u or {}).get('username') or '', 'banned': (u or {}).get('is_banned') == 1,
+                  'joined': _doc_ts(u) if u else 0,
+                  'ip': _wa_plain((u or {}).get('last_webapp_ip') or (u or {}).get('ip_address') or (u or {}).get('ip'), 45),
+                  'missing': not u}
     return cache[uid]
 
 
@@ -35163,10 +35168,13 @@ def admin_deep_search(q, limit=25):
         a['sales'].append(sale)
 
     # 1) المخزون — المباع وغير المباع
-    for it in _ds_find(db.product_stock, {'code_line': rx}, limit=limit * 2):
+    for it in _ds_find(db.product_stock, {'$or': [{'code_line': rx}, {'ip': rx},
+                                                   {'ip_address': rx}, {'account_ip': rx}]}, limit=limit * 2):
         a = acc(str(it.get('code_line') or ''), it.get('product_id'))
         a['stock'].append({'id': str(it['_id']), 'sold': bool(it.get('is_sold')), 'reserved': bool(it.get('reservation_id')),
-                           'added': _doc_ts(it)})
+                           'added': _doc_ts(it),
+                           'account_date': _wa_plain(it.get('account_date') or it.get('created_at') or it.get('date'), 40),
+                           'ip': _wa_plain(it.get('account_ip') or it.get('ip_address') or it.get('ip'), 45)})
     # 2) الطلبات: الكود اللي انسلّم، أو إيميل العميل (طلبات يدوية / ChatGPT)
     for d in _ds_find(db.orders, {'$or': [{'code_delivered': rx}, {'buyer_email': rx}, {'cgpt_email': rx}]},
                       limit=limit * 3, sort=('_id', -1)):
@@ -35220,13 +35228,16 @@ def admin_deep_search(q, limit=25):
     # 6) المستخدمين
     users = []
     try:
-        flt = {'$or': [{'username': rx}, {'name': rx}]}
+        flt = {'$or': [{'username': rx}, {'name': rx}, {'last_webapp_ip': rx},
+                       {'ip': rx}, {'ip_address': rx}]}
         if s_.lstrip('-').isdigit() and len(s_) <= 15:
             flt['$or'].append({'user_id': int(s_)})
-        for u in _ds_find(db.users, flt, {'user_id': 1, 'name': 1, 'username': 1, 'balance': 1, 'is_banned': 1}, limit=12):
+        for u in _ds_find(db.users, flt, {'user_id': 1, 'name': 1, 'username': 1, 'balance': 1, 'is_banned': 1,
+                                           'last_webapp_ip': 1, 'ip': 1, 'ip_address': 1}, limit=12):
             users.append({'id': u['user_id'], 'name': _wa_plain(u.get('name') or u.get('username') or u['user_id'], 60),
                           'username': u.get('username') or '', 'balance': round(_wa_fnum(u.get('balance')), 2),
-                          'banned': u.get('is_banned') == 1})
+                          'banned': u.get('is_banned') == 1, 'joined': _doc_ts(u),
+                          'ip': _wa_plain(u.get('last_webapp_ip') or u.get('ip_address') or u.get('ip'), 45)})
     except Exception:
         pass
 
@@ -35257,6 +35268,8 @@ def admin_deep_search(q, limit=25):
             'resold' if n_sales and free else '',
             'dup' if len(st) > 1 else '') if w]
         a['added'] = min((x['added'] for x in st if x['added']), default=0)
+        a['account_date'] = next((x['account_date'] for x in st if x.get('account_date')), '')
+        a['ip'] = next((x['ip'] for x in st if x.get('ip')), '')
         a['last'] = max([x.get('ts') or 0 for x in a['sales']] + [a['added'] or 0])
         a['exact'] = a['line'].strip().lower() == low
         out.append(a)
@@ -35721,10 +35734,13 @@ def _wa_admin_search(identity, body):
     try:
         if len(q) >= 3:
             rx = re.compile(re.escape(q.lstrip('@')), re.I)
-            for u in db.users.find({'$or': [{'username': rx}, {'name': rx}]}, {'user_id': 1, 'name': 1, 'username': 1,
-                                                                                  'balance': 1}).limit(12):
+            for u in db.users.find({'$or': [{'username': rx}, {'name': rx}, {'last_webapp_ip': rx},
+                                             {'ip': rx}, {'ip_address': rx}]}, {'user_id': 1, 'name': 1, 'username': 1,
+                                                                                  'balance': 1, 'last_webapp_ip': 1,
+                                                                                  'ip': 1, 'ip_address': 1}).limit(12):
                 users.append({'id': u['user_id'], 'name': _wa_plain(u.get('name') or u.get('username') or u['user_id'], 60),
-                              'username': u.get('username') or '', 'balance': round(_wa_fnum(u.get('balance')), 2)})
+                              'username': u.get('username') or '', 'balance': round(_wa_fnum(u.get('balance')), 2),
+                              'joined': _doc_ts(u), 'ip': _wa_plain(u.get('last_webapp_ip') or u.get('ip_address') or u.get('ip'), 45)})
     except Exception:
         pass
     if users:
@@ -36663,6 +36679,18 @@ def _wa_maybe_handle_post(handler):
             except Exception as exc:
                 logger.exception('webapp %s failed: %s', p, type(exc).__name__)
                 code, data = 500, {'error': 'server_error'}
+            # Record the last authenticated Mini App IP for admin account lookup.
+            # Trust the rightmost forwarded address, which is the platform proxy's address.
+            try:
+                import ipaddress
+                forwarded = handler.headers.get('X-Forwarded-For', '').split(',')
+                ip_text = (forwarded[-1].strip() if forwarded else '') or handler.client_address[0]
+                ip_text = str(ipaddress.ip_address(ip_text))
+                db.users.update_one({'user_id': uid, 'last_webapp_ip': {'$ne': ip_text}},
+                                    {'$set': {'last_webapp_ip': ip_text,
+                                              'last_webapp_seen': datetime.datetime.utcnow()}})
+            except Exception:
+                pass
             _json_resp(handler, code, data)
     finally:
         _LOG_SRC.v = previous_source

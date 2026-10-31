@@ -414,22 +414,50 @@ def test_suspicious_referral_counts_and_admin_reviews_at_milestone(mod, server):
 
 # ───── round 7: admin whole-database search (email / any part of an account line) ─────
 def test_admin_finds_account_by_email_even_after_sale(mod, server):
+    request(server, '/webapp/bootstrap', uid=1001, headers={'X-Forwarded-For': '203.0.113.4, 1.1.1.1'})
     product(mod, stock=0)
     mod.db.product_stock.insert_one({'product_id': '101', 'is_sold': False, 'code_line': 'acct.one@example.test:Secret1'})
     mod.db.product_stock.insert_one({'product_id': '101', 'is_sold': False, 'code_line': 'acct.two@example.test:Secret2'})
     mod._PRODUCTS_CACHE = None; mod._invalidate_products_cache(); mod._wa_invalidate_catalog()
-    s, d, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1}); assert s == 200, d
+    s, d, _ = request(server, '/webapp/buy', {'product_id': '101', 'qty': 1},
+                      headers={'X-Forwarded-For': '203.0.113.4, 1.1.1.1'}); assert s == 200, d
     sold = d['codes'][0]
     s, d, _ = request(server, '/webapp/admin/search', {'q': sold.split(':')[0]}, uid=9001)
     assert s == 200 and d['kind'] == 'deep', d
     a = d['accounts'][0]
     assert a['line'] == sold and a['state'] == 'sold'
     assert a['sales'][0]['user']['id'] == 1001 and a['sales'][0]['order_id'].startswith('LS') and a['sales'][0]['via'] == 'webapp'
+    assert a['sales'][0]['user']['joined'] > 0 and a['sales'][0]['user']['ip'] == '1.1.1.1'
     s, d, _ = request(server, '/webapp/admin/search', {'q': 'EXAMPLE.TEST'}, uid=9001)
     states = {x['line']: x['state'] for x in d['accounts']}
     assert len(states) == 2 and 'in_stock' in states.values() and 'sold' in states.values()
     s, d, _ = request(server, '/webapp/admin/search', {'q': 'example.test'}, uid=1001)
     assert s == 403
+
+
+def test_admin_user_search_includes_join_date_and_last_verified_webapp_ip(mod, server):
+    # First authenticated Mini App visit stores its observed IP; admin search exposes it with join date.
+    s, _, _ = request(server, '/webapp/bootstrap', uid=1001,
+                      headers={'X-Forwarded-For': '198.51.100.20, 8.8.8.8'})
+    assert s == 200
+    s, d, _ = request(server, '/webapp/admin/search', {'q': 'customer'}, uid=9001)
+    assert s == 200 and d['kind'] == 'user', d
+    u = d['user']
+    assert u['joined'] > 0 and u['ip'] == '8.8.8.8'
+    brief = mod.admin_user_brief(1001)
+    assert brief['joined'] == u['joined'] and brief['ip'] == '8.8.8.8'
+    s, d, _ = request(server, '/webapp/admin/search', {'q': '8.8.8.8'}, uid=9001)
+    assert s == 200 and any(x['id'] == 1001 for x in d['users'])
+
+
+def test_account_search_includes_stock_account_date_and_ip(mod):
+    product(mod, stock=0)
+    mod.db.product_stock.insert_one({'product_id': '101', 'is_sold': False,
+                                     'code_line': 'account@example.test:secret',
+                                     'account_date': '2024-05-06', 'account_ip': '192.0.2.11'})
+    result = mod.admin_deep_search('account@example.test')
+    account = result['accounts'][0]
+    assert account['account_date'] == '2024-05-06' and account['ip'] == '192.0.2.11'
 
 
 # ───── round 8: 🔍 check transaction (hash / order ID) works from the site like the bot ─────
