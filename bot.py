@@ -14096,8 +14096,10 @@ def _binance_row_used_keys(tx):
 
 
 def _binance_pending_match(pending, tx, allow_amount_mismatch=False):
-    """Validate an incoming Binance Pay record; only manual ID review can relax amount matching."""
-    if not isinstance(tx, dict) or str(tx.get('orderType') or '').upper() != 'PAY':
+    """Validate an incoming Binance Pay/C2C record; manual ID review can relax amount matching."""
+    # Binance Pay transfers to another user's Binance ID are returned as C2C rows,
+    # while merchant payments use PAY. Binance defines positive amounts as income.
+    if not isinstance(tx, dict) or str(tx.get('orderType') or '').upper() not in ('PAY', 'C2C'):
         return False
     try:
         raw = float(tx.get('amount'))

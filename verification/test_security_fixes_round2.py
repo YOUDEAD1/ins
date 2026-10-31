@@ -212,6 +212,25 @@ def test_manual_binance_id_credits_actual_amount_even_if_request_amount_differs(
     assert mod.db.users.find_one({'user_id': uid})['balance'] == 3.0
 
 
+def test_manual_binance_c2c_order_id_credits_received_amount_once(mod, monkeypatch):
+    uid = 9123457
+    monkeypatch.setattr(mod, 'BINANCE_API_KEY', 'FAKE-KEY')
+    monkeypatch.setattr(mod, 'BINANCE_API_SECRET', 'FAKE-SECRET')
+    mod.db.users.insert_one({'user_id': uid, 'balance': 0., 'lang': 'en', 'is_banned': 0})
+    pending = mod.register_pending_deposit(uid, 5.0, 5.0023, 'BINANCE')
+    row = {'orderType': 'C2C', 'transactionId': 'M_P_C2C_FIXTURE_123', 'orderId': '900779123', 'amount': '3.00',
+           'currency': 'USDT', 'transactionTime': int(time.time() * 1000)}
+    monkeypatch.setattr(mod, 'execute_binance_call', lambda fn, **kw: {'data': [row]})
+
+    mod.verify_binance_pay(_msg(mod, row['orderId'], uid), 'en')
+
+    assert mod.db.users.find_one({'user_id': uid})['balance'] == 3.0
+    completed = mod.db.pending_deposits.find_one({'pending_id': pending['pending_id']})
+    assert completed['status'] == 'completed'
+    mod.verify_binance_pay(_msg(mod, row['transactionId'], uid), 'en')
+    assert mod.db.users.find_one({'user_id': uid})['balance'] == 3.0
+
+
 # ── reseller webhooks stop when the key is rotated/disabled or the owner is banned ──
 
 KEY = 'sk_' + 'e' * 48
