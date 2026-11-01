@@ -14,6 +14,7 @@ assert(parsed >= 1);
 const dateCode = html.slice(html.indexOf('function fmtDate(ts)'), html.indexOf('/* ───────────────────────── icons'));
 const normalizeCode = html.match(/^function normalizeBinanceId.*$/m)[0];
 const actionCode = html.slice(html.indexOf('async function payAction('), html.indexOf('/* ───────────────────────── profile'));
+const pollCode = html.slice(html.indexOf('async function pollPay('), html.indexOf('function finishPay('));
 const calls = [];
 const input = {value:'\u200f١٢٣٤٥٦٧٨٩٠١٢٣٤٥٦٧٨', scrollIntoView(){calls.push('scroll');}, focus(){calls.push('focus');}};
 const context = vm.createContext({
@@ -37,5 +38,14 @@ assert.equal(context.normalizeBinanceId(' ۱۲۳۴۵۶۷۸۹۰۱۲۳۴۵۶۷۸\u
   const submitted = calls.find(x=>x && x.route==='deposit/check');
   assert.equal(submitted.body.transaction_id,'123456789012345678');
   assert(calls.includes('poll'));
-  console.log(`${parsed} scripts parsed; date precision, timezone, Order ID entry, normalization, and submission passed`);
+  const message = {};
+  const pollContext = vm.createContext({
+    isAr:()=>false,
+    paymentText:key=>`custom:${key}`,
+    api:async()=>({ok:true,status:'pending',manual_status:'search_pending'})
+  });
+  vm.runInContext(pollCode, pollContext);
+  await pollContext.pollPay({el:{isConnected:true,querySelector:()=>message}}, {p:{id:'fixture'}});
+  assert.equal(message.textContent,'custom:dep_binance_search_pending');
+  console.log(`${parsed} scripts parsed; full dates, Order ID submission, and resumable history status passed`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

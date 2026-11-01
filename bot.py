@@ -2686,7 +2686,7 @@ class APIHandler(BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path).path.rstrip('/')
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p in ('', '/'):
-            return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3',
+            return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v4',
                                          'binance_receipt': 'order-id-v1', 'payment_cms_dates': 'v1',
                                          'runtime_handoff': 'single-active-v1',
                                          'bot_active': bool(globals().get('_RUNTIME_HANDOFF'))})
@@ -7342,6 +7342,7 @@ DEPOSIT_CMS_TEXTS = {
     'dep_binance_record_rejected': ('Binance: تعذر اعتماد سجل موجود', 'وجدنا المعرّف في Binance، لكن تعذر اعتماد إيداع وارد صالح. تواصل مع الإدارة بهذا المعرّف، ولا تعِد الدفع.', 'We found the ID in Binance but could not confirm an eligible incoming payment. Contact support with this ID; do not pay again.'),
     'dep_binance_not_in_history': ('Binance: المعرّف غير موجود في السجل', 'لم يظهر هذا المعرّف في سجل حساب الاستلام خلال آخر 90 يومًا. تأكد أنه معرّف Binance Pay أو تواصل مع الإدارة. لا تعِد الدفع.', 'This ID was not found in the receiving account history for the last 90 days. Check the Binance Pay ID or contact support. Do not pay again.'),
     'dep_binance_unavailable': ('Binance: تعذر إكمال الفحص', '⚠️ تعذر إكمال فحص سجل Binance الآن. أعد المحاولة أو تواصل مع الإدارة بهذا المعرّف. لا تعِد الدفع.', '⚠️ The Binance history check could not finish. Retry or contact support with this ID. Do not pay again.'),
+    'dep_binance_search_pending': ('Binance: متابعة بحث السجل', '🔍 تم حفظ تقدم البحث في سجل Binance. اضغط أعد الفحص لمتابعة البحث عن نفس Order ID؛ لا تعِد الدفع.', '🔍 Binance history search progress was saved. Press Check again to continue searching for the same Order ID; do not pay again.'),
     'dep_unique_unavailable': ('تعذر حجز مبلغ فريد', 'تعذر إنشاء مبلغ فريد الآن. حاول بعد قليل.', 'Could not reserve a unique amount right now. Please try again shortly.'),
     'dep_site_order_label': ('عنوان خانة Order ID في الموقع', 'Binance Order ID', 'Binance Order ID'),
     'dep_site_checking': ('الموقع: جار فحص Binance', 'جاري فحص سجل Binance…', 'Checking Binance history…'),
@@ -14135,18 +14136,55 @@ def _binance_id_key(value):
     return match.group(1) if match else value
 
 
-def _binance_manual_lookup(supplied):
-    """Search bounded history windows, without assuming Binance's row ordering."""
+class BinanceHistorySearchPending(Exception):
+    """A bounded search has more pages; this is not a provider connection error."""
+
+
+def _binance_manual_lookup(supplied, pending=None):
+    """Search recent payments first and checkpoint unfinished history windows.
+
+    Pay history returns at most 100 rows and has no page/offset parameter. Split
+    saturated windows without relying on row ordering, retaining both halves.
+    A new submission of the same ID resumes its owned deposit's saved windows.
+    """
     now = int(time.time() * 1000)
-    windows = [(now - 90 * 86400000 + 120000, now)]
-    deadline = time.monotonic() + 40
+    day = 86400000
     wanted = _binance_id_key(supplied)
+    state = (pending or {}).get('binance_manual_search') or {}
+    windows = state.get('windows')
+    if not (state.get('version') == 1 and state.get('id_key') == wanted and
+            now - 15 * 60000 <= state.get('started_at', 0) <= now and
+            isinstance(windows, list) and 0 < len(windows) <= 64 and
+            all(isinstance(w, list) and len(w) == 2 and
+                all(isinstance(v, int) for v in w) and
+                state['started_at'] - 90 * day <= w[0] <= w[1] <= state['started_at'] for w in windows)):
+        # Newest interval is popped first. A busy old month must not prevent
+        # finding today's payment, whichever order Binance returns its rows in.
+        windows = [[now - 90 * day + 120000, now - 30 * day - 1],
+                   [now - 30 * day, now - 7 * day - 1],
+                   [now - 7 * day, now - day - 1], [now - day, now]]
+        state = {'version': 1, 'id_key': wanted, 'supplied': str(supplied),
+                 'started_at': now}
+    else:
+        windows = [list(w) for w in windows]
+
+    def checkpoint():
+        if pending:
+            db.pending_deposits.update_one(
+                {'pending_id': pending['pending_id'], 'user_id': pending['user_id'],
+                 'coin': 'BINANCE', 'status': 'pending'},
+                {'$set': {'binance_manual_search': dict(state, windows=windows)}})
+
+    deadline = time.monotonic() + 40
     for _ in range(16):
         if not windows:
             return None
         if time.monotonic() >= deadline:
             break
-        start, end = windows.pop()
+        start, end = windows[-1]
+        # Save the current window before requesting it. A network failure or a
+        # deployment can retry this window without skipping any unsearched rows.
+        checkpoint()
         response = execute_binance_call(
             lambda c, lo=start, hi=end: c.get_pay_trade_history(startTime=lo, endTime=hi, limit=100),
             max_retries=2, total_timeout=max(1, min(10, deadline - time.monotonic())))
@@ -14163,12 +14201,18 @@ def _binance_manual_lookup(supplied):
             raise ValueError('ambiguous_binance_id')
         if matches:
             return matches[0]
+        windows.pop()
         if len(rows) >= 100:
             if start >= end:
-                break
+                # The provider cannot paginate >100 rows in one millisecond.
+                raise ConnectionError('Binance history timestamp is saturated')
             mid = (start + end) // 2
-            windows.extend([(start, mid), (mid + 1, end)])
-    raise ConnectionError('Binance history search incomplete; retry with a narrower time window')
+            windows.extend([[start, mid], [mid + 1, end]])
+        checkpoint()
+    if not windows:
+        return None
+    checkpoint()
+    raise BinanceHistorySearchPending()
 
 
 def _binance_row_used_keys(tx):
@@ -14287,7 +14331,7 @@ def _credit_binance_pending_record(uid, pending, tx, lang, via, allow_amount_mis
             PROCESSING_TXS.discard(tx_id_norm)
 
 
-@bot.callback_query_handler(func=lambda call: call.data == 'binance_manual_start')
+@bot.callback_query_handler(func=lambda call: call.data in ('binance_manual_start', 'binance_manual_resume'))
 def binance_manual_start(call):
     uid = call.from_user.id
     bot.answer_callback_query(call.id)
@@ -14300,6 +14344,12 @@ def binance_manual_start(call):
     if not pending:
         bot.send_message(uid, get_text(uid, 'dep_binance_no_pending'), parse_mode='HTML')
         return
+    if call.data == 'binance_manual_resume':
+        supplied = (pending.get('binance_manual_search') or {}).get('supplied')
+        if supplied:
+            bot.clear_step_handler_by_chat_id(chat_id=uid)
+            verify_binance_pay(_WAMessage(uid, supplied), get_lang(uid))
+            return
     msg = bot.send_message(uid, get_text(uid, 'dep_binance_manual_prompt'), parse_mode='HTML', reply_markup=InlineKeyboardMarkup().add(
         _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
     bot.register_next_step_handler(msg, verify_binance_pay, get_lang(uid))
@@ -14329,7 +14379,7 @@ def verify_binance_pay(message, lang):
     try:
         db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
                                        {'$set': {'last_manual_check': 'checking'}})
-        tx = _binance_manual_lookup(supplied)
+        tx = _binance_manual_lookup(supplied, pending=pending)
         if tx and _credit_binance_pending_record(
                 uid, pending, tx, lang, 'binance_manual', allow_amount_mismatch=True):
             completed = db.pending_deposits.find_one({'pending_id': pending['pending_id'], 'user_id': uid}) or {}
@@ -14350,6 +14400,15 @@ def verify_binance_pay(message, lang):
         msg = bot.send_message(uid, retry, parse_mode='HTML', reply_markup=InlineKeyboardMarkup().add(
             _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
+    except BinanceHistorySearchPending:
+        db.pending_deposits.update_one(
+            {'pending_id': pending['pending_id'], 'user_id': uid, 'status': 'pending'},
+            {'$set': {'last_manual_check': 'search_pending', 'last_manual_checked_at': int(time.time())}})
+        msg = bot.send_message(uid, get_text(uid, 'dep_binance_search_pending'), parse_mode='HTML',
+                               reply_markup=InlineKeyboardMarkup(row_width=1).add(
+                                   _deposit_action_button(uid, 'dep_btn_retry', 'binance_manual_resume'),
+                                   _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
+        bot.register_next_step_handler(msg, verify_binance_pay, lang)
     except Exception as exc:
         logger.error('Manual Binance Pay verification failed: %s', exc)
         db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
@@ -14368,7 +14427,7 @@ def binance_manual_status(message):
     bits = (message.text or '').split()
     target = int(bits[1]) if len(bits) == 2 and bits[1].isdigit() else uid
     record = db.pending_deposits.find_one({'user_id': target, 'coin': 'BINANCE'}, sort=[('created_at', -1)]) or {}
-    bot.send_message(uid, 'Binance verification: manual-v3\n'
+    bot.send_message(uid, 'Binance verification: manual-v4\n'
                      f"User: {target}\nDeposit: {record.get('status', 'none')}\n"
                      f"Last check: {record.get('last_manual_check', 'none')}\n"
                      f"Credited: {record.get('credited_amount_usd', 0)} USD")
@@ -34250,6 +34309,8 @@ def _wa_deposit_check(identity, body):
     target = None
     if coin == 'BINANCE':
         supplied = str(body.get('transaction_id') or '').strip()
+        if not supplied and rec.get('last_manual_check') == 'search_pending':
+            supplied = str((rec.get('binance_manual_search') or {}).get('supplied') or '').strip()
         supplied = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]', '', supplied)
         supplied = supplied.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
         if supplied:

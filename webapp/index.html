@@ -3603,12 +3603,13 @@ async function pollPay(sh, st) {
   if (manualMessage && r.manual_status) {
     const messages = {
       checking: isAr() ? 'جاري فحص سجل Binance…' : 'Checking Binance history…',
+      search_pending: isAr() ? 'تم حفظ تقدم البحث. اضغط التحقق من Order ID لمتابعته؛ لا تعِد الدفع.' : 'Search progress saved. Press Verify Order ID to continue; do not pay again.',
       not_in_history: isAr() ? 'لم يظهر المعرّف في سجل حساب الاستلام. تأكد منه أو تواصل مع الدعم؛ لا تعِد الدفع.' : 'ID not found in the receiving account history. Check the ID or contact support; do not pay again.',
       unavailable: isAr() ? 'تعذر إكمال الفحص. أعد المحاولة أو تواصل مع الدعم؛ لا تعِد الدفع.' : 'The check could not finish. Retry or contact support; do not pay again.',
       record_rejected: isAr() ? 'وجدنا المعرّف، لكن تعذر اعتماد إيداع وارد. تواصل مع الدعم.' : 'ID found, but the incoming deposit could not be approved. Contact support.',
       already_credited: isAr() ? 'المعاملة محسوبة سابقًا.' : 'This payment was already credited.'
     };
-    const keys = {checking:'dep_site_checking',not_in_history:'dep_binance_not_in_history',unavailable:'dep_binance_unavailable',record_rejected:'dep_binance_record_rejected',already_credited:'dep_binance_already_credited'};
+    const keys = {checking:'dep_site_checking',search_pending:'dep_binance_search_pending',not_in_history:'dep_binance_not_in_history',unavailable:'dep_binance_unavailable',record_rejected:'dep_binance_record_rejected',already_credited:'dep_binance_already_credited'};
     manualMessage.textContent = paymentText(keys[r.manual_status], messages[r.manual_status] || '');
   }
   if (r.status === 'completed') finishPay(sh, st, 'completed', r.amount);
