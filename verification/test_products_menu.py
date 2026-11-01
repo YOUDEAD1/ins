@@ -245,11 +245,13 @@ def test_authenticated_console_edits_button_premium_color_and_message_end_to_end
     assert mod.get_text(1001, 'shop_available_hint') == mod.LANG['en']['shop_available_hint']
 
 
-def test_console_exposes_only_requested_customization_and_keeps_other_cms_routing(mod, server):
+def test_console_exposes_requested_customization_but_keeps_broadcast_in_bot(mod, server):
     status, home, _ = request(server, '/webapp/admin/home', uid=9001)
     assert status == 200 and any(s['cb'] == 'ad_cms_shop' for s in home['sections'])
-    for cb in ['ad_texts_main', 'ad_cms_vip', 'edit_txt_welcome', 'ad_bc']:
+    for cb in ['ad_texts_main', 'ad_cms_vip', 'edit_txt_welcome', 'ad_cms_catalog_deposit_0']:
         status, data, _ = request(server, '/webapp/admin/vc', {'action': 'open', 'cb': cb}, uid=9001)
-        assert status == 403 and data['error'] == 'bot_only'
+        assert status == 200 and data.get('msgs')
+    status, data, _ = request(server, '/webapp/admin/vc', {'action': 'open', 'cb': 'ad_bc'}, uid=9001)
+    assert status == 403 and data['error'] == 'bot_only'
     status, _, _ = request(server, '/webapp/admin/vc', {'action': 'open', 'cb': 'ad_cms_shop'})
     assert status == 403

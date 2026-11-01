@@ -294,10 +294,9 @@ def test_virtual_admin_sections_execute_original_handlers(mod,server,cb,caplog):
     assert not any('صار خطأ' in t.get('text','') for t in d.get('toasts',[])),d
 
 
-BOT_ONLY_SECTIONS=['ad_bc','ad_texts_main']
+BOT_ONLY_SECTIONS=['ad_bc']
 @pytest.mark.parametrize('cb',BOT_ONLY_SECTIONS)
-def test_cms_and_broadcast_stay_inside_the_bot(mod,server,cb):
-    # التخصيص والبرودكاست من البوت فقط: الموقع يرفض فتحها
+def test_broadcast_stays_inside_the_bot(mod,server,cb):
     s,d,_=request(server,'/webapp/admin/vc',{'action':'open','cb':cb},uid=9001)
     assert s==403 and d.get('error')=='bot_only',d
 

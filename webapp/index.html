@@ -1520,7 +1520,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .ds-ic.sold_multi,.ds-ic.warn{background:var(--bad-soft)}.ds-ic.sold_norecord{background:var(--surface-3)}
 .ds-acc .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
 .ds-acc .meta b{font:600 13px/1.35 var(--f-mono);direction:ltr;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ds-acc .meta small{font-size:11.5px;color:var(--fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ds-acc .meta small{font-size:11.5px;color:var(--fg-3);overflow-wrap:anywhere;white-space:normal}
+.api-card.adm-list .adm-row .meta small,.ds-buyer .meta small{white-space:normal;overflow:visible;overflow-wrap:anywhere}
 .ds-acc mark,.ds-line mark{background:color-mix(in srgb,var(--warn) 32%,transparent);color:inherit;border-radius:3px;padding:0 1px}
 .ds-tag{display:inline-block;padding:1px 7px;border-radius:7px;font-size:10.5px;font-weight:700;margin-inline-end:5px;vertical-align:1px}
 .ds-tag.in_stock{background:var(--ok-soft);color:var(--ok)}.ds-tag.reserved{background:var(--warn-soft);color:var(--warn)}
@@ -1796,11 +1797,11 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ 
 function hue(str) { let h = 0; for (const ch of String(str)) h = (h * 31 + ch.codePointAt(0)) >>> 0; return h % 360; }
 function fmtDate(ts) {
   if (!ts) return '';
-  const d = new Date(ts * 1000), now = new Date();
-  const loc = { ar: 'ar-u-nu-latn', en: 'en-US', ru: 'ru-RU', zh: 'zh-CN' }[LANG];
-  const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
-  if (d.toDateString() === now.toDateString()) return time;
-  return d.toLocaleDateString(loc, { day: 'numeric', month: 'short', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' }) + ' · ' + time;
+  const d = new Date(Number(ts) * 1000);
+  if (!Number.isFinite(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0'), offset = -d.getTimezoneOffset();
+  const zone = offset === 0 ? 'UTC' : 'UTC' + (offset > 0 ? '+' : '−') + pad(Math.floor(Math.abs(offset) / 60)) + ':' + pad(Math.abs(offset) % 60);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} · ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${zone}`;
 }
 
 /* ───────────────────────── icons ───────────────────────── */
@@ -2305,6 +2306,8 @@ function visual(p) {
 
 /* ───────────────────────── rich text (Telegram HTML subset) ───────────────────────── */
 function botText(k) { const T = S.texts || {}; const a = T[isAr() ? 'ar' : 'en'] || {}, b = T.en || {}, c = T.ar || {}; return a[k] || b[k] || c[k] || (typeof T[k] === 'string' ? T[k] : ''); }
+function paymentText(key, fallback) { const box = document.createElement('div'); box.innerHTML = botText(key); return box.textContent || fallback || ''; }
+function normalizeBinanceId(value) { return String(value || '').replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '').replace(/[٠-٩۰-۹]/g, digit => String(digit.charCodeAt(0) - (digit <= '٩' ? 0x660 : 0x6f0))).trim(); }
 /* folder arrows only where there is more to see */
 function chipsEdges() {
   const c = $('#chips'); if (!c) return; const w = c.parentElement; const x = Math.abs(c.scrollLeft);
@@ -3386,7 +3389,7 @@ function kv(label, value, opts) {
   const v = opts.html ? value : esc(value);
   return `<div class="kvrow"><span>${esc(label)}</span>${opts.copy ? `<span class="vv"><b class="${opts.mono ? 'mono' : ''}">${v}</b><button class="copy" data-act="copy" data-v="${esc(opts.copy)}" aria-label="copy">${ic.copy}</button></span>` : `<b class="${opts.mono ? 'mono' : ''}">${v}</b>`}</div>`;
 }
-function fullDate(ts) { return new Date(ts * 1000).toLocaleString({ ar: 'ar-u-nu-latn', en: 'en-US', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function fullDate(ts) { return fmtDate(ts); }
 const COIN_NAMES = { BINANCE: 'Binance Pay', BYBIT_UID: 'Bybit UID', BYBIT_TRC20: 'Bybit TRC20', BYBIT_BEP20: 'Bybit BEP20', USDT: 'USDT TRC20', USDT_BEP20: 'USDT BEP20', TON: 'Toncoin (TON)', LTC: 'Litecoin (LTC)' };
 function openHistoryItem(id) {
   const it = S.hist.map[id]; if (!it) return;
@@ -3575,11 +3578,12 @@ function renderPayment(sh, st) {
       ${p.method !== 'binance' && p.method !== 'bybit' && p.address ? `<button class="linkish" data-act="qr" style="display:inline-flex;align-items:center;gap:6px">${ic.qr}${esc(t('qr'))}</button><div id="qrbox"></div>` : ''}</div>
     ${p.note ? `<div class="paybox"><div class="k">${esc(t('noteId'))}</div><div class="v"><div class="addr">${esc(p.note)}</div><button class="copy-l" data-act="copy" data-v="${esc(p.note)}">${slotH('copy', ic.copy)}</button></div></div>` : ''}
     <div class="note warn">${slotH('warn', ic.warn)}<span>${esc(t('warnExact'))}<br><br>${esc(st.warnFee === 'bep20' ? t('warnBep') : t('warnGen'))}</span></div>
-    ${p.method === 'binance' ? `<div class="paybox"><label for="binance-order-id">Binance Order ID</label><input id="binance-order-id" type="text" dir="ltr" maxlength="128" autocomplete="off" value="${esc(st.manualId || '')}"><button class="btn ghost full" data-act="pay-manual" ${st.checking ? 'disabled' : ''}>${esc(isAr() ? 'التحقق من Order ID' : 'Verify Order ID')}</button><p class="hint" id="binance-manual-message"></p></div>` : ''}
+    ${p.method === 'binance' && st.showManual ? `<div class="paybox"><label for="binance-order-id">${esc(paymentText('dep_site_order_label', 'Binance Order ID'))}</label><p class="hint">${esc(paymentText('dep_binance_manual_prompt'))}</p><input id="binance-order-id" type="text" dir="ltr" maxlength="128" autocomplete="off" value="${esc(st.manualId || '')}"><button class="btn ghost full" data-act="pay-manual" ${st.checking ? 'disabled' : ''}>${esc(paymentText('dep_btn_verify_id', isAr() ? 'التحقق من Order ID' : 'Verify Order ID'))}</button><p class="hint" id="binance-manual-message"></p></div>` : ''}
     <p class="hint" id="ptimeup" hidden>${esc(t('timeUp'))}</p>`);
   sh.foot(`<div class="paybtns">
-    ${manualCheck ? `<button class="btn primary full" data-act="pay-check" ${st.checking ? 'disabled' : ''}>${st.checking ? `<span class="spin"></span>${esc(t('checking'))}` : bem('check', ae('search')) + esc(t('checkNow'))}</button>` : ''}
-    <button class="btn danger-text full ${st.arm ? 'armed' : ''}" data-act="pay-cancel">${bem('cancel', ae('cross'))}${esc(st.arm ? t('armCancel') : t('cancelPay'))}</button></div>`);
+    ${manualCheck ? `<button class="btn primary full" data-act="pay-check" ${st.checking ? 'disabled' : ''}>${st.checking ? `<span class="spin"></span>${esc(t('checking'))}` : bem('check', ae('search')) + esc(paymentText('dep_btn_check', t('checkNow')))}</button>` : ''}
+    ${p.method === 'binance' ? `<button class="btn ghost full" data-act="pay-manual-open">${esc(paymentText('dep_btn_manual', isAr() ? '🧾 إدخال Order ID' : '🧾 Enter Order ID'))}</button>` : ''}
+    <button class="btn danger-text full ${st.arm ? 'armed' : ''}" data-act="pay-cancel">${bem('cancel', ae('cross'))}${esc(st.arm ? t('armCancel') : paymentText('dep_btn_cancel', t('cancelPay')))}</button></div>`);
   tickPay(sh, st);
 }
 function tickPay(sh, st) {
@@ -3604,7 +3608,8 @@ async function pollPay(sh, st) {
       record_rejected: isAr() ? 'وجدنا المعرّف، لكن تعذر اعتماد إيداع وارد. تواصل مع الدعم.' : 'ID found, but the incoming deposit could not be approved. Contact support.',
       already_credited: isAr() ? 'المعاملة محسوبة سابقًا.' : 'This payment was already credited.'
     };
-    manualMessage.textContent = messages[r.manual_status] || '';
+    const keys = {checking:'dep_site_checking',not_in_history:'dep_binance_not_in_history',unavailable:'dep_binance_unavailable',record_rejected:'dep_binance_record_rejected',already_credited:'dep_binance_already_credited'};
+    manualMessage.textContent = paymentText(keys[r.manual_status], messages[r.manual_status] || '');
   }
   if (r.status === 'completed') finishPay(sh, st, 'completed', r.amount);
   else if (r.status === 'cancelled' || r.status === 'expired') finishPay(sh, st, r.status);
@@ -3618,14 +3623,20 @@ function finishPay(sh, st, status, amount) {
   if (S.tab === 'balance') loadWallet();
 }
 async function payAction(sh, st, act, el) {
+  if (act === 'pay-manual-open') {
+    st.showManual = true; renderPayment(sh, st);
+    const input = sh.el.querySelector('#binance-order-id');
+    if (input) { input.scrollIntoView({block: 'center', behavior: 'smooth'}); input.focus(); }
+    return true;
+  }
   if (act === 'pay-manual') {
-    st.manualId = String(sh.el.querySelector('#binance-order-id')?.value || '').trim();
-    if (!/^[A-Za-z0-9_-]{8,128}$/.test(st.manualId)) { toast(isAr() ? 'أدخل المعرّف كاملًا كما يظهر في Binance.' : 'Enter the full ID shown in Binance.', 'bad'); return true; }
+    st.manualId = normalizeBinanceId(sh.el.querySelector('#binance-order-id')?.value);
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(st.manualId)) { toast(paymentText('dep_binance_invalid_id', isAr() ? 'أدخل المعرّف كاملًا كما يظهر في Binance.' : 'Enter the full ID shown in Binance.'), 'bad'); return true; }
     st.checking = true; renderPayment(sh, st);
     const r = await api('deposit/check', {transaction_id: st.manualId});
     st.checking = false;
     if (!r.ok) toast(errText(r), 'bad');
-    else if (r.throttled) toast(isAr() ? 'انتظر قليلًا ثم أعد المحاولة.' : 'Wait a moment before retrying.', 'bad');
+    else if (r.throttled) toast(paymentText('dep_site_throttled', isAr() ? 'انتظر قليلًا ثم أعد المحاولة.' : 'Wait a moment before retrying.'), 'bad');
     if (!st.done && sh.el.isConnected) { renderPayment(sh, st); await pollPay(sh, st); }
     return true;
   }
@@ -4547,7 +4558,7 @@ function upProductsHtml(data, busy) {
   const items=data.products || [];
   return `<div class="up-section-head"><div><b>${esc(adt('upPurchased'))}</b><small>${esc(adt('upAllSources'))}</small></div><button class="copy" data-act="up-refresh" aria-label="${esc(adt('upRefresh'))}">↻</button></div>
     <p class="api-muted">${esc(adt('upHint'))}</p>
-    <div class="up-product-list">${items.length ? items.map(p=>`<button class="up-product" data-act="up-product" data-v="${esc(p.key)}"><span class="up-product-icon">${ic.box || '📦'}</span><span class="meta"><b dir="auto">${esc(upTitle(p))}</b><small>${esc(adt('upOrderCount',{n:p.orders}))} · ×${p.qty}</small></span><span class="up-product-end"><b class="num">${usd(p.total)}</b>${ic.chev}</span></button>`).join('') : `<div class="empty"><h3>${esc(adt('upNoOrders'))}</h3></div>`}</div>${upPager(data,'up-products-page')}`;
+    <div class="up-product-list">${items.length ? items.map(p=>`<button class="up-product" data-act="up-product" data-v="${esc(p.key)}"><span class="up-product-icon">${ic.box || '📦'}</span><span class="meta"><b dir="auto">${esc(upTitle(p))}</b><small>${esc(adt('upOrderCount',{n:p.orders}))} · ×${p.qty}</small>${p.last ? `<small>${esc(fmtDate(p.last))}</small>` : ''}</span><span class="up-product-end"><b class="num">${usd(p.total)}</b>${ic.chev}</span></button>`).join('') : `<div class="empty"><h3>${esc(adt('upNoOrders'))}</h3></div>`}</div>${upPager(data,'up-products-page')}`;
 }
 function upRecordsHtml(data) {
   return `<button class="sub-back" data-act="up-back">${ic.chevL}${esc(adt('upBackProducts'))}</button><div class="up-section-head"><div><b dir="auto">${esc(upTitle(data.product))}</b><small>${esc(adt('upOrderCount',{n:data.summary.orders}))}</small></div><b class="num">${usd(data.summary.spent)}</b></div>

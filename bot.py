@@ -2687,7 +2687,7 @@ class APIHandler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if p in ('', '/'):
             return _json_resp(self, 200, {'status': 'online', 'binance_verification': 'manual-v3',
-                                         'binance_receipt': 'order-id-v1',
+                                         'binance_receipt': 'order-id-v1', 'payment_cms_dates': 'v1',
                                          'runtime_handoff': 'single-active-v1',
                                          'bot_active': bool(globals().get('_RUNTIME_HANDOFF'))})
         if p == '/__lara/ping':
@@ -3645,21 +3645,10 @@ def send_payment_lock_warning(uid, lang=None):
         try: lang = get_lang(uid)
         except: lang = 'ar'
     
-    warn = (
-        "⚠️ <b>تنبيه: لديك عملية دفع معلقة!</b>\n\n"
-        "لا يمكنك القيام بأي إجراء آخر في البوت حتى تقوم بإتمام عملية الدفع الحالية أو إلغائها.\n\n"
-        "💡 <b>للإلغاء والعودة لاستخدام البوت:</b>\n"
-        "اضغط على الزر أدناه مباشرة 👇"
-        if lang == 'ar' else
-        "⚠️ <b>Warning: You have a pending payment!</b>\n\n"
-        "You cannot perform any other actions in the bot until you complete or cancel the current payment.\n\n"
-        "💡 <b>To cancel and return to using the bot:</b>\n"
-        "Press the button below 👇"
-    )
-    
+    warn = get_text(uid, 'dep_payment_locked')
+
     markup = InlineKeyboardMarkup()
-    btn_text = "❌ إلغاء عملية الدفع" if lang == 'ar' else "❌ Cancel Payment"
-    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     
     try:
         bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
@@ -6869,7 +6858,7 @@ def _parse_btn_label(text):
     return text.strip(), emoji_id
 
 
-def _copy_button(label, text_to_copy):
+def _copy_button(label, text_to_copy, style=None):
     """
     يصنع زر نسخ بـ CopyTextButton (Bot API 7.10+).
     يستخرج Premium Emoji من label تلقائياً ويحطه كأيقونة الزر.
@@ -6878,8 +6867,8 @@ def _copy_button(label, text_to_copy):
     try:
         from telebot.types import CopyTextButton
         kwargs = {'copy_text': CopyTextButton(text=str(text_to_copy)[:256])}
-        if emoji_id:
-            return CustomInlineButton(clean_label, icon_custom_emoji_id=emoji_id, **kwargs)
+        if emoji_id or style:
+            return CustomInlineButton(clean_label, icon_custom_emoji_id=emoji_id, style=style, **kwargs)
         return InlineKeyboardButton(clean_label, **kwargs)
     except Exception:
         # Fallback لإصدارات قديمة
@@ -6888,9 +6877,9 @@ def _copy_button(label, text_to_copy):
 
 def _deposit_copy_button(uid, key, value):
     """Keep payment-copy labels distinct while sharing the configured copy emoji."""
-    source = get_text(uid, 'dep_btn_copy_amount')
+    source = _deposit_label(uid, 'dep_btn_copy_amount')
     source_text, emoji_id = _parse_btn_label(source)
-    label, _unused = _parse_btn_label(get_text(uid, key))
+    label, _unused = _parse_btn_label(_deposit_label(uid, key))
 
     def without_symbol_prefix(text):
         first, space, rest = text.partition(' ')
@@ -6903,7 +6892,9 @@ def _deposit_copy_button(uid, key, value):
         first = source_text.partition(' ')[0]
         symbol = first if first and not any(ch.isalnum() for ch in first) else ''
         label = f'{symbol} {label}'.strip()
-    return _copy_button(label, value)
+    lang = 'en' if get_lang(uid) == 'en' else 'ar'
+    custom = _custom_button_for_view(lang, key) or {}
+    return _copy_button(label, value, style=custom.get('style'))
 
 
 def _make_btn(label, callback_data=None, url=None, style=None):
@@ -7337,6 +7328,53 @@ LANG['en']['cg_expired_removed'] = '⌛ Your ChatGPT subscription expired and ac
 # ============================================================
 # 🛠️ 7. محرك الـ CMS (ترجمة آمنة مع حماية الرموز التعبيرية)
 # ============================================================
+
+DEPOSIT_CMS_TEXTS = {
+    'dep_payment_locked': ('تنبيه وجود عملية دفع معلقة', '⚠️ <b>لديك عملية دفع معلقة!</b>\nأكمل عملية الدفع الحالية أو ألغها من الزر أدناه للعودة إلى البوت.', '⚠️ <b>You have a pending payment!</b>\nComplete the current payment or cancel it using the button below to return to the bot.'),
+    'dep_binance_check_toast': ('تنبيه زر فحص Binance', '⏳ جاري الفحص...', '⏳ Checking...'),
+    'dep_binance_checking': ('جاري فحص Binance', '🔍 <b>جاري فحص Binance Pay...</b>\nانتظر ثوانٍ.', '🔍 <b>Checking Binance Pay...</b>\nPlease wait.'),
+    'dep_binance_no_pending': ('لا يوجد طلب Binance', 'لا يوجد طلب Binance Pay معلّق صالح. ابدأ طلب إيداع جديد.', 'There is no active Binance Pay deposit. Start a new deposit.'),
+    'dep_binance_not_found': ('التحقق التلقائي لم يجد الإيداع', '❌ لم نجد الإيداع بعد. إذا كان مكتملًا في Binance، أدخل Order ID للتحقق اليدوي.', '❌ Deposit not found yet. If Binance shows it as completed, enter its Order ID for manual verification.'),
+    'dep_binance_manual_prompt': ('طلب Binance Order ID', 'أرسل معرّف المعاملة أو Order ID الظاهر في سجل Binance Pay. سنضيف المبلغ المستلم فعليًا، حتى لو اختلف عن المبلغ المطلوب.', 'Send the transaction ID or Order ID from Binance Pay history. We credit the actual amount received, even if it differs from the requested amount.'),
+    'dep_binance_invalid_id': ('معرّف Binance غير صالح', '❌ أدخل المعرّف كاملًا كما يظهر في Binance.', '❌ Enter the full ID shown in Binance.'),
+    'dep_binance_verified': ('نجاح التحقق اليدوي {0}=المبلغ', '✅ تم التحقق من المعاملة وإضافة المبلغ المستلم: ${0}.', '✅ Payment verified. The received amount ${0} was credited.'),
+    'dep_binance_already_credited': ('Binance: معاملة محسوبة سابقًا', 'هذه المعاملة محسوبة سابقًا، ولن نضيفها مرة ثانية.', 'This payment has already been credited and cannot be credited again.'),
+    'dep_binance_record_rejected': ('Binance: تعذر اعتماد سجل موجود', 'وجدنا المعرّف في Binance، لكن تعذر اعتماد إيداع وارد صالح. تواصل مع الإدارة بهذا المعرّف، ولا تعِد الدفع.', 'We found the ID in Binance but could not confirm an eligible incoming payment. Contact support with this ID; do not pay again.'),
+    'dep_binance_not_in_history': ('Binance: المعرّف غير موجود في السجل', 'لم يظهر هذا المعرّف في سجل حساب الاستلام خلال آخر 90 يومًا. تأكد أنه معرّف Binance Pay أو تواصل مع الإدارة. لا تعِد الدفع.', 'This ID was not found in the receiving account history for the last 90 days. Check the Binance Pay ID or contact support. Do not pay again.'),
+    'dep_binance_unavailable': ('Binance: تعذر إكمال الفحص', '⚠️ تعذر إكمال فحص سجل Binance الآن. أعد المحاولة أو تواصل مع الإدارة بهذا المعرّف. لا تعِد الدفع.', '⚠️ The Binance history check could not finish. Retry or contact support with this ID. Do not pay again.'),
+    'dep_unique_unavailable': ('تعذر حجز مبلغ فريد', 'تعذر إنشاء مبلغ فريد الآن. حاول بعد قليل.', 'Could not reserve a unique amount right now. Please try again shortly.'),
+    'dep_site_order_label': ('عنوان خانة Order ID في الموقع', 'Binance Order ID', 'Binance Order ID'),
+    'dep_site_checking': ('الموقع: جار فحص Binance', 'جاري فحص سجل Binance…', 'Checking Binance history…'),
+    'dep_site_throttled': ('الموقع: انتظار إعادة الفحص', 'انتظر قليلًا ثم أعد المحاولة.', 'Wait a moment before retrying.'),
+}
+for _dep_key, (_dep_title, _dep_ar, _dep_en) in DEPOSIT_CMS_TEXTS.items():
+    LANG['ar'][_dep_key], LANG['en'][_dep_key] = _dep_ar, _dep_en
+for _dep_key, _dep_ar, _dep_en in (
+        ('dep_btn_manual', '🧾 إدخال Order ID', '🧾 Enter Order ID'),
+        ('dep_btn_retry', '🔄 أعد الفحص', '🔄 Check again'),
+        ('dep_btn_verify_id', '🔍 التحقق من Order ID', '🔍 Verify Order ID')):
+    LANG['ar'][_dep_key], LANG['en'][_dep_key] = _dep_ar, _dep_en
+DEPOSIT_CMS_BUTTONS = {key for key in LANG['ar'] if key.startswith('dep_btn_')}
+for _dep_lang in ('ar', 'en'):
+    for _dep_key in DEPOSIT_CMS_BUTTONS:
+        DEFAULT_BUTTONS[_dep_lang][_dep_key] = LANG[_dep_lang][_dep_key]
+
+
+def _deposit_label(uid, key):
+    lang = 'en' if get_lang(uid) == 'en' else 'ar'
+    custom = _custom_button_for_view(lang, key) or {}
+    label = custom.get('text') or get_text(uid, key)
+    if custom.get('emoji_id'):
+        label, _legacy_emoji = _parse_btn_label(label)
+        label = f'<tg-emoji emoji-id="{custom["emoji_id"]}">📋</tg-emoji> {html.escape(label)}'
+    return label
+
+
+def _deposit_action_button(uid, key, callback_data):
+    lang = 'en' if get_lang(uid) == 'en' else 'ar'
+    custom = _custom_button_for_view(lang, key) or {}
+    return _make_btn(_deposit_label(uid, key), callback_data=callback_data, style=custom.get('style'))
+
 
 def translate_duration_label(label, target_lang='en'):
     if not label:
@@ -8279,12 +8317,17 @@ def get_btn_data(uid, key):
             text = custom.get('text', '').strip()
             emoji_id = custom.get('emoji_id', None)
             if not text:
+                if key in DEPOSIT_CMS_BUTTONS:
+                    label, legacy_emoji = _parse_btn_label(get_text(uid, key))
+                    return label, emoji_id or legacy_emoji
                 default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
                 return default_text, emoji_id
             return text, emoji_id
     except Exception as e:
         logger.error(f"get_btn_data DB error: {e}")
     
+    if key in DEPOSIT_CMS_BUTTONS:
+        return _parse_btn_label(get_text(uid, key))
     default_text = DEFAULT_BUTTONS.get(l, DEFAULT_BUTTONS['ar']).get(key, key)
     return default_text, None
 
@@ -13842,7 +13885,7 @@ def _show_exact_amount_warning(call, dest):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(_make_btn(get_text(uid, 'bybit_btn_understood'),
                          callback_data=f"pay_go_{dest}"))
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     bot.send_message(uid, warn, parse_mode="HTML", reply_markup=markup)
 
 
@@ -13917,8 +13960,7 @@ def _dep_binance_real(call):
     # نص قابل للتعديل من admin مع إضافة زر إلغاء عملية الدفع
     msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
     markup = InlineKeyboardMarkup()
-    btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
-    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_binance_deposit_amount)
 
@@ -13943,8 +13985,7 @@ def ask_binance_deposit_amount(message):
         send_payment_lock_warning(uid)
         msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
@@ -13953,8 +13994,7 @@ def ask_binance_deposit_amount(message):
         bot.send_message(uid, get_text(uid, 'dep_err_min'), parse_mode="HTML")
         msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
@@ -13963,8 +14003,7 @@ def ask_binance_deposit_amount(message):
         bot.send_message(uid, get_text(uid, 'dep_err_max'), parse_mode="HTML")
         msg_text = get_text(uid, 'dep_prompt_amount', 'Binance Pay')
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_binance_deposit_amount)
         return
@@ -13972,15 +14011,14 @@ def ask_binance_deposit_amount(message):
     wallet = str(get_setting('wallet_address') or '').strip()
     if not wallet or wallet == 'Not Set':
         markup = InlineKeyboardMarkup()
-        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data='cancel_deposit'))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML', reply_markup=markup)
         return
 
     # نولّد مبلغ Binance Pay بدقة 4 خانات لأن هذه هي الدقة المعروضة للمستخدم.
     unique_amount = generate_unique_amount_for_user(base_amount, uid, 'BINANCE')
     if unique_amount is None:
-        bot.send_message(uid, 'تعذر إنشاء مبلغ فريد الآن. حاول بعد قليل.' if get_lang(uid) == 'ar'
-                         else 'Could not reserve a unique amount right now. Please try again shortly.')
+        bot.send_message(uid, get_text(uid, 'dep_unique_unavailable'), parse_mode='HTML')
         return
 
     # نسجّل في DB
@@ -14000,14 +14038,9 @@ def ask_binance_deposit_amount(message):
         _deposit_copy_button(uid, 'dep_btn_copy_binance_id', wallet)
     )
     cancel_markup.add(_deposit_copy_button(uid, 'dep_btn_copy_id', str(uid)))
-    cancel_markup.add(_make_btn(
-        get_text(uid, 'dep_btn_check'),
-        callback_data=f"binance_check_{uid}"
-    ))
-    cancel_markup.add(_make_btn(
-        get_text(uid, 'dep_btn_cancel'),
-        callback_data="cancel_deposit"
-    ))
+    cancel_markup.add(_deposit_action_button(uid, 'dep_btn_check', f'binance_check_{uid}'))
+    cancel_markup.add(_deposit_action_button(uid, 'dep_btn_manual', 'binance_manual_start'))
+    cancel_markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     
     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=cancel_markup)
     bot.clear_step_handler_by_chat_id(chat_id=uid)
@@ -14017,7 +14050,7 @@ def ask_binance_deposit_amount(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("binance_check_"))
 def binance_check_payment(call):
     """يفحص Binance Pay فوراً لما المستخدم يضغط الزر"""
-    bot.answer_callback_query(call.id, "⏳ جاري الفحص..." if get_lang(call.from_user.id) == 'ar' else "⏳ Checking...")
+    bot.answer_callback_query(call.id, _wa_plain(get_text(call.from_user.id, 'dep_binance_check_toast'), 150))
     uid = call.from_user.id
     if is_user_banned(uid): return
     l = get_lang(uid)
@@ -14025,7 +14058,7 @@ def binance_check_payment(call):
     # نرسل رسالة "جاري الفحص"
     checking_msg = bot.send_message(
         uid,
-        bil(uid, "🔍 <b>جاري فحص Binance Pay...</b>\nانتظر ثوانٍ.", "🔍 <b>Checking Binance Pay...</b>\nPlease wait."),
+        get_text(uid, 'dep_binance_checking'),
         parse_mode="HTML"
     )
     
@@ -14054,8 +14087,7 @@ def binance_check_payment(call):
 
     except ValueError:
         bot.edit_message_text(
-            bil(uid, 'لا يوجد طلب Binance Pay معلّق صالح. ابدأ طلب إيداع جديد.',
-                'There is no active Binance Pay deposit. Start a new deposit.'),
+            get_text(uid, 'dep_binance_no_pending'),
             uid, checking_msg.message_id, parse_mode='HTML')
         return
     except Exception as e:
@@ -14070,16 +14102,12 @@ def binance_check_payment(call):
     if not found:
         try:
             bot.edit_message_text(
-                bil(uid,
-                    "❌ <b>لم نجد الإيداع بعد.</b> إذا كان مكتملًا في Binance، أدخل معرّف المعاملة للتحقق اليدوي.",
-                    "❌ <b>Deposit not found yet.</b> If Binance shows it as completed, enter its transaction ID for manual verification."),
+                get_text(uid, 'dep_binance_not_found'),
                 uid, checking_msg.message_id,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(row_width=1).add(
-                    InlineKeyboardButton("🔄 أعد الفحص" if l == 'ar' else "🔄 Check again",
-                                         callback_data=f"binance_check_{uid}"),
-                    InlineKeyboardButton("🧾 إدخال معرّف المعاملة" if l == 'ar' else "🧾 Enter transaction ID",
-                                         callback_data='binance_manual_start')
+                    _deposit_action_button(uid, 'dep_btn_retry', f'binance_check_{uid}'),
+                    _deposit_action_button(uid, 'dep_btn_manual', 'binance_manual_start')
                 )
             )
         except Exception:
@@ -14270,14 +14298,10 @@ def binance_manual_start(call):
         'expires_at': {'$gt': int(time.time())}
     })
     if not pending:
-        bot.send_message(uid, 'لا يوجد طلب Binance Pay معلّق صالح.' if get_lang(uid) == 'ar'
-                         else 'There is no active Binance Pay deposit.')
+        bot.send_message(uid, get_text(uid, 'dep_binance_no_pending'), parse_mode='HTML')
         return
-    prompt = ('أرسل معرّف المعاملة أو Order ID الظاهر في سجل Binance Pay. سنفحص الإيداع الوارد ونضيف المبلغ المستلم فعليًا، حتى لو اختلف عن المبلغ الذي طلبته.'
-              if get_lang(uid) == 'ar' else
-              'Send the transaction ID or Order ID from Binance Pay history. We verify the incoming payment and credit the actual amount received, even if it differs from your requested amount.')
-    msg = bot.send_message(uid, prompt, reply_markup=InlineKeyboardMarkup().add(
-        InlineKeyboardButton('❌ إلغاء' if get_lang(uid) == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+    msg = bot.send_message(uid, get_text(uid, 'dep_binance_manual_prompt'), parse_mode='HTML', reply_markup=InlineKeyboardMarkup().add(
+        _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
     bot.register_next_step_handler(msg, verify_binance_pay, get_lang(uid))
 
 
@@ -14292,8 +14316,7 @@ def verify_binance_pay(message, lang):
     if supplied.lower() in ('cancel', 'الغاء', 'إلغاء', 'الغاء العملية') or supplied.startswith('/'):
         return
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', supplied, flags=re.ASCII):
-        msg = bot.send_message(uid, '❌ معرّف غير صالح. أرسله كما يظهر في Binance.' if lang == 'ar'
-                         else '❌ Invalid ID. Send it exactly as shown in Binance.')
+        msg = bot.send_message(uid, get_text(uid, 'dep_binance_invalid_id'), parse_mode='HTML')
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
         return
     pending = db.pending_deposits.find_one({
@@ -14301,8 +14324,7 @@ def verify_binance_pay(message, lang):
         'expires_at': {'$gt': int(time.time())}
     })
     if not pending:
-        bot.send_message(uid, 'لا يوجد طلب Binance Pay معلّق صالح.' if lang == 'ar'
-                         else 'There is no active Binance Pay deposit.')
+        bot.send_message(uid, get_text(uid, 'dep_binance_no_pending'), parse_mode='HTML')
         return
     try:
         db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
@@ -14312,34 +14334,29 @@ def verify_binance_pay(message, lang):
                 uid, pending, tx, lang, 'binance_manual', allow_amount_mismatch=True):
             completed = db.pending_deposits.find_one({'pending_id': pending['pending_id'], 'user_id': uid}) or {}
             actual_usd = completed['credited_amount_usd']
-            bot.send_message(uid,
-                f'✅ تم التحقق من المعاملة وإضافة المبلغ المستلم: ${float(actual_usd):.2f}.' if lang == 'ar'
-                else f'✅ Payment verified. The received amount ${float(actual_usd):.2f} was credited.')
+            bot.send_message(uid, get_text(uid, 'dep_binance_verified', f'{float(actual_usd):.2f}'), parse_mode='HTML')
             return
         if tx and db.used_transactions.find_one({'transaction_id': {'$in': _binance_row_used_keys(tx)}}):
             reason = 'already_credited'
-            retry = 'هذه المعاملة محسوبة سابقًا، ولن نضيفها مرة ثانية.' if lang == 'ar' else 'This payment has already been credited and cannot be credited again.'
+            retry = get_text(uid, 'dep_binance_already_credited')
         elif tx:
             reason = 'record_rejected'
-            retry = ('وجدنا المعرّف في Binance، لكن لم نتمكن من اعتماد إيداع وارد صالح. تواصل مع الإدارة بهذا المعرّف، ولا تعِد الدفع.' if lang == 'ar' else
-                     'We found the ID in Binance but could not confirm an eligible incoming payment. Contact support with this ID; do not pay again.')
+            retry = get_text(uid, 'dep_binance_record_rejected')
         else:
             reason = 'not_in_history'
-            retry = ('لم يظهر هذا المعرّف في سجل Binance Pay لحساب الاستلام خلال آخر 90 يومًا. تأكد أنه معرّف Binance Pay، أو تواصل مع الإدارة. لا تعِد الدفع.' if lang == 'ar' else
-                     'This ID was not found in the receiving account\'s Binance Pay history for the last 90 days. Check the Binance Pay ID or contact support. Do not pay again.')
+            retry = get_text(uid, 'dep_binance_not_in_history')
         db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
                                        {'$set': {'last_manual_check': reason, 'last_manual_checked_at': int(time.time())}})
-        msg = bot.send_message(uid, retry, reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+        msg = bot.send_message(uid, retry, parse_mode='HTML', reply_markup=InlineKeyboardMarkup().add(
+            _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
     except Exception as exc:
         logger.error('Manual Binance Pay verification failed: %s', exc)
         db.pending_deposits.update_one({'pending_id': pending['pending_id'], 'user_id': uid},
                                        {'$set': {'last_manual_check': 'unavailable', 'last_manual_checked_at': int(time.time())}})
-        msg = bot.send_message(uid, '⚠️ تعذر إكمال فحص سجل Binance الآن. أعد المحاولة بعد قليل أو تواصل مع الإدارة بهذا المعرّف. لا تعِد الدفع.' if lang == 'ar'
-                               else '⚠️ The Binance history check could not finish. Retry shortly or contact support with this ID. Do not pay again.',
+        msg = bot.send_message(uid, get_text(uid, 'dep_binance_unavailable'), parse_mode='HTML',
                                reply_markup=InlineKeyboardMarkup().add(
-                                   InlineKeyboardButton('❌ إلغاء' if lang == 'ar' else '❌ Cancel', callback_data='cancel_deposit')))
+                                   _deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit')))
         bot.register_next_step_handler(msg, verify_binance_pay, lang)
 
 
@@ -16458,7 +16475,7 @@ def _dep_bybit_start_flow(uid, method):
     method = 'UID'
     msg_text = get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method))
     markup = InlineKeyboardMarkup()
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method, None)
 
@@ -16474,7 +16491,7 @@ def ask_bybit_sender_uid(message, method):
     def _retry(err=None):
         send_payment_lock_warning(uid, l)
         markup = InlineKeyboardMarkup()
-        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         txt = (err + "\n\n" if err else "") + get_text(uid, 'bybit_ask_uid')
         m = bot.send_message(uid, txt, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(m, ask_bybit_sender_uid, method)
@@ -16489,7 +16506,7 @@ def ask_bybit_sender_uid(message, method):
 
     # ننتقل لطلب المبلغ حاملين الـ sender_uid
     markup = InlineKeyboardMarkup()
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     msg = bot.send_message(uid, get_text(uid, 'dep_prompt_amount', _bybit_method_label(uid, method)),
                            parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_bybit_deposit_amount, method, sender_uid)
@@ -16524,7 +16541,7 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
     def _retry():
         send_payment_lock_warning(uid, l)
         markup = InlineKeyboardMarkup()
-        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         m = bot.send_message(uid, get_text(uid, 'dep_prompt_amount',
                                            _bybit_method_label(uid, method)),
                              parse_mode="HTML", reply_markup=markup)
@@ -16584,7 +16601,7 @@ def ask_bybit_deposit_amount(message, method, sender_uid=None):
     # صف 3: فحص الدفع فوراً (بدل انتظار الفحص التلقائي)
     markup.add(_make_btn(get_text(uid, 'dep_btn_check'),
                          callback_data=f"bybit_check_{uid}"))
-    markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
 
 
@@ -18470,8 +18487,7 @@ def start_amount_protected_deposit(call, coin):
 
     msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
     markup = InlineKeyboardMarkup()
-    btn_text = "❌ إلغاء عملية الدفع" if get_lang(uid) == 'ar' else "❌ Cancel Payment"
-    markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+    markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
     msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
     bot.register_next_step_handler(msg, ask_deposit_amount, coin)
 
@@ -18503,8 +18519,7 @@ def ask_deposit_amount(message, coin):
         }.get(coin, coin)
         msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
@@ -18520,8 +18535,7 @@ def ask_deposit_amount(message, coin):
         }.get(coin, coin)
         msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
@@ -18536,8 +18550,7 @@ def ask_deposit_amount(message, coin):
         }.get(coin, coin)
         msg_text = get_text(uid, 'dep_prompt_amount', coin_name)
         markup = InlineKeyboardMarkup()
-        btn_text = "❌ إلغاء عملية الدفع" if l == 'ar' else "❌ Cancel Payment"
-        markup.add(InlineKeyboardButton(btn_text, callback_data="cancel_deposit"))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, msg_text, parse_mode="HTML", reply_markup=markup)
         bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
@@ -18576,7 +18589,7 @@ def ask_deposit_amount(message, coin):
             raise ValueError('Invalid payment amount')
     except Exception:
         markup = InlineKeyboardMarkup()
-        markup.add(_make_btn(get_text(uid, 'dep_btn_cancel'), callback_data='cancel_deposit'))
+        markup.add(_deposit_action_button(uid, 'dep_btn_cancel', 'cancel_deposit'))
         msg = bot.send_message(uid, get_text(uid, 'dep_err_general'), parse_mode='HTML', reply_markup=markup)
         bot.register_next_step_handler(msg, ask_deposit_amount, coin)
         return
@@ -24516,6 +24529,55 @@ def _cms_status_snapshot(markup, kind):
     return markup
 
 
+def _cms_catalog_entries(kind, deposit=False):
+    entries = []
+    if kind in ('text', 'deposit'):
+        keys = sorted({key for lang in LANG.values() for key, value in lang.items() if isinstance(value, str)})
+        for key in keys:
+            if deposit and not key.startswith(('dep_', 'bybit_')):
+                continue
+            title = DEPOSIT_CMS_TEXTS.get(key, (None,))[0] or _wa_plain(LANG.get('ar', {}).get(key) or key, 55)
+            entries.append(('text', key, title))
+    if kind in ('button', 'deposit'):
+        keys = sorted({key for lang in DEFAULT_BUTTONS.values() for key in lang})
+        for key in keys:
+            if deposit and key not in DEPOSIT_CMS_BUTTONS and not key.startswith(('btn_bybit', 'btn_binance', 'btn_usdt', 'btn_ton', 'btn_ltc', 'btn_stars')):
+                continue
+            entries.append(('button', key, _wa_plain(DEFAULT_BUTTONS.get('ar', {}).get(key) or key, 55)))
+    return entries
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ad_cms_catalog_'))
+@admin_required
+def ad_cms_catalog(call):
+    bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(call.message.chat.id)
+    match = re.fullmatch(r'ad_cms_catalog_(text|button|deposit)_(\d{1,5})', call.data)
+    if not match:
+        return
+    kind, page = match[1], int(match[2])
+    entries = _cms_catalog_entries(kind, deposit=kind == 'deposit')
+    page = min(page, max(0, (len(entries) - 1) // 12))
+    markup = InlineKeyboardMarkup(row_width=1)
+    for entry_kind, key, title in entries[page * 12:page * 12 + 12]:
+        prefix = 'edit_txt_' if entry_kind == 'text' else 'edit_btn_'
+        icon = '📝' if entry_kind == 'text' else '🎛'
+        markup.add(InlineKeyboardButton(f'{icon} {title}', callback_data=prefix + key))
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton('⬅️', callback_data=f'ad_cms_catalog_{kind}_{page - 1}'))
+    if (page + 1) * 12 < len(entries):
+        nav.append(InlineKeyboardButton('➡️', callback_data=f'ad_cms_catalog_{kind}_{page + 1}'))
+    if nav:
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton('🔙 التخصيص', callback_data='ad_texts_main'))
+    _cms_status_snapshot(markup, 'text')
+    _cms_status_snapshot(markup, 'button')
+    bot.edit_message_text(f'🎛 <b>التخصيص الكامل</b> · {page + 1}/{max(1, (len(entries) + 11) // 12)}\n'
+                          'جميع العناصر المسجلة متاحة هنا. اختر نصًا أو زرًا لتعديله من المحرر الأصلي.',
+                          call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+
+
 def _cms_edit_target(value):
     key, separator, lang = value.rpartition(':')
     if separator and key in WWC_CMS_TEXTS and lang in ('ar', 'en', 'vi', 'zh'):
@@ -24594,6 +24656,9 @@ def ad_texts_main_ui(call):
     bot.answer_callback_query(call.id)
     bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
     markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton('💳 تخصيص الإيداع والتحقق', callback_data='ad_cms_catalog_deposit_0'))
+    markup.add(InlineKeyboardButton('🗂 جميع النصوص', callback_data='ad_cms_catalog_text_0'),
+               InlineKeyboardButton('🗂 جميع الأزرار', callback_data='ad_cms_catalog_button_0'))
     markup.add(InlineKeyboardButton("📢 أزرار النشر (الموقع / البوت)", callback_data="ad_cms_notice"))
     markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cms_cgpt"))
     markup.add(InlineKeyboardButton("👑 نصوص VIP", callback_data="ad_cms_vip"))
@@ -24744,7 +24809,7 @@ def ad_cms_btns_list(call):
         'wwc': list(WWC_CMS_BUTTONS),
         'start': ['btn_products', 'btn_deposit', 'btn_profile', 'btn_settings', 'btn_toggle_folders', 'btn_view_flat', 'btn_view_folders', 'btn_invite', 'btn_support', 'btn_lang', 'btn_terms', 'btn_admin', 'btn_api', 'btn_check_sub'],
         'dep': ['btn_stars', 'btn_binance', 'btn_usdt_trc20', 'btn_usdt_bep20', 'btn_ton', 'btn_ltc',
-                'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'],
+                'btn_bybit', 'btn_bybit_uid', 'btn_bybit_trc20', 'btn_bybit_bep20'] + sorted(DEPOSIT_CMS_BUTTONS),
         'prof': ['btn_buy_hist', 'btn_dep_hist', 'btn_dl_buy', 'btn_vip'],
         'shop': ['btn_shop_search', 'btn_shop_avail', 'btn_shop_available_list', 'btn_shop_available_text', 'btn_refresh', 'btn_main_menu', 'btn_buy_now', 'btn_back']
     }
@@ -24783,6 +24848,8 @@ def ad_edit_txt_prompt(call):
         if key == 'shop_available_count':
             guide += '\nاحتفظ بـ {0} ليظهر عدد المنتجات.'
         bot.send_message(call.message.chat.id, guide, reply_markup=nav)
+    if key in DEPOSIT_CMS_TEXTS:
+        bot.send_message(call.message.chat.id, '💳 تخصيص رسائل الدفع. احتفظ بالمتغيرات مثل {0} إن وجدت؛ تمثل بيانات المعاملة.')
     if key in CGPT_CMS_TEXTS:
         nav = InlineKeyboardMarkup()
         nav.add(InlineKeyboardButton("🔙 ChatGPT Business", callback_data="ad_cms_cgpt"))
@@ -25224,7 +25291,7 @@ def ad_save_custom_text(message, key, edit_lang=None):
             bot.send_message(message.chat.id, final_text, parse_mode='HTML')
             return
     
-    if key in CGPT_CMS_TEXTS:
+    if key in CGPT_CMS_TEXTS or key in DEPOSIT_CMS_TEXTS:
         try:
             from string import Formatter
             expected = {field for _, field, _, _ in Formatter().parse(LANG['ar'][key]) if field is not None}
@@ -25367,7 +25434,7 @@ def ad_save_custom_text(message, key, edit_lang=None):
             )
             return
 
-    if key in CGPT_CMS_TEXTS:
+    if key in CGPT_CMS_TEXTS or key in DEPOSIT_CMS_TEXTS:
         from string import Formatter
         for value in (final_text_ar, final_text_en):
             try:
@@ -32936,7 +33003,7 @@ def _wa_txt_emoji(lang, key):
     return None
 
 
-_WA_TEXT_KEYS = ('dep_choose',)
+_WA_TEXT_KEYS = ('dep_choose',) + tuple(DEPOSIT_CMS_TEXTS) + tuple(sorted(DEPOSIT_CMS_BUTTONS))
 
 
 def _wa_texts():
@@ -32946,12 +33013,20 @@ def _wa_texts():
             _load_custom_texts_cache()
     except Exception:
         pass
+    try:
+        payment_buttons = {(d.get('lang'), d.get('key')): d for d in db.custom_buttons.find(
+            {'key': {'$in': list(DEPOSIT_CMS_BUTTONS)}, 'lang': {'$in': ['ar', 'en']}})}
+    except Exception:
+        payment_buttons = {}
     out = {}
     for l in ('ar', 'en'):
         out[l] = {}
         for k in _WA_TEXT_KEYS:
             try:
                 raw = (_CUSTOM_TEXTS_CACHE.get((l, k)) or '').strip() or LANG.get(l, LANG['ar']).get(k, '')
+                if k in DEPOSIT_CMS_BUTTONS:
+                    custom_button = payment_buttons.get((l, k)) or {}
+                    raw = custom_button.get('text') or raw
                 if raw:
                     out[l][k] = _wa_rich(raw, 1500)
             except Exception:
@@ -34175,6 +34250,8 @@ def _wa_deposit_check(identity, body):
     target = None
     if coin == 'BINANCE':
         supplied = str(body.get('transaction_id') or '').strip()
+        supplied = re.sub(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]', '', supplied)
+        supplied = supplied.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
         if supplied:
             if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', supplied, re.ASCII):
                 return 400, {'error': 'bad_request'}
@@ -35417,10 +35494,10 @@ def admin_deep_search_text(r):
         lines.append(f"📦 {html.escape(clean_name(a['product']['name']))} · {stl.get(a['state'], a['state'])}"
                      + (f" · بالمخزون {a['in_stock']}" if a['in_stock'] and a['state'] != 'in_stock' else ''))
         if a['added']:
-            lines.append(f"🗓 انضاف: {datetime.datetime.utcfromtimestamp(a['added']).strftime('%Y-%m-%d %H:%M')} UTC")
+            lines.append(f"🗓 انضاف: {datetime.datetime.utcfromtimestamp(a['added']).strftime('%Y-%m-%d %H:%M:%S')} UTC")
         for x in a['sales'][:3]:
             u = x.get('user') or {}
-            when = datetime.datetime.utcfromtimestamp(x['ts']).strftime('%Y-%m-%d %H:%M') if x.get('ts') else '—'
+            when = datetime.datetime.utcfromtimestamp(x['ts']).strftime('%Y-%m-%d %H:%M:%S') if x.get('ts') else '—'
             who = (f"<a href=\"tg://user?id={u['id']}\">{html.escape(clean_name(u.get('name') or str(u['id'])))}</a>"
                    + (f" @{html.escape(u['username'])}" if u.get('username') else '') + f" · <code>{u['id']}</code>") if u else '—'
             lines.append(f"   🧾 <code>{html.escape(x['order_id'])}</code> · {when} · ${x['price']:.2f}")
@@ -35434,7 +35511,7 @@ def admin_deep_search_text(r):
         lines.append("… فيه نتائج أكثر — افتح «🔎 البحث» في تبويب الإدارة بالموقع عشان تشوفها كلها.")
     for t in (r.get('deposits') or [])[:5]:
         u = t.get('user') or {}
-        when = datetime.datetime.utcfromtimestamp(t['ts']).strftime('%Y-%m-%d %H:%M') if t.get('ts') else '—'
+        when = datetime.datetime.utcfromtimestamp(t['ts']).strftime('%Y-%m-%d %H:%M:%S') if t.get('ts') else '—'
         lines.append(f"💳 <b>إيداع مسجّل</b> ${t['amount']:.2f} · {html.escape(t['method'] or '')} · {when}")
         lines.append(f"   🆔 <code>{html.escape(t['tx'][:90])}</code>" + (f" · 👤 <code>{u['id']}</code>" if u else ''))
     for o in r['orders'][:5]:
@@ -35468,7 +35545,7 @@ _ADM_STATUS = {'delivered': '✅ تم التسليم', 'manual': '✋ يدوي',
 
 def admin_order_card_text(c):
     u = c.get('user') or {}
-    when = datetime.datetime.utcfromtimestamp(c['ts']).strftime('%Y-%m-%d %H:%M UTC') if c.get('ts') else '—'
+    when = datetime.datetime.utcfromtimestamp(c['ts']).strftime('%Y-%m-%d %H:%M:%S UTC') if c.get('ts') else '—'
     lines = [f"🧾 <b>طلب</b> <code>{html.escape(c['order_id'])}</code>",
              f"📌 {_ADM_STATUS.get(c.get('status'), html.escape(str(c.get('status') or '')))}",
              f"📦 <b>{html.escape(clean_name(c['product']['name']))}</b> × {c['qty']}",
@@ -35616,6 +35693,7 @@ _ADM_SECTIONS = [
     ('profit', '💹', 'الأرباح', 'Profit', 'ad_profit'),
     ('plist', '📋', 'جدول المنتجات المتوفرة', 'Available products table', 'ad_plist'),
     ('shop_cms', '🔎', 'تخصيص البحث والمتوفر', 'Search and availability settings', 'ad_cms_shop'),
+    ('cms', '🎛', 'تخصيص النصوص والأزرار', 'Texts and buttons', 'ad_texts_main'),
     ('reports', '📊', 'تقارير المبيعات (CSV)', 'Sales reports (CSV)', 'ad_reports'),
     ('ref', '🤝', 'إعدادات الإحالات', 'Referral settings', 'ad_ref_settings'),
     ('vip', '💎', 'نظام VIP', 'VIP tiers', 'ad_vip'),
@@ -35625,15 +35703,16 @@ _ADM_SECTIONS = [
 _ADM_OPEN_OK = {s[4] for s in _ADM_SECTIONS} | {'toggle_amount_protection'}
 _ADM_OPEN_OK.add('ad_ref_balance_audit')
 
-# ✏️ التخصيص (CMS) و📢 البرودكاست: داخل البوت فقط — الموقع ما يعرض أزرارها ولا يشغّلها
+# Native CMS also runs inside the authenticated admin console. Broadcasts retain their bot-only routing.
 _WA_BOT_ONLY_RE = re.compile(r'^(?:ad_texts_main|ad_cms_\w*|edit_txt_\w*|rst_txt_\w*|edit_btn_\w*|btnstyle_\w*'
                              r'|ad_bc|bc_\w*|cgpt_bcast_\w*|extbc_\w*)$')
 
 
 def _wa_bot_only(cb):
-    # The shop's requested controls are also available in the authenticated console.
-    # Other CMS sections and broadcasts keep their existing routing.
+    # CMS operations still execute the original handlers and their admin checks.
     data = str(cb or '')
+    if re.fullmatch(r'(?:ad_texts_main|ad_cms_[\w:]+|edit_txt_[\w:]+|rst_txt_[\w:]+|edit_btn_[\w:]+|btnstyle_[\w:]+)', data):
+        return False
     if data.startswith('chbc_'):
         return True
     if data.startswith('chbcx_'):
@@ -35647,7 +35726,7 @@ def _wa_bot_only(cb):
         if data == f'edit_btn_{key}' or data in {f'btnstyle_{key}_{v}' for v in ('default', 'primary', 'success', 'danger')}:
             return False
     return bool(cb) and bool(_WA_BOT_ONLY_RE.match(data))
-_ADM_OPEN_RE = re.compile(r'^(?:edit_p_[\w-]{1,40}|ad_u_det_\d{1,15}|ad_vipu_\d{1,15}|ordinfo_[\w-]{1,40}|ad_view_ballogs_\d{1,15}_0)$')
+_ADM_OPEN_RE = re.compile(r'^(?:edit_p_[\w-]{1,40}|ad_u_det_\d{1,15}|ad_vipu_\d{1,15}|ordinfo_[\w-]{1,40}|ad_view_ballogs_\d{1,15}_0|ad_cms_[\w:]+|edit_txt_[\w:]+|rst_txt_[\w:]+|edit_btn_[\w:]+|btnstyle_[\w:]+)$')
 
 # الضغطات اللي يرسلها الموقع نيابة عن الأدمن ما لها callback حقيقي عند تيليجرام
 _ORIG_ANSWER_CQ = bot.answer_callback_query
@@ -41590,7 +41669,7 @@ def _up_export(uid, key=None):
 
 def _up_date(stamp):
     try:
-        return datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if stamp else '—'
+        return datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if stamp else '—'
     except (ValueError, OverflowError, OSError):
         return '—'
 
@@ -41689,6 +41768,8 @@ def _up_show_products(call, uid, page=1):
         f"الصفحة {data['page']} / {data['pages']}")
     markup = InlineKeyboardMarkup(row_width=1)
     for product in data['products']:
+        text += (f"\n📦 {html.escape(str(product['name_en'] or product['name'])[:65])}\n"
+                 f"📅 آخر شراء: <code>{_up_date(product['last'])}</code>\n")
         markup.add(InlineKeyboardButton(f"📦 {str(product['name_en'] or product['name'])[:65]} ({product['orders']})",
             callback_data=_up_cb(uid, 'p', product['key'], 1, data['page'])))
     if not data['products']:
@@ -41706,7 +41787,7 @@ def _up_show_product(call, uid, key, page=1, parent=1):
         return
     markup = InlineKeyboardMarkup(row_width=1)
     for row in data['records']:
-        label = f"🧾 {_up_date(row['ts'])[:16]} · ×{row['qty']} · ${row['total']:.2f} · {row['ref']}"
+        label = f"🧾 {_up_date(row['ts'])} · ×{row['qty']} · ${row['total']:.2f} · {row['ref']}"
         markup.add(InlineKeyboardButton(label[:110], callback_data=_up_cb(uid, 'd', row['key'], data['page'], parent)))
     _up_pager(markup, data, lambda p: _up_cb(uid, 'p', key, p, parent))
     markup.add(InlineKeyboardButton('🔙 منتجات المستخدم', callback_data=_up_cb(uid, 'g', page=parent)))
