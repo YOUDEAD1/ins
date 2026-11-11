@@ -13841,6 +13841,14 @@ def got_payment(message):
         usd_amount = float(parts[2])
         tx_id = pay_info.telegram_payment_charge_id
         l = get_lang(uid)
+        # 🛡 نضيف ما دُفع فعلاً: العملة نجوم فقط، والمبلغ لا يتجاوز قيمة النجوم المدفوعة بالسعر الحالي.
+        if str(getattr(pay_info, 'currency', '') or '') != 'XTR':
+            logger.error(f"🚨 successful_payment بعملة غير متوقعة للمستخدم {uid}")
+            notify_admins(f"🚨 <b>دفعة Stars بعملة غير متوقعة</b>\n👤 <code>{uid}</code> — لم يُضف الرصيد. راجع يدوياً.")
+            return
+        paid_stars = int(getattr(pay_info, 'total_amount', 0) or 0)
+        if STARS_RATE > 0 and usd_amount > (paid_stars + 1) / STARS_RATE:
+            usd_amount = round(paid_stars / STARS_RATE, 2)
         _LOG_SRC.v = 'webapp' if payload.endswith('_wa') else 'bot'
         try:
             credit_user(uid, usd_amount, tx_id, l, "Telegram Stars ⭐️", trusted_txid=True)
@@ -18896,9 +18904,9 @@ def verify_crypto_tx(message, lang, coin):
                     
                     mark_pending_deposit_used(pending['pending_id'])
                     base_amount = pending.get('base_amount_usd', amt)
-                    credit_user(uid, base_amount, matched_txid, lang, f"Crypto {coin}")
+                    credit_user(uid, base_amount, matched_txid, lang, f"Crypto {coin}", trusted_txid=True)
                 else:
-                    credit_user(uid, amt, matched_txid, lang, f"Crypto {coin}")
+                    credit_user(uid, amt, matched_txid, lang, f"Crypto {coin}", trusted_txid=True)
             else: bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     except Exception as e:
@@ -18907,6 +18915,9 @@ def verify_crypto_tx(message, lang, coin):
         bot.send_message(uid, get_text(uid, 'dep_fail'), parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id_normalized)
+        # 🛡 الحجز المؤقت يُفك دائماً بعد انتهاء الفحص؛ الإيداع الناجح مسجَّل في used_transactions.
+        try: db.claimed_hashes.delete_one({'transaction_id': normalize_tx_id(tx_id_normalized), 'user_id': uid})
+        except Exception: pass
 
 
 def get_ltc_price_usd():
@@ -19337,6 +19348,9 @@ def verify_ton_public_blockchain(message, lang, wallet_address):
         )
     finally:
         PROCESSING_TXS.discard(tx_track_key)
+        # 🛡 الحجز المؤقت يُفك دائماً بعد انتهاء الفحص؛ الإيداع الناجح مسجَّل في used_transactions.
+        try: db.claimed_hashes.delete_one({'transaction_id': normalize_tx_id(tx_track_key), 'user_id': uid})
+        except Exception: pass
 
 @safe_next_step
 def verify_ltc_public_blockchain(message, lang, wallet_address):
@@ -19552,9 +19566,9 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
                     mark_pending_deposit_used(pending['pending_id'])
                     # نستخدم المبلغ الأساسي (بدون عشر سنتين الإضافية)
                     base_amount = pending.get('base_amount_usd', usd_amount)
-                    credit_user(uid, base_amount, tx_id_normalized, lang, "Litecoin (LTC)")
+                    credit_user(uid, base_amount, tx_id_normalized, lang, "Litecoin (LTC)", trusted_txid=True)
                 else:
-                    credit_user(uid, usd_amount, tx_id_normalized, lang, "Litecoin (LTC)")
+                    credit_user(uid, usd_amount, tx_id_normalized, lang, "Litecoin (LTC)", trusted_txid=True)
             else: 
                 bot.send_message(uid, get_text(uid, 'dep_pending'), parse_mode="HTML")
         else: 
@@ -19564,6 +19578,9 @@ def verify_ltc_public_blockchain(message, lang, wallet_address):
         bot.send_message(uid, bil(uid, "❌ حدث خطأ أثناء فحص الشبكة.", "❌ Network check error."), parse_mode="HTML")
     finally:
         PROCESSING_TXS.discard(tx_id_normalized)
+        # 🛡 الحجز المؤقت يُفك دائماً بعد انتهاء الفحص؛ الإيداع الناجح مسجَّل في used_transactions.
+        try: db.claimed_hashes.delete_one({'transaction_id': normalize_tx_id(tx_id_normalized), 'user_id': uid})
+        except Exception: pass
 
 def generate_tx_fingerprint(amount, method, sender_addr=None, receiver_addr=None, tx_timestamp=None):
     """
@@ -19680,8 +19697,7 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
         original_user = db.users.find_one({'user_id': original_uid})
         original_balance = float(original_user.get('balance', 0)) if original_user else 0
         
-        # حظر الاثنين فقط (بدون أي تعديل على الرصيد)
-        db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
+        # 🛡 يُحظر فقط من حاول استخدام حوالة مسجّلة لغيره. صاحب الإيداع الأصلي لا يُمس.
         db.users.update_one({'user_id': thief_uid}, {'$set': {'is_banned': 1}})
         
         # تسجيل
@@ -19718,11 +19734,10 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
             
             admin_msg = (
                 f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
-                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
-                f"🔍 <b>نوع الكشف:</b> {match_desc}\n"
-                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"⚠️ الحساب 2 حاول استخدام حوالة مسجّلة للحساب 1.\n"
+                f"🔍 <b>نوع الكشف:</b> {match_desc}\n\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"🚫 <b>تم حظر الحساب 2 فقط.</b> الحساب 1 (صاحب الإيداع) لم يُمس.\n\n"
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
@@ -19750,15 +19765,13 @@ def punish_hash_collision_extended(original_uid, thief_uid, tx_id_clean, origina
                 "⚠️ <i>Contact admin if you believe this is a mistake.</i>"
             )
         
-        try: bot.send_message(original_uid, bil(original_uid, ar_msg, en_msg), parse_mode="HTML")
-        except: pass
         try: bot.send_message(thief_uid, bil(thief_uid, ar_msg, en_msg), parse_mode="HTML")
         except: pass
         
         logger.warning(
             f"🚨 EXTENDED COLLISION PUNISHMENT ({match_type}):\n"
             f"   tx: {tx_id_clean[:30]}\n"
-            f"   original: {original_uid} (banned, ${original_balance:.2f} seized)\n"
+            f"   original: {original_uid} (untouched)\n"
             f"   thief: {thief_uid} (banned)"
         )
         return True
@@ -19779,11 +19792,7 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
         original_user = db.users.find_one({'user_id': original_uid})
         original_balance = float(original_user.get('balance', 0)) if original_user else 0
         
-        # 1. حظر الأصلي (بدون سحب الرصيد)
-        db.users.update_one(
-            {'user_id': original_uid},
-            {'$set': {'is_banned': 1}}
-        )
+        # 1. 🛡 صاحب الإيداع الأصلي لا يُحظر (كان أي حساب وهمي يقدر يحظره بإرسال هاشه العلني)
         
         # 2. حظر الـ thief
         db.users.update_one(
@@ -19817,10 +19826,9 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
             
             admin_msg = (
                 f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
-                f"⚠️ شخصان حاولا استخدام نفس الحوالة.\n"
-                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"⚠️ الحساب 2 حاول استخدام حوالة مسجّلة للحساب 1.\n\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
+                f"🚫 <b>تم حظر الحساب 2 فقط.</b> الحساب 1 (صاحب الإيداع) لم يُمس.\n\n"
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
@@ -19843,11 +19851,6 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
         )
         
         try:
-            bot.send_message(original_uid, manipulation_msg, parse_mode="HTML")
-        except Exception:
-            pass
-        
-        try:
             bot.send_message(thief_uid, manipulation_msg, parse_mode="HTML")
         except Exception:
             pass
@@ -19855,7 +19858,7 @@ def punish_hash_collision(original_uid, thief_uid, tx_id_clean, original_amount=
         logger.warning(
             f"🚨 HASH COLLISION PUNISHMENT APPLIED:\n"
             f"   tx: {tx_id_clean[:30]}\n"
-            f"   original: {original_uid} (banned, balance ${original_balance:.2f} seized)\n"
+            f"   original: {original_uid} (untouched)\n"
             f"   thief: {thief_uid} (banned)"
         )
         return True
@@ -19998,9 +20001,7 @@ def claim_tx_hash(tx_id, uid):
         # 🚨 حظر الاثنين فوراً (race condition = نصب واضح)
         try:
             # حظر الاثنين فقط (بدون سحب رصيد)
-            db.users.update_one({'user_id': original_uid}, {'$set': {'is_banned': 1}})
-            db.users.update_one({'user_id': uid}, {'$set': {'is_banned': 1}})
-            
+            # 🛡 لا حظر تلقائي: الهاش علني على البلوكشين، وأي حساب وهمي كان يقدر يحظر صاحب الحوالة الحقيقي.
             # نجلب رصيد الأول (للعرض في الإشعار فقط)
             original_user = db.users.find_one({'user_id': original_uid})
             original_balance = float(original_user.get('balance', 0)) if original_user else 0
@@ -20013,11 +20014,10 @@ def claim_tx_hash(tx_id, uid):
             thief_username = thief_data.get('username', 'unknown') if thief_data else 'unknown'
             
             admin_msg = (
-                f"🚨 <b>تم اكتشاف تلاعب!</b>\n\n"
-                f"⚠️ شخصان أرسلا نفس الهاش/الأوردر في نفس اللحظة.\n"
-                f"💡 على الأرجح <b>نفس الشخص بحسابين</b>.\n\n"
+                f"⚠️ <b>حسابان أرسلا نفس الهاش</b>\n\n"
+                f"الحساب 2 أرسل هاش يفحصه الحساب 1 الآن.\n"
+                f"🔎 <b>لم يُحظر أحد تلقائياً.</b> الرصيد يُضاف فقط لصاحب طلب الإيداع المطابق. راجع لو تكرر.\n\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🚫 <b>تم حظر الحسابين تلقائياً:</b>\n\n"
                 f"👤 الحساب 1:\n"
                 f"   • ID: <code>{original_uid}</code>\n"
                 f"   • Username: @{original_username}\n"
@@ -20044,17 +20044,11 @@ def claim_tx_hash(tx_id, uid):
             "⚠️ <i>You attempted manipulation - contact admin if you believe this is a mistake.</i>"
         )
         
-        try:
-            bot.send_message(uid, cancel_msg_ar, parse_mode="HTML")
-        except: pass
-        try:
-            bot.send_message(original_uid, cancel_msg_ar, parse_mode="HTML")
-        except: pass
-        
+        # الرسالة للمُرسِل يرسلها المستدعي ('stolen_attempt')؛ صاحب الحجز الأول لا يُزعج ولا يُحظر.
         logger.warning(
-            f"🚨 SIMULTANEOUS RACE DETECTED: "
+            f"⚠️ SAME HASH FROM TWO ACCOUNTS: "
             f"users {original_uid} and {uid} both tried hash {tx_id_clean[:20]}... "
-            f"at the same time. Both banned."
+            f"No automatic ban."
         )
         
         return 'stolen_attempt'
@@ -20169,7 +20163,30 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False, display_tx_id
         original_uid = dup_check.get('original_uid')
         match_type = dup_check.get('match_type', 'unknown')
         original_amount = float(dup_check.get('original_amount', 0))
-        
+
+        if match_type != 'tx_id':
+            # 🛡 تشابه (مبلغ + دقيقة) تخمين وليس دليلاً: عميلان يودعان نفس المبلغ في نفس الدقيقة حالة عادية.
+            # لا حظر ولا رفض صامت: يُعلَّق الإيداع للمراجعة اليدوية ويُبلَّغ العميل والإدارة.
+            logger.warning(f"⚠️ deposit held for review ({match_type}): user {uid} amount {amt} method {method}")
+            try:
+                notify_admins(
+                    f"🔎 <b>إيداع يحتاج مراجعة يدوية</b>\n\n"
+                    f"👤 المستخدم: <code>{uid}</code>\n"
+                    f"💰 المبلغ: <b>${amt:.2f}</b>\n"
+                    f"💳 الطريقة: {html.escape(str(method))}\n"
+                    f"🆔 العملية: <code>{html.escape(tx_id_display[:60])}</code>\n\n"
+                    f"السبب: يشبه إيداعاً آخر بنفس المبلغ في نفس الدقيقة (المستخدم <code>{original_uid}</code>).\n"
+                    f"<b>لم يُحظر أحد ولم يُضف الرصيد.</b> تحقق من العملية ثم أضف الرصيد يدوياً إن كانت صحيحة."
+                )
+            except Exception: pass
+            try:
+                bot.send_message(uid, bil(uid,
+                    "⏳ <b>إيداعك قيد المراجعة.</b>\n\nسيُضاف الرصيد بعد تأكيد الإدارة. لا تُعد الدفع.",
+                    "⏳ <b>Your deposit is under review.</b>\n\nYour balance will be added once support confirms it. Do not pay again."),
+                    parse_mode="HTML")
+            except Exception: pass
+            return
+
         if original_uid != uid:
             # 🚨 شخص آخر استخدم نفس الحوالة (بأي طريقة)
             logger.warning(
@@ -20282,12 +20299,23 @@ def credit_user(uid, amt, tx_id, lang, method, trusted_txid=False, display_tx_id
             )
             
             # نشوف من الأول
-            existing = db.used_transactions.find_one({
-                '$or': [
-                    {'transaction_id': tx_id_clean},
-                    {'fingerprint': tx_fingerprint}
-                ]
-            })
+            existing = db.used_transactions.find_one({'transaction_id': tx_id_clean})
+            if not existing:
+                # 🛡 التصادم على البصمة (مبلغ+دقيقة) وليس على رقم العملية: حوالة مختلفة → مراجعة يدوية بلا حظر.
+                try:
+                    notify_admins(
+                        f"🔎 <b>إيداع يحتاج مراجعة يدوية</b>\n\n👤 المستخدم: <code>{uid}</code>\n"
+                        f"💰 المبلغ: <b>${amt:.2f}</b>\n💳 الطريقة: {html.escape(str(method))}\n"
+                        f"🆔 العملية: <code>{html.escape(tx_id_display[:60])}</code>\n\n"
+                        f"وصل مع إيداع آخر بنفس المبلغ في نفس اللحظة. <b>لم يُحظر أحد ولم يُضف الرصيد.</b>")
+                except Exception: pass
+                try:
+                    bot.send_message(uid, bil(uid,
+                        "⏳ <b>إيداعك قيد المراجعة.</b>\n\nسيُضاف الرصيد بعد تأكيد الإدارة. لا تُعد الدفع.",
+                        "⏳ <b>Your deposit is under review.</b>\n\nYour balance will be added once support confirms it. Do not pay again."),
+                        parse_mode="HTML")
+                except Exception: pass
+                return
             if existing:
                 original_uid = existing.get('user_id')
                 if original_uid != uid:
@@ -29602,12 +29630,22 @@ def del_fsub_btn(call):
 @bot.callback_query_handler(func=lambda call: call.data == "ad_new_admin")
 @admin_required
 def admin_add_admin_start(call):
+    # 🛡 ترقية الأدمن للمالك فقط: الأدمن العادي ما يقدر يصنع أدمن ثاني.
+    if call.from_user.id != OWNER_ID:
+        try:
+            bot.answer_callback_query(call.id, "❌ ترقية الأدمن للمالك فقط.", show_alert=True)
+        except Exception:
+            pass
+        _sec_owner_alert(f"⚠️ <b>محاولة ترقية أدمن من غير المالك</b>\n👮 الأدمن: <code>{call.from_user.id}</code>")
+        return
     bot.answer_callback_query(call.id)
     msg = bot.send_message(call.from_user.id, "👑 <b>أرسل الأيدي (ID) أو @يوزر الشخص اللي تبي ترقّيه أدمن:</b>", parse_mode="HTML")
     bot.register_next_step_handler(msg, admin_add_admin_save)
 
 def admin_add_admin_save(message):
     # كان النص يطلع بوسوم <b> ظاهرة (بدون parse_mode) وبالإنجليزي، ويطيح لو انرسلت صورة بدل نص
+    if getattr(message.from_user, 'id', None) != OWNER_ID or message.chat.id != OWNER_ID:
+        return
     target = (message.text or '').strip()
     if not target:
         bot.send_message(message.chat.id, "❌ أرسل الأيدي أو اليوزر كنص.")
@@ -29619,8 +29657,124 @@ def admin_add_admin_save(message):
         db.users.update_one({'user_id': u['user_id']}, {'$set': {'is_admin': 1}})
         try: _invalidate_user_cache(u['user_id'])
         except Exception: pass
-        bot.send_message(message.chat.id, f"✅ تمت ترقية <b>{html.escape(str(u.get('name') or u['user_id']))}</b> إلى أدمن.", parse_mode="HTML")
+        _sec_admins_remember()
+        bot.send_message(message.chat.id, f"✅ تمت ترقية <b>{html.escape(str(u.get('name') or u['user_id']))}</b> إلى أدمن.\n\n📋 قائمة الأدمن وحذفهم: /admins", parse_mode="HTML")
     else: bot.send_message(message.chat.id, "❌ ما لقيت المستخدم. تأكد إنه دخل البوت مرة على الأقل.")
+
+
+# ============================================================
+# 🛡 حماية الصلاحيات: قائمة الأدمن + حذفهم + تنبيه المالك عند ظهور أدمن جديد
+# ============================================================
+# - /admins (للمالك فقط): يعرض كل من عنده صلاحية أدمن مع زر حذف.
+# - مراقب خلفي: لو ظهر أدمن جديد ما أضافه المالك من البوت (مثلاً تعديل مباشر
+#   في قاعدة البيانات) يوصل المالك تنبيه فوري مع زر حذف.
+def _sec_owner_alert(text, markup=None):
+    """تنبيه أمني للمالك فقط (ما يمر على باقي الأدمن)."""
+    try:
+        if OWNER_ID:
+            bot.send_message(OWNER_ID, text, parse_mode="HTML", reply_markup=markup)
+    except Exception as exc:
+        logger.warning('security alert not delivered: %s', type(exc).__name__)
+
+
+def _sec_admin_ids():
+    return sorted({int(u['user_id']) for u in db.users.find({'is_admin': 1}, {'user_id': 1})
+                   if u.get('user_id') is not None and int(u['user_id']) != OWNER_ID})
+
+
+def _sec_admins_remember(ids=None):
+    """يحفظ قائمة الأدمن المعروفة للمالك (المرجع الذي يقارن به المراقب)."""
+    try:
+        ids = _sec_admin_ids() if ids is None else sorted(int(i) for i in ids)
+        db.settings.update_one({'key': 'sec_known_admins'}, {'$set': {'value': ids}}, upsert=True)
+    except Exception:
+        logger.exception('could not store known admins')
+
+
+def _sec_admin_line(aid):
+    u = db.users.find_one({'user_id': aid}, {'name': 1, 'username': 1, 'is_banned': 1}) or {}
+    uname = f" @{html.escape(str(u['username']))}" if u.get('username') else ''
+    banned = ' 🚫' if u.get('is_banned') == 1 else ''
+    return f"• <code>{aid}</code> {html.escape(str(u.get('name') or ''))[:40]}{uname}{banned}"
+
+
+def _sec_admins_markup(ids):
+    mk = InlineKeyboardMarkup(row_width=1)
+    for aid in ids[:40]:
+        mk.add(InlineKeyboardButton(f"🗑 حذف صلاحية {aid}", callback_data=f"sec_rmadm_{aid}"))
+    return mk
+
+
+@bot.message_handler(commands=['admins'])
+def sec_admins_cmd(message):
+    if message.from_user.id != OWNER_ID or message.chat.id != OWNER_ID:
+        return
+    ids = _sec_admin_ids()
+    _sec_admins_remember(ids)
+    if not ids:
+        bot.send_message(OWNER_ID, "🛡 <b>لا يوجد أي أدمن غيرك.</b>", parse_mode="HTML")
+        return
+    text = ("🛡 <b>كل من عنده صلاحية أدمن الآن:</b>\n\n" + '\n'.join(_sec_admin_line(a) for a in ids)
+            + "\n\n<i>أي شخص هنا يقدر يشوف المشترين ومشترياتهم ويعدّل الأرصدة. احذف أي أحد ما تعرفه.</i>")
+    bot.send_message(OWNER_ID, text, parse_mode="HTML", reply_markup=_sec_admins_markup(ids))
+
+
+@bot.callback_query_handler(func=lambda call: str(call.data or '').startswith('sec_rmadm_'))
+def sec_remove_admin_cb(call):
+    if call.from_user.id != OWNER_ID:
+        try: bot.answer_callback_query(call.id, "❌ للمالك فقط.", show_alert=True)
+        except Exception: pass
+        return
+    try:
+        target = int(call.data[len('sec_rmadm_'):])
+    except ValueError:
+        return
+    if target == OWNER_ID:
+        return
+    db.users.update_one({'user_id': target}, {'$set': {'is_admin': 0}})
+    try: _invalidate_user_cache(target)
+    except Exception: pass
+    _sec_admins_remember()
+    try:
+        db.admin_audit.insert_one({'admin': OWNER_ID, 'action': 'remove_admin', 'target': target,
+                                   'via': 'bot', 'at': datetime.datetime.utcnow()})
+    except Exception:
+        pass
+    try: bot.answer_callback_query(call.id, "✅ تم حذف الصلاحية.", show_alert=True)
+    except Exception: pass
+    bot.send_message(OWNER_ID, f"✅ تم حذف صلاحية الأدمن من <code>{target}</code>.", parse_mode="HTML")
+
+
+def _sec_admin_watch_tick():
+    current = _sec_admin_ids()
+    doc = db.settings.find_one({'key': 'sec_known_admins'})
+    if doc is None:
+        # أول تشغيل بعد التحديث: نعرض القائمة الحالية للمالك مرة واحدة ليراجعها.
+        _sec_admins_remember(current)
+        if current:
+            _sec_owner_alert("🛡 <b>مراجعة أمنية:</b> هؤلاء عندهم صلاحية أدمن الآن:\n\n"
+                             + '\n'.join(_sec_admin_line(a) for a in current)
+                             + "\n\nاحذف أي أحد ما تعرفه.", _sec_admins_markup(current))
+        return
+    known = {int(i) for i in (doc.get('value') or [])}
+    fresh = [a for a in current if a not in known]
+    if fresh:
+        _sec_owner_alert("🚨 <b>تنبيه أمني: ظهر أدمن جديد ما أضفته أنت من البوت!</b>\n\n"
+                         + '\n'.join(_sec_admin_line(a) for a in fresh)
+                         + "\n\nلو ما تعرفه: احذفه فوراً وغيّر كلمة سر قاعدة البيانات.",
+                         _sec_admins_markup(fresh))
+    if set(current) != known:
+        _sec_admins_remember(current)
+
+
+def _sec_admin_watch_loop():
+    time.sleep(45)
+    while True:
+        try:
+            _sec_admin_watch_tick()
+        except Exception:
+            logger.exception('admin watch failed')
+        time.sleep(300)
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_gift")
 @admin_required
@@ -32774,6 +32928,7 @@ def _wa_verify(init_data):
         if not isinstance(uid, int) or uid <= 0:
             return None
         identity['_start_param'] = values.get('start_param', [''])[0]
+        identity['_auth_date'] = auth_date
         return identity
     except Exception:
         return None
@@ -35822,10 +35977,20 @@ def _wa_admin_dispatch(identity, data):
 
 
 # ─────────── لوحة الإدارة في الموقع (كل الطلبات تتحقق من الصلاحية) ───────────
+try:
+    WEBAPP_ADMIN_AUTH_MAX_AGE = max(300, int(os.getenv('WEBAPP_ADMIN_AUTH_MAX_AGE', '3600').strip() or 3600))
+except ValueError:
+    WEBAPP_ADMIN_AUTH_MAX_AGE = 3600
+
+
 def _wa_admin(identity):
     uid = identity['id']
     if not _is_admin_check(uid):
         return None, (403, {'error': 'forbidden'})
+    # 🛡 لوحة الإدارة تحتاج جلسة حديثة (ساعة افتراضياً): رابط/جلسة قديمة مسروقة ما تفتح بيانات العملاء.
+    auth_date = identity.get('_auth_date')
+    if isinstance(auth_date, (int, float)) and time.time() - auth_date > WEBAPP_ADMIN_AUTH_MAX_AGE:
+        return None, (401, {'error': 'auth'})
     return uid, None
 
 
@@ -41755,6 +41920,11 @@ def _up_web(identity, body, mode):
         else:
             content = _up_export(uid, key)
             data = {'ok': True, 'text': content, 'filename': f'user_{uid}_{key}.txt'} if content else None
+            # 🛡 تصدير مشتريات عميل (فيها الأكواد/الحسابات) يُسجَّل، ويُبلَّغ المالك لو المنفّذ أدمن غيره.
+            if content:
+                _adm_audit(_admin, 'purchases_export', uid, key=key)
+                if _admin != OWNER_ID:
+                    _sec_owner_alert(f"👁 <b>أدمن صدّر مشتريات عميل</b>\n👮 الأدمن: <code>{_admin}</code>\n👤 العميل: <code>{uid}</code>")
         return (200, data) if data else (404, {'error': 'not_found'})
     except (TypeError, ValueError, OverflowError):
         return 400, {'error': 'bad_request'}
@@ -42047,6 +42217,7 @@ def run_bot():
     threading.Thread(target=_wa_setup_menu_button, daemon=True, name='webapp-menu-button').start()
     threading.Thread(target=_wa_owner_hello, daemon=True, name='webapp-owner-hello').start()
     threading.Thread(target=_vip_backfill_thread, daemon=True, name='vip-backfill').start()
+    threading.Thread(target=_sec_admin_watch_loop, daemon=True, name='security-admin-watch').start()
     try:
         _recover_external_approval_notices()
     except Exception:

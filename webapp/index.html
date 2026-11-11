@@ -1597,6 +1597,106 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .up-subscription{margin:14px 0}.up-subscription>.summary{margin-top:10px}.up-note{border-inline-start:3px solid #3d8bff;background:#3d8bff0b;padding:12px 14px;border-radius:9px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.up-codes .code span{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;min-width:0}.up-content .api-muted{line-height:1.7}
 @media(max-width:480px){.up-product,.up-record{padding:12px;gap:8px}.up-product-end{font-size:12px;gap:3px}.up-record .meta b{font-size:11px}.up-profile{padding:13px}.up-tabs button{padding:10px 7px;font-size:11px}}
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   LARA polish layer (r42). Visual refinements only: no markup or script
+   depends on it. Delete this block to return to the previous look.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 1 · Loading screen: an atmosphere around the mark instead of a flat sheet ── */
+#page-loading{
+  background:
+    radial-gradient(60% 42% at 50% 44%, color-mix(in srgb,var(--accent) 16%,transparent), transparent 72%),
+    radial-gradient(90% 55% at 12% -8%, color-mix(in srgb,var(--accent-2) 20%,transparent), transparent 62%),
+    radial-gradient(80% 50% at 96% 108%, color-mix(in srgb,var(--accent) 18%,transparent), transparent 60%),
+    var(--bg);
+}
+#page-loading::before{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.55;
+  background-image:radial-gradient(circle at 1px 1px, color-mix(in srgb,var(--fg) 13%,transparent) 1px, transparent 0);
+  background-size:22px 22px;
+  -webkit-mask-image:radial-gradient(62% 46% at 50% 46%, #000, transparent 78%);
+          mask-image:radial-gradient(62% 46% at 50% 46%, #000, transparent 78%);
+}
+#page-loading.soft::before{display:none}
+#page-loading:not(.soft) .ld-mark{width:172px;height:149px}
+/* one quiet orbit around the mark: the only looping motion on the screen */
+#page-loading:not(.soft) .ld::before,#page-loading:not(.soft) .ld::after{
+  content:"";position:absolute;top:-52px;left:50%;width:276px;height:276px;margin-left:-138px;border-radius:50%;pointer-events:none;
+  /* a thin ring that fades out before it reaches the wordmark */
+  -webkit-mask:radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px)), linear-gradient(to bottom, #000 38%, transparent 62%);
+          mask:radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px)), linear-gradient(to bottom, #000 38%, transparent 62%);
+  -webkit-mask-composite:source-in;mask-composite:intersect;
+}
+#page-loading:not(.soft) .ld::after{background:color-mix(in srgb,var(--fg) 9%,transparent)}
+#page-loading:not(.soft) .ld::before{z-index:1;opacity:0;
+  background:conic-gradient(from var(--lp-a,300deg), transparent 0 66%, color-mix(in srgb,var(--accent-2) 90%,transparent) 93%, transparent 100%);
+  animation:lpOrbitIn 1.2s ease .5s forwards, lpSweep 4.8s linear infinite}
+#page-loading.leaving .ld::before,#page-loading.leaving .ld::after{transition:opacity .25s ease;opacity:0!important;animation:none}
+@property --lp-a{syntax:'<angle>';inherits:false;initial-value:0deg}
+@keyframes lpSweep{to{--lp-a:360deg}}
+@keyframes lpOrbitIn{to{opacity:1}}
+#page-loading:not(.soft) .ld-status{margin-top:30px;font-size:14px;font-weight:500;color:var(--fg-2)}
+#page-loading:not(.soft) .ld-bar{width:176px;height:4px;margin-top:14px;border-radius:4px;background:color-mix(in srgb,var(--accent) 16%,transparent)}
+#page-loading .ld-bar i{box-shadow:0 0 14px var(--glow)}
+@media (prefers-reduced-motion: reduce){ #page-loading:not(.soft) .ld::before{animation:none;opacity:.7} }
+
+/* ── 2 · Product cards: shorter tile, clearer name and price, calmer surface ── */
+.card{border-radius:20px;box-shadow:0 10px 26px -18px rgba(6,22,60,.55), inset 0 1px 0 rgba(255,255,255,.05)}
+.card .pv{aspect-ratio:1/.76}
+.card .pv::after{content:"";position:absolute;inset:auto 0 0;height:34%;pointer-events:none;z-index:0;
+  background:linear-gradient(to top, color-mix(in srgb,var(--surface) 26%,transparent), transparent)}
+.card .pv.is-oos::after{inset:0;height:auto}
+.card .body{gap:10px;padding:11px 12px 12px}
+.card .name{font-size:13.5px;line-height:1.38;min-height:2.76em;letter-spacing:-.005em;color:var(--fg)}
+.card .price{font-size:16.5px;letter-spacing:-.01em}
+.card .price .was{font-size:11.5px;margin-bottom:2px}
+.card .add{width:36px;height:36px;border-radius:50%;box-shadow:0 8px 18px -6px var(--glow)}
+.card:active .add{transform:scale(.92)}
+.card .add{transition:transform .18s ease}
+.pill{height:25px;font-weight:700;letter-spacing:.01em;background:rgba(7,12,24,.5)}
+.num,.price,.chip .n{font-variant-numeric:tabular-nums}
+
+/* ── 3 · Category chips: the selected one reads at a glance ── */
+.chip{height:38px;border-radius:999px;padding:0 14px 0 9px}
+.chip.on{background:var(--accent);border-color:transparent;color:var(--accent-ink);box-shadow:0 8px 20px -8px var(--glow)}
+.chip.on .n{background:rgba(255,255,255,.22);color:var(--accent-ink)}
+.chip-nav{width:30px;height:30px;margin-top:-15px;background:var(--surface);box-shadow:0 6px 16px -6px rgba(6,22,60,.45)}
+.chip-nav svg{width:16px;height:16px}
+
+/* ── 4 · Store header and tools ── */
+.hello{display:flex;align-items:center;gap:12px}
+.hello > div:first-child{flex:1;min-width:0}
+.hello h1{font-size:22px;letter-spacing:-.01em}
+.search,.tool-btn{border-radius:15px}
+.search:focus-within{border-color:color-mix(in srgb,var(--accent) 60%,transparent);box-shadow:0 0 0 4px var(--accent-soft)}
+
+/* ── 5 · Bottom dock: lifted off the page, active tab tinted with the brand colour ── */
+.dock-in{box-shadow:0 18px 44px -16px rgba(4,14,40,.6), inset 0 1px 0 rgba(255,255,255,.07)}
+.dock-ind{background:color-mix(in srgb,var(--accent) 13%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 22%,transparent)}
+.tab.on{color:var(--accent-2)}
+
+/* ── 6 · Fix: the VIP card header inherited a sticky toolbar style from another component ── */
+.vipcard .vc-top{position:static;top:auto;z-index:auto;margin:0 0 12px;padding:0;background:none;box-shadow:none}
+
+/* ── 7 · Keyboard focus is always visible ── */
+:where(button,a,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+.search input:focus-visible{outline:0}
+
+/* ── 8 · Light theme (set by Telegram, or by the device when opened in a browser) ── */
+ :root[data-theme="light"] .card{box-shadow:0 12px 28px -20px rgba(16,44,110,.42), 0 1px 0 rgba(255,255,255,.9) inset}
+ :root[data-theme="light"] .dock-in{box-shadow:0 18px 44px -18px rgba(16,44,110,.4), inset 0 1px 0 #fff}
+ :root[data-theme="light"] .tab.on{color:var(--accent)}
+ :root[data-theme="light"] .vipcard:not(.lv0) .vc-t b{color:#b0700a}
+ :root[data-theme="light"] .vipcard .vc-off{color:#8f5a05;background:rgba(245,185,66,.3)}
+@media (prefers-color-scheme:light){
+ :root:not([data-theme="dark"]) .card{box-shadow:0 12px 28px -20px rgba(16,44,110,.42), 0 1px 0 rgba(255,255,255,.9) inset}
+ :root:not([data-theme="dark"]) .dock-in{box-shadow:0 18px 44px -18px rgba(16,44,110,.4), inset 0 1px 0 #fff}
+ :root:not([data-theme="dark"]) .tab.on{color:var(--accent)}
+ :root:not([data-theme="dark"]) .vipcard:not(.lv0) .vc-t b{color:#b0700a}
+ :root:not([data-theme="dark"]) .vipcard .vc-off{color:#8f5a05;background:rgba(245,185,66,.3)}
+}
+/* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
 <body>

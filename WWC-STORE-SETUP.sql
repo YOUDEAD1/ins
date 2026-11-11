@@ -1910,7 +1910,10 @@ begin
 end;
 $$;
 
-grant execute on function public.adjust_balance(bigint, numeric) to anon, authenticated, service_role;
+-- SECURITY: this function changes any user's balance. It must never be callable
+-- with the public (anon) key. Only the bot's service_role key may run it.
+revoke all on function public.adjust_balance(bigint, numeric) from public, anon, authenticated;
+grant execute on function public.adjust_balance(bigint, numeric) to service_role;
 
 
 
@@ -2413,3 +2416,38 @@ $$;
 revoke all on function public.wwc_manager_cleanup() from public,anon,authenticated;
 grant execute on function public.wwc_manager_cleanup() to service_role;
 commit;
+
+
+-- =====================================================================
+-- SECURITY LOCKDOWN (safe to run many times, deletes nothing)
+-- Closes the database to the public "anon" key: only the bot (service_role)
+-- can read tables or run functions. Covers every table and function in
+-- the public schema, including ones added later.
+-- =====================================================================
+do $$ declare t record; f record; begin
+ for t in select tablename from pg_tables where schemaname='public' loop
+  execute format('alter table public.%I enable row level security', t.tablename);
+  execute format('revoke all on public.%I from public, anon, authenticated', t.tablename);
+  execute format('grant all on public.%I to service_role', t.tablename);
+ end loop;
+ for t in select viewname from pg_views where schemaname='public' loop
+  execute format('revoke all on public.%I from public, anon, authenticated', t.viewname);
+ end loop;
+ for f in select p.oid::regprocedure as sig from pg_proc p
+          join pg_namespace n on n.oid=p.pronamespace
+          left join pg_depend d on d.objid=p.oid and d.deptype='e'
+          where n.nspname='public' and p.prokind='f' and d.objid is null loop
+  execute format('revoke all on function %s from public, anon, authenticated', f.sig);
+  execute format('grant execute on function %s to service_role', f.sig);
+ end loop;
+end $$;
+alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
+alter default privileges in schema public revoke all on tables from anon, authenticated;
+
+-- CHECK: both queries below must return ZERO rows after the lockdown.
+-- 1) functions the public key can still run:
+--   select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+--   where n.nspname='public' and has_function_privilege('anon', p.oid, 'execute');
+-- 2) tables the public key can still read:
+--   select tablename from pg_tables where schemaname='public'
+--   and has_table_privilege('anon', format('public.%I', tablename), 'select');
