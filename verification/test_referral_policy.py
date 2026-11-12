@@ -67,8 +67,10 @@ def test_old_archive_keeps_its_original_policy_on_restore(mod):
     old = mod._ref_find(5001)
     mod.db.referrals_v2.delete_one({'_id': old['_id']})
     mod.db.referrals_archived.insert_one({k: v for k, v in old.items() if k != '_id'})
-    assert not mod.ref_dv_required(mod._ref_find(5001))
+    # The restored record is not relabelled, but it comes back inactive ('left'), and an inactive
+    # referral without website proof must pass the real-person step before it counts again.
     assert 'ref_policy_version' not in mod._ref_find(5001)
+    assert mod._ref_find(5001)['status'] == 'left' and mod.ref_dv_required(mod._ref_find(5001))
 
 
 @pytest.mark.parametrize('new', [False, True])

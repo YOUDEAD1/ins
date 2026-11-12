@@ -60,6 +60,24 @@ class AutomaticReferralRewards:
     def fresh_query(self, rid=None):
         return self.live_query(rid, auto_reward_pending=True, ms_batch={'$exists': False})
 
+    def legacy_left(self, rid):
+        """Counted referrals from before automatic rewards that are still outside any batch.
+
+        Without this bridge a referrer with, say, 6 historical and 6 new verified referrals
+        owns 12 real referrals yet completes neither a historical nor an automatic batch.
+        Such leftovers and the new verified referrals now complete one ordinary
+        admin-approved batch together; automatic payment starts from the next batch.
+        """
+        rid = int(rid)
+        base = self.original.get('_ms_fresh_q')
+        if base is None:
+            return False
+        if self.db.referral_milestones.find_one({'referrer_id': rid, 'status': 'reopened',
+                                                 'reward_mode': {'$ne': MODE}}, {'_id': 1}):
+            return True
+        return bool(self.db.referrals_v2.find_one(
+            {'$and': [base(rid), {'ref_auto_version': {'$ne': VERSION}}]}, {'_id': 1}))
+
     def _operation(self, milestone):
         return 'milestone:%s:%s' % (milestone['referrer_id'], milestone['batch_no'])
 
@@ -232,6 +250,9 @@ class AutomaticReferralRewards:
             pending = {'referrer_id': rid, 'reward_mode': MODE, 'status': {'$in': list(OPEN_STATES)}}
             if not self.db.referral_milestones.find_one(pending) and not self.db.referrals_v2.find_one(self.fresh_query(rid)):
                 return 0
+            # Historical leftovers are completed first through the ordinary approved batch.
+            if not self.db.referral_milestones.find_one(pending) and self.legacy_left(rid):
+                return 0
             token = self._lease(rid)
             if not token:
                 return 0
@@ -280,6 +301,15 @@ class AutomaticReferralRewards:
         owners.update(int(row['referrer_id']) for row in self.db.referrals_v2.find(query,
             {'referrer_id': 1}).sort('auto_next_check_at', 1).limit(limit * THRESHOLD))
         for rid in sorted(owners)[:limit]:
+            if self.legacy_left(rid):
+                # Mixed historical + new referrals: build/announce the ordinary batch when it is complete.
+                try:
+                    self.original['_notify_admin_referral_milestone'](rid)
+                except Exception:
+                    self.log.debug('Mixed referral batch check deferred', exc_info=True)
+                self.db.referrals_v2.update_many(self.fresh_query(rid),
+                    {'$set': {'auto_next_check_at': int(time.time()) + 300}})
+                continue
             self.process(rid)
         # Reconciliation and message retries use the existing loop, no new job.
         for row in self.db.referral_milestones.find({'reward_mode': MODE, 'status': 'paid',
@@ -310,13 +340,22 @@ class AutomaticReferralRewards:
                  'dv': {'$in': ['ok', 'ok_admin']}}]}]}
 
         def legacy_fresh(rid):
-            return dict(self.original['_ms_fresh_q'](rid), ref_auto_version={'$ne': VERSION})
+            base = self.original['_ms_fresh_q'](rid)
+            if self.legacy_left(rid):
+                # Leftovers + new website-verified (never the flagged/unverified) referrals share one batch.
+                return {'$and': [base, {'$or': [
+                    {'ref_auto_version': {'$ne': VERSION}},
+                    {'ref_auto_version': VERSION, 'web_verified_version': 2, 'web_verified_at': {'$gt': 0},
+                     'dv': {'$in': ['ok', 'ok_admin']}}]}]}
+            return dict(base, ref_auto_version={'$ne': VERSION})
 
         def notify(rid):
             self.process(rid)
             return self.original['_notify_admin_referral_milestone'](rid)
 
         def progress(rid):
+            if self.legacy_left(rid):
+                return self.original['ref_progress'](rid)
             if self.db.referrals_v2.find_one({'referrer_id': int(rid), 'ref_auto_version': VERSION}, {'_id': 1}):
                 fresh = self.db.referrals_v2.count_documents(self.fresh_query(rid))
                 return fresh, THRESHOLD, max(0, THRESHOLD - fresh)

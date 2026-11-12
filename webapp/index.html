@@ -1612,7 +1612,7 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
     var(--bg);
 }
 #page-loading::before{
-  content:"";position:absolute;inset:0;pointer-events:none;opacity:.55;
+  content:"";position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;opacity:.55;
   background-image:radial-gradient(circle at 1px 1px, color-mix(in srgb,var(--fg) 13%,transparent) 1px, transparent 0);
   background-size:22px 22px;
   -webkit-mask-image:radial-gradient(62% 46% at 50% 46%, #000, transparent 78%);
@@ -1629,32 +1629,70 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
   -webkit-mask-composite:source-in;mask-composite:intersect;
 }
 #page-loading:not(.soft) .ld::after{background:color-mix(in srgb,var(--fg) 9%,transparent)}
-#page-loading:not(.soft) .ld::before{z-index:1;opacity:0;
-  background:conic-gradient(from var(--lp-a,300deg), transparent 0 66%, color-mix(in srgb,var(--accent-2) 90%,transparent) 93%, transparent 100%);
-  animation:lpOrbitIn 1.2s ease .5s forwards, lpSweep 4.8s linear infinite}
+/* the moving arc is a still picture that only rotates (GPU transform): nothing is repainted per frame.
+   It swings across the top half, so it never crosses the wordmark and needs no fade mask of its own. */
+#page-loading:not(.soft) .ld::before{z-index:1;opacity:0;will-change:transform,opacity;
+  -webkit-mask:radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+          mask:radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+  -webkit-mask-composite:source-over;mask-composite:add;
+  background:conic-gradient(from 70deg, transparent 0 66%, var(--accent-2) 93%, transparent 100%);
+  animation:lpOrbitIn 1.2s ease .5s forwards, lpSwing 3.8s cubic-bezier(.45,0,.55,1) infinite alternate}
 #page-loading.leaving .ld::before,#page-loading.leaving .ld::after{transition:opacity .25s ease;opacity:0!important;animation:none}
-@property --lp-a{syntax:'<angle>';inherits:false;initial-value:0deg}
-@keyframes lpSweep{to{--lp-a:360deg}}
+@keyframes lpSwing{from{transform:rotate(-64deg)}to{transform:rotate(64deg)}}
 @keyframes lpOrbitIn{to{opacity:1}}
 #page-loading:not(.soft) .ld-status{margin-top:30px;font-size:14px;font-weight:500;color:var(--fg-2)}
 #page-loading:not(.soft) .ld-bar{width:176px;height:4px;margin-top:14px;border-radius:4px;background:color-mix(in srgb,var(--accent) 16%,transparent)}
 #page-loading .ld-bar i{box-shadow:0 0 14px var(--glow)}
 @media (prefers-reduced-motion: reduce){ #page-loading:not(.soft) .ld::before{animation:none;opacity:.7} }
 
-/* ── 2 · Product cards: shorter tile, clearer name and price, calmer surface ── */
-.card{border-radius:20px;box-shadow:0 10px 26px -18px rgba(6,22,60,.55), inset 0 1px 0 rgba(255,255,255,.05)}
-.card .pv{aspect-ratio:1/.76}
-.card .pv::after{content:"";position:absolute;inset:auto 0 0;height:34%;pointer-events:none;z-index:0;
-  background:linear-gradient(to top, color-mix(in srgb,var(--surface) 26%,transparent), transparent)}
-.card .pv.is-oos::after{inset:0;height:auto}
-.card .body{gap:10px;padding:11px 12px 12px}
-.card .name{font-size:13.5px;line-height:1.38;min-height:2.76em;letter-spacing:-.005em;color:var(--fg)}
-.card .price{font-size:16.5px;letter-spacing:-.01em}
-.card .price .was{font-size:11.5px;margin-bottom:2px}
-.card .add{width:36px;height:36px;border-radius:50%;box-shadow:0 8px 18px -6px var(--glow)}
-.card:active .add{transform:scale(.92)}
-.card .add{transition:transform .18s ease}
-.pill{height:25px;font-weight:700;letter-spacing:.01em;background:rgba(7,12,24,.5)}
+/* ── 2 · Product cards as posters: each product owns a lit colour stage, its name and price sit on a plate ── */
+.card{position:relative;border:0;border-radius:22px;overflow:hidden;isolation:isolate;background:var(--surface-2);
+  box-shadow:0 18px 34px -22px rgba(4,14,44,.75), 0 2px 6px -2px rgba(4,14,44,.25)}
+.card .pv{aspect-ratio:1/1.46;border-radius:0;
+  background:
+    radial-gradient(72% 46% at 50% 30%, hsl(var(--h,215) 90% 62% / .32), transparent 72%),
+    linear-gradient(172deg, hsl(var(--h,215) 40% 17%), hsl(calc(var(--h,215) + 24) 44% 8%))}
+/* dark and quiet: the stage is near-black, tinted by the product's own colour, with one soft halo behind the artwork */
+.card .pv-bg{background:
+    radial-gradient(72% 46% at 50% 30%, rgb(var(--ec1,128 128 128) / .44), transparent 72%),
+    linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 24%, #0b1020), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 12%, #05070d))}
+.card::after{content:"";position:absolute;top:0;left:0;right:0;bottom:0;z-index:3;border-radius:22px;border:1px solid rgba(255,255,255,.085);pointer-events:none}
+.card .pv::before{opacity:.28;background-size:12px 12px}
+/* emoji could not be loaded → the brand tile stands on a darker stage of the same colour so it reads as an object */
+.card .pv:has(.btile){background:radial-gradient(72% 46% at 50% 30%, hsl(var(--h,215) 90% 60% / .26), transparent 72%), linear-gradient(172deg, hsl(var(--h,215) 38% 15%), hsl(calc(var(--h,215) + 24) 42% 7%))}
+/* Safari mis-places a grid item that is sized by aspect-ratio and moved with `translate` (it slid to the card's edge),
+   so the artwork gets plain offsets: 57% of the width is 39% of the height at this card ratio, i.e. a square. */
+.card .pv .vis{position:absolute;top:13.5%;left:21.5%;width:57%;height:39%;margin:0;aspect-ratio:auto;filter:drop-shadow(0 14px 16px rgba(0,0,0,.38))}
+.card .pv .mono-tile{font-size:clamp(34px,11.5vw,52px)}
+/* very narrow phones (320px): a slightly taller card keeps the artwork clear of a two-line name */
+@media (max-width:350px){
+  .card .pv{aspect-ratio:1/1.6}
+  .card .pv .vis{top:11%;height:35.625%}
+  .card .xmark{bottom:36%}
+}
+/* the floor the product stands on */
+.card .pv:not(.is-oos)::after{content:"";position:absolute;top:auto;left:18%;right:18%;bottom:43.5%;height:5.5%;border-radius:50%;z-index:-1;pointer-events:none;
+  background:radial-gradient(closest-side, rgba(0,0,0,.42), transparent);filter:blur(3px)}
+.card .body{position:absolute;top:auto;left:7px;right:7px;bottom:7px;z-index:2;flex:none;gap:9px;padding:10px 11px 10px;border-radius:17px;
+  background:color-mix(in srgb,var(--surface) 92%,transparent);
+  border:1px solid color-mix(in srgb,var(--fg) 9%,transparent);
+  box-shadow:0 12px 26px -14px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.07)}
+.card .name{font-size:13px;font-weight:600;line-height:1.36;min-height:0;letter-spacing:-.005em;color:var(--fg)}
+.card .row{margin-top:0}
+.card .price{font-family:var(--f-display);font-weight:700;font-size:15px;letter-spacing:-.02em}
+.card .price small{font-family:var(--f-body)}
+.card .price .was{font-family:var(--f-body);font-size:11.5px;margin-bottom:2px}
+.card .add{width:34px;height:34px;border-radius:50%;box-shadow:0 8px 18px -6px var(--glow);transition:transform .18s ease}
+.card:active .add{transform:scale(.9)}
+.card .pill{top:10px;height:25px;font-weight:700;letter-spacing:.01em;background:rgba(6,10,22,.46)}
+.card .pill.stock{inset-inline-start:10px}
+.card .pill.kind{inset-inline-end:10px}
+.card .pill.hid{top:42px;bottom:auto}
+.card.oos .pv{filter:saturate(.35) brightness(.85)}
+/* out of stock: the X sits on the product, the label goes to the free top corner (the plate covers the bottom) */
+.card .xmark{top:0;left:0;right:0;bottom:30.5%}
+.card .xmark i{width:52px;height:52px}
+.card .oos-tag{top:10px;bottom:auto;inset-inline-start:10px;height:25px}
 .num,.price,.chip .n{font-variant-numeric:tabular-nums}
 
 /* ── 3 · Category chips: the selected one reads at a glance ── */
@@ -1684,18 +1722,241 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .search input:focus-visible{outline:0}
 
 /* ── 8 · Light theme (set by Telegram, or by the device when opened in a browser) ── */
- :root[data-theme="light"] .card{box-shadow:0 12px 28px -20px rgba(16,44,110,.42), 0 1px 0 rgba(255,255,255,.9) inset}
  :root[data-theme="light"] .dock-in{box-shadow:0 18px 44px -18px rgba(16,44,110,.4), inset 0 1px 0 #fff}
  :root[data-theme="light"] .tab.on{color:var(--accent)}
  :root[data-theme="light"] .vipcard:not(.lv0) .vc-t b{color:#b0700a}
  :root[data-theme="light"] .vipcard .vc-off{color:#8f5a05;background:rgba(245,185,66,.3)}
 @media (prefers-color-scheme:light){
- :root:not([data-theme="dark"]) .card{box-shadow:0 12px 28px -20px rgba(16,44,110,.42), 0 1px 0 rgba(255,255,255,.9) inset}
  :root:not([data-theme="dark"]) .dock-in{box-shadow:0 18px 44px -18px rgba(16,44,110,.4), inset 0 1px 0 #fff}
  :root:not([data-theme="dark"]) .tab.on{color:var(--accent)}
  :root:not([data-theme="dark"]) .vipcard:not(.lv0) .vc-t b{color:#b0700a}
  :root:not([data-theme="dark"]) .vipcard .vc-off{color:#8f5a05;background:rgba(245,185,66,.3)}
 }
+/* ── 9 · Poster cards in the light theme ── */
+ :root[data-theme="light"] .card .pv-bg{background:radial-gradient(72% 46% at 50% 30%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
+ :root[data-theme="light"] .card .body{background:rgba(255,255,255,.94);border-color:rgba(255,255,255,.9);box-shadow:0 12px 26px -14px rgba(8,24,70,.5)}
+@media (prefers-color-scheme:light){
+ :root:not([data-theme="dark"]) .card .pv-bg{background:radial-gradient(72% 46% at 50% 30%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
+ :root:not([data-theme="dark"]) .card .body{background:rgba(255,255,255,.94);border-color:rgba(255,255,255,.9);box-shadow:0 12px 26px -14px rgba(8,24,70,.5)}
+}
+
+/* ── 10 · Language change: one slow scene ── */
+.lang-veil{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;display:grid;place-items:center;align-content:center;gap:20px;overflow:hidden;
+  color:var(--fg);touch-action:none;
+  background:
+    radial-gradient(58% 38% at 50% 47%, color-mix(in srgb,var(--accent) 30%,transparent), transparent 74%),
+    radial-gradient(90% 55% at 10% -5%, color-mix(in srgb,var(--accent-2) 22%,transparent), transparent 62%),
+    var(--bg);
+  animation:lvIn .5s cubic-bezier(.22,1,.36,1) both}
+.lang-veil .lv-ring{position:absolute;top:47%;left:50%;width:min(78vw,320px);height:min(78vw,320px);margin:calc(min(78vw,320px) / -2) 0 0 calc(min(78vw,320px) / -2);border-radius:50%;
+  background:conic-gradient(from 300deg, transparent 0 58%, var(--accent-2) 93%, transparent 100%);will-change:transform;
+  -webkit-mask:radial-gradient(closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+          mask:radial-gradient(closest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  animation:lvSpin 2.8s linear infinite, lvIn .9s ease both}
+.lang-veil .lv-word{position:relative;font:700 clamp(40px,13.5vw,66px)/1.15 var(--f-display),var(--f-body);letter-spacing:-.02em;text-align:center;
+  text-shadow:0 10px 44px var(--glow);animation:lvWord 1.15s cubic-bezier(.16,1,.3,1) both}
+.lang-veil .lv-word[lang="ar"]{font-family:var(--f-body);letter-spacing:0}
+.lang-veil .lv-line{position:relative;width:132px;height:3px;border-radius:3px;overflow:hidden;background:color-mix(in srgb,var(--fg) 12%,transparent);animation:lvIn .6s ease .2s both}
+.lang-veil .lv-line i{position:absolute;top:0;left:0;right:0;bottom:0;border-radius:3px;background:linear-gradient(90deg,var(--accent),var(--accent-2));transform-origin:left center;animation:lvFill 1.2s cubic-bezier(.4,0,.2,1) .1s both}
+.lang-veil[dir="rtl"] .lv-line i{transform-origin:right center}
+/* opening: a hole grows from the centre while the word drifts forward out of focus */
+.lang-veil.out{pointer-events:none;
+  -webkit-mask:radial-gradient(circle at 50% 47%, transparent var(--lv-r,0px), #000 calc(var(--lv-r,0px) + 70px));
+          mask:radial-gradient(circle at 50% 47%, transparent var(--lv-r,0px), #000 calc(var(--lv-r,0px) + 70px));
+  animation:lvOpen 1.25s cubic-bezier(.45,0,.3,1) both}
+.lang-veil.out .lv-word{animation:lvWordOut .7s cubic-bezier(.5,0,.75,0) both}
+.lang-veil.out .lv-ring,.lang-veil.out .lv-line{animation:lvFade .45s ease both}
+@property --lv-r{syntax:'<length>';inherits:false;initial-value:0px}
+@keyframes lvIn{from{opacity:0}to{opacity:1}}
+@keyframes lvFade{to{opacity:0}}
+@keyframes lvSpin{to{transform:rotate(360deg)}}
+@keyframes lvWord{0%{opacity:0;transform:translateY(34px) scale(.9);filter:blur(16px)}55%{opacity:1;filter:blur(0)}100%{opacity:1;transform:none;filter:blur(0)}}
+@keyframes lvWordOut{to{opacity:0;transform:scale(1.18);filter:blur(12px)}}
+@keyframes lvFill{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes lvOpen{0%{--lv-r:0px;opacity:1}85%{opacity:1}100%{--lv-r:82vmax;opacity:0}}
+
+/* ── 11 · Balance: the chip in the header and the wallet card ── */
+.chip-bal{height:38px;padding:0 13px 0 5px;border:1.5px solid transparent;font-size:13.5px;
+  background:linear-gradient(var(--surface),var(--surface)) padding-box,
+             linear-gradient(135deg,var(--accent-2),color-mix(in srgb,var(--accent) 25%,transparent) 48%,var(--accent)) border-box;
+  box-shadow:0 10px 22px -14px var(--glow);transition:transform .35s cubic-bezier(.2,1.3,.32,1)}
+.chip-bal:active{transform:scale(.94)}
+.wal-hero{padding:26px 18px 22px;border:0;border-radius:30px;color:#fff;
+  background:
+    radial-gradient(110% 75% at 100% 0%, rgba(110,200,255,.85), transparent 56%),
+    radial-gradient(95% 80% at 0% 100%, #0a2390, transparent 62%),
+    linear-gradient(158deg,#2377ff,#0b1d66 72%);
+  box-shadow:0 28px 54px -28px rgba(20,84,235,.85), inset 0 1px 0 rgba(255,255,255,.28), inset 0 0 0 1px rgba(255,255,255,.08)}
+.wal-hero::before{content:"";position:absolute;top:0;left:0;right:0;bottom:0;z-index:-1;pointer-events:none;opacity:.5;
+  background-image:radial-gradient(circle at 1px 1px, rgba(255,255,255,.22) 1px, transparent 0);background-size:18px 18px;
+  -webkit-mask-image:linear-gradient(135deg,#000,transparent 62%);mask-image:linear-gradient(135deg,#000,transparent 62%)}
+.wal-hero::after{content:"";position:absolute;top:-40%;bottom:-40%;left:-60%;right:-60%;z-index:-1;pointer-events:none;
+  background:linear-gradient(112deg, transparent 44%, rgba(255,255,255,.16) 50%, transparent 56%);
+  transform:translateX(-60%);animation:walSheen 7s cubic-bezier(.45,0,.2,1) 1.2s infinite}
+@keyframes walSheen{0%,55%{transform:translateX(-60%)}100%{transform:translateX(60%)}}
+.wal-hero .wal-glow{display:none}
+.wal-hero .wal-lbl{color:rgba(255,255,255,.74);font-weight:500}
+.wal-hero .wal-amt{font-size:clamp(44px,14vw,56px);color:#fff;text-shadow:0 10px 30px rgba(3,14,60,.5)}
+.wal-hero .wal-amt .cur,.wal-hero .wal-amt .cts{color:rgba(255,255,255,.66)}
+.wal-hero .wal-id{background:rgba(255,255,255,.14);color:rgba(255,255,255,.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+.wal-hero .wal-acts{gap:20px;margin-top:20px}
+.wal-hero .wact{color:rgba(255,255,255,.9)}
+.wal-hero .wact-ic{width:56px;height:56px;background:rgba(255,255,255,.14);color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2);transition:transform .4s cubic-bezier(.2,1.3,.32,1)}
+.wal-hero .wact.main{color:#fff}
+.wal-hero .wact.main .wact-ic{background:#fff;color:#1657e6;box-shadow:0 14px 28px -10px rgba(2,10,50,.6)}
+.wal-sums > div{border-radius:20px;padding:13px 12px}
+.wal-sums b{font-size:16px;margin-top:7px}
+
+/* ── 12 · Bottom dock: the active tab is lit from above and its icon lifts ── */
+.dock-in{border-radius:28px;box-shadow:0 22px 48px -18px rgba(3,12,40,.7), inset 0 1px 0 rgba(255,255,255,.09)}
+.dock-ind{border-radius:22px;
+  background:linear-gradient(180deg, color-mix(in srgb,var(--accent) 24%,transparent), color-mix(in srgb,var(--accent) 7%,transparent));
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 30%,transparent), 0 12px 24px -14px var(--glow)}
+.dock-ind::before{content:"";position:absolute;top:-1px;left:26%;right:26%;height:2.5px;border-radius:3px;
+  background:linear-gradient(90deg,transparent,var(--accent-2),transparent);box-shadow:0 0 14px 1px var(--accent-2)}
+.dock-ind::after{content:"";position:absolute;left:22%;right:22%;top:44%;height:26%;border-radius:50%;
+  background:radial-gradient(closest-side, color-mix(in srgb,var(--accent-2) 55%,transparent), transparent);filter:blur(7px);opacity:.75}
+.tab{gap:3px;letter-spacing:.005em}
+.tab .ico img,.tab .ico .ce{transition:filter .6s ease}
+.tab.on .ico{transform:translateY(-2px) scale(1.14)}
+.tab.on .ico img,.tab.on .ico .ce{filter:drop-shadow(0 8px 10px rgba(3,12,40,.45))}
+.tab.on > span:last-child{font-weight:700}
+.tab:not(.on) .ico{opacity:.86}
+@media (prefers-reduced-motion: reduce){ .wal-hero::after{animation:none} }
+
+/* ── 16 · Product page: the same lit colour stage as the card it was opened from ── */
+.hero-vis.pv{border-radius:26px;
+  background:radial-gradient(64% 60% at 50% 40%, hsl(var(--h,215) 90% 62% / .32), transparent 72%),
+             linear-gradient(172deg, hsl(var(--h,215) 40% 17%), hsl(calc(var(--h,215) + 24) 44% 8%));
+  box-shadow:0 24px 44px -28px rgba(4,14,44,.85), inset 0 1px 0 rgba(255,255,255,.16)}
+.hero-vis .pv-bg{background:
+    radial-gradient(64% 60% at 50% 40%, rgb(var(--ec1,128 128 128) / .44), transparent 72%),
+    linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 24%, #0b1020), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 12%, #05070d))}
+.hero-vis.pv .vis{filter:drop-shadow(0 18px 20px rgba(0,0,0,.4))}
+ :root[data-theme="light"] .hero-vis .pv-bg{background:radial-gradient(64% 60% at 50% 40%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
+@media (prefers-color-scheme:light){
+ :root:not([data-theme="dark"]) .hero-vis .pv-bg{background:radial-gradient(64% 60% at 50% 40%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
+}
+
+ :root[data-theme="light"] .card .pv,:root[data-theme="light"] .hero-vis.pv{background:radial-gradient(72% 46% at 50% 30%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, hsl(var(--h,215) 62% 91%), hsl(calc(var(--h,215) + 24) 52% 82%))}
+ :root[data-theme="light"] .card::after{border-color:rgba(20,40,90,.08)}
+@media (prefers-color-scheme:light){
+ :root:not([data-theme="dark"]) .card .pv,:root:not([data-theme="dark"]) .hero-vis.pv{background:radial-gradient(72% 46% at 50% 30%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, hsl(var(--h,215) 62% 91%), hsl(calc(var(--h,215) + 24) 52% 82%))}
+ :root:not([data-theme="dark"]) .card::after{border-color:rgba(20,40,90,.08)}
+}
+/* ── 13 · Older iPhones (Safari before 15 / 16.2) ──────────────────────────────────────────────
+   iOS 13–14 has no `aspect-ratio` and (before 14.1) no `inset`: the product picture was sized only by
+   aspect-ratio, so its box collapsed to nothing and a card showed just the name and price.
+   iOS 15–16.1 has no color-mix(): surfaces built with it became transparent. */
+@supports not (aspect-ratio:1/1){
+  /* phones show two columns: column = (100vw − 32px side padding − 12px gap) / 2, card height = 1.46 × column */
+  .card .pv{display:block;height:calc((100vw - 44px) * .73)}
+  @media (min-width:521px){ .card .pv{height:0;padding-top:146%} }
+  @media (max-width:350px){ .card .pv{height:calc((100vw - 44px) * .8)} }
+  .hero-vis.pv .vis{width:58%}
+  .vf-grid button{min-height:62px}
+}
+@supports not (inset:0){
+  .page-loading,.ld-bar i,.tab .ico img,.tab .ce,.api-hero::before,.pv::before,.pv .photo,.btile::after,.pv.is-oos::after,
+  .xmark,.scrim,.vis > .ce,.vis > .ce > svg,.vis > .ce > video,.vis > .ce > img,.thumb > .ce > svg,.thumb > .ce > video,.thumb > .ce > img,
+  .vis > .ce > .btile,.vis > .ce > .fb,.pv-bg,.vf-scan::before,.vf-conf{top:0;right:0;bottom:0;left:0}
+  body::before{top:0;left:0;right:0;bottom:auto}
+  .vis > .ce > .ce-skel{top:19%;right:19%;bottom:19%;left:19%}
+  .vf-shield::before{top:-16px;right:-16px;bottom:-16px;left:-16px}
+  .cart-empty-art>span{top:12px;right:12px;bottom:12px;left:12px}
+  .card .xmark{bottom:30.5%}
+}
+@supports not (color:color-mix(in srgb,red,blue)){
+  /* a declaration that mixes var() into color-mix() is accepted and then computes to nothing there,
+     so a plain value on the line before it does not help: the replacements have to live in this block */
+  .card .body{background:var(--surface);border:1px solid rgba(128,140,170,.2)}
+  #page-loading,.lang-veil{background:var(--bg)}
+  .lang-veil .lv-line{background:rgba(128,140,170,.25)}
+  .chip-bal{background:var(--surface);border-color:var(--accent)}
+  #page-loading:not(.soft) .ld-bar{background:rgba(47,125,255,.18)}
+  .dock-ind{background:rgba(47,125,255,.16);box-shadow:inset 0 0 0 1px rgba(47,125,255,.3)}
+  .chip.on{background:var(--accent)}
+  .search:focus-within{border-color:var(--accent)}
+  .card .pill{background:rgba(6,10,22,.46)}
+}
+
+/* ── 14 · Language button in the header and the language picker ── */
+.lang-btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 11px 0 9px;border-radius:999px;background:var(--surface);border:1px solid var(--line);
+  color:var(--fg);font:700 12.5px/1 var(--f-display),var(--f-body);letter-spacing:.02em;transition:transform .35s cubic-bezier(.2,1.3,.32,1)}
+.lang-btn svg{width:17px;height:17px;color:var(--accent-2);flex:none}
+.lang-btn:active{transform:scale(.94)}
+/* Language carousel */
+.lang-sheet .sh-body{overflow:hidden}
+.lang-car{--gx:118px;position:relative;display:flex;flex-direction:column;align-items:center;gap:14px;padding:12px 0 4px;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.lang-car::before{content:"";position:absolute;left:50%;top:38%;width:300px;height:180px;margin:-90px 0 0 -150px;border-radius:50%;pointer-events:none;
+  background:radial-gradient(closest-side, rgba(47,125,255,.18), rgba(47,125,255,0))}
+.lc-flag{position:relative;height:46px;display:grid;place-items:center}
+.lc-flag .flag{width:62px;height:41px}
+.lc-flag.swap .flag{animation:lcFlag .75s cubic-bezier(.16,1,.3,1) both}
+@keyframes lcFlag{from{opacity:0;transform:translateY(-12px) scale(.86)}to{opacity:1;transform:none}}
+/* the names own the whole width, so the previous and next language are readable on both sides */
+.lc-track{position:relative;width:100%;height:70px;outline:0;overflow:hidden}
+.lc-item{position:absolute;left:50%;top:50%;width:150px;height:62px;margin:-31px 0 0 -75px;padding:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+  color:var(--fg);background:none;border:0;
+  transition:transform .8s cubic-bezier(.16,1,.3,1), opacity .8s cubic-bezier(.16,1,.3,1);will-change:transform,opacity}
+.lc-name{font:700 22px/1.2 var(--f-display),var(--f-body);letter-spacing:-.015em;white-space:nowrap}
+.lc-item[lang="ar"] .lc-name,.lc-item[lang="zh"] .lc-name{font-family:var(--f-body);font-size:26px;letter-spacing:0}
+.lc-code{font:700 10.5px/1 var(--f-display),var(--f-body);letter-spacing:.22em;color:var(--accent-2);padding-left:.22em;transition:opacity .5s}
+.lc-item[data-pos="0"]{transform:translateX(0) scale(1);opacity:1;z-index:2}
+.lc-item[data-pos="-1"]{transform:translateX(calc(var(--gx) * -1)) scale(.7);opacity:.5;z-index:1}
+.lc-item[data-pos="1"]{transform:translateX(var(--gx)) scale(.7);opacity:.5;z-index:1}
+.lc-item[data-pos="-2"]{transform:translateX(calc(var(--gx) * -2.1)) scale(.5);opacity:0;pointer-events:none}
+.lc-item[data-pos="2"]{transform:translateX(calc(var(--gx) * 2.1)) scale(.5);opacity:0;pointer-events:none}
+.lc-item:not([data-pos="0"]) .lc-code{opacity:0}
+.lc-ctrl{display:flex;align-items:center;justify-content:center;gap:22px;direction:ltr;margin-top:2px}
+.lc-arrow{flex:none;display:grid;place-items:center;width:48px;height:48px;border-radius:50%;color:var(--fg);
+  background:var(--surface-2);border:1px solid var(--line);box-shadow:0 10px 22px -14px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+  transition:transform .4s cubic-bezier(.2,1.3,.32,1), border-color .3s, color .3s}
+.lc-arrow svg{width:21px;height:21px}
+.lc-arrow:active{transform:scale(.88);color:var(--accent-2);border-color:var(--accent)}
+.lc-dots{display:flex;gap:7px;direction:ltr}
+.lc-dots i{width:6px;height:6px;border-radius:6px;background:var(--line-2);transition:width .6s cubic-bezier(.16,1,.3,1), background .4s}
+.lc-dots i.on{width:22px;background:var(--accent)}
+.lang-sheet .lc-ok{height:54px;border-radius:18px;font-size:15.5px}
+.lang-sheet .lc-ok.same{background:var(--surface-2);color:var(--fg-2);box-shadow:none;border:1px solid var(--line)}
+@media (min-width:420px){ .lang-car{--gx:132px} }
+@media (max-width:350px){ .lang-car{--gx:94px} .lc-name{font-size:19px} .lc-item[lang="ar"] .lc-name,.lc-item[lang="zh"] .lc-name{font-size:22px} .lc-item{width:130px;margin-left:-65px} }
+@media (prefers-reduced-motion: reduce){ .lc-item{transition:none} .lc-flag.swap .flag{animation:none} }
+/* ── 15 · Header logo: show the whole mark (it was being cropped into a square) ── */
+.brand img{width:42px;height:35px;border-radius:11px;object-fit:cover;background:#00143a;
+  box-shadow:0 0 0 1px rgba(110,200,255,.2), 0 8px 18px -8px var(--glow)}
+
+/* ── 17 · Waving flags (language picker, language scene) and the small flag in the header ── */
+.flag{position:relative;display:inline-flex;flex:none;direction:ltr;width:60px;height:40px;filter:drop-shadow(0 8px 9px rgba(3,12,40,.42))}
+.flag i{display:block;flex:1 0 0;height:100%;margin-right:-.7px;background-image:var(--flag);background-repeat:no-repeat;
+  background-size:900% 100%;background-position:calc(var(--s) * 12.5%) 0}
+.flag i:first-child{border-radius:6px 0 0 6px}
+.flag i:last-child{border-radius:0 6px 6px 0;margin-right:0}
+.flag:not(.wave) i{background-size:100% 100%;background-position:0 0;border-radius:inherit}
+.flag.wave i{will-change:transform;animation:flagWave 2s ease-in-out infinite;animation-delay:calc(var(--s) * -.17s)}
+/* the cloth moves more the further it is from the pole (strip 0) */
+@keyframes flagWave{0%,100%{transform:translateY(calc((var(--s) + 1.5) * -.34px))}50%{transform:translateY(calc((var(--s) + 1.5) * .34px))}}
+/* light travelling across the folds */
+.flag.wave::after{content:"";position:absolute;top:-3px;bottom:-3px;left:0;right:0;pointer-events:none;border-radius:6px;
+  background:linear-gradient(100deg, rgba(255,255,255,0) 22%, rgba(255,255,255,.3) 40%, rgba(0,0,0,.16) 56%, rgba(255,255,255,0) 74%);
+  background-size:230% 100%;animation:flagLight 2s linear infinite}
+@keyframes flagLight{from{background-position:120% 0}to{background-position:-110% 0}}
+.lang-opt.on .flag.wave i{animation-duration:1.5s}
+.lang-btn .flag{width:23px;height:15.5px;border-radius:3.5px;filter:none;box-shadow:0 0 0 1px rgba(128,140,170,.35)}
+.lang-btn .flag i{border-radius:3.5px}
+.lang-veil .flag.big{width:78px;height:52px;margin-bottom:2px;animation:lvWord 1.05s cubic-bezier(.16,1,.3,1) both;filter:drop-shadow(0 18px 26px rgba(3,12,40,.55))}
+.lang-veil .flag.big i:first-child{border-radius:7px 0 0 7px}
+.lang-veil .flag.big i:last-child{border-radius:0 7px 7px 0}
+.lang-veil .flag.big.wave::after{border-radius:7px}
+.lang-veil.out .flag.big{animation:lvWordOut .7s cubic-bezier(.5,0,.75,0) both}
+@media (prefers-reduced-motion: reduce){ .flag.wave i,.flag.wave::after{animation:none} }
+/* ── 18 · Header logo as sharp vector art, no box ── */
+.brand .brand-mark{display:block;flex:none;width:46px;height:40px;overflow:visible;filter:drop-shadow(0 6px 12px var(--glow))}
+.brand .brand-mark *{transform-box:fill-box;transform-origin:center}
+.brand .brand-mark .bm-plane{animation:bmBob 4.2s ease-in-out infinite alternate}
+.brand .brand-mark .bm-sheen{opacity:0}
+@keyframes bmBob{from{transform:translate(0,0)}to{transform:translate(1.2px,-1.6px)}}
+@media (prefers-reduced-motion: reduce){ .brand .brand-mark .bm-plane{animation:none} }
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -1734,6 +1995,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
    a Russian/Chinese choice made in the store → Telegram's own language → the phone. Never the phone first. */
 (function () {
   var L = {
+    es: { c: 'Conectando con la tienda…', a: 'Comprobando tu cuenta…', p: 'Preparando tus productos…', l: 'Cargando…',
+          w: 'Despertando la tienda — la primera apertura puede tardar hasta un minuto.' },
     en: { c: 'Connecting to the store…', a: 'Checking your account…', p: 'Getting your products ready…', l: 'Loading…',
           w: 'Waking the store up — the first open can take up to a minute.' },
     ar: { c: 'جارٍ الاتصال بالمتجر…', a: 'جارٍ التحقق من حسابك…', p: 'جارٍ تجهيز المنتجات…', l: 'جاري التحميل…',
@@ -1742,7 +2005,7 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
           w: 'Запускаем магазин — первое открытие может занять до минуты.' },
     zh: { c: '正在连接商店…', a: '正在验证你的账号…', p: '正在准备商品…', l: '加载中…', w: '正在唤醒商店——首次打开可能需要一分钟。' }
   };
-  function norm(c) { c = String(c || '').toLowerCase(); return /^ar/.test(c) ? 'ar' : /^(ru|uk|be|kk)/.test(c) ? 'ru' : /^zh/.test(c) ? 'zh' : /^en/.test(c) ? 'en' : ''; }
+  function norm(c) { c = String(c || '').toLowerCase(); return /^ar/.test(c) ? 'ar' : /^(ru|uk|be|kk)/.test(c) ? 'ru' : /^zh/.test(c) ? 'zh' : /^es/.test(c) ? 'es' : /^en/.test(c) ? 'en' : ''; }
   function ls(k) { try { var v = localStorage.getItem('lara:' + k); return v == null ? null : JSON.parse(v); } catch (e) { return null; } }
   function tgLang() {
     try { var u = window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user; if (u && u.language_code) return u.language_code; } catch (e) {}
@@ -1750,9 +2013,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
           if (m) return JSON.parse(decodeURIComponent(m[1])).language_code || ''; } catch (e) {}
     return '';
   }
-  var q = (location.search.match(/[?&]l=(ar|en|ru|zh)(?:&|$)/) || [])[1];
+  var q = (location.search.match(/[?&]l=(ar|en|es|ru|zh)(?:&|$)/) || [])[1];
   var own = ls('lang');
-  var lang = q || norm(ls('uiLang')) || ((own === 'ru' || own === 'zh') ? own : '') || norm(tgLang()) || norm(navigator.language) || 'en';
+  var lang = q || norm(ls('uiLang')) || ((own === 'ru' || own === 'zh' || own === 'es') ? own : '') || norm(tgLang()) || norm(navigator.language) || 'en';
   var root = document.documentElement;
   root.lang = lang === 'zh' ? 'zh-CN' : lang; root.dir = lang === 'ar' ? 'rtl' : 'ltr';
   try {   /* Telegram light/dark before the SDK arrives — no dark flash for light-theme users */
@@ -1878,9 +2141,10 @@ profileTitle:'我的',purchases:'购买次数',language:'语言',support:'客服
 joinT:'请关注我们的频道',joinB:'关注后才能继续使用商店。',join:'关注',joined:'我已关注',notYet:'你还没有关注全部频道',channel:'频道',
 banned:'账号已被封禁',bannedB:'如有疑问请联系客服。',authT:'会话已过期',authB:'请关闭商店并从机器人重新打开。',close:'关闭',noTgT:'请在 Telegram 中打开',noTgB:'本商店在 Telegram 内运行，请从机器人菜单打开。',
 activity:'动态',noActivity:'暂无内容',translate:'翻译',original:'查看原文',translating:'翻译中…',demo:'演示',loading:'加载中…',retry:'重试',pcs:'件',
-e_insufficient_balance:'余额不足，还差 {p}。',e_out_of_stock:'该商品已缺货。',e_not_enough_stock:'仅剩 {n} 件。',e_deposit_pending:'请先完成或取消当前支付。',e_busy:'另一笔购买正在处理，请稍候。',e_renewal_pending:'续期正在核实。请勿再次付款，请联系支持。',e_must_join:'请先关注指定频道。',e_banned:'账号已被封禁。',e_bad_email:'请输入有效的邮箱。',e_bad_duration:'请先选择套餐。',e_invite_failed:'邀请发送失败，余额已退回。',e_supplier_failed:'供应商拒绝了订单，余额已退回。',e_purchase_failed:'购买未完成，请检查余额后重试。',e_rate_limited:'请求过于频繁，请一分钟后再试。',e_auth:'会话已过期，请重新打开商店。',e_method_unavailable:'该支付方式不可用。',e_amount_range:'请输入 {min} 到 {max} 之间的金额。',e_busy_amount:'暂无可用的唯一金额，请换个金额。',e_price_unavailable:'无法获取币价，请稍后再试。',e_invoice_failed:'无法创建星星账单。',e_server_error:'出错了，请重试。',e_network:'网络连接失败，请检查网络。',e_not_found:'该商品已下架。',e_bad_qty:'请输入有效的数量。',e_bot_only:'此功能仅在机器人内使用。',vfT:"激活你的账号",vfB:"两步快速验证，保护商店免受虚假账号。",vfS1:"频道和群组",vfS2:"真人验证",vfS3:"完成",vfJoinT:"加入我们的频道和群组",vfJoinB:"还剩 {n}/{t} 个。加入后点“检查”。",vfJoinAll:"这里都好了，点“检查”继续。",vfKindC:"频道",vfKindG:"群组",vfJoined:"已加入",vfJoin:"加入",vfOpened:"已打开",vfCheck:"检查",vfChecking:"检查中…",vfLeft:"还有 {n} 个未加入",vfHumT:"确认你是真人",vfHumB:"点击相同的表情。",vfTap:"请点击",vfW1:"正在检查设备",vfW2:"正在确认 Telegram 应用",vfW3:"正在激活账号",vfDoneT:"一切就绪",vfDoneB:"账号已激活，祝购物愉快。",vfEnter:"进入商店",vfOpenP:"打开商品",vfOpening:"正在为你打开 {p}…",deepGone:"该商品暂时不可用。",vfPriv:"我们不收集个人信息，只保存加密的设备代码。",vfFail:"暂时无法检查，请重试。",vfNoLink:"联系客服获取链接",pvVerify:"查看推荐激活页面",poSub:"卡密和购买记录",dvT:"最后一步",dvB:"点击对应的表情来验证您的设备。这可以防止虚假账号，我们不会收集个人信息。",dvTap:"请点击 {e}",dvWrong:"不是这个，请再试一次",dvWork:"正在验证设备…",dvOkT:"验证成功",dvOkB:"现在可以使用商店了。",dvEnter:"进入商店",dvFail:"暂时无法验证，请重试。",e_no_account:'请先启动机器人，再打开商店。',e_deposit_failed:"无法创建支付，请重试或选择其他方式。",e_deposit_exists:"你有一笔支付正在进行，请先完成或取消。",e_unavailable:"暂时不可用，请稍后再试。",e_bad_request:"请求有误，请刷新后重试。",e_too_large:"内容太长，请分几次发送。",e_bad_json:"请求有误，请刷新后重试。",e_expired:"链接已过期，请重试。",e_forbidden:"你没有权限执行此操作。",e_no_key:"请先生成 API 密钥。",e_no_webhook:"请先设置 Webhook 地址。",e_bad_url:"请输入有效的 http(s) 地址。",e_private_url:"请使用公网地址（不能是 localhost 或内网）。",e_empty:"没有输入内容。",e_bad_amount:"请输入有效金额。",e_bad_price:"请输入有效价格。",e_bad_vip:"VIP 设置无效。",e_cannot_ban:"无法封禁此账号。",e_bad_section:"此栏目不可用。",e_open_failed:"无法打开此栏目，请重试。",h_all:'全部',h_deposit:'充值',h_purchase:'购买',h_adjust:'调整',opsN:'共 {n} 笔',details:'详情',f_type:'类型',f_method:'方式',f_network:'网络',f_sent:'实付金额',f_requested:'申请金额',f_status:'状态',completed:'已完成',f_date:'时间',f_ref:'编号',f_tx:'交易 ID',f_product:'商品',f_note:'备注',f_after:'变动后余额',adj_compensation:'补偿',adj_manual:'人工充值',adj_gift:'赠送',adj_adjustment:'余额调整',adj_ref_reward:'推荐奖励',adj_ref_clawback:'推荐用户退出扣回',adj_ref_refund:'推荐用户回归',adj_deduct:'扣除',refunded:'已退款',g_tg:'Telegram',g_ex:'交易所',g_cr:'加密钱包',change:'更换',lastUsed:'最近使用',mInstant:'即时到账',mAuto:'自动入账',minFrom:'{min} 起',newBal:'新余额',uniqueNote:'系统会生成带额外小数位的唯一金额，请准确转账。',prev:'上一页',next:'下一页',codesN:'{n} 个卡密'}
+e_insufficient_balance:'余额不足，还差 {p}。',e_out_of_stock:'该商品已缺货。',e_not_enough_stock:'仅剩 {n} 件。',e_deposit_pending:'请先完成或取消当前支付。',e_busy:'另一笔购买正在处理，请稍候。',e_renewal_pending:'续期正在核实。请勿再次付款，请联系支持。',e_must_join:'请先关注指定频道。',e_banned:'账号已被封禁。',e_bad_email:'请输入有效的邮箱。',e_bad_duration:'请先选择套餐。',e_invite_failed:'邀请发送失败，余额已退回。',e_supplier_failed:'供应商拒绝了订单，余额已退回。',e_purchase_failed:'购买未完成，请检查余额后重试。',e_rate_limited:'请求过于频繁，请一分钟后再试。',e_auth:'会话已过期，请重新打开商店。',e_method_unavailable:'该支付方式不可用。',e_amount_range:'请输入 {min} 到 {max} 之间的金额。',e_busy_amount:'暂无可用的唯一金额，请换个金额。',e_price_unavailable:'无法获取币价，请稍后再试。',e_invoice_failed:'无法创建星星账单。',e_server_error:'出错了，请重试。',e_network:'网络连接失败，请检查网络。',e_not_found:'该商品已下架。',e_bad_qty:'请输入有效的数量。',e_bot_only:'此功能仅在机器人内使用。',vfT:"激活你的账号",vfB:"两步快速验证，保护商店免受虚假账号。",vfS1:"频道和群组",vfS2:"真人验证",vfS3:"完成",vfJoinT:"加入我们的频道和群组",vfJoinB:"还剩 {n}/{t} 个。加入后点“检查”。",vfJoinAll:"这里都好了，点“检查”继续。",vfKindC:"频道",vfKindG:"群组",vfJoined:"已加入",vfJoin:"加入",vfOpened:"已打开",vfCheck:"检查",vfChecking:"检查中…",vfLeft:"还有 {n} 个未加入",vfHumT:"确认你是真人",vfHumB:"点击相同的表情。",vfTap:"请点击",vfW1:"正在检查设备",vfW2:"正在确认 Telegram 应用",vfW3:"正在激活账号",vfDoneT:"一切就绪",vfDoneB:"账号已激活，祝购物愉快。",vfEnter:"进入商店",vfOpenP:"打开商品",vfOpening:"正在为你打开 {p}…",deepGone:"该商品暂时不可用。",vfPriv:"我们不收集个人信息，只保存加密的设备代码。",vfFail:"暂时无法检查，请重试。",vfNoLink:"联系客服获取链接",pvVerify:"查看推荐激活页面",poSub:"卡密和购买记录",dvT:"最后一步",dvB:"点击对应的表情来验证您的设备。这可以防止虚假账号，我们不会收集个人信息。",dvTap:"请点击 {e}",dvWrong:"不是这个，请再试一次",dvWork:"正在验证设备…",dvOkT:"验证成功",dvOkB:"现在可以使用商店了。",dvEnter:"进入商店",dvFail:"暂时无法验证，请重试。",e_no_account:'请先启动机器人，再打开商店。',e_deposit_failed:"无法创建支付，请重试或选择其他方式。",e_deposit_exists:"你有一笔支付正在进行，请先完成或取消。",e_unavailable:"暂时不可用，请稍后再试。",e_bad_request:"请求有误，请刷新后重试。",e_too_large:"内容太长，请分几次发送。",e_bad_json:"请求有误，请刷新后重试。",e_expired:"链接已过期，请重试。",e_forbidden:"你没有权限执行此操作。",e_no_key:"请先生成 API 密钥。",e_no_webhook:"请先设置 Webhook 地址。",e_bad_url:"请输入有效的 http(s) 地址。",e_private_url:"请使用公网地址（不能是 localhost 或内网）。",e_empty:"没有输入内容。",e_bad_amount:"请输入有效金额。",e_bad_price:"请输入有效价格。",e_bad_vip:"VIP 设置无效。",e_cannot_ban:"无法封禁此账号。",e_bad_section:"此栏目不可用。",e_open_failed:"无法打开此栏目，请重试。",h_all:'全部',h_deposit:'充值',h_purchase:'购买',h_adjust:'调整',opsN:'共 {n} 笔',details:'详情',f_type:'类型',f_method:'方式',f_network:'网络',f_sent:'实付金额',f_requested:'申请金额',f_status:'状态',completed:'已完成',f_date:'时间',f_ref:'编号',f_tx:'交易 ID',f_product:'商品',f_note:'备注',f_after:'变动后余额',adj_compensation:'补偿',adj_manual:'人工充值',adj_gift:'赠送',adj_adjustment:'余额调整',adj_ref_reward:'推荐奖励',adj_ref_clawback:'推荐用户退出扣回',adj_ref_refund:'推荐用户回归',adj_deduct:'扣除',refunded:'已退款',g_tg:'Telegram',g_ex:'交易所',g_cr:'加密钱包',change:'更换',lastUsed:'最近使用',mInstant:'即时到账',mAuto:'自动入账',minFrom:'{min} 起',newBal:'新余额',uniqueNote:'系统会生成带额外小数位的唯一金额，请准确转账。',prev:'上一页',next:'下一页',codesN:'{n} 个卡密'},
+es:{e_verification_required:"Completa la verificación dentro de la tienda y vuelve a intentarlo.",e_verification_unavailable:"No se pudo comprobar tu suscripción. Inténtalo de nuevo en un momento.",cartAdd:"Añadir a la bolsa",cartTitle:"Tu bolsa",cartReady:"Tu selección, lista para llevar",cartItems:"{n} artículos en tu bolsa",cartResume:"Hay un pago guardado. Revisa su resultado antes de empezar otro.",cartAlready:"Este plan ya está en tu bolsa.",cartLimit:"Tu bolsa admite hasta 20 artículos distintos.",cartAdded:"Añadido a tu bolsa",cartSteps:"Pasos de la compra",cartBagStep:"Tu bolsa",cartReviewStep:"Revisar",cartDoneStep:"Listo",cartLess:"Reducir cantidad",cartMore:"Aumentar cantidad",cartRemove:"Quitar artículo",cartSummary:"Resumen del pedido",cartSubtotal:"Subtotal",cartDiscounts:"Tus descuentos",cartMissing:"Saldo que falta",cartReviewNote:"Los artículos se compran uno a uno con tu saldo. Si alguno necesita atención, el resto se detiene y ves lo que se cobró.",cartQuoteNote:"Los precios finales, los descuentos por cantidad y el ahorro VIP se comprueban de nuevo al revisar.",cartSaved:"Ahorras {p} en este pedido",cartEmpty:"Haz sitio para algo bueno.",cartEmptyBody:"Tu bolsa espera a tu próximo favorito. Explora la tienda y añade lo que te guste.",cartLast:"Ver tu última compra",cartReviewEyebrow:"UN ÚLTIMO VISTAZO",cartEyebrow:"ELEGIDO POR TI",cartReviewTitle:"¿Todo correcto?",cartHeading:"Buenas elecciones. Todas juntas.",cartReviewSub:"Revisa los artículos, las cantidades y los correos de invitación antes de pagar.",cartProducts:"TUS ARTÍCULOS",cartContinue:"Seguir comprando",cartFix:"Algunos artículos necesitan atención. Actualiza tu bolsa antes de continuar.",cartPay:"Confirmar y pagar · {p}",cartReviewButton:"Revisar pedido",cartEdit:"Editar bolsa",cartSuccess:"Todo tuyo.",cartWorking:"Tu pedido está en marcha.",cartVerifying:"Se está verificando un artículo.",cartPartial:"Aquí tienes el estado de tu pedido.",cartSuccessSub:"Tus artículos aparecen abajo. Tus compras también quedan guardadas en Mis pedidos.",cartWorkingSub:"Estamos comprobando tu pago guardado. Espera el resultado.",cartUncertainSub:"Hay un resultado por comprobar. Contacta con soporte con esta referencia antes de volver a comprar.",cartPartialSub:"Los artículos completados aparecen abajo. Los demás no se compraron.",cartWaiting:"Esperando su turno",cartNotPurchased:"No comprado",cartPaid:"Importe pagado",cartReference:"REFERENCIA DE LA COMPRA",cartCheck:"Comprobar resultado",cartRemaining:"Volver a los artículos restantes",e_cart_changed:"El stock o la disponibilidad han cambiado. Revisa tu bolsa de nuevo.",e_cart_disabled:"La bolsa no está disponible por ahora. La compra directa sigue funcionando.",e_price_changed:"Un precio ha cambiado. Revisa el nuevo total antes de pagar.",e_purchase_uncertain:"Esta compra necesita revisión. Abre Mis pedidos o contacta con soporte antes de intentarlo otra vez.",e_quote_expired:"La revisión de precios caducó. Revisa tu pedido de nuevo.",e_bad_cart:"Añade entre 1 y 20 artículos válidos a tu bolsa.",api:"API",orderId:"ID del pedido",vipTier:"Nivel VIP",vipNone:"Aún sin nivel",vipOff:"{r} de descuento",vipNet:"Recargas netas",vipNext:"Recarga {p} más para llegar a VIP {n} ({r} de descuento)",vipMax:"Has alcanzado el nivel máximo",vipAll:"Todos los niveles",vipTitle:"Programa VIP",vipHow1:"Cuanto más recargas, más alto es tu nivel y mayor tu descuento en productos seleccionados.",vipHow2:"Solo cuentan las recargas reales. Los regalos no cuentan, y las deducciones o reembolsos se restan.",vipProducts:"{n} productos tienen descuento VIP",vipYou:"Tú",vipSave:"VIP {n} · −{p}%",pvTitle:"Solo vista previa",pvShort:"— no está vinculada a tu bot. Aquí las compras, las recargas y la API son simuladas; no se cobra nada.",pvHow:"Cómo vincularla",pvSim:"Vista previa: este resultado es simulado — no se cobró nada ni se envió ningún código real. Dentro de tu bot es real.",pvHowT:"Esto es una vista previa — cómo hacerla real",pvHere:"Aquí (vista previa)",pvBot:"Dentro de tu bot (real)",pvR1:"Compras",pvR1a:"Simuladas, no se cobra nada",pvR1b:"Descuenta el saldo y envía el código en el chat",pvR2:"Recargas",pvR2a:"Dirección de ejemplo",pvR2b:"Las direcciones y facturas reales de tu bot, confirmadas automáticamente",pvR3:"API",pvR3a:"Clave de ejemplo",pvR3b:"Tu clave real en la API de tu bot",pvR4:"Canal de registro",pvR4a:"No se envía nada",pvR4b:"Cada pedido se registra con «Vía: Mini App»",pvStepsT:"Pasos",pvS1:"Sube el nuevo bot.py con la carpeta webapp al lado, donde funciona tu bot ahora (GitHub → Render).",pvS2:"Cuando el bot arranca, pone el botón «Tienda» en cada chat y te envía un mensaje con un botón para abrir la tienda.",pvS3:"Abre tu bot en Telegram y toca Tienda junto al cuadro de mensaje.",pvS4:"Envía /miniapp al bot para recibir un informe completo de comprobación.",pvWarn:"No pongas el enlace de claude.ai en BotFather — es una vista previa privada que solo tú puedes abrir, y no está vinculada a tu bot.",linked:"Vinculada a tu bot",notLinked:"Vista previa — sin vincular",autoTr:"Traducido automáticamente",emailInvite:"Tu correo para la invitación",emailHintManual:"Escribe el correo donde quieres la invitación — llega directamente a los administradores con tu pedido.",emailSent:"Tu correo se envió a los administradores:",addrPreview:"Tu dirección real aparece aquí en el bot",premiumId:"ID del emoji premium",demoNoteEmoji:"Los emojis premium aparecen aquí cuando se obtienen de Telegram.",demoNoteReal:"Tus productos, precios y stock reales desde tu base de datos ({d}). Las compras y recargas reales se hacen dentro de tu bot.",demoNote:"Productos de ejemplo para previsualizar el diseño. Tus productos, precios y stock reales aparecen al abrir la tienda desde tu bot en Telegram.",store:"Tienda",orders:"Pedidos",balance:"Saldo",profile:"Perfil",hello:"Hola, {n}",helloSub:"¿Qué nos llevamos hoy?",search:"Buscar productos",all:"Todo",other:"Otros",inStock:"Disponible",sortRec:"A → Z",sortLow:"Precio ↑",sortHigh:"Precio ↓",products:"{n} productos",noMatch:"Nada coincide con tu búsqueda",srDym:"Quizá quisiste decir:",srFixed:"Sin resultados para «{q}» — mostrando «{c}»",srNoStock:"No hay nada disponible con ese nombre ahora — desactiva «Disponible» para verlo todo.",noMatchBody:"Prueba con otra palabra o quita los filtros.",clear:"Quitar filtros",outOfStock:"Agotado",stockN:"{n} disponibles",onlyLeft:"Solo quedan {n}",unlimited:"Ilimitado",seats:"{n} plazas",instant:"Entrega inmediata",manual:"Entrega manual",invite:"Invitación por correo",from:"desde",buyFor:"Comprar · {p}",confirmFor:"Toca para confirmar · {p}",processing:"Procesando…",about:"Descripción",tiers:"Descuento por cantidad",tierRow:"{n}+ uds.",perPc:"/ud.",duration:"Elige un plan",email:"Correo de la cuenta de ChatGPT",emailHint:"La invitación se envía a este correo. Debe estar registrado en chatgpt.com.",qty:"Cantidad",unit:"Precio unitario",total:"Total",yourBal:"Tu saldo",after:"Después de la compra",needMore:"Te faltan {p}",addFunds:"Recargar saldo",days:"{n} días",hiddenTag:"Oculto",okTitle:"Compra completada",okCodes:"Tus códigos",dlTxt:"Descargar TXT",dlAll:"Descargar todas las compras",cgSubs:"Suscripciones de ChatGPT",cgSubsSub:"{n} activas · la próxima termina en {d} días",cgLeft:"Quedan {d} días y {h} h",cgEnds:"Termina el {d}",cgRenew:"Renovar / añadir tiempo",cgPick:"Elige un plan para añadir a este correo",cgAddQ:"¿Añadir {l} (+{n} días) a {e} por {p}?",cgAdded:"Se añadieron {n} días — ahora quedan {t} días",cgNone:"No hay suscripciones de ChatGPT activas.",toChat:"📩 Al chat",txtSent:"Archivo enviado al chat de tu bot",txtCancel:"Descarga cancelada",pvTxt:"Vista previa: en tu bot esto descarga un archivo TXT con los códigos",copyAll:"Copiar todo",copied:"Copiado",sentChat:"También se envió una copia a tu chat con el bot.",manualTitle:"Pedido realizado",manualBody:"Este producto se entrega manualmente. Tu número de pedido es {ref}. Soporte se pondrá en contacto contigo.",gptTitle:"Invitación enviada",gptBody:"Abre {email} y acepta la invitación para activar tu plaza.",expires:"Caduca el {d}",verTitle:"Pedido en verificación",verBody:"No repitas la compra. Recibirás el resultado en el chat del bot.",done:"Hecho",myOrders:"Mis pedidos",ordersTitle:"Mis pedidos",ordersN:"Pedidos",spent:"Gastado",noOrders:"Aún no hay pedidos",noOrdersBody:"Todo lo que compres aparece aquí con sus códigos.",browse:"Explorar la tienda",st_delivered:"Entregado",st_manual:"Pendiente",st_chatgpt:"Invitación enviada",st_verifying:"Verificando",st_failed:"Reembolsado",st_api:"API",showCodes:"Mostrar códigos",hideCodes:"Ocultar códigos",orderRef:"Pedido {ref}",walletTitle:"Monedero",available:"Saldo disponible",deposited:"Recargado",history:"Historial",noHistory:"Aún no hay movimientos",dep:"Recarga",compensation:"Compensación",gift:"Regalo",adjustment:"Ajuste",pendingPay:"Esperando tu pago",open:"Abrir",refresh:"Actualizar",amount:"Importe",minMax:"Mín. {min} · Máx. {max}",starsEq:"≈ {n} Stars",payWith:"Pagar con",cont:"Continuar · {p}",noMethods:"No hay métodos de pago disponibles ahora mismo.",pay:"Pago",sendExactly:"Envía exactamente",toAddr:"A esta dirección",payId:"ID de Binance Pay",bybitUid:"UID de Bybit",noteId:"Pon tu ID en la nota",waiting:"Esperando el pago",autoCheck:"Se comprueba automáticamente cada pocos segundos",checkNow:"Ya pagué · Comprobar ahora",checking:"Comprobando…",cancelPay:"Cancelar pago",armCancel:"Toca otra vez para cancelar",timeUp:"Se acabó el tiempo. Si ya pagaste, se seguirá detectando durante un rato.",warnExact:"Copia el importe completo con todos sus decimales y envía exactamente eso. Un importe distinto no se detectará.",warnBep:"La plataforma puede descontar una comisión de red (unos 0,1–0,2). Súmala para que llegue el importe completo.",warnGen:"Si la red descuenta una comisión, súmala para que llegue el importe completo.",paidTitle:"Saldo añadido",paidBody:"Se añadieron {p} a tu saldo.",cancelled:"Pago cancelado",expired:"Este pago caducó",qr:"Código QR",existsTitle:"Tienes un pago sin terminar",existsBody:"{p} por {m}. Continúalo o empieza uno nuevo.",continueIt:"Continuarlo",startNew:"Empezar uno nuevo",starsPaid:"Stars recibidas. Tu saldo se actualiza en un momento.",profileTitle:"Perfil",purchases:"Compras",language:"Idioma",support:"Soporte",terms:"Términos de uso",openChat:"Abrir el chat del bot",inviteT:"Invita a tus amigos",inviteB:"Gana {r} por cada {n} amigos activos, más {pr} cuando un amigo gaste más de {mp}.",share:"Compartir",clicks:"Visitas",active:"Activos",pendingR:"Pendientes",left:"Se fueron",earned:"Ganado",toNext:"Faltan {n} amigos activos para ganar {r}",admin:"Admin",joinT:"Únete a nuestros canales",joinB:"Suscríbete para seguir usando la tienda.",join:"Unirme",joined:"Ya me uní",notYet:"Aún no te has unido a todos los canales",channel:"Canal",banned:"Tu cuenta está bloqueada",bannedB:"Contacta con soporte si crees que es un error.",authT:"La sesión caducó",authB:"Cierra la tienda y ábrela de nuevo desde el bot.",close:"Cerrar",noTgT:"Ábrela en Telegram",noTgB:"Esta tienda funciona dentro de Telegram. Ábrela desde el menú del bot.",activity:"Actividad",noActivity:"Todavía no hay nada aquí",translate:"Traducir",original:"Ver original",translating:"Traduciendo…",demo:"Demo",loading:"Cargando…",retry:"Reintentar",pcs:"uds.",e_insufficient_balance:"Saldo insuficiente. Te faltan {p}.",e_out_of_stock:"Este producto está agotado.",e_not_enough_stock:"Solo hay {n} disponibles.",e_deposit_pending:"Termina o cancela primero tu pago pendiente.",e_busy:"Hay otra compra en curso. Espera un momento.",e_renewal_pending:"La renovación se está verificando. No pagues otra vez; contacta con soporte.",e_must_join:"Únete primero a los canales obligatorios.",e_banned:"Tu cuenta está bloqueada.",e_bad_email:"Escribe un correo válido.",e_bad_duration:"Elige primero un plan.",e_invite_failed:"No se pudo enviar la invitación. Se reembolsó tu saldo.",e_supplier_failed:"El proveedor rechazó el pedido. Se reembolsó tu saldo.",e_purchase_failed:"La compra no se completó. Revisa tu saldo e inténtalo de nuevo.",e_rate_limited:"Demasiadas solicitudes. Inténtalo en un minuto.",e_auth:"La sesión caducó. Vuelve a abrir la tienda.",e_method_unavailable:"Este método de pago no está disponible.",e_amount_range:"Escribe un importe entre {min} y {max}.",e_busy_amount:"No hay un importe único libre ahora mismo. Prueba con otro importe.",e_price_unavailable:"No se pudo obtener el precio de la moneda. Inténtalo en un momento.",e_invoice_failed:"No se pudo crear la factura de Stars.",e_server_error:"Algo salió mal. Inténtalo de nuevo.",e_network:"Sin conexión. Revisa tu internet e inténtalo de nuevo.",e_not_found:"Este producto ya no está disponible.",e_bad_qty:"Escribe una cantidad válida.",e_bot_only:"Esto se gestiona solo desde el bot.",vfT:"Activa tu cuenta",vfB:"Dos pasos rápidos que protegen la tienda de cuentas falsas.",vfS1:"Canales y grupos",vfS2:"Comprobación humana",vfS3:"Listo",vfJoinT:"Únete a nuestros canales y grupos",vfJoinB:"Faltan {n} de {t}. Únete y luego toca «Comprobar».",vfJoinAll:"Todo listo aquí. Toca «Comprobar» para continuar.",vfKindC:"Canal",vfKindG:"Grupo",vfJoined:"Unido",vfJoin:"Unirme",vfOpened:"Abierto",vfCheck:"Comprobar",vfChecking:"Comprobando…",vfLeft:"Faltan {n} por unirte",vfHumT:"Demuéstranos que eres una persona",vfHumB:"Toca el emoji que coincide.",vfTap:"Toca",vfW1:"Comprobando tu dispositivo",vfW2:"Confirmando la app de Telegram",vfW3:"Activando tu cuenta",vfDoneT:"Todo listo",vfDoneB:"Tu cuenta está activa. Disfruta de la tienda.",vfEnter:"Entrar en la tienda",vfOpenP:"Abrir el producto",vfOpening:"Abriendo {p} para ti…",deepGone:"Este producto no está disponible ahora mismo.",vfPriv:"No se recopilan datos personales, solo un código cifrado del dispositivo.",vfFail:"No se pudo comprobar ahora. Inténtalo de nuevo.",vfNoLink:"Pregunta a soporte",pvVerify:"Ver la pantalla de activación de referidos",poSub:"Tus códigos e historial de pedidos",dvT:"Un último paso",dvB:"Toca el emoji que coincide para verificar tu dispositivo. Así la tienda se protege de cuentas falsas — no se recopilan datos personales.",dvTap:"Toca {e}",dvWrong:"Ese no es — inténtalo de nuevo",dvWork:"Comprobando tu dispositivo…",dvOkT:"Verificado",dvOkB:"Ya puedes usar la tienda.",dvEnter:"Entrar en la tienda",dvFail:"No se pudo verificar ahora. Inténtalo de nuevo.",e_no_account:"Inicia primero el bot y vuelve a abrir la tienda.",e_deposit_failed:"No se pudo crear el pago. Inténtalo de nuevo o elige otro método.",e_deposit_exists:"Ya tienes un pago en curso. Termínalo o cancélalo primero.",e_unavailable:"Esto no está disponible ahora mismo. Inténtalo en un momento.",e_bad_request:"Algo en la solicitud no era correcto. Actualiza e inténtalo de nuevo.",e_too_large:"Es demasiado texto de una vez. Envíalo en partes más pequeñas.",e_bad_json:"Algo en la solicitud no era correcto. Actualiza e inténtalo de nuevo.",e_expired:"Este enlace caducó. Inténtalo de nuevo.",e_forbidden:"No tienes permiso para esto.",e_no_key:"Genera primero una clave de API.",e_no_webhook:"Configura primero una URL de webhook.",e_bad_url:"Escribe una URL http(s) válida.",e_private_url:"Usa una dirección pública de internet (no localhost ni una red privada).",e_empty:"No se escribió nada.",e_bad_amount:"Escribe un importe válido.",e_bad_price:"Escribe un precio válido.",e_bad_vip:"Ajuste VIP no válido.",e_cannot_ban:"Esta cuenta no se puede bloquear.",e_bad_section:"Esta sección no está disponible.",e_open_failed:"No se pudo abrir esta sección. Inténtalo de nuevo.",h_all:"Todo",h_deposit:"Recargas",h_purchase:"Compras",h_adjust:"Ajustes",opsN:"{n} operaciones",details:"Detalles",f_type:"Tipo",f_method:"Método",f_network:"Red",f_sent:"Importe enviado",f_requested:"Solicitado",f_status:"Estado",completed:"Completado",f_date:"Fecha",f_ref:"Referencia",f_tx:"ID de la transacción",f_product:"Producto",f_note:"Nota",f_after:"Saldo después",adj_compensation:"Compensación",adj_manual:"Recarga manual",adj_gift:"Regalo",adj_adjustment:"Ajuste de saldo",adj_ref_reward:"Recompensa por referidos",adj_ref_clawback:"Referido descontado (se fue)",adj_ref_refund:"Referido recuperado",adj_deduct:"Deducción",refunded:"Reembolsado",g_tg:"Telegram",g_ex:"Exchanges",g_cr:"Monederos cripto",change:"Cambiar",lastUsed:"Último usado",mInstant:"Inmediato",mAuto:"Se acredita automáticamente",minFrom:"desde {min}",newBal:"Nuevo saldo",uniqueNote:"Recibirás un importe único con decimales extra. Envía exactamente ese importe.",prev:"Anterior",next:"Siguiente",codesN:"{n} códigos"}
 };
-const LANGS = [['ar','AR'],['en','EN'],['ru','RU'],['zh','中']];
+const LANGS = [['ar','AR'],['en','EN'],['es','ES'],['ru','RU'],['zh','中']];
 let LANG = 'en';
 function t(k, v) {
   let s = (I[LANG] && I[LANG][k]) || I.en[k] || k;
@@ -2567,8 +2831,8 @@ function renderShell() {
   top.hidden = !(shell || S.screen === 'gate' || S.screen === 'verify');
   dock.hidden = !shell;
   top.innerHTML = `
-    <div class="brand"><img src="logo-mark.webp" alt="" onerror="this.src='logo.webp'"><span class="wordmark">${esc(brandName()[0])}${brandName()[1] ? ' <b>' + esc(brandName()[1]) + '</b>' : ''}</span></div>
-    <div class="seg" role="radiogroup" aria-label="${esc(t('language'))}">${LANGS.map(([c, l]) => `<button role="radio" aria-checked="${c === LANG}" class="${c === LANG ? 'on' : ''}" data-act="lang" data-v="${c}">${l}</button>`).join('')}</div>
+    <div class="brand">${brandMark()}<span class="wordmark">${esc(brandName()[0])}${brandName()[1] ? ' <b>' + esc(brandName()[1]) + '</b>' : ''}</span></div>
+    <button class="lang-btn" data-act="lang-open" aria-haspopup="dialog" aria-label="${esc(t('language'))}">${flagH(LANG, false) || LANG_GLOBE}<span>${esc((LANGS.find(x => x[0] === LANG) || ['', LANG.toUpperCase()])[1])}</span></button>
     <button class="chip-bal num" data-act="funds" aria-label="${esc(t('addFunds'))}">${slot('balance', 'purse', 'ae')}<span id="hbal">${usdShort(S.user ? S.user.balance : 0)}</span></button>
     <button class="icon-btn" data-act="activity" aria-label="${esc(t('activity'))}">${ic.bell}<span class="dot" id="hdot" ${S.pending ? '' : 'hidden'}></span></button>`;
   const tabs = tabsList();
@@ -2768,7 +3032,7 @@ function stopStoreRender(reset) {
   StoreRender.io = null; StoreRender.frame = null; StoreRender.grid = null;
   if (reset) { StoreRender.items = []; StoreRender.shown = 0; StoreRender.key = ''; }
 }
-function moreProductsLabel() { return ({ ar: 'عرض المزيد', en: 'Show more', ru: 'Показать ещё', zh: '显示更多' })[LANG] || 'Show more'; }
+function moreProductsLabel() { return ({ ar: 'عرض المزيد', en: 'Show more', es: 'Ver más', ru: 'Показать ещё', zh: '显示更多' })[LANG] || 'Show more'; }
 function bindStoreMore() {
   StoreRender.grid = $('#grid');
   const more = $('#products-more');
@@ -2941,7 +3205,7 @@ function openProduct(id) {
   renderProduct(sh, p, st);
   autoTranslate(sh, p, st);
 }
-const TR_SCRIPT = { ar: /[\u0600-\u06FF]/g, ru: /[\u0400-\u04FF]/g, zh: /[\u4E00-\u9FFF]/g, en: /[A-Za-z]/g };
+const TR_SCRIPT = { ar: /[\u0600-\u06FF]/g, ru: /[\u0400-\u04FF]/g, zh: /[\u4E00-\u9FFF]/g, en: /[A-Za-z]/g, es: /[A-Za-z\u00C0-\u017F]/g };
 function descNeedsTr(d) {
   const txt = plain(d); const letters = txt.match(/\p{L}/gu) || [];
   if (letters.length < 3) return false;
@@ -3438,12 +3702,12 @@ function vWallet() {
 }
 function dayLabel(ts) {
   const d = new Date(ts * 1000), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
-  const loc = { ar: 'ar-u-nu-latn', en: 'en-US', ru: 'ru-RU', zh: 'zh-CN' }[LANG];
-  if (d.toDateString() === now.toDateString()) return { ar: 'اليوم', en: 'Today', ru: 'Сегодня', zh: '今天' }[LANG];
-  if (d.toDateString() === y.toDateString()) return { ar: 'أمس', en: 'Yesterday', ru: 'Вчера', zh: '昨天' }[LANG];
+  const loc = { ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG];
+  if (d.toDateString() === now.toDateString()) return { ar: 'اليوم', en: 'Today', es: 'Hoy', ru: 'Сегодня', zh: '今天' }[LANG];
+  if (d.toDateString() === y.toDateString()) return { ar: 'أمس', en: 'Yesterday', es: 'Ayer', ru: 'Вчера', zh: '昨天' }[LANG];
   return d.toLocaleDateString(loc, { weekday: 'short', day: 'numeric', month: 'long', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
-function timeOf(ts) { return new Date(ts * 1000).toLocaleTimeString({ ar: 'ar-u-nu-latn', en: 'en-US', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { hour: '2-digit', minute: '2-digit' }); }
+function timeOf(ts) { return new Date(ts * 1000).toLocaleTimeString({ ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { hour: '2-digit', minute: '2-digit' }); }
 function histTitle(it) {
   if (it.type === 'deposit') return t('dep');
   if (it.type === 'adjust') return t('adj_' + it.sub) !== 'adj_' + it.sub ? t('adj_' + it.sub) : t('adj_adjustment');
@@ -4859,7 +5123,7 @@ function admUnit(price, cost) {
 }
 function admPP(P) {
   if (!P || !(P.periods || []).length) return '';
-  const d = ts => { const x = new Date(ts * 1000); return x.toLocaleDateString({ ar: 'ar-u-nu-latn', en: 'en-GB', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { day: 'numeric', month: 'short', year: x.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }); };
+  const d = ts => { const x = new Date(ts * 1000); return x.toLocaleDateString({ ar: 'ar-u-nu-latn', en: 'en-GB', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { day: 'numeric', month: 'short', year: x.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }); };
   const money = r => r.cost || !r.no_cost ? `<span class="${r.profit < 0 ? 'neg' : 'pos'}">${esc(adt(r.profit < 0 ? 'lossL' : 'profitL', { p: usd(Math.abs(r.profit)) }))}</span>` : `<span class="mut">${esc(adt('noCostL'))}</span>`;
   const row = r => {
     const now = r.to == null;
@@ -5446,6 +5710,7 @@ document.addEventListener('click', async e => {
     case 'cart-open': openCart(); break;
     case 'tab': closeAllSheets(); setTab(el.dataset.v); break;
     case 'lang': setLang(el.dataset.v); break;
+    case 'lang-open': openLang(); break;
     case 'pv-how': openPvHow(); break;
     case 'funds': openFunds(); break;
     case 'activity': openActivity(); break;
@@ -5496,7 +5761,103 @@ function persistAppLanguage(l) {
   languageFlight = languageFlight.catch(() => {}).then(() => api('lang', { lang: l }));
   return languageFlight;
 }
+/* Language change plays one slow scene: a veil closes over the page, the new language's name
+   rises into focus, the page is re-rendered underneath, then the veil opens from the centre.
+   Skipped (instant change, as before) with reduced motion, the lite performance mode, or no animation support. */
+let langVeilBusy = false;
+const LANG_NAMES = { ar: 'العربية', en: 'English', es: 'Español', ru: 'Русский', zh: '中文' };
+function langVeil(l) {
+  try {
+    if (langVeilBusy) return true;
+    const root = document.documentElement;
+    if (typeof root.animate !== 'function' || root.dataset.perf === 'lite' ||
+        (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) return false;
+    const v = document.createElement('div');
+    v.className = 'lang-veil'; v.setAttribute('aria-hidden', 'true'); v.dir = l === 'ar' ? 'rtl' : 'ltr';
+    v.innerHTML = `<span class="lv-ring"></span>${flagH(l, true, 'big')}<span class="lv-word" lang="${esc(l)}">${esc(LANG_NAMES[l] || String(l).toUpperCase())}</span><span class="lv-line"><i></i></span>`;
+    document.body.appendChild(v);
+    langVeilBusy = true;
+    setTimeout(() => { try { applyLang(l); } finally { v.classList.add('out'); } }, 520);
+    setTimeout(() => { v.remove(); langVeilBusy = false; }, 1850);
+    return true;
+  } catch (e) { langVeilBusy = false; return false; }
+}
+/* Flags are tiny inline SVGs (no network). LANG_FLAG says which flag stands for each language:
+   change 'ar' to another key of FLAG_SVG to use a different Arab flag. */
+const FLAG_SVG = {"ye":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23CE1126%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","gb":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2060%2030%22%20preserveAspectRatio%3D%22none%22%3E%3CclipPath%20id%3D%22t%22%3E%3Cpath%20d%3D%22M30%2015h30v15zv15H0zH0V0zV0h30z%22%2F%3E%3C%2FclipPath%3E%3Cpath%20d%3D%22M0%200v30h60V0z%22%20fill%3D%22%23012169%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20stroke%3D%22%23fff%22%20stroke-width%3D%226%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20clip-path%3D%22url%28%23t%29%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23fff%22%20stroke-width%3D%2210%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%226%22%2F%3E%3C%2Fsvg%3E","es":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23AA151B%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cpath%20fill%3D%22%23F1BF00%22%20d%3D%22M0%205h30v10H0z%22%2F%3E%3C%2Fsvg%3E","ru":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%230039A6%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23D52B1E%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","cn":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23EE1C25%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cg%20fill%3D%22%23FFDE00%22%3E%3Cpolygon%20points%3D%225.00%2C2.00%205.67%2C4.07%207.85%2C4.07%206.09%2C5.35%206.76%2C7.43%205.00%2C6.15%203.24%2C7.43%203.91%2C5.35%202.15%2C4.07%204.33%2C4.07%22%2F%3E%3Cpolygon%20points%3D%229.14%2C2.51%209.62%2C1.97%209.25%2C1.34%209.91%2C1.63%2010.39%2C1.08%2010.33%2C1.80%2011.00%2C2.09%2010.29%2C2.25%2010.22%2C2.97%209.85%2C2.35%22%2F%3E%3Cpolygon%20points%3D%2211.01%2C4.14%2011.66%2C3.82%2011.56%2C3.10%2012.07%2C3.62%2012.72%2C3.30%2012.38%2C3.95%2012.88%2C4.47%2012.17%2C4.34%2011.83%2C4.99%2011.73%2C4.27%22%2F%3E%3Cpolygon%20points%3D%2211.04%2C6.73%2011.76%2C6.70%2011.96%2C6.00%2012.21%2C6.68%2012.94%2C6.66%2012.37%2C7.10%2012.62%2C7.79%2012.01%2C7.38%2011.44%2C7.83%2011.64%2C7.13%22%2F%3E%3Cpolygon%20points%3D%229.22%2C8.38%209.90%2C8.63%2010.35%2C8.06%2010.32%2C8.79%2011.00%2C9.05%2010.30%2C9.24%2010.26%2C9.96%209.87%2C9.36%209.16%2C9.55%209.62%2C8.98%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"};
+const LANG_FLAG = { ar: 'ye', en: 'gb', es: 'es', ru: 'ru', zh: 'cn' };
+/* A waving flag is the same picture cut into vertical strips that rise and fall one after another. */
+function flagH(l, wave, cls) {
+  const u = FLAG_SVG[LANG_FLAG[l]]; if (!u) return '';
+  const n = wave ? 9 : 1;
+  return `<span class="flag ${wave ? 'wave' : ''} ${cls || ''}" style="--flag:url('${u}')" aria-hidden="true">${Array.from({ length: n }, (_, i) => `<i style="--s:${i}"></i>`).join('')}</span>`;
+}
+/* Header logo: the same vector artwork as the loading screen (sharp at any size), under its own ids/classes
+   so the loader's draw-in animation does not replay on every header render. Falls back to the image file. */
+let BRAND_MARK = null;
+function brandMark() {
+  if (BRAND_MARK == null) {
+    try { const m = document.querySelector('svg.ld-mark'); BRAND_MARK = m ? m.outerHTML.replace(/\blm(?=[A-Z-])/g, 'bm').replace('class="ld-mark"', 'class="brand-mark"').replace(/\s(width|height)="\d+"/g, '') : ''; }
+    catch (e) { BRAND_MARK = ''; }
+  }
+  return BRAND_MARK || `<img src="logo-mark.webp" alt="" onerror="this.src='logo.webp'">`;
+}
+const LANG_GLOBE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.5 3.9 5.5 3.9 9s-1.3 6.5-3.9 9c-2.6-2.5-3.9-5.5-3.9-9S9.4 5.5 12 3z"/></svg>';
+/* The language picker: every language by its own name; choosing one plays the slow scene above. */
+const LANG_PICK = { ar: 'اختيار العربية', en: 'Choose English', es: 'Elegir español', ru: 'Выбрать русский', zh: '选择中文' };
+/* Language picker as a carousel: the candidate language sits in the centre under its waving flag, the previous
+   and next languages wait dimmed at its sides, the arrows (or a swipe, or the keyboard) turn it, one button confirms. */
+function openLang() {
+  const n = LANGS.length;
+  let idx = Math.max(0, LANGS.findIndex(x => x[0] === LANG));
+  const arrow = d => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + (d < 0 ? 'M14.5 5.5L8 12l6.5 6.5' : 'M9.5 5.5L16 12l-6.5 6.5') + '"/></svg>';
+  const items = LANGS.map(([c, l], i) => '<button class="lc-item" data-act="lc-go" data-i="' + i + '" lang="' + esc(c) + '" dir="' + (c === 'ar' ? 'rtl' : 'ltr') + '"><span class="lc-name">' + esc(LANG_NAMES[c] || c) + '</span><span class="lc-code">' + esc(l) + '</span></button>').join('');
+  const body = '<div class="lang-car" dir="ltr">' +
+    '<div class="lc-flag" aria-hidden="true"></div>' +
+    '<div class="lc-track" role="listbox" tabindex="0" aria-label="' + esc(t('language')) + '">' + items + '</div>' +
+    '<div class="lc-ctrl"><button class="lc-arrow" data-act="lc-prev" aria-label="‹">' + arrow(-1) + '</button>' +
+    '<div class="lc-dots" aria-hidden="true">' + LANGS.map(() => '<i></i>').join('') + '</div>' +
+    '<button class="lc-arrow" data-act="lc-next" aria-label="›">' + arrow(1) + '</button></div></div>';
+  const sh = openSheet({
+    title: t('language'), cls: 'lang-sheet', body, foot: '<button class="btn primary full lc-ok" data-act="lc-ok"></button>',
+    onAction(act, el) {
+      if (act === 'lc-prev') { turn(-1); return true; }
+      if (act === 'lc-next') { turn(1); return true; }
+      if (act === 'lc-go') { const i = +el.dataset.i; if (i === idx) pick(); else { idx = i; paint(true); hap('select'); } return true; }
+      if (act === 'lc-ok') { pick(); return true; }
+      return false;
+    }
+  });
+  if (!sh || !sh.el) return;
+  const root = sh.el, car = root.querySelector('.lang-car');
+  function paint(moved) {
+    const half = Math.floor(n / 2), code = LANGS[idx][0];
+    root.querySelectorAll('.lc-item').forEach((el, i) => {
+      const d = ((i - idx + n + half) % n) - half;                 // −2 … 2: how far from the centre
+      el.dataset.pos = d; el.setAttribute('aria-selected', d === 0 ? 'true' : 'false'); el.tabIndex = d === 0 ? 0 : -1;
+    });
+    root.querySelectorAll('.lc-dots i').forEach((el, i) => el.classList.toggle('on', i === idx));
+    const f = root.querySelector('.lc-flag'); f.innerHTML = flagH(code, true); if (moved) { f.classList.remove('swap'); void f.offsetWidth; f.classList.add('swap'); }
+    const ok = root.querySelector('.lc-ok'); ok.textContent = LANG_PICK[code] || LANG_NAMES[code] || code; ok.lang = code; ok.dir = code === 'ar' ? 'rtl' : 'ltr';
+    ok.classList.toggle('same', code === LANG);
+  }
+  function turn(d) { idx = (idx + d + n) % n; paint(true); hap('select'); }
+  function pick() { setLang(LANGS[idx][0]); }
+  // swipe and keyboard
+  let x0 = null;
+  car.addEventListener('pointerdown', e => { x0 = e.clientX; });
+  car.addEventListener('pointerup', e => { if (x0 == null) return; const dx = e.clientX - x0; x0 = null; if (Math.abs(dx) > 36) { car.dataset.swiped = '1'; turn(dx < 0 ? 1 : -1); setTimeout(() => { delete car.dataset.swiped; }, 60); } });
+  car.addEventListener('click', e => { if (car.dataset.swiped) { e.stopPropagation(); e.preventDefault(); } }, true);
+  root.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') { turn(-1); e.preventDefault(); } else if (e.key === 'ArrowRight') { turn(1); e.preventDefault(); } else if (e.key === 'Enter') { pick(); e.preventDefault(); } });
+  paint(false);
+}
 function setLang(l) {
+  if (!I[l]) return;
+  if (l === LANG) { closeAllSheets(); return; }
+  if (langVeil(l)) return;
+  applyLang(l);
+}
+function applyLang(l) {
   if (!I[l] || l === LANG) return;
   LANG = l; store.set('lang', l); store.set('uiLang', l); hap('select');
   if (!DEMO && S.user) {
@@ -5723,8 +6084,8 @@ async function boot() {
   lastCat = Date.now();
   const saved = store.get('lang', null);
   const tgl = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) || '';
-  const own = saved === 'ru' || saved === 'zh' ? saved : null;
-  const want = (I[r.user.ui_lang] && r.user.ui_lang) || own || (!saved && /^(ru|uk|be|kk)/.test(tgl) ? 'ru' : !saved && /^zh/.test(tgl) ? 'zh' : (r.user.lang || saved || 'en'));
+  const own = saved === 'ru' || saved === 'zh' || saved === 'es' ? saved : null;
+  const want = (I[r.user.ui_lang] && r.user.ui_lang) || own || (!saved && /^(ru|uk|be|kk)/.test(tgl) ? 'ru' : !saved && /^zh/.test(tgl) ? 'zh' : !saved && /^es/.test(tgl) ? 'es' : (r.user.lang || saved || 'en'));
   if (I[want]) { LANG = want; document.documentElement.lang = want === 'zh' ? 'zh-CN' : want; document.documentElement.dir = want === 'ar' ? 'rtl' : 'ltr'; }
   store.set('uiLang', LANG); if (S.store && S.store.name) store.set('uiBrand', String(S.store.name).slice(0, 40));   // next open: right language + name from the first frame
   if (r.user.ui_lang !== LANG) { S.user.ui_lang = LANG; persistAppLanguage(LANG); }
@@ -6106,7 +6467,8 @@ const AdminFast = {
     ar: ['جاري تحميل الإحصاءات…', 'تعذّر تحديث الإحصاءات. يمكنك استخدام الأزرار أو إعادة المحاولة.', 'جاري تحديث الإحصاءات…'],
     en: ['Loading statistics…', 'Statistics could not be updated. You can use the buttons or retry.', 'Updating statistics…'],
     ru: ['Загрузка статистики…', 'Не удалось обновить статистику. Кнопки доступны; можно повторить попытку.', 'Обновление статистики…'],
-    zh: ['正在加载统计…', '统计更新失败。功能按钮仍可使用，也可以重试。', '正在更新统计…']
+    zh: ['正在加载统计…', '统计更新失败。功能按钮仍可使用，也可以重试。', '正在更新统计…'],
+    es: ['Cargando estadísticas…', 'No se pudieron actualizar las estadísticas. Puedes usar los botones o reintentar.', 'Actualizando estadísticas…']
   }
 };
 function adminFastReset(response) {

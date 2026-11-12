@@ -4978,8 +4978,13 @@ def _ref_web_verified(rec):
 
 
 def _ref_policy_requires_web(rec):
-    """Only referrals created by the new policy require the new website step."""
-    return bool(rec and rec.get('ref_policy_version') == 30)
+    """Is the website "real person" step a condition for this referral to count?
+
+    Always for referrals created by the new policy. An older referral needs it too whenever it
+    is not active right now (never activated, or left and came back): joining the channels alone
+    no longer activates anyone. Older referrals that are already active keep their state.
+    """
+    return bool(rec and (rec.get('ref_policy_version') == 30 or rec.get('status') != 'active'))
 
 
 def _ref_countable(rec):
@@ -5891,7 +5896,7 @@ def send_progress_log_notification(referrer_id):
         # 1) DM للمُحيل (بلغته مع CMS)
         try:
             referrer = db.users.find_one({'user_id': referrer_id})
-            if referrer and referrer.get('is_banned') != 1:
+            if referrer and referrer.get('is_banned') != 1 and _fresh != 0:
                 dm_text = _notification_text(referrer_id, 'ref_progress_dm', active_count, remaining, f"{reward:.2f}")
                 
                 bot.send_message(referrer_id, dm_text, parse_mode="HTML")
@@ -33951,7 +33956,7 @@ def _wa_bootstrap(identity, body):
                       'photo_url': identity.get('photo_url') or '',
                       'balance': round(_wa_fnum(u.get('balance')), 2),
                       'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
-                      'lang': lang, 'ui_lang': u.get('ui_lang') if u.get('ui_lang') in ('ar', 'en', 'ru', 'zh') else None,
+                      'lang': lang, 'ui_lang': u.get('ui_lang') if u.get('ui_lang') in ('ar', 'en', 'ru', 'zh', 'es') else None,
                       'is_admin': is_admin}, **_wa_user_stats(uid)),
         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
                   'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
@@ -34922,7 +34927,7 @@ def _wa_api_webhook(identity, body):
 
 
 # ─────────────────────────── ترجمة الأوصاف تلقائياً (مع الحفاظ على الإيموجي المميز) ───────────────────────────
-_WA_TR_LANG = {'ar': 'ar', 'en': 'en', 'ru': 'ru', 'zh': 'zh-CN'}
+_WA_TR_LANG = {'ar': 'ar', 'en': 'en', 'ru': 'ru', 'zh': 'zh-CN', 'es': 'es'}
 _WA_TR_SCRIPT = {'ar': r'[؀-ۿ]', 'ru': r'[Ѐ-ӿ]', 'zh': r'[一-鿿]', 'en': r'[A-Za-z]'}
 _WA_TR_DAY = {'d': '', 'n': 0}
 
@@ -35090,7 +35095,7 @@ def _wa_set_lang(identity, body):
     """Persist all app locales for notifications; ar/en also select the legacy bot menus."""
     uid = identity['id']
     lang = str(body.get('lang') or '')
-    if lang not in ('ar', 'en', 'ru', 'zh'):
+    if lang not in ('ar', 'en', 'ru', 'zh', 'es'):
         return 200, {'ok': True, 'changed': False, 'ui_changed': False}
     u = db.users.find_one({'user_id': uid}, {'lang': 1, 'ui_lang': 1, 'lang_chosen': 1, 'is_banned': 1})
     if not u or u.get('is_banned') == 1:
@@ -38349,21 +38354,19 @@ def _dv_record(uid, res):
 
 
 def _dv_relevant_others(uid, rec, res):
-    """الحسابات اللي نعتبرها «نفس الجهاز»: التطابق القوي دائماً. التطابق بالبصمة فقط نتجاهله في آيفون/ماك
-    (أجهزة أبل المتشابهة تطلع نفس البصمة) إلا لو الحساب الثاني هو المحيل نفسه أو مُحال من نفس المحيل."""
+    """الحسابات اللي نعتبرها «نفس الجهاز»: التطابق القوي (معرّف الجهاز) دائماً. التطابق بالبصمة فقط
+    نتجاهله في كل الأجهزة (نفس موديل الجوال يطلع نفس البصمة عند ناس ما بينهم علاقة، أندرويد وآيفون)
+    إلا لو الحساب الثاني هو المحيل نفسه أو مُحال من نفس المحيل — وهذي حالة الحسابات الوهمية فعلاً."""
     out = list(res['strong'])
     if res['weak']:
         rid = int((rec or {}).get('referrer_id') or 0)
-        if not res['apple']:
-            out += res['weak']
-        else:
-            same_ref = set()
-            try:
-                same_ref = {int(d['invited_id']) for d in db.referrals_v2.find(
-                    {'referrer_id': rid, 'invited_id': {'$in': res['weak']}}, {'invited_id': 1})}
-            except Exception:
-                pass
-            out += [x for x in res['weak'] if x == rid or x in same_ref]
+        same_ref = set()
+        try:
+            same_ref = {int(d['invited_id']) for d in db.referrals_v2.find(
+                {'referrer_id': rid, 'invited_id': {'$in': res['weak']}}, {'invited_id': 1})}
+        except Exception:
+            pass
+        out += [x for x in res['weak'] if x == rid or x in same_ref]
     return sorted(set(out))
 
 
@@ -38441,6 +38444,23 @@ def _wa_ref_verify(identity, body):
             'dv': 'flag', 'dv_at': now, 'dv_reasons': res['reasons'][:8], 'dv_others': others[:20],
             'dv_strong': bool(res['strong']), 'dv_dev': res['info'].get('tgp'),
             'web_verified_at': now, 'web_verified_version': 2}})
+        try:
+            _rid = int((rec or {}).get('referrer_id') or 0)
+            _why = '، '.join(html.escape(str(x)) for x in res['reasons'][:4]) or 'نفس جهاز حساب آخر'
+            notify_admins(
+                f"⚠️ <b>إحالة تنتظر مراجعتك</b>\n\n"
+                f"👤 المدعو: {_dv_user_line(uid)}\n"
+                f"👥 المحيل: {_dv_user_line(_rid) if _rid else '—'}\n"
+                f"🔍 السبب: {_why}\n\n"
+                f"لن تُحسب ضمن العشرة حتى تقبلها. بعد القبول تُصرف المكافأة تلقائياً عند اكتمال العدد.",
+                buttons=[('cb', '⚠️ فتح قائمة الإحالات المشكوك فيها', 'refdv_list')])
+            if _rid and not is_user_banned(_rid):
+                bot.send_message(_rid, bil(_rid,
+                    "⏳ <b>إحالة جديدة قيد المراجعة.</b>\n\nستُحسب ضمن إحالاتك بعد تأكيد الإدارة.",
+                    "⏳ <b>A new referral is under review.</b>\n\nIt will count once support confirms it."),
+                    parse_mode='HTML')
+        except Exception as e:
+            logger.debug(f"dv flag notice {uid}: {e}")
     else:
         db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'dv': 'ok', 'dv_at': now,
             'dv_reasons': [], 'web_verified_at': now, 'web_verified_version': 2}})

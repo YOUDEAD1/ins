@@ -158,11 +158,14 @@ def test_twenty_new_referrals_get_two_disjoint_automatic_rewards(mod):
 def test_legacy_and_new_referrals_are_not_mixed_into_an_automatic_reward(mod):
     for uid in range(5001, 5010):
         referral(mod, invited=uid)
-    before = list(mod.db.referrals_v2.find({}))
     ready(mod, 1, activate=True)
+    # Nothing is paid automatically: the nine historical referrals and the new verified one
+    # complete one ordinary batch that waits for the admin, instead of stranding all ten.
     assert balance(mod) == 100 and not auto_batches(mod)
-    assert before == list(mod.db.referrals_v2.find({'invited_id': {'$lt': 6000}}))
-    assert mod.ref_progress(1001) == (1, 10, 9)
+    row = mod.db.referral_milestones.find_one({})
+    assert row['status'] == 'pending' and 'reward_mode' not in row
+    assert sorted(row['members']) == list(range(5001, 5010)) + [6001]
+    assert mod.ref_progress(1001) == (0, 10, 10)
 
 
 def test_ten_legacy_referrals_keep_the_existing_manual_reward_workflow(mod):
