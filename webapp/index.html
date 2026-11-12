@@ -1647,7 +1647,7 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 
 /* ── 2 · Product cards as posters: each product owns a lit colour stage, its name and price sit on a plate ── */
 .card{position:relative;border:0;border-radius:22px;overflow:hidden;isolation:isolate;background:var(--surface-2);
-  box-shadow:0 18px 34px -22px rgba(4,14,44,.75), 0 2px 6px -2px rgba(4,14,44,.25)}
+  box-shadow:0 12px 20px -16px rgba(4,14,44,.85)}
 .card .pv{aspect-ratio:1/1.46;border-radius:0;
   background:
     radial-gradient(72% 46% at 50% 30%, hsl(var(--h,215) 90% 62% / .32), transparent 72%),
@@ -1661,18 +1661,19 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 /* emoji could not be loaded → the brand tile stands on a darker stage of the same colour so it reads as an object */
 .card .pv:has(.btile){background:radial-gradient(72% 46% at 50% 30%, hsl(var(--h,215) 90% 60% / .26), transparent 72%), linear-gradient(172deg, hsl(var(--h,215) 38% 15%), hsl(calc(var(--h,215) + 24) 42% 7%))}
 /* Safari mis-places a grid item that is sized by aspect-ratio and moved with `translate` (it slid to the card's edge),
-   so the artwork gets plain offsets: 57% of the width is 39% of the height at this card ratio, i.e. a square. */
-.card .pv .vis{position:absolute;top:13.5%;left:21.5%;width:57%;height:39%;margin:0;aspect-ratio:auto;filter:drop-shadow(0 14px 16px rgba(0,0,0,.38))}
+   so the artwork gets plain offsets: 50% of the width is 34.25% of the height at this card ratio, i.e. a square.
+   It is drawn at the size the original design used: these are animated images, and area is what costs. */
+.card .pv .vis{position:absolute;top:15.5%;left:25%;width:50%;height:34.25%;margin:0;aspect-ratio:auto;filter:none}
 .card .pv .mono-tile{font-size:clamp(34px,11.5vw,52px)}
 /* very narrow phones (320px): a slightly taller card keeps the artwork clear of a two-line name */
 @media (max-width:350px){
   .card .pv{aspect-ratio:1/1.6}
-  .card .pv .vis{top:11%;height:35.625%}
+  .card .pv .vis{top:12.5%;height:31.25%}
   .card .xmark{bottom:36%}
 }
 /* the floor the product stands on */
-.card .pv:not(.is-oos)::after{content:"";position:absolute;top:auto;left:18%;right:18%;bottom:43.5%;height:5.5%;border-radius:50%;z-index:-1;pointer-events:none;
-  background:radial-gradient(closest-side, rgba(0,0,0,.42), transparent);filter:blur(3px)}
+.card .pv:not(.is-oos)::after{content:"";position:absolute;top:auto;left:22%;right:22%;bottom:46%;height:5%;border-radius:50%;z-index:-1;pointer-events:none;
+  background:radial-gradient(closest-side, rgba(0,0,0,.34), transparent)}
 .card .body{position:absolute;top:auto;left:7px;right:7px;bottom:7px;z-index:2;flex:none;gap:9px;padding:10px 11px 10px;border-radius:17px;
   background:color-mix(in srgb,var(--surface) 92%,transparent);
   border:1px solid color-mix(in srgb,var(--fg) 9%,transparent);
@@ -1684,7 +1685,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .card .price .was{font-family:var(--f-body);font-size:11.5px;margin-bottom:2px}
 .card .add{width:34px;height:34px;border-radius:50%;box-shadow:0 8px 18px -6px var(--glow);transition:transform .18s ease}
 .card:active .add{transform:scale(.9)}
-.card .pill{top:10px;height:25px;font-weight:700;letter-spacing:.01em;background:rgba(6,10,22,.46)}
+.card .pill{top:10px;height:25px;font-weight:700;letter-spacing:.01em;background:rgba(6,10,22,.5);-webkit-backdrop-filter:none;backdrop-filter:none}
+.card .xmark i{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(6,10,22,.55)}
 .card .pill.stock{inset-inline-start:10px}
 .card .pill.kind{inset-inline-end:10px}
 .card .pill.hid{top:42px;bottom:auto}
@@ -1807,7 +1809,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .wal-sums > div{border-radius:20px;padding:13px 12px}
 .wal-sums b{font-size:16px;margin-top:7px}
 
-/* ── 12 · Bottom dock: the active tab is lit from above and its icon lifts ── */
+/* ── 12 · Bottom dock: the active tab is lit from above and its icon lifts ──
+   No CSS filters on the icons or cards: they are animated images, and a filter is recomputed on every frame. */
 .dock-in{border-radius:28px;box-shadow:0 22px 48px -18px rgba(3,12,40,.7), inset 0 1px 0 rgba(255,255,255,.09)}
 .dock-ind{border-radius:22px;
   background:linear-gradient(180deg, color-mix(in srgb,var(--accent) 24%,transparent), color-mix(in srgb,var(--accent) 7%,transparent));
@@ -1815,11 +1818,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .dock-ind::before{content:"";position:absolute;top:-1px;left:26%;right:26%;height:2.5px;border-radius:3px;
   background:linear-gradient(90deg,transparent,var(--accent-2),transparent);box-shadow:0 0 14px 1px var(--accent-2)}
 .dock-ind::after{content:"";position:absolute;left:22%;right:22%;top:44%;height:26%;border-radius:50%;
-  background:radial-gradient(closest-side, color-mix(in srgb,var(--accent-2) 55%,transparent), transparent);filter:blur(7px);opacity:.75}
+  background:radial-gradient(closest-side, color-mix(in srgb,var(--accent-2) 34%,transparent), transparent)}
 .tab{gap:3px;letter-spacing:.005em}
-.tab .ico img,.tab .ico .ce{transition:filter .6s ease}
 .tab.on .ico{transform:translateY(-2px) scale(1.14)}
-.tab.on .ico img,.tab.on .ico .ce{filter:drop-shadow(0 8px 10px rgba(3,12,40,.45))}
 .tab.on > span:last-child{font-weight:700}
 .tab:not(.on) .ico{opacity:.86}
 @media (prefers-reduced-motion: reduce){ .wal-hero::after{animation:none} }
@@ -1832,7 +1833,6 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .hero-vis .pv-bg{background:
     radial-gradient(64% 60% at 50% 40%, rgb(var(--ec1,128 128 128) / .44), transparent 72%),
     linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 24%, #0b1020), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 12%, #05070d))}
-.hero-vis.pv .vis{filter:drop-shadow(0 18px 20px rgba(0,0,0,.4))}
  :root[data-theme="light"] .hero-vis .pv-bg{background:radial-gradient(64% 60% at 50% 40%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
 @media (prefers-color-scheme:light){
  :root:not([data-theme="dark"]) .hero-vis .pv-bg{background:radial-gradient(64% 60% at 50% 40%, rgb(255 255 255 / .8), transparent 72%), linear-gradient(172deg, color-mix(in srgb, rgb(var(--ec1,128 128 128)) 30%, #fff), color-mix(in srgb, rgb(var(--ec2,128 128 128)) 34%, #e6ecf7))}
@@ -1951,12 +1951,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .lang-veil.out .flag.big{animation:lvWordOut .7s cubic-bezier(.5,0,.75,0) both}
 @media (prefers-reduced-motion: reduce){ .flag.wave i,.flag.wave::after{animation:none} }
 /* ── 18 · Header logo as sharp vector art, no box ── */
-.brand .brand-mark{display:block;flex:none;width:46px;height:40px;overflow:visible;filter:drop-shadow(0 6px 12px var(--glow))}
+.brand .brand-mark{display:block;flex:none;width:46px;height:40px;overflow:visible}
 .brand .brand-mark *{transform-box:fill-box;transform-origin:center}
-.brand .brand-mark .bm-plane{animation:bmBob 4.2s ease-in-out infinite alternate}
 .brand .brand-mark .bm-sheen{opacity:0}
-@keyframes bmBob{from{transform:translate(0,0)}to{transform:translate(1.2px,-1.6px)}}
-@media (prefers-reduced-motion: reduce){ .brand .brand-mark .bm-plane{animation:none} }
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -2849,7 +2846,8 @@ function updateHeader() {
   const d = $('#hdot'); if (d) d.hidden = !S.pending;
   updateCartBadge();
 }
-function setTab(k) {
+let tabPaintSeq = 0;
+function setTab(k, fromTap) {
   if (S.tab === k) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
   const was = dockKey(S.tab);
   if (S.tab === 'api' && S.apiUi) S.apiUi.reveal = false;   // بيانات الربط ترجع مخفية لما يطلع من تبويب الـ API
@@ -2857,9 +2855,16 @@ function setTab(k) {
   const dk = dockKey(k);
   const din = $('.dock-in'); if (din) din.style.setProperty('--i', Math.max(0, tabsList().findIndex(x => x[0] === dk)));
   document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.v === dk; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); if (on && was !== dk) { b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); } });
-  window.scrollTo({ top: 0 });
-  renderView(); syncBack();
-  if (k === 'store' && S.screen === 'app' && Date.now() - lastCat > 60000) refreshCatalog();
+  const paint = () => {
+    window.scrollTo({ top: 0 });
+    renderView(); syncBack();
+    if (k === 'store' && S.screen === 'app' && Date.now() - lastCat > 60000) refreshCatalog();
+  };
+  /* A tap on the dock answers in the very next frame: the indicator and icon start moving (GPU animations),
+     and only then is the new page built. Building it first held the whole dock still for that long. */
+  const seq = ++tabPaintSeq;
+  if (fromTap && typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(() => { if (seq === tabPaintSeq) paint(); }, 0));
+  else paint();
 }
 function renderAll() { renderShell(); renderView(); }
 function pvNote() { return DEMO ? `<div class="pv-note">${ic.info}<span>${esc(t('pvSim'))}</span></div>` : ''; }
@@ -5708,7 +5713,7 @@ document.addEventListener('click', async e => {
   if (act.startsWith('adm-') && await admAction(act, el)) return;
   switch (act) {
     case 'cart-open': openCart(); break;
-    case 'tab': closeAllSheets(); setTab(el.dataset.v); break;
+    case 'tab': closeAllSheets(); setTab(el.dataset.v, true); break;
     case 'lang': setLang(el.dataset.v); break;
     case 'lang-open': openLang(); break;
     case 'pv-how': openPvHow(); break;
