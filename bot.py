@@ -8940,7 +8940,8 @@ def _bx_apply(method_name, params):
         markup = json.loads(raw_markup)
         for row in markup.get('inline_keyboard') or []:
             for btn in row:
-                if isinstance(btn, dict) and isinstance(btn.get('text'), str):
+                if isinstance(btn, dict) and isinstance(btn.get('text'), str) \
+                        and not str(btn.get('callback_data') or '').startswith('init_lang_'):
                     parts = []
                     _bx_split(btn['text'], lang, False, parts, need)
                     btn_parts.append((btn, parts))
@@ -8994,13 +8995,90 @@ def _bx_process_updates(updates):
 bot.process_new_updates = _bx_process_updates
 
 
-def _bx_lang_markup(uid, prefix='init_lang_'):
+_BX_BASE_LANGS = {'ar': ('🇸🇦', 'العربية'), 'en': ('🇬🇧', 'English')}
+_BX_BTN_STYLES = {'primary': '🔵 أزرق', 'success': '🟢 أخضر', 'danger': '🔴 أحمر'}
+
+
+def _bx_btn_cfg():
+    try:
+        v = get_setting('bot_lang_btns', None)
+    except Exception:
+        v = None
+    return v if isinstance(v, dict) else {}
+
+
+def _bx_btn_cfg_save(cfg):
+    db.settings.update_one({'key': 'bot_lang_btns'}, {'$set': {'value': cfg}}, upsert=True)
+    try:
+        _settings_cache_invalidate()
+    except Exception:
+        pass
+
+
+def _bx_lang_meta(code):
+    """(علم، اسم) الافتراضي للغة."""
+    if code in _BX_BASE_LANGS:
+        return _BX_BASE_LANGS[code]
+    v = BOT_XLANGS.get(code)
+    return (v[0], v[1]) if v else ('🌐', str(code))
+
+
+def _bx_lang_button(code, callback_data, mark=False):
+    """زر لغة واحد بتخصيص المالك: الاسم، إيموجي بريميوم، اللون."""
+    flag, name = _bx_lang_meta(code)
+    c = _bx_btn_cfg().get(code) or {}
+    text = str(c.get('text') or '').strip()
+    emoji_id = c.get('emoji_id') or None
+    label = text or (name if emoji_id else flag + ' ' + name)
+    kwargs = {'callback_data': callback_data}
+    if emoji_id:
+        kwargs['icon_custom_emoji_id'] = str(emoji_id)
+    if c.get('style') in _BX_BTN_STYLES:
+        kwargs['style'] = c['style']
+    return CustomInlineButton((('✅ ' if mark else '') + label)[:64], **kwargs)
+
+
+def _bx_lang_markup(uid=None, prefix='init_lang_'):
     """أزرار اختيار اللغة: العربية + English + اللغات الإضافية اللي فعّلها المالك."""
-    cur = (get_user_data_full(uid) or {}).get('ui_lang') or get_lang(uid)
+    cur = ((get_user_data_full(uid) or {}).get('ui_lang') or get_lang(uid)) if uid else None
     markup = InlineKeyboardMarkup(row_width=2)
-    rows = [('ar', '🇸🇦 العربية'), ('en', '🇬🇧 English')] + [(c, BOT_XLANGS[c][0] + ' ' + BOT_XLANGS[c][1]) for c in _bx_enabled_langs()]
-    markup.add(*[InlineKeyboardButton(('✅ ' if c == cur else '') + label, callback_data=prefix + c) for c, label in rows])
+    markup.add(*[_bx_lang_button(c, prefix + c, mark=(c == cur)) for c in ['ar', 'en'] + _bx_enabled_langs()])
     return markup
+
+
+_WA_BUILTIN_LANGS = ('ar', 'en', 'es', 'ru', 'zh')
+
+
+def _wa_site_langs():
+    """لغات الموقع: الخمس المدمجة دائماً + الإضافية اللي فعّلها المالك."""
+    return list(_WA_BUILTIN_LANGS) + [c for c in _bx_enabled_langs() if c not in _WA_BUILTIN_LANGS]
+
+
+def _wa_langs_view():
+    cfg = _bx_btn_cfg()
+    out = []
+    for code in _wa_site_langs():
+        c = cfg.get(code) or {}
+        label = re.sub(r'<[^>]+>', '', str(c.get('text') or '')).strip()[:24]
+        out.append({'c': code, 'label': label or None, 'emoji_id': str(c['emoji_id']) if c.get('emoji_id') else None})
+    return out
+
+
+def _wa_uidict(identity, body):
+    """ترجمة نصوص واجهة الموقع للغات الإضافية (نفس مخزن ترجمات البوت، فتصحيحات المالك تنطبق هنا)."""
+    lang = str(body.get('lang') or '')
+    items = body.get('items')
+    if lang not in BOT_XLANGS or lang not in _wa_site_langs() or not isinstance(items, list) or len(items) > 40 \
+            or any(not isinstance(x, str) or len(x) > 600 for x in items):
+        return 400, {'error': 'bad_request'}
+    need, plans = set(), []
+    for x in items:
+        parts = []
+        _bx_split(x, lang, '<' in x and '>' in x, parts, need)
+        plans.append(parts)
+    res = _bx_resolve(lang, need) if need else {}
+    return 200, {'ok': True, 'full': all(t in res for t in need),
+                 'items': [_bx_join(parts, res) for parts in plans]}
 
 
 _REF_NOTE_EN = [
@@ -10520,14 +10598,7 @@ def start_handler(message):
                 'is_admin': 0, 'is_banned': 0}
 
     if not user.get('lang_chosen'):
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            InlineKeyboardButton("🇸🇦 العربية", callback_data="init_lang_ar"),
-            InlineKeyboardButton("🇬🇧 English", callback_data="init_lang_en")
-        )
-        _extra_langs = _bx_enabled_langs()
-        if _extra_langs:
-            markup.add(*[InlineKeyboardButton(BOT_XLANGS[c][0] + ' ' + BOT_XLANGS[c][1], callback_data="init_lang_" + c) for c in _extra_langs])
+        markup = _bx_lang_markup()      # العربية + English + اللغات الإضافية، بتخصيص المالك للأزرار
         bot.send_message(chat_id, "🌐 <b>الرجاء اختيار لغتك / Please choose your language:</b>", reply_markup=markup, parse_mode="HTML")
         return
 
@@ -25107,6 +25178,7 @@ def _bxl_view(chat_id, message_id=None):
     markup.add(InlineKeyboardButton(("🟢 الترجمة التلقائية: شغّالة" if cfg['on'] else "🔴 الترجمة التلقائية: متوقفة"), callback_data="ad_bxl_on"))
     markup.add(*[InlineKeyboardButton(("✅ " if c in cfg['langs'] else "▫️ ") + v[0] + " " + v[1], callback_data="ad_bxl_t_" + c)
                  for c, v in BOT_XLANGS.items()])
+    markup.add(InlineKeyboardButton("🎨 تخصيص أزرار اللغات", callback_data="ad_bxl_btns"))
     markup.add(InlineKeyboardButton("✏️ تصحيح ترجمة", callback_data="ad_bxl_fix"))
     markup.add(InlineKeyboardButton("🧹 مسح الترجمات المحفوظة", callback_data="ad_bxl_clear"))
     markup.add(InlineKeyboardButton("🔙 التخصيص", callback_data="ad_texts_main"))
@@ -25150,6 +25222,103 @@ def ad_bxl_ui(call):
         note = "تم المسح. الترجمات المصحّحة يدوياً محفوظة."
     bot.answer_callback_query(call.id, note or '')
     _bxl_view(call.message.chat.id, call.message.message_id)
+
+
+def _bxl_btn_view(chat_id, code, message_id=None):
+    flag, name = _bx_lang_meta(code)
+    c = _bx_btn_cfg().get(code) or {}
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(_bx_lang_button(code, "ad_bxl_b_" + code))                      # معاينة الزر كما يراه الزبون
+    markup.add(InlineKeyboardButton("✏️ الاسم والإيموجي", callback_data="ad_bxl_be_" + code))
+    markup.add(*[InlineKeyboardButton(("✅ " if c.get('style') == st else "") + label, callback_data=f"ad_bxl_bs_{code}_{st}")
+                 for st, label in _BX_BTN_STYLES.items()])
+    markup.add(InlineKeyboardButton(("✅ " if not c.get('style') else "") + "⚪ بدون لون", callback_data=f"ad_bxl_bs_{code}_none"))
+    markup.add(InlineKeyboardButton("♻️ رجوع للشكل الافتراضي", callback_data="ad_bxl_br_" + code))
+    markup.add(InlineKeyboardButton("🔙 أزرار اللغات", callback_data="ad_bxl_btns"))
+    txt = (f"🎨 <b>زر لغة: {html.escape(name)}</b>\n\n"
+           f"الاسم: <b>{html.escape(str(c.get('text') or (flag + ' ' + name)))}</b>\n"
+           f"إيموجي بريميوم: <b>{'موجود ✅' if c.get('emoji_id') else 'لا يوجد'}</b>\n"
+           f"اللون: <b>{_BX_BTN_STYLES.get(c.get('style'), '⚪ بدون لون')}</b>\n\n"
+           "الزر الأول معاينة. الاسم والإيموجي يظهران أيضاً في اختيار اللغة داخل الموقع.")
+    if message_id:
+        try:
+            bot.edit_message_text(txt, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_bxl_btns" or call.data.startswith(("ad_bxl_b_", "ad_bxl_bs_", "ad_bxl_br_")))
+@admin_required
+def ad_bxl_btns_ui(call):
+    bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    data = call.data
+    known = ['ar', 'en'] + list(BOT_XLANGS)
+    if data == "ad_bxl_btns":
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(*[_bx_lang_button(c, "ad_bxl_b_" + c) for c in known])
+        markup.add(InlineKeyboardButton("🔙 لغات البوت", callback_data="ad_bxl"))
+        bot.edit_message_text("🎨 <b>تخصيص أزرار اللغات</b>\nاختر الزر الذي تريد تعديله (الاسم، إيموجي بريميوم، اللون):",
+                              call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        return
+    cfg = _bx_btn_cfg()
+    if data.startswith("ad_bxl_bs_"):
+        code, _, style = data[len("ad_bxl_bs_"):].partition('_')
+        if code in known:
+            entry = dict(cfg.get(code) or {})
+            if style in _BX_BTN_STYLES:
+                entry['style'] = style
+            else:
+                entry.pop('style', None)
+            cfg[code] = entry
+            _bx_btn_cfg_save(cfg)
+    elif data.startswith("ad_bxl_br_"):
+        code = data[len("ad_bxl_br_"):]
+        cfg.pop(code, None)
+        _bx_btn_cfg_save(cfg)
+    else:
+        code = data[len("ad_bxl_b_"):]
+    if code in known:
+        _bxl_btn_view(call.message.chat.id, code, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_bxl_be_"))
+@admin_required
+def ad_bxl_btn_edit(call):
+    bot.answer_callback_query(call.id)
+    code = call.data[len("ad_bxl_be_"):]
+    if code not in ['ar', 'en'] + list(BOT_XLANGS):
+        return
+    msg = bot.send_message(call.message.chat.id,
+                           "✏️ أرسل اسم الزر الجديد.\nلو تبي إيموجي بريميوم متحرك، حطّه في أول الرسالة ثم الاسم.\n(أرسل «الغاء» للإلغاء)")
+    bot.register_next_step_handler(msg, _bxl_btn_save, code)
+
+
+def _bxl_btn_save(message, code):
+    if not _is_admin_check(message.from_user.id):
+        return
+    if not message.text or message.text.strip() in ('الغاء', 'إلغاء', '/cancel'):
+        bot.send_message(message.chat.id, "❌ تم الإلغاء.")
+        return
+    text, emoji_id = parse_button_input(message)
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()[:40]
+    cfg = _bx_btn_cfg()
+    entry = dict(cfg.get(code) or {})
+    if text:
+        entry['text'] = text
+    elif not emoji_id:
+        bot.send_message(message.chat.id, "❌ ما وصلني اسم ولا إيموجي.")
+        return
+    if emoji_id:
+        entry['emoji_id'] = str(emoji_id)
+        if not text:
+            entry.pop('text', None)
+    cfg[code] = entry
+    _bx_btn_cfg_save(cfg)
+    bot.send_message(message.chat.id, "✅ تم حفظ الزر.")
+    _bxl_btn_view(message.chat.id, code)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_bxl_fix")
@@ -34393,9 +34562,11 @@ def _wa_bootstrap(identity, body):
     for m in methods:
         m['emoji_id'] = nav.get(m['id']) or m.get('emoji_id')
     emoji_ids += [v for v in nav.values() if v] + [m['emoji_id'] for m in methods if m.get('emoji_id')]
+    site_langs = _wa_langs_view()
+    emoji_ids += [x['emoji_id'] for x in site_langs if x.get('emoji_id')]
     _wa_prefetch_emoji(emoji_ids)
     return 200, {
-        'ok': True,
+        'ok': True, 'langs': site_langs,
         **({'admin_shell': _ADMIN_PERFORMANCE.shell(uid)} if is_admin and globals().get('_ADMIN_PERFORMANCE') else {}),
         'user': dict({'id': uid,
                       'first_name': identity.get('first_name') or _wa_plain(u.get('name'), 60),
@@ -34404,7 +34575,7 @@ def _wa_bootstrap(identity, body):
                       'photo_url': identity.get('photo_url') or '',
                       'balance': round(_wa_fnum(u.get('balance')), 2),
                       'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
-                      'lang': lang, 'ui_lang': u.get('ui_lang') if u.get('ui_lang') in ('ar', 'en', 'ru', 'zh', 'es') else None,
+                      'lang': lang, 'ui_lang': u.get('ui_lang') if u.get('ui_lang') in _wa_site_langs() else None,
                       'is_admin': is_admin}, **_wa_user_stats(uid)),
         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
                   'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
@@ -35375,7 +35546,8 @@ def _wa_api_webhook(identity, body):
 
 
 # ─────────────────────────── ترجمة الأوصاف تلقائياً (مع الحفاظ على الإيموجي المميز) ───────────────────────────
-_WA_TR_LANG = {'ar': 'ar', 'en': 'en', 'ru': 'ru', 'zh': 'zh-CN', 'es': 'es'}
+_WA_TR_LANG = {'ar': 'ar', 'en': 'en', 'ru': 'ru', 'zh': 'zh-CN', 'es': 'es',
+               'fa': 'fa', 'fr': 'fr', 'tr': 'tr', 'pt': 'pt', 'de': 'de', 'id': 'id', 'hi': 'hi'}
 _WA_TR_SCRIPT = {'ar': r'[؀-ۿ]', 'ru': r'[Ѐ-ӿ]', 'zh': r'[一-鿿]', 'en': r'[A-Za-z]'}
 _WA_TR_DAY = {'d': '', 'n': 0}
 
@@ -35545,7 +35717,7 @@ def _wa_set_lang(identity, body):
     """Persist all app locales for notifications; ar/en also select the legacy bot menus."""
     uid = identity['id']
     lang = str(body.get('lang') or '')
-    if lang not in ('ar', 'en', 'ru', 'zh', 'es'):
+    if lang not in _wa_site_langs():
         return 200, {'ok': True, 'changed': False, 'ui_changed': False}
     u = db.users.find_one({'user_id': uid}, {'lang': 1, 'ui_lang': 1, 'lang_chosen': 1, 'is_banned': 1})
     if not u or u.get('is_banned') == 1:
@@ -35592,10 +35764,11 @@ _WA_POST_ROUTES = {
     '/webapp/cgpt/subs': _wa_cgpt_subs,
     '/webapp/cgpt/renew': _wa_cgpt_renew,
     '/webapp/lang': _wa_set_lang,
+    '/webapp/uidict': _wa_uidict,
 }
 _WA_HEAVY = {'/webapp/buy': 12, '/webapp/deposit/create': 10, '/webapp/tr': 20, '/webapp/desc': 40,
              '/webapp/api/generate': 5, '/webapp/api/regen': 5, '/webapp/api/disable': 5, '/webapp/api/webhook': 8,
-             '/webapp/api/toggle': 60, '/webapp/cgpt/renew': 8, '/webapp/lang': 20}
+             '/webapp/api/toggle': 60, '/webapp/cgpt/renew': 8, '/webapp/lang': 20, '/webapp/uidict': 40}
 
 
 # ============================================================

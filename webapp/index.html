@@ -1961,6 +1961,18 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 @keyframes swInR{from{transform:translate3d(34px,0,0);opacity:.35}to{transform:none;opacity:1}}
 @keyframes swInL{from{transform:translate3d(-34px,0,0);opacity:.35}to{transform:none;opacity:1}}
 @media (prefers-reduced-motion:reduce){#view.sw-r,#view.sw-l{animation:none}}
+
+/* 20 ─ إيموجي بريميوم بدل العلم (لو المالك خصّص زر اللغة) */
+.flag-ce{display:inline-grid;place-items:center;width:22px;height:22px;flex:none}
+.flag-ce > .ce{width:100%;height:100%}
+.flag-ce > .ce > .flag{width:100%;height:68%}
+.lc-flag .flag-ce{width:46px;height:46px}
+.lang-veil .flag-ce.big{width:74px;height:74px;margin-bottom:2px;animation:lvWord 1.05s cubic-bezier(.16,1,.3,1) both}
+/* مع أكثر من خمس لغات: كل ما هو أبعد من الجارين يختفي بدل ما يتراكم في الوسط */
+.lc-item:not([data-pos="0"]):not([data-pos="1"]):not([data-pos="-1"]){opacity:0;pointer-events:none;transform:scale(.5)}
+.lc-item[data-pos="-2"]{transform:translateX(calc(var(--gx) * -2.1)) scale(.5)}
+.lc-item[data-pos="2"]{transform:translateX(calc(var(--gx) * 2.1)) scale(.5)}
+.lang-car .lc-ctrl{gap:14px}
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -2017,11 +2029,12 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
           if (m) return JSON.parse(decodeURIComponent(m[1])).language_code || ''; } catch (e) {}
     return '';
   }
-  var q = (location.search.match(/[?&]l=(ar|en|es|ru|zh)(?:&|$)/) || [])[1];
+  var q = (location.search.match(/[?&]l=(ar|en|es|ru|zh|fa|fr|tr|pt|de|id|hi)(?:&|$)/) || [])[1];
   var own = ls('lang');
-  var lang = q || norm(ls('uiLang')) || ((own === 'ru' || own === 'zh' || own === 'es') ? own : '') || norm(tgLang()) || norm(navigator.language) || 'en';
+  var xl = /^(fa|fr|tr|pt|de|id|hi)$/, ui = ls('uiLang');
+  var lang = q || (xl.test(ui) ? ui : norm(ui)) || ((own === 'ru' || own === 'zh' || own === 'es' || xl.test(own)) ? own : '') || norm(tgLang()) || norm(navigator.language) || 'en';
   var root = document.documentElement;
-  root.lang = lang === 'zh' ? 'zh-CN' : lang; root.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  root.lang = lang === 'zh' ? 'zh-CN' : lang; root.dir = (lang === 'ar' || lang === 'fa') ? 'rtl' : 'ltr';
   try {   /* Telegram light/dark before the SDK arrives — no dark flash for light-theme users */
     var tp = decodeURIComponent((location.hash.match(/tgWebAppThemeParams=([^&]*)/) || [])[1] || '');
     var bg = tp ? String(JSON.parse(tp).bg_color || '').replace('#', '') : '';
@@ -2149,6 +2162,37 @@ e_insufficient_balance:'余额不足，还差 {p}。',e_out_of_stock:'该商品�
 es:{e_verification_required:"Completa la verificación dentro de la tienda y vuelve a intentarlo.",e_verification_unavailable:"No se pudo comprobar tu suscripción. Inténtalo de nuevo en un momento.",cartAdd:"Añadir a la bolsa",cartTitle:"Tu bolsa",cartReady:"Tu selección, lista para llevar",cartItems:"{n} artículos en tu bolsa",cartResume:"Hay un pago guardado. Revisa su resultado antes de empezar otro.",cartAlready:"Este plan ya está en tu bolsa.",cartLimit:"Tu bolsa admite hasta 20 artículos distintos.",cartAdded:"Añadido a tu bolsa",cartSteps:"Pasos de la compra",cartBagStep:"Tu bolsa",cartReviewStep:"Revisar",cartDoneStep:"Listo",cartLess:"Reducir cantidad",cartMore:"Aumentar cantidad",cartRemove:"Quitar artículo",cartSummary:"Resumen del pedido",cartSubtotal:"Subtotal",cartDiscounts:"Tus descuentos",cartMissing:"Saldo que falta",cartReviewNote:"Los artículos se compran uno a uno con tu saldo. Si alguno necesita atención, el resto se detiene y ves lo que se cobró.",cartQuoteNote:"Los precios finales, los descuentos por cantidad y el ahorro VIP se comprueban de nuevo al revisar.",cartSaved:"Ahorras {p} en este pedido",cartEmpty:"Haz sitio para algo bueno.",cartEmptyBody:"Tu bolsa espera a tu próximo favorito. Explora la tienda y añade lo que te guste.",cartLast:"Ver tu última compra",cartReviewEyebrow:"UN ÚLTIMO VISTAZO",cartEyebrow:"ELEGIDO POR TI",cartReviewTitle:"¿Todo correcto?",cartHeading:"Buenas elecciones. Todas juntas.",cartReviewSub:"Revisa los artículos, las cantidades y los correos de invitación antes de pagar.",cartProducts:"TUS ARTÍCULOS",cartContinue:"Seguir comprando",cartFix:"Algunos artículos necesitan atención. Actualiza tu bolsa antes de continuar.",cartPay:"Confirmar y pagar · {p}",cartReviewButton:"Revisar pedido",cartEdit:"Editar bolsa",cartSuccess:"Todo tuyo.",cartWorking:"Tu pedido está en marcha.",cartVerifying:"Se está verificando un artículo.",cartPartial:"Aquí tienes el estado de tu pedido.",cartSuccessSub:"Tus artículos aparecen abajo. Tus compras también quedan guardadas en Mis pedidos.",cartWorkingSub:"Estamos comprobando tu pago guardado. Espera el resultado.",cartUncertainSub:"Hay un resultado por comprobar. Contacta con soporte con esta referencia antes de volver a comprar.",cartPartialSub:"Los artículos completados aparecen abajo. Los demás no se compraron.",cartWaiting:"Esperando su turno",cartNotPurchased:"No comprado",cartPaid:"Importe pagado",cartReference:"REFERENCIA DE LA COMPRA",cartCheck:"Comprobar resultado",cartRemaining:"Volver a los artículos restantes",e_cart_changed:"El stock o la disponibilidad han cambiado. Revisa tu bolsa de nuevo.",e_cart_disabled:"La bolsa no está disponible por ahora. La compra directa sigue funcionando.",e_price_changed:"Un precio ha cambiado. Revisa el nuevo total antes de pagar.",e_purchase_uncertain:"Esta compra necesita revisión. Abre Mis pedidos o contacta con soporte antes de intentarlo otra vez.",e_quote_expired:"La revisión de precios caducó. Revisa tu pedido de nuevo.",e_bad_cart:"Añade entre 1 y 20 artículos válidos a tu bolsa.",api:"API",orderId:"ID del pedido",vipTier:"Nivel VIP",vipNone:"Aún sin nivel",vipOff:"{r} de descuento",vipNet:"Recargas netas",vipNext:"Recarga {p} más para llegar a VIP {n} ({r} de descuento)",vipMax:"Has alcanzado el nivel máximo",vipAll:"Todos los niveles",vipTitle:"Programa VIP",vipHow1:"Cuanto más recargas, más alto es tu nivel y mayor tu descuento en productos seleccionados.",vipHow2:"Solo cuentan las recargas reales. Los regalos no cuentan, y las deducciones o reembolsos se restan.",vipProducts:"{n} productos tienen descuento VIP",vipYou:"Tú",vipSave:"VIP {n} · −{p}%",pvTitle:"Solo vista previa",pvShort:"— no está vinculada a tu bot. Aquí las compras, las recargas y la API son simuladas; no se cobra nada.",pvHow:"Cómo vincularla",pvSim:"Vista previa: este resultado es simulado — no se cobró nada ni se envió ningún código real. Dentro de tu bot es real.",pvHowT:"Esto es una vista previa — cómo hacerla real",pvHere:"Aquí (vista previa)",pvBot:"Dentro de tu bot (real)",pvR1:"Compras",pvR1a:"Simuladas, no se cobra nada",pvR1b:"Descuenta el saldo y envía el código en el chat",pvR2:"Recargas",pvR2a:"Dirección de ejemplo",pvR2b:"Las direcciones y facturas reales de tu bot, confirmadas automáticamente",pvR3:"API",pvR3a:"Clave de ejemplo",pvR3b:"Tu clave real en la API de tu bot",pvR4:"Canal de registro",pvR4a:"No se envía nada",pvR4b:"Cada pedido se registra con «Vía: Mini App»",pvStepsT:"Pasos",pvS1:"Sube el nuevo bot.py con la carpeta webapp al lado, donde funciona tu bot ahora (GitHub → Render).",pvS2:"Cuando el bot arranca, pone el botón «Tienda» en cada chat y te envía un mensaje con un botón para abrir la tienda.",pvS3:"Abre tu bot en Telegram y toca Tienda junto al cuadro de mensaje.",pvS4:"Envía /miniapp al bot para recibir un informe completo de comprobación.",pvWarn:"No pongas el enlace de claude.ai en BotFather — es una vista previa privada que solo tú puedes abrir, y no está vinculada a tu bot.",linked:"Vinculada a tu bot",notLinked:"Vista previa — sin vincular",autoTr:"Traducido automáticamente",emailInvite:"Tu correo para la invitación",emailHintManual:"Escribe el correo donde quieres la invitación — llega directamente a los administradores con tu pedido.",emailSent:"Tu correo se envió a los administradores:",addrPreview:"Tu dirección real aparece aquí en el bot",premiumId:"ID del emoji premium",demoNoteEmoji:"Los emojis premium aparecen aquí cuando se obtienen de Telegram.",demoNoteReal:"Tus productos, precios y stock reales desde tu base de datos ({d}). Las compras y recargas reales se hacen dentro de tu bot.",demoNote:"Productos de ejemplo para previsualizar el diseño. Tus productos, precios y stock reales aparecen al abrir la tienda desde tu bot en Telegram.",store:"Tienda",orders:"Pedidos",balance:"Saldo",profile:"Perfil",hello:"Hola, {n}",helloSub:"¿Qué nos llevamos hoy?",search:"Buscar productos",all:"Todo",other:"Otros",inStock:"Disponible",sortRec:"A → Z",sortLow:"Precio ↑",sortHigh:"Precio ↓",products:"{n} productos",noMatch:"Nada coincide con tu búsqueda",srDym:"Quizá quisiste decir:",srFixed:"Sin resultados para «{q}» — mostrando «{c}»",srNoStock:"No hay nada disponible con ese nombre ahora — desactiva «Disponible» para verlo todo.",noMatchBody:"Prueba con otra palabra o quita los filtros.",clear:"Quitar filtros",outOfStock:"Agotado",stockN:"{n} disponibles",onlyLeft:"Solo quedan {n}",unlimited:"Ilimitado",seats:"{n} plazas",instant:"Entrega inmediata",manual:"Entrega manual",invite:"Invitación por correo",from:"desde",buyFor:"Comprar · {p}",confirmFor:"Toca para confirmar · {p}",processing:"Procesando…",about:"Descripción",tiers:"Descuento por cantidad",tierRow:"{n}+ uds.",perPc:"/ud.",duration:"Elige un plan",email:"Correo de la cuenta de ChatGPT",emailHint:"La invitación se envía a este correo. Debe estar registrado en chatgpt.com.",qty:"Cantidad",unit:"Precio unitario",total:"Total",yourBal:"Tu saldo",after:"Después de la compra",needMore:"Te faltan {p}",addFunds:"Recargar saldo",days:"{n} días",hiddenTag:"Oculto",okTitle:"Compra completada",okCodes:"Tus códigos",dlTxt:"Descargar TXT",dlAll:"Descargar todas las compras",cgSubs:"Suscripciones de ChatGPT",cgSubsSub:"{n} activas · la próxima termina en {d} días",cgLeft:"Quedan {d} días y {h} h",cgEnds:"Termina el {d}",cgRenew:"Renovar / añadir tiempo",cgPick:"Elige un plan para añadir a este correo",cgAddQ:"¿Añadir {l} (+{n} días) a {e} por {p}?",cgAdded:"Se añadieron {n} días — ahora quedan {t} días",cgNone:"No hay suscripciones de ChatGPT activas.",toChat:"📩 Al chat",txtSent:"Archivo enviado al chat de tu bot",txtCancel:"Descarga cancelada",pvTxt:"Vista previa: en tu bot esto descarga un archivo TXT con los códigos",copyAll:"Copiar todo",copied:"Copiado",sentChat:"También se envió una copia a tu chat con el bot.",manualTitle:"Pedido realizado",manualBody:"Este producto se entrega manualmente. Tu número de pedido es {ref}. Soporte se pondrá en contacto contigo.",gptTitle:"Invitación enviada",gptBody:"Abre {email} y acepta la invitación para activar tu plaza.",expires:"Caduca el {d}",verTitle:"Pedido en verificación",verBody:"No repitas la compra. Recibirás el resultado en el chat del bot.",done:"Hecho",myOrders:"Mis pedidos",ordersTitle:"Mis pedidos",ordersN:"Pedidos",spent:"Gastado",noOrders:"Aún no hay pedidos",noOrdersBody:"Todo lo que compres aparece aquí con sus códigos.",browse:"Explorar la tienda",st_delivered:"Entregado",st_manual:"Pendiente",st_chatgpt:"Invitación enviada",st_verifying:"Verificando",st_failed:"Reembolsado",st_api:"API",showCodes:"Mostrar códigos",hideCodes:"Ocultar códigos",orderRef:"Pedido {ref}",walletTitle:"Monedero",available:"Saldo disponible",deposited:"Recargado",history:"Historial",noHistory:"Aún no hay movimientos",dep:"Recarga",compensation:"Compensación",gift:"Regalo",adjustment:"Ajuste",pendingPay:"Esperando tu pago",open:"Abrir",refresh:"Actualizar",amount:"Importe",minMax:"Mín. {min} · Máx. {max}",starsEq:"≈ {n} Stars",payWith:"Pagar con",cont:"Continuar · {p}",noMethods:"No hay métodos de pago disponibles ahora mismo.",pay:"Pago",sendExactly:"Envía exactamente",toAddr:"A esta dirección",payId:"ID de Binance Pay",bybitUid:"UID de Bybit",noteId:"Pon tu ID en la nota",waiting:"Esperando el pago",autoCheck:"Se comprueba automáticamente cada pocos segundos",checkNow:"Ya pagué · Comprobar ahora",checking:"Comprobando…",cancelPay:"Cancelar pago",armCancel:"Toca otra vez para cancelar",timeUp:"Se acabó el tiempo. Si ya pagaste, se seguirá detectando durante un rato.",warnExact:"Copia el importe completo con todos sus decimales y envía exactamente eso. Un importe distinto no se detectará.",warnBep:"La plataforma puede descontar una comisión de red (unos 0,1–0,2). Súmala para que llegue el importe completo.",warnGen:"Si la red descuenta una comisión, súmala para que llegue el importe completo.",paidTitle:"Saldo añadido",paidBody:"Se añadieron {p} a tu saldo.",cancelled:"Pago cancelado",expired:"Este pago caducó",qr:"Código QR",existsTitle:"Tienes un pago sin terminar",existsBody:"{p} por {m}. Continúalo o empieza uno nuevo.",continueIt:"Continuarlo",startNew:"Empezar uno nuevo",starsPaid:"Stars recibidas. Tu saldo se actualiza en un momento.",profileTitle:"Perfil",purchases:"Compras",language:"Idioma",support:"Soporte",terms:"Términos de uso",openChat:"Abrir el chat del bot",inviteT:"Invita a tus amigos",inviteB:"Gana {r} por cada {n} amigos activos, más {pr} cuando un amigo gaste más de {mp}.",share:"Compartir",clicks:"Visitas",active:"Activos",pendingR:"Pendientes",left:"Se fueron",earned:"Ganado",toNext:"Faltan {n} amigos activos para ganar {r}",admin:"Admin",joinT:"Únete a nuestros canales",joinB:"Suscríbete para seguir usando la tienda.",join:"Unirme",joined:"Ya me uní",notYet:"Aún no te has unido a todos los canales",channel:"Canal",banned:"Tu cuenta está bloqueada",bannedB:"Contacta con soporte si crees que es un error.",authT:"La sesión caducó",authB:"Cierra la tienda y ábrela de nuevo desde el bot.",close:"Cerrar",noTgT:"Ábrela en Telegram",noTgB:"Esta tienda funciona dentro de Telegram. Ábrela desde el menú del bot.",activity:"Actividad",noActivity:"Todavía no hay nada aquí",translate:"Traducir",original:"Ver original",translating:"Traduciendo…",demo:"Demo",loading:"Cargando…",retry:"Reintentar",pcs:"uds.",e_insufficient_balance:"Saldo insuficiente. Te faltan {p}.",e_out_of_stock:"Este producto está agotado.",e_not_enough_stock:"Solo hay {n} disponibles.",e_deposit_pending:"Termina o cancela primero tu pago pendiente.",e_busy:"Hay otra compra en curso. Espera un momento.",e_renewal_pending:"La renovación se está verificando. No pagues otra vez; contacta con soporte.",e_must_join:"Únete primero a los canales obligatorios.",e_banned:"Tu cuenta está bloqueada.",e_bad_email:"Escribe un correo válido.",e_bad_duration:"Elige primero un plan.",e_invite_failed:"No se pudo enviar la invitación. Se reembolsó tu saldo.",e_supplier_failed:"El proveedor rechazó el pedido. Se reembolsó tu saldo.",e_purchase_failed:"La compra no se completó. Revisa tu saldo e inténtalo de nuevo.",e_rate_limited:"Demasiadas solicitudes. Inténtalo en un minuto.",e_auth:"La sesión caducó. Vuelve a abrir la tienda.",e_method_unavailable:"Este método de pago no está disponible.",e_amount_range:"Escribe un importe entre {min} y {max}.",e_busy_amount:"No hay un importe único libre ahora mismo. Prueba con otro importe.",e_price_unavailable:"No se pudo obtener el precio de la moneda. Inténtalo en un momento.",e_invoice_failed:"No se pudo crear la factura de Stars.",e_server_error:"Algo salió mal. Inténtalo de nuevo.",e_network:"Sin conexión. Revisa tu internet e inténtalo de nuevo.",e_not_found:"Este producto ya no está disponible.",e_bad_qty:"Escribe una cantidad válida.",e_bot_only:"Esto se gestiona solo desde el bot.",vfT:"Activa tu cuenta",vfB:"Dos pasos rápidos que protegen la tienda de cuentas falsas.",vfS1:"Canales y grupos",vfS2:"Comprobación humana",vfS3:"Listo",vfJoinT:"Únete a nuestros canales y grupos",vfJoinB:"Faltan {n} de {t}. Únete y luego toca «Comprobar».",vfJoinAll:"Todo listo aquí. Toca «Comprobar» para continuar.",vfKindC:"Canal",vfKindG:"Grupo",vfJoined:"Unido",vfJoin:"Unirme",vfOpened:"Abierto",vfCheck:"Comprobar",vfChecking:"Comprobando…",vfLeft:"Faltan {n} por unirte",vfHumT:"Demuéstranos que eres una persona",vfHumB:"Toca el emoji que coincide.",vfTap:"Toca",vfW1:"Comprobando tu dispositivo",vfW2:"Confirmando la app de Telegram",vfW3:"Activando tu cuenta",vfDoneT:"Todo listo",vfDoneB:"Tu cuenta está activa. Disfruta de la tienda.",vfEnter:"Entrar en la tienda",vfOpenP:"Abrir el producto",vfOpening:"Abriendo {p} para ti…",deepGone:"Este producto no está disponible ahora mismo.",vfPriv:"No se recopilan datos personales, solo un código cifrado del dispositivo.",vfFail:"No se pudo comprobar ahora. Inténtalo de nuevo.",vfNoLink:"Pregunta a soporte",pvVerify:"Ver la pantalla de activación de referidos",poSub:"Tus códigos e historial de pedidos",dvT:"Un último paso",dvB:"Toca el emoji que coincide para verificar tu dispositivo. Así la tienda se protege de cuentas falsas — no se recopilan datos personales.",dvTap:"Toca {e}",dvWrong:"Ese no es — inténtalo de nuevo",dvWork:"Comprobando tu dispositivo…",dvOkT:"Verificado",dvOkB:"Ya puedes usar la tienda.",dvEnter:"Entrar en la tienda",dvFail:"No se pudo verificar ahora. Inténtalo de nuevo.",e_no_account:"Inicia primero el bot y vuelve a abrir la tienda.",e_deposit_failed:"No se pudo crear el pago. Inténtalo de nuevo o elige otro método.",e_deposit_exists:"Ya tienes un pago en curso. Termínalo o cancélalo primero.",e_unavailable:"Esto no está disponible ahora mismo. Inténtalo en un momento.",e_bad_request:"Algo en la solicitud no era correcto. Actualiza e inténtalo de nuevo.",e_too_large:"Es demasiado texto de una vez. Envíalo en partes más pequeñas.",e_bad_json:"Algo en la solicitud no era correcto. Actualiza e inténtalo de nuevo.",e_expired:"Este enlace caducó. Inténtalo de nuevo.",e_forbidden:"No tienes permiso para esto.",e_no_key:"Genera primero una clave de API.",e_no_webhook:"Configura primero una URL de webhook.",e_bad_url:"Escribe una URL http(s) válida.",e_private_url:"Usa una dirección pública de internet (no localhost ni una red privada).",e_empty:"No se escribió nada.",e_bad_amount:"Escribe un importe válido.",e_bad_price:"Escribe un precio válido.",e_bad_vip:"Ajuste VIP no válido.",e_cannot_ban:"Esta cuenta no se puede bloquear.",e_bad_section:"Esta sección no está disponible.",e_open_failed:"No se pudo abrir esta sección. Inténtalo de nuevo.",h_all:"Todo",h_deposit:"Recargas",h_purchase:"Compras",h_adjust:"Ajustes",opsN:"{n} operaciones",details:"Detalles",f_type:"Tipo",f_method:"Método",f_network:"Red",f_sent:"Importe enviado",f_requested:"Solicitado",f_status:"Estado",completed:"Completado",f_date:"Fecha",f_ref:"Referencia",f_tx:"ID de la transacción",f_product:"Producto",f_note:"Nota",f_after:"Saldo después",adj_compensation:"Compensación",adj_manual:"Recarga manual",adj_gift:"Regalo",adj_adjustment:"Ajuste de saldo",note_ref_auto:'Recompensa automática por referidos verificados · lote #{b} ({n} referidos)',note_ref_batch:'Recompensa por referidos · lote #{b} ({n} referidos)',note_ref_rej:'Referido rechazado ({id}) · lote #{b}',note_ref_left:'El referido salió del canal ({id}) · lote #{b}',note_ref_back:'El referido volvió ({id})',note_ref_buy:'Recompensa por compra de un referido ({id})',adj_ref_reward:"Recompensa por referidos",adj_ref_clawback:"Referido descontado (se fue)",adj_ref_refund:"Referido recuperado",adj_deduct:"Deducción",refunded:"Reembolsado",g_tg:"Telegram",g_ex:"Exchanges",g_cr:"Monederos cripto",change:"Cambiar",lastUsed:"Último usado",mInstant:"Inmediato",mAuto:"Se acredita automáticamente",minFrom:"desde {min}",newBal:"Nuevo saldo",uniqueNote:"Recibirás un importe único con decimales extra. Envía exactamente ese importe.",prev:"Anterior",next:"Siguiente",codesN:"{n} códigos"}
 };
 const LANGS = [['ar','AR'],['en','EN'],['es','ES'],['ru','RU'],['zh','中']];
+/* لغات إضافية يفعّلها المالك من البوت: نصوص الواجهة تُترجم تلقائياً من الإنجليزية وتُحفظ على الجهاز */
+const XL = { fa: ['FA', 'fa-IR-u-nu-latn'], fr: ['FR', 'fr-FR'], tr: ['TR', 'tr-TR'], pt: ['PT', 'pt-BR'], de: ['DE', 'de-DE'], id: ['ID', 'id-ID'], hi: ['HI', 'hi-IN-u-nu-latn'] };
+Object.keys(XL).forEach(l => { I[l] = {}; });
+const isRtl = l => l === 'ar' || l === 'fa';
+const xloc = () => (XL[LANG] && XL[LANG][1]) || 'en-US';
+function relDay(n) { try { const x = new Intl.RelativeTimeFormat(LANG, { numeric: 'auto' }).format(n, 'day'); return x.charAt(0).toUpperCase() + x.slice(1); } catch (e) { return n ? 'Yesterday' : 'Today'; } }
+function setSiteLangs(codes) {
+  for (let i = LANGS.length - 1; i >= 0; i--) if (XL[LANGS[i][0]]) LANGS.splice(i, 1);
+  (codes || []).forEach(c => { if (XL[c] && !LANGS.some(x => x[0] === c)) LANGS.push([c, XL[c][0]]); });
+}
+const UID = {};
+function uiDictApply(l) {
+  const m = store.get('ui:' + l, {}), d = I[l], miss = new Set();
+  for (const k in I.en) { const src = I.en[k]; if (typeof src !== 'string' || !/\p{L}{2}/u.test(src)) continue; if (m[src] != null) d[k] = m[src]; else miss.add(src); }
+  return { m, miss: [...miss] };
+}
+async function uiDictLoad(l) {
+  if (!XL[l] || UID[l]) return;
+  UID[l] = 1;
+  const { m, miss } = uiDictApply(l); let got = 0;
+  for (let i = 0; i < miss.length && LANG === l; i += 40) {
+    const items = miss.slice(i, i + 40); let r = null;
+    try { r = await api('uidict', { lang: l, items }); } catch (e) {}
+    if (!r || !r.ok || !Array.isArray(r.items)) break;
+    items.forEach((src, j) => { const o = r.items[j]; if (typeof o === 'string' && o && (o !== src || r.full)) { m[src] = o; got++; } });
+    store.set('ui:' + l, m);
+    if (!r.full) break;                      // المترجم مشغول: نكمل الباقي في الفتحة الجاية
+  }
+  UID[l] = 0;
+  if (got) { uiDictApply(l); if (LANG === l && S.screen && !Sheets.length) renderAll(); }
+}
 let LANG = 'en';
 function t(k, v) {
   let s = (I[LANG] && I[LANG][k]) || I.en[k] || k;
@@ -2836,7 +2880,7 @@ function renderShell() {
   dock.hidden = !shell;
   top.innerHTML = `
     <div class="brand">${brandMark()}<span class="wordmark">${esc(brandName()[0])}${brandName()[1] ? ' <b>' + esc(brandName()[1]) + '</b>' : ''}</span></div>
-    <button class="lang-btn" data-act="lang-open" aria-haspopup="dialog" aria-label="${esc(t('language'))}">${flagH(LANG, false) || LANG_GLOBE}<span>${esc((LANGS.find(x => x[0] === LANG) || ['', LANG.toUpperCase()])[1])}</span></button>
+    <button class="lang-btn" data-act="lang-open" aria-haspopup="dialog" aria-label="${esc(t('language'))}">${flagH(LANG, true) || LANG_GLOBE}<span>${esc((LANGS.find(x => x[0] === LANG) || ['', LANG.toUpperCase()])[1])}</span></button>
     <button class="chip-bal num" data-act="funds" aria-label="${esc(t('addFunds'))}">${slot('balance', 'purse', 'ae')}<span id="hbal">${usdShort(S.user ? S.user.balance : 0)}</span></button>
     <button class="icon-btn" data-act="activity" aria-label="${esc(t('activity'))}">${ic.bell}<span class="dot" id="hdot" ${S.pending ? '' : 'hidden'}></span></button>`;
   const tabs = tabsList();
@@ -3272,7 +3316,7 @@ const TR_SCRIPT = { ar: /[\u0600-\u06FF]/g, ru: /[\u0400-\u04FF]/g, zh: /[\u4E00
 function descNeedsTr(d) {
   const txt = plain(d); const letters = txt.match(/\p{L}/gu) || [];
   if (letters.length < 3) return false;
-  if (LANG === 'es') return true;   // الإسبانية والإنجليزية نفس الحروف، فما نقدر نميّز بالحروف
+  if (LANG === 'es' || XL[LANG]) return true;   // الإسبانية والإنجليزية نفس الحروف، فما نقدر نميّز بالحروف
   return (txt.match(TR_SCRIPT[LANG] || TR_SCRIPT.en) || []).length / letters.length < 0.6;
 }
 async function autoTranslate(sh, p, st) {
@@ -3766,12 +3810,12 @@ function vWallet() {
 }
 function dayLabel(ts) {
   const d = new Date(ts * 1000), now = new Date(), y = new Date(now); y.setDate(now.getDate() - 1);
-  const loc = { ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG];
-  if (d.toDateString() === now.toDateString()) return { ar: 'اليوم', en: 'Today', es: 'Hoy', ru: 'Сегодня', zh: '今天' }[LANG];
-  if (d.toDateString() === y.toDateString()) return { ar: 'أمس', en: 'Yesterday', es: 'Ayer', ru: 'Вчера', zh: '昨天' }[LANG];
+  const loc = { ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG] || xloc();
+  if (d.toDateString() === now.toDateString()) return { ar: 'اليوم', en: 'Today', es: 'Hoy', ru: 'Сегодня', zh: '今天' }[LANG] || relDay(0);
+  if (d.toDateString() === y.toDateString()) return { ar: 'أمس', en: 'Yesterday', es: 'Ayer', ru: 'Вчера', zh: '昨天' }[LANG] || relDay(-1);
   return d.toLocaleDateString(loc, { weekday: 'short', day: 'numeric', month: 'long', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 }
-function timeOf(ts) { return new Date(ts * 1000).toLocaleTimeString({ ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { hour: '2-digit', minute: '2-digit' }); }
+function timeOf(ts) { return new Date(ts * 1000).toLocaleTimeString({ ar: 'ar-u-nu-latn', en: 'en-US', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG] || xloc(), { hour: '2-digit', minute: '2-digit' }); }
 function histTitle(it) {
   if (it.type === 'deposit') return t('dep');
   if (it.type === 'adjust') return t('adj_' + it.sub) !== 'adj_' + it.sub ? t('adj_' + it.sub) : t('adj_adjustment');
@@ -3800,7 +3844,7 @@ function trqNeeded(s) {
   if (letters.length < 2 || LANG === 'ar') return false;
   if (/[\u0600-\u06FF]/.test(s)) return true;
   if (LANG === 'en') return false;
-  if (LANG === 'es') return true;
+  if (LANG === 'es' || XL[LANG]) return true;
   return (String(s).match(TR_SCRIPT[LANG] || TR_SCRIPT.en) || []).length / letters.length < 0.6;
 }
 function trq(s, arOnly) {
@@ -5236,7 +5280,7 @@ function admUnit(price, cost) {
 }
 function admPP(P) {
   if (!P || !(P.periods || []).length) return '';
-  const d = ts => { const x = new Date(ts * 1000); return x.toLocaleDateString({ ar: 'ar-u-nu-latn', en: 'en-GB', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG], { day: 'numeric', month: 'short', year: x.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }); };
+  const d = ts => { const x = new Date(ts * 1000); return x.toLocaleDateString({ ar: 'ar-u-nu-latn', en: 'en-GB', es: 'es-ES', ru: 'ru-RU', zh: 'zh-CN' }[LANG] || xloc(), { day: 'numeric', month: 'short', year: x.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }); };
   const money = r => r.cost || !r.no_cost ? `<span class="${r.profit < 0 ? 'neg' : 'pos'}">${esc(adt(r.profit < 0 ? 'lossL' : 'profitL', { p: usd(Math.abs(r.profit)) }))}</span>` : `<span class="mut">${esc(adt('noCostL'))}</span>`;
   const row = r => {
     const now = r.to == null;
@@ -5878,7 +5922,9 @@ function persistAppLanguage(l) {
    rises into focus, the page is re-rendered underneath, then the veil opens from the centre.
    Skipped (instant change, as before) with reduced motion, the lite performance mode, or no animation support. */
 let langVeilBusy = false;
-const LANG_NAMES = { ar: 'العربية', en: 'English', es: 'Español', ru: 'Русский', zh: '中文' };
+const LANG_NAMES = { ar: 'العربية', en: 'English', es: 'Español', ru: 'Русский', zh: '中文', fa: 'فارسی', fr: 'Français', tr: 'Türkçe', pt: 'Português', de: 'Deutsch', id: 'Indonesia', hi: 'हिन्दी' };
+/* الاسم/الإيموجي اللي خصّصه المالك لزر اللغة في البوت يظهر هنا أيضاً */
+function langName(l) { return (S.langName && S.langName[l]) || LANG_NAMES[l] || l; }
 function langVeil(l) {
   try {
     if (langVeilBusy) return true;
@@ -5886,9 +5932,9 @@ function langVeil(l) {
     if (typeof root.animate !== 'function' || root.dataset.perf === 'lite' ||
         (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) return false;
     const v = document.createElement('div');
-    v.className = 'lang-veil'; v.setAttribute('aria-hidden', 'true'); v.dir = l === 'ar' ? 'rtl' : 'ltr';
-    v.innerHTML = `<span class="lv-ring"></span>${flagH(l, true, 'big')}<span class="lv-word" lang="${esc(l)}">${esc(LANG_NAMES[l] || String(l).toUpperCase())}</span><span class="lv-line"><i></i></span>`;
-    document.body.appendChild(v);
+    v.className = 'lang-veil'; v.setAttribute('aria-hidden', 'true'); v.dir = isRtl(l) ? 'rtl' : 'ltr';
+    v.innerHTML = `<span class="lv-ring"></span>${flagH(l, true, 'big')}<span class="lv-word" lang="${esc(l)}">${esc(langName(l) || String(l).toUpperCase())}</span><span class="lv-line"><i></i></span>`;
+    document.body.appendChild(v); hydrate(v);
     langVeilBusy = true;
     setTimeout(() => { try { applyLang(l); } finally { v.classList.add('out'); } }, 520);
     setTimeout(() => { v.remove(); langVeilBusy = false; }, 1850);
@@ -5897,13 +5943,16 @@ function langVeil(l) {
 }
 /* Flags are tiny inline SVGs (no network). LANG_FLAG says which flag stands for each language:
    change 'ar' to another key of FLAG_SVG to use a different Arab flag. */
-const FLAG_SVG = {"ye":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23CE1126%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","gb":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2060%2030%22%20preserveAspectRatio%3D%22none%22%3E%3CclipPath%20id%3D%22t%22%3E%3Cpath%20d%3D%22M30%2015h30v15zv15H0zH0V0zV0h30z%22%2F%3E%3C%2FclipPath%3E%3Cpath%20d%3D%22M0%200v30h60V0z%22%20fill%3D%22%23012169%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20stroke%3D%22%23fff%22%20stroke-width%3D%226%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20clip-path%3D%22url%28%23t%29%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23fff%22%20stroke-width%3D%2210%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%226%22%2F%3E%3C%2Fsvg%3E","es":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23AA151B%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cpath%20fill%3D%22%23F1BF00%22%20d%3D%22M0%205h30v10H0z%22%2F%3E%3C%2Fsvg%3E","ru":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%230039A6%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23D52B1E%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","cn":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23EE1C25%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cg%20fill%3D%22%23FFDE00%22%3E%3Cpolygon%20points%3D%225.00%2C2.00%205.67%2C4.07%207.85%2C4.07%206.09%2C5.35%206.76%2C7.43%205.00%2C6.15%203.24%2C7.43%203.91%2C5.35%202.15%2C4.07%204.33%2C4.07%22%2F%3E%3Cpolygon%20points%3D%229.14%2C2.51%209.62%2C1.97%209.25%2C1.34%209.91%2C1.63%2010.39%2C1.08%2010.33%2C1.80%2011.00%2C2.09%2010.29%2C2.25%2010.22%2C2.97%209.85%2C2.35%22%2F%3E%3Cpolygon%20points%3D%2211.01%2C4.14%2011.66%2C3.82%2011.56%2C3.10%2012.07%2C3.62%2012.72%2C3.30%2012.38%2C3.95%2012.88%2C4.47%2012.17%2C4.34%2011.83%2C4.99%2011.73%2C4.27%22%2F%3E%3Cpolygon%20points%3D%2211.04%2C6.73%2011.76%2C6.70%2011.96%2C6.00%2012.21%2C6.68%2012.94%2C6.66%2012.37%2C7.10%2012.62%2C7.79%2012.01%2C7.38%2011.44%2C7.83%2011.64%2C7.13%22%2F%3E%3Cpolygon%20points%3D%229.22%2C8.38%209.90%2C8.63%2010.35%2C8.06%2010.32%2C8.79%2011.00%2C9.05%2010.30%2C9.24%2010.26%2C9.96%209.87%2C9.36%209.16%2C9.55%209.62%2C8.98%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"};
-const LANG_FLAG = { ar: 'ye', en: 'gb', es: 'es', ru: 'ru', zh: 'cn' };
+const FLAG_SVG = {"ir":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23239F40%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23DA0000%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3Ccircle%20cx%3D%2215%22%20cy%3D%2210%22%20r%3D%221.7%22%20fill%3D%22none%22%20stroke%3D%22%23DA0000%22%20stroke-width%3D%22.9%22%2F%3E%3C%2Fsvg%3E","fr":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%230055A4%22%20d%3D%22M0%200h10v20H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M10%200h10v20H10z%22%2F%3E%3Cpath%20fill%3D%22%23EF4135%22%20d%3D%22M20%200h10v20H20z%22%2F%3E%3C%2Fsvg%3E","tr":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23E30A17%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Ccircle%20cx%3D%2211%22%20cy%3D%2210%22%20r%3D%225%22%20fill%3D%22%23fff%22%2F%3E%3Ccircle%20cx%3D%2212.3%22%20cy%3D%2210%22%20r%3D%224%22%20fill%3D%22%23E30A17%22%2F%3E%3Cpolygon%20fill%3D%22%23fff%22%20points%3D%2214.60%2C10.00%2016.26%2C9.46%2016.26%2C7.72%2017.28%2C9.13%2018.94%2C8.59%2017.92%2C10.00%2018.94%2C11.41%2017.28%2C10.87%2016.26%2C12.28%2016.26%2C10.54%22%2F%3E%3C%2Fsvg%3E","br":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23009C3B%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cpath%20fill%3D%22%23FFDF00%22%20d%3D%22M15%202.5%2027%2010%2015%2017.5%203%2010z%22%2F%3E%3Ccircle%20cx%3D%2215%22%20cy%3D%2210%22%20r%3D%224.3%22%20fill%3D%22%23002776%22%2F%3E%3C%2Fsvg%3E","de":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23DD0000%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23FFCE00%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","id":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23CE1126%22%20d%3D%22M0%200h30v10H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%2010h30v10H0z%22%2F%3E%3C%2Fsvg%3E","in":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23FF9933%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23138808%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3Ccircle%20cx%3D%2215%22%20cy%3D%2210%22%20r%3D%222.4%22%20fill%3D%22none%22%20stroke%3D%22%23000080%22%20stroke-width%3D%22.7%22%2F%3E%3Ccircle%20cx%3D%2215%22%20cy%3D%2210%22%20r%3D%22.6%22%20fill%3D%22%23000080%22%2F%3E%3C%2Fsvg%3E","ye":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23CE1126%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","gb":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2060%2030%22%20preserveAspectRatio%3D%22none%22%3E%3CclipPath%20id%3D%22t%22%3E%3Cpath%20d%3D%22M30%2015h30v15zv15H0zH0V0zV0h30z%22%2F%3E%3C%2FclipPath%3E%3Cpath%20d%3D%22M0%200v30h60V0z%22%20fill%3D%22%23012169%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20stroke%3D%22%23fff%22%20stroke-width%3D%226%22%2F%3E%3Cpath%20d%3D%22M0%200l60%2030m0-30L0%2030%22%20clip-path%3D%22url%28%23t%29%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%224%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23fff%22%20stroke-width%3D%2210%22%2F%3E%3Cpath%20d%3D%22M30%200v30M0%2015h60%22%20stroke%3D%22%23C8102E%22%20stroke-width%3D%226%22%2F%3E%3C%2Fsvg%3E","es":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23AA151B%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cpath%20fill%3D%22%23F1BF00%22%20d%3D%22M0%205h30v10H0z%22%2F%3E%3C%2Fsvg%3E","ru":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M0%200h30v7H0z%22%2F%3E%3Cpath%20fill%3D%22%230039A6%22%20d%3D%22M0%206.67h30v6.67H0z%22%2F%3E%3Cpath%20fill%3D%22%23D52B1E%22%20d%3D%22M0%2013.33h30V20H0z%22%2F%3E%3C%2Fsvg%3E","cn":"data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2030%2020%22%20preserveAspectRatio%3D%22none%22%3E%3Cpath%20fill%3D%22%23EE1C25%22%20d%3D%22M0%200h30v20H0z%22%2F%3E%3Cg%20fill%3D%22%23FFDE00%22%3E%3Cpolygon%20points%3D%225.00%2C2.00%205.67%2C4.07%207.85%2C4.07%206.09%2C5.35%206.76%2C7.43%205.00%2C6.15%203.24%2C7.43%203.91%2C5.35%202.15%2C4.07%204.33%2C4.07%22%2F%3E%3Cpolygon%20points%3D%229.14%2C2.51%209.62%2C1.97%209.25%2C1.34%209.91%2C1.63%2010.39%2C1.08%2010.33%2C1.80%2011.00%2C2.09%2010.29%2C2.25%2010.22%2C2.97%209.85%2C2.35%22%2F%3E%3Cpolygon%20points%3D%2211.01%2C4.14%2011.66%2C3.82%2011.56%2C3.10%2012.07%2C3.62%2012.72%2C3.30%2012.38%2C3.95%2012.88%2C4.47%2012.17%2C4.34%2011.83%2C4.99%2011.73%2C4.27%22%2F%3E%3Cpolygon%20points%3D%2211.04%2C6.73%2011.76%2C6.70%2011.96%2C6.00%2012.21%2C6.68%2012.94%2C6.66%2012.37%2C7.10%2012.62%2C7.79%2012.01%2C7.38%2011.44%2C7.83%2011.64%2C7.13%22%2F%3E%3Cpolygon%20points%3D%229.22%2C8.38%209.90%2C8.63%2010.35%2C8.06%2010.32%2C8.79%2011.00%2C9.05%2010.30%2C9.24%2010.26%2C9.96%209.87%2C9.36%209.16%2C9.55%209.62%2C8.98%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"};
+const LANG_FLAG = { ar: 'ye', en: 'gb', es: 'es', ru: 'ru', zh: 'cn', fa: 'ir', fr: 'fr', tr: 'tr', pt: 'br', de: 'de', id: 'id', hi: 'in' };
 /* A waving flag is the same picture cut into vertical strips that rise and fall one after another. */
 function flagH(l, wave, cls) {
-  const u = FLAG_SVG[LANG_FLAG[l]]; if (!u) return '';
+  const u = FLAG_SVG[LANG_FLAG[l]];
   const n = wave ? 9 : 1;
-  return `<span class="flag ${wave ? 'wave' : ''} ${cls || ''}" style="--flag:url('${u}')" aria-hidden="true">${Array.from({ length: n }, (_, i) => `<i style="--s:${i}"></i>`).join('')}</span>`;
+  const strips = u ? `<span class="flag ${wave ? 'wave' : ''} ${cls || ''}" style="--flag:url('${u}')" aria-hidden="true">${Array.from({ length: n }, (_, i) => `<i style="--s:${i}"></i>`).join('')}</span>` : '';
+  const cid = S.langCe && S.langCe[l];
+  if (cid && ceOK(cid)) return `<span class="flag-ce ${cls || ''}" aria-hidden="true">${ceH(cid, strips)}</span>`;
+  return strips;
 }
 /* Header logo: the same vector artwork as the loading screen (sharp at any size), under its own ids/classes
    so the loader's draw-in animation does not replay on every header render. Falls back to the image file. */
@@ -5924,7 +5973,7 @@ function openLang() {
   const n = LANGS.length;
   let idx = Math.max(0, LANGS.findIndex(x => x[0] === LANG));
   const arrow = d => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + (d < 0 ? 'M14.5 5.5L8 12l6.5 6.5' : 'M9.5 5.5L16 12l-6.5 6.5') + '"/></svg>';
-  const items = LANGS.map(([c, l], i) => '<button class="lc-item" data-act="lc-go" data-i="' + i + '" lang="' + esc(c) + '" dir="' + (c === 'ar' ? 'rtl' : 'ltr') + '"><span class="lc-name">' + esc(LANG_NAMES[c] || c) + '</span><span class="lc-code">' + esc(l) + '</span></button>').join('');
+  const items = LANGS.map(([c, l], i) => '<button class="lc-item" data-act="lc-go" data-i="' + i + '" lang="' + esc(c) + '" dir="' + (isRtl(c) ? 'rtl' : 'ltr') + '"><span class="lc-name">' + esc(langName(c)) + '</span><span class="lc-code">' + esc(l) + '</span></button>').join('');
   const body = '<div class="lang-car" dir="ltr">' +
     '<div class="lc-flag" aria-hidden="true"></div>' +
     '<div class="lc-track" role="listbox" tabindex="0" aria-label="' + esc(t('language')) + '">' + items + '</div>' +
@@ -5950,8 +5999,8 @@ function openLang() {
       el.dataset.pos = d; el.setAttribute('aria-selected', d === 0 ? 'true' : 'false'); el.tabIndex = d === 0 ? 0 : -1;
     });
     root.querySelectorAll('.lc-dots i').forEach((el, i) => el.classList.toggle('on', i === idx));
-    const f = root.querySelector('.lc-flag'); f.innerHTML = flagH(code, true); if (moved) { f.classList.remove('swap'); void f.offsetWidth; f.classList.add('swap'); }
-    const ok = root.querySelector('.lc-ok'); ok.textContent = LANG_PICK[code] || LANG_NAMES[code] || code; ok.lang = code; ok.dir = code === 'ar' ? 'rtl' : 'ltr';
+    const f = root.querySelector('.lc-flag'); f.innerHTML = flagH(code, true); hydrate(f); if (moved) { f.classList.remove('swap'); void f.offsetWidth; f.classList.add('swap'); }
+    const ok = root.querySelector('.lc-ok'); ok.textContent = (S.langName && S.langName[code]) || LANG_PICK[code] || LANG_NAMES[code] || code; ok.lang = code; ok.dir = isRtl(code) ? 'rtl' : 'ltr';
     ok.classList.toggle('same', code === LANG);
   }
   function turn(d) { idx = (idx + d + n) % n; paint(true); hap('select'); }
@@ -5972,6 +6021,7 @@ function setLang(l) {
 }
 function applyLang(l) {
   if (!I[l] || l === LANG) return;
+  if (XL[l]) uiDictApply(l);          // الترجمات المحفوظة على الجهاز تظهر فوراً
   LANG = l; store.set('lang', l); store.set('uiLang', l); hap('select');
   if (!DEMO && S.user) {
     S.user.ui_lang = l;
@@ -5979,9 +6029,10 @@ function applyLang(l) {
     persistAppLanguage(l);
   }
   document.documentElement.lang = l === 'zh' ? 'zh-CN' : l;
-  document.documentElement.dir = l === 'ar' ? 'rtl' : 'ltr';
+  document.documentElement.dir = isRtl(l) ? 'rtl' : 'ltr';
   closeAllSheets();
   renderAll();
+  uiDictLoad(l);
 }
 
 /* ───────────────────────── refresh ───────────────────────── */
@@ -6197,9 +6248,13 @@ async function boot() {
   lastCat = Date.now();
   const saved = store.get('lang', null);
   const tgl = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) || '';
-  const own = saved === 'ru' || saved === 'zh' || saved === 'es' ? saved : null;
+  S.langCe = {}; S.langName = {};
+  (r.langs || []).forEach(x => { if (x && x.c) { if (x.emoji_id) S.langCe[x.c] = x.emoji_id; if (x.label) S.langName[x.c] = String(x.label).slice(0, 24); } });
+  setSiteLangs(DEMO ? Object.keys(XL) : (r.langs || []).map(x => x && x.c));
+  const own = (saved === 'ru' || saved === 'zh' || saved === 'es' || (XL[saved] && LANGS.some(x => x[0] === saved))) ? saved : null;
   const want = (I[r.user.ui_lang] && r.user.ui_lang) || own || (!saved && /^(ru|uk|be|kk)/.test(tgl) ? 'ru' : !saved && /^zh/.test(tgl) ? 'zh' : !saved && /^es/.test(tgl) ? 'es' : (r.user.lang || saved || 'en'));
-  if (I[want]) { LANG = want; document.documentElement.lang = want === 'zh' ? 'zh-CN' : want; document.documentElement.dir = want === 'ar' ? 'rtl' : 'ltr'; }
+  if (XL[want]) { if (LANGS.some(x => x[0] === want)) { uiDictApply(want); setTimeout(() => uiDictLoad(want), 600); } }
+  if (I[want] && (!XL[want] || LANGS.some(x => x[0] === want))) { LANG = want; document.documentElement.lang = want === 'zh' ? 'zh-CN' : want; document.documentElement.dir = isRtl(want) ? 'rtl' : 'ltr'; }
   store.set('uiLang', LANG); if (S.store && S.store.name) store.set('uiBrand', String(S.store.name).slice(0, 40));   // next open: right language + name from the first frame
   if (r.user.ui_lang !== LANG) { S.user.ui_lang = LANG; persistAppLanguage(LANG); }
   if (r.ok) ldStage('p');
@@ -6220,7 +6275,7 @@ if (tg) {
   try { tg.onEvent('activated', () => { if (S.screen === 'app') { refreshMe(); refreshCatalog(); } }); } catch (e) {}
 }
 const initLang = (window.__LD && window.__LD.lang) || store.get('lang', null) || 'en';   // same pick as the loading screen (never the phone first)
-if (I[initLang]) { LANG = initLang; document.documentElement.dir = initLang === 'ar' ? 'rtl' : 'ltr'; }
+if (I[initLang]) { LANG = initLang; document.documentElement.dir = isRtl(initLang) ? 'rtl' : 'ltr'; }
 
 /* ───────────────────────── demo data (preview only) ───────────────────────── */
 const Demo = {
@@ -6538,6 +6593,7 @@ const Demo = {
     if (path.startsWith('api/')) return this.apiCall(path.slice(4), b);
     if (path.startsWith('admin/')) return this.adminCall(path.slice(6), b);
     if (path === 'desc') return { ok: true, html: null };
+    if (path === 'uidict') return { ok: true, full: false, items: b.items || [] };
     if (path === 'tr') return { ok: true, items: (b.items || []).map(s => '[' + LANG.toUpperCase() + '] ' + s) };
     if (path === 'deposit/create') {
       if (b.method === 'stars') { this.starsPend = b.amount; return { ok: true, kind: 'invoice', link: '#', stars: Math.floor(b.amount * 120), amount: b.amount }; }
