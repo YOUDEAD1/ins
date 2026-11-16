@@ -8859,8 +8859,59 @@ def _bx_core(piece, lang):
     return m.group(1), core, m.group(3)
 
 
+# أسماء تبقى بأصلها ولا تُترجم أبداً: أسماء المنتجات، أسماء الأقسام (المجلدات)، اسم المتجر،
+# أسماء طرق الدفع والعملات الرقمية، واسم الزبون نفسه.
+_BX_KEEP_FIXED = ('Telegram Stars', 'Stars', 'Binance Pay', 'Binance', 'Bybit', 'USDT', 'TRC20', 'TRC-20', 'BEP20',
+                  'BEP-20', 'ERC20', 'ERC-20', 'TON', 'Toncoin', 'Litecoin', 'LTC', 'Bitcoin', 'BTC', 'Ethereum', 'ETH',
+                  'TRX', 'Tron', 'USDC', 'BNB', 'Solana', 'SOL', 'CryptoBot', 'Crypto Bot', 'Crypto Pay', 'Crypto',
+                  'Payeer', 'PayPal', 'Perfect Money', 'Vodafone Cash', 'LARA STOCK', 'LARA', 'VIP', 'API', 'ChatGPT')
+_BX_KEEP = {'at': 0, 're': None}
+_BX_KEEP_EXTRA = threading.local()
+
+
+def _bx_keep_re():
+    """Regex لكل الأسماء المحمية (يتحدّث كل دقيقتين)."""
+    now = time.time()
+    if _BX_KEEP['re'] is not None and now - _BX_KEEP['at'] < 120:
+        return _BX_KEEP['re']
+    terms = set(_BX_KEEP_FIXED)
+    try:
+        for p in db.products.find({}, {'name_en': 1, 'name_ar': 1, 'name': 1}):
+            terms.update(str(p.get(k) or '').strip() for k in ('name_en', 'name_ar', 'name'))
+        for c in db.catalogs.find({}, {'name_en': 1, 'name_ar': 1}):
+            terms.update(str(c.get(k) or '').strip() for k in ('name_en', 'name_ar'))
+        store_name = get_setting('webapp_store_name', None) or get_setting('store_name', None)
+        if store_name:
+            terms.add(str(store_name).strip())
+    except Exception:
+        pass
+    terms = sorted({t for t in terms if len(t) >= 2 and re.search(r'[^\W\d_]', t)}, key=len, reverse=True)[:3000]
+    _BX_KEEP['re'] = re.compile(r'(?<![^\W_])(' + '|'.join(re.escape(t) for t in terms) + r')(?![^\W_])', re.I) if terms else None
+    _BX_KEEP['at'] = now
+    return _BX_KEEP['re']
+
+
+def _bx_keep_split(text):
+    """[(قطعة، محمية؟)] — الأسماء المحمية تطلع كقطع ثابتة."""
+    pieces = [(text, False)]
+    extra = getattr(_BX_KEEP_EXTRA, 'names', None)
+    for rx in (_bx_keep_re(), extra):
+        if rx is None:
+            continue
+        nxt = []
+        for seg, keep in pieces:
+            if keep:
+                nxt.append((seg, True))
+                continue
+            for i, part in enumerate(rx.split(seg)):
+                if part:
+                    nxt.append((part, i % 2 == 1))
+        pieces = nxt
+    return pieces
+
+
 def _bx_split(text, lang, is_html, out, need):
-    """يقسّم النص إلى قطع: ثابتة (وسوم/أكواد/أرقام) وقابلة للترجمة."""
+    """يقسّم النص إلى قطع: ثابتة (وسوم/أكواد/أرقام/أسماء) وقابلة للترجمة."""
     chunks = _BX_TAG.split(text) if is_html else [text]
     frozen = 0
     for ch in chunks:
@@ -8875,19 +8926,75 @@ def _bx_split(text, lang, is_html, out, need):
             out.append(ch)
             continue
         for ln in re.split(r'(\n)', ch):
-            for part in _BX_TOKEN.split(html.unescape(ln) if is_html else ln):
-                if not part:
-                    continue
-                got = None if _BX_TOKEN.fullmatch(part) else _bx_core(part, lang)
-                if not got:
-                    out.append(html.escape(part, quote=False) if is_html else part)
-                    continue
-                need.add(got[1])
-                out.append((got[0], got[1], got[2], is_html))
+            if ln == '\n' or not ln:
+                out.append(ln)
+                continue
+            plain = html.unescape(ln) if is_html else ln
+            _bx_split_plain(plain, lang, is_html, out, need, keep=_bx_keep_split(plain))
 
 
-def _bx_resolve(lang, need):
-    """يرجّع {نص: ترجمة} من الذاكرة ثم قاعدة البيانات ثم المترجم (بحدود وقت آمنة)."""
+_BX_MARK_BASE = 1001
+_BX_MARK_RE = re.compile(r'(?<![0-9\u06F0-\u06F9\u0660-\u0669])([0-9\u06F0-\u06F9\u0660-\u0669]{4})(?![0-9\u06F0-\u06F9\u0660-\u0669])')
+_BX_DIGITS = str.maketrans('\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669',
+                           '01234567890123456789')
+
+
+def _bx_split_plain(text, lang, is_html, out, need, keep=None):
+    """قطعة سطر (بين الوسوم): جملة واحدة قابلة للترجمة، والثوابت داخلها علامات."""
+    pieces = []
+    for seg, kept in (keep if keep is not None else [(text, False)]):
+        if kept:
+            pieces.append((seg, True))
+            continue
+        for part in _BX_TOKEN.split(seg):
+            if part:
+                pieces.append((part, bool(_BX_TOKEN.fullmatch(part))))
+    # الأطراف (إيموجي/رموز/أرقام/أسماء في البداية أو النهاية) تبقى برا الجملة
+    lead, tail = [], []
+    while pieces and (pieces[0][1] or not re.search(r'[^\W\d_]', pieces[0][0])):
+        lead.append(pieces.pop(0)[0])
+    while pieces and (pieces[-1][1] or not re.search(r'[^\W\d_]', pieces[-1][0])):
+        tail.insert(0, pieces.pop()[0])
+    if pieces:
+        m = re.match(r'^(\W*)', pieces[0][0])
+        if m.group(1):
+            lead.append(m.group(1)); pieces[0] = (pieces[0][0][len(m.group(1)):], False)
+        m = re.search(r'([^\w)\]]*)$', pieces[-1][0])
+        if m and m.group(1) and len(m.group(1)) < len(pieces[-1][0]):
+            tail.insert(0, m.group(1)); pieces[-1] = (pieces[-1][0][:len(pieces[-1][0]) - len(m.group(1))], False)
+    pre, post = ''.join(lead), ''.join(tail)
+    frozen, tpl = [], []
+    for seg, kept in pieces:
+        if kept:
+            tpl.append(str(_BX_MARK_BASE + len(frozen)))
+            frozen.append(seg)
+        else:
+            tpl.append(seg)
+    template = ''.join(tpl)
+    letters = re.findall(r'[^\W\d_]', template)
+    nat = _BX_NATIVE.get(lang)
+    if len(letters) < 2 or (nat and len(re.findall(nat, template)) / len(letters) >= 0.6) or len(frozen) > 9:
+        raw = pre + ''.join(p[0] for p in pieces) + post
+        out.append(html.escape(raw, quote=False) if is_html else raw)
+        return
+    need.add(template)
+    out.append(('T', pre, template, post, tuple(frozen), is_html))
+
+
+def _bx_marks_ok(template, value):
+    want = sorted(_BX_MARK_RE.findall(template))
+    got = sorted(x.translate(_BX_DIGITS) for x in _BX_MARK_RE.findall(value or ''))
+    return want == got
+
+
+def _bx_restore(value, frozen):
+    return _BX_MARK_RE.sub(lambda m: (frozen[int(m.group(1).translate(_BX_DIGITS)) - _BX_MARK_BASE]
+                                      if 0 <= int(m.group(1).translate(_BX_DIGITS)) - _BX_MARK_BASE < len(frozen) else m.group(1)), value)
+
+
+def _bx_resolve(lang, need, live=True):
+    """يرجّع {نص: ترجمة} من الذاكرة ثم قاعدة البيانات ثم المترجم (بحدود وقت آمنة).
+    live=False: المحفوظ فقط بدون أي اتصال بالمترجم."""
     res, miss = {}, []
     for t in need:
         v = _BX_MEM.get((lang, t))
@@ -8904,6 +9011,8 @@ def _bx_resolve(lang, need):
             if t is not None and row.get('value'):
                 res[t] = _BX_MEM[(lang, t)] = row['value']
     except Exception:
+        return res
+    if not live:
         return res
     todo = list(ids.values())
     now = time.time()
@@ -8950,6 +9059,27 @@ def _bx_resolve(lang, need):
             logger.warning('Bot translation unavailable for %s (%s texts); original text sent', lang, len(todo))
     except Exception as exc:
         logger.warning(f'bot i18n translate err: {type(exc).__name__}')
+    for t in [t for t, v in done.items() if not _bx_marks_ok(t, v)]:
+        if time.time() < deadline:
+            one = _bx_translate(t, gcode, deadline)
+            if one and _bx_marks_ok(t, one.strip()):
+                done[t] = one.strip()
+                continue
+        pieces, good = re.split(r'(\d{4})', t), True
+        for k in range(0, len(pieces), 2):
+            if re.search(r'[^\W\d_]', pieces[k]) and time.time() < deadline:
+                m = re.match(r'^(\s*)(.*?)(\s*)$', pieces[k], re.S)
+                one = _bx_translate(m.group(2), gcode, deadline)
+                if not one:
+                    good = False
+                    break
+                pieces[k] = m.group(1) + one.strip() + m.group(3)
+            elif re.search(r'[^\W\d_]', pieces[k]):
+                good = False
+        if good:
+            done[t] = ''.join(pieces)
+        else:
+            done.pop(t, None)
     if len(_BX_MEM) > 30000:
         _BX_MEM.clear()
     for t, v in done.items():
@@ -8968,10 +9098,13 @@ def _bx_join(parts, res):
     for p in parts:
         if isinstance(p, str):
             out.append(p)
-        else:
-            pre, core, post, is_html = p
-            val = res.get(core, core)
-            out.append((html.escape(pre + val + post, quote=False)) if is_html else pre + val + post)
+            continue
+        _t, pre, template, post, frozen, is_html = p
+        val = res.get(template)
+        if val is None or not _bx_marks_ok(template, val):
+            val = template
+        text = pre + _bx_restore(val, frozen) + post
+        out.append(html.escape(text, quote=False) if is_html else text)
     return ''.join(out)
 
 
@@ -8983,6 +9116,20 @@ def _bx_apply(method_name, params):
         lang = _bx_target(params.get('chat_id'))
     if not lang:
         return params
+    try:
+        _u = get_user_data_full(int(params.get('chat_id') or _BX_CQ.get(str(params.get('callback_query_id'))) or 0)) or {}
+        _names = {str(_u.get(k) or '').strip().lstrip('@') for k in ('name', 'first_name', 'last_name', 'username', 'full_name')}
+        _names = sorted({n for n in _names if len(n) >= 3}, key=len, reverse=True)
+        _BX_KEEP_EXTRA.names = re.compile(r'(?<![^\W_])(' + '|'.join(map(re.escape, _names)) + r')(?![^\W_])') if _names else None
+    except Exception:
+        _BX_KEEP_EXTRA.names = None
+    try:
+        return _bx_apply_inner(method_name, params, field, lang)
+    finally:
+        _BX_KEEP_EXTRA.names = None
+
+
+def _bx_apply_inner(method_name, params, field, lang):
     need, text_parts, markup, btn_parts = set(), None, None, []
     text = params.get(field) if field else None
     mode = str(params.get('parse_mode') or '').lower()
@@ -9119,7 +9266,47 @@ def _wa_langs_view():
     return out
 
 
+_WA_UI_TEXTS = {'mtime': None, 'texts': []}
+
+
+def _wa_ui_texts():
+    try:
+        mtime = os.path.getmtime(os.path.join(WEBAPP_DIR, 'index.html'))
+    except Exception:
+        mtime = None
+    if _WA_UI_TEXTS['mtime'] != mtime or not _WA_UI_TEXTS['texts']:
+        _WA_UI_TEXTS.update(mtime=mtime, texts=_bx_site_ui_texts())
+    return _WA_UI_TEXTS['texts']
+
+
 def _wa_uidict(identity, body):
+    lang = str(body.get('lang') or '')
+    if body.get('all'):
+        if lang not in BOT_XLANGS or lang not in _wa_site_langs():
+            return 400, {'error': 'bad_request'}
+        texts = _wa_ui_texts()
+        plans, need = [], set()
+        for x in texts:
+            parts = []
+            _bx_split(x, lang, '<' in x and '>' in x, parts, need)
+            plans.append(parts)
+        res = _bx_resolve(lang, need, live=False)           # المحفوظ فقط: سريع، بدون Google
+        out, missing = {}, 0
+        for x, parts in zip(texts, plans):
+            cores = [p[2] for p in parts if not isinstance(p, str)]
+            if all(c in res for c in cores):
+                out[x] = _bx_join(parts, res)
+            else:
+                missing += 1
+        warming = bool((_BX_WARM.get(lang) or {}).get('running'))
+        if missing and not warming:
+            threading.Thread(target=_bx_warm_lang, args=(lang,), daemon=True, name='bot-i18n-warm-site').start()
+            warming = True
+        return 200, {'ok': True, 'map': out, 'missing': missing, 'warming': warming}
+    return _wa_uidict_items(identity, body)
+
+
+def _wa_uidict_items(identity, body):
     """ترجمة نصوص واجهة الموقع للغات الإضافية (نفس مخزن ترجمات البوت، فتصحيحات المالك تنطبق هنا)."""
     lang = str(body.get('lang') or '')
     items = body.get('items')
@@ -9146,7 +9333,7 @@ def _bx_translate_items(lang, items):
     res = _bx_resolve(lang, need) if need else {}
     out = []
     for x, parts in zip(items, plans):
-        cores = [p[1] for p in parts if not isinstance(p, str)]
+        cores = [p[2] for p in parts if not isinstance(p, str)]
         out.append(_bx_join(parts, res) if all(c in res for c in cores) else None)
     return out, all(t in res for t in need)
 
@@ -9225,7 +9412,6 @@ def _bx_all_texts():
     try:
         texts += [r.get('value') for r in db.custom_texts.find({'lang': 'en'}, {'value': 1})]
         texts += [r.get('text') for r in db.custom_buttons.find({'lang': 'en'}, {'text': 1})]
-        texts += [c.get('name_en') or c.get('name_ar') for c in db.catalogs.find({}, {'name_en': 1, 'name_ar': 1})]
     except Exception:
         pass
     texts += _bx_code_texts()
@@ -9247,8 +9433,8 @@ def _bx_desc_lines(src):
     for ln in (src or '').split('\n'):
         plain = html.unescape(re.sub(r'<[^>]+>', '', ln)).strip(' \t•·▪●-–')
         plain = re.sub(r'^[☀-➿\U0001F000-\U0001FAFF️‍\s]+|[☀-➿\U0001F000-\U0001FAFF️‍\s]+$', '', plain)
-        if re.search(r'[^\W\d_]', plain):
-            out.append(plain)
+        if re.search(r'[^\W\d_]{2}', plain):
+            out.append(html.unescape(re.sub(r'<[^>]+>', '', ln)))
     return out
 
 
@@ -9267,7 +9453,8 @@ def _bx_warm_lang(lang, notify_chat=None):
             for p in _wa_build_catalog(include_hidden=False)['products']:
                 for d in (p.get('desc_en') or p.get('desc_ar') or '',):
                     if not re.search(r'[؀-ۿ]', d):
-                        need.update(_bx_desc_lines(d))
+                        for line in _bx_desc_lines(d):
+                            _bx_split(line, lang, False, [], need)
                         _bx_split(d, lang, '<' in d, [], need)
         except Exception:
             pass
@@ -9277,7 +9464,25 @@ def _bx_warm_lang(lang, notify_chat=None):
             ids = {_bx_id(lang, t): t for t in need[i:i + 400]}
             have.update(ids[r['_id']] for r in db.bot_i18n.find({'_id': {'$in': list(ids)}}, {'_id': 1}))
         todo = [t for t in need if t not in have]
+        try:                                   # نصوص الموقع أولاً: هي اللي يشوفها الزبون فوراً لما يفتح الصفحة
+            site = set()
+            for t in _wa_ui_texts():
+                _bx_split(t, lang, '<' in t and '>' in t, [], site)
+            todo.sort(key=lambda t: t not in site)
+        except Exception:
+            pass
         state.update(total=len(need), done=len(have))
+        try:                                   # ترجمات قديمة ترجمت اسماً محمياً: تنحذف (إلا اللي عدّلها المالك)
+            keep_rx = _bx_keep_re()
+            if keep_rx is not None:
+                stale = [r['_id'] for r in db.bot_i18n.find({'lang': lang, 'fixed': {'$ne': True}}, {'src': 1})
+                         if keep_rx.search(str(r.get('src') or '')) and str(r.get('src')) not in need]
+                for i in range(0, len(stale), 500):
+                    db.bot_i18n.delete_many({'_id': {'$in': stale[i:i + 500]}})
+                for key in [k for k in list(_BX_MEM) if k[0] == lang and keep_rx.search(k[1])]:
+                    _BX_MEM.pop(key, None)
+        except Exception:
+            pass
         for i in range(0, len(todo), 30):
             chunk = todo[i:i + 30]
             for attempt in range(4):
@@ -9289,7 +9494,7 @@ def _bx_warm_lang(lang, notify_chat=None):
                 time.sleep(20 * (attempt + 1))         # المترجم مشغول/واقف: نستنى ونعيد نفس الدفعة
             state['done'] += len([t for t in chunk if t in got])
             state['failed'] += len([t for t in chunk if t not in got])
-            time.sleep(0.6)
+            time.sleep(0.25)
     except Exception:
         logger.exception('Bot language warm-up failed for %s', lang)
     finally:
@@ -9313,10 +9518,11 @@ def _bx_export_file(lang):
     rows = list(db.bot_i18n.find({'lang': lang}, {'src': 1, 'value': 1, 'fixed': 1}).sort('src', 1))
     head = [f"LARA — ترجمات {BOT_XLANGS[lang][1]} ({lang})",
             "عدّل فقط السطر اللي يبدأ بالسهم ←  ثم احفظ الملف وأرسله للبوت من «📥 رفع ملف معدّل».",
-            "لا تغيّر السطر اللي فيه # ولا السطر EN.", ""]
+            "لا تغيّر السطر اللي فيه # ولا السطر EN. العلامات {1} {2}… مكان أرقام وأسماء؛ خلّها في الترجمة.", ""]
     body = []
     for r in rows:
-        body += [f"# {r['_id'][:16]}{'  ✏️' if r.get('fixed') else ''}", f"EN: {r.get('src', '')}", f"← {r.get('value', '')}", ""]
+        show = lambda v: _BX_MARK_RE.sub(lambda m: '{' + str(int(m.group(1).translate(_BX_DIGITS)) - _BX_MARK_BASE + 1) + '}', str(v or ''))
+        body += [f"# {r['_id'][:16]}{'  ✏️' if r.get('fixed') else ''}", f"EN: {show(r.get('src'))}", f"← {show(r.get('value'))}", ""]
     data = io.BytesIO('\n'.join(head + body).encode('utf-8'))
     data.name = f'translations-{lang}.txt'
     return data, len(rows)
@@ -9330,7 +9536,8 @@ def _bx_import_file(lang, text):
         if not m:
             continue
         row, value = rows.get(m.group(1)), m.group(2).strip()
-        if not row or not value or value == row.get('value'):
+        value = re.sub(r'\{(\d)\}', lambda x: str(_BX_MARK_BASE + int(x.group(1)) - 1), value)
+        if not row or not value or value == row.get('value') or not _bx_marks_ok(row.get('src', ''), value):
             continue
         db.bot_i18n.update_one({'_id': row['_id']}, {'$set': {'value': value[:600], 'fixed': True}})
         _BX_MEM[(lang, row.get('src'))] = value[:600]
@@ -25670,10 +25877,8 @@ def _bxl_fix_find(message):
     if not text or text.startswith('/'):
         bot.send_message(message.chat.id, "تم الإلغاء.")
         return
-    core = _bx_core(text, '') or ('', text, '')
-    rows = list(db.bot_i18n.find({'value': core[1]}).limit(6))
-    if not rows:
-        rows = list(db.bot_i18n.find({'value': {'$regex': re.escape(core[1][:80]), '$options': 'i'}}).limit(6))
+    probe = re.sub(r'\\d+', r'[0-9\\u06F0-\\u06F9]+', re.escape(text.strip(' .!?:،')[:80]))
+    rows = list(db.bot_i18n.find({'value': {'$regex': probe, '$options': 'i'}}).limit(6))
     if not rows:
         bot.send_message(message.chat.id, "ما لقيت هذه الجملة في الترجمات المحفوظة. انسخها بالضبط كما تظهر (سطر واحد بدون أرقام أو إيموجي).")
         return
@@ -25694,7 +25899,8 @@ def ad_bxl_fix_pick(call):
         return
     _BX_FIX[call.from_user.id] = row['_id']
     msg = bot.send_message(call.message.chat.id,
-                           f"الأصل:\n<code>{html.escape(str(row.get('src')))}</code>\n\nالترجمة الحالية:\n<code>{html.escape(str(row.get('value')))}</code>\n\n✏️ أرسل الترجمة الصحيحة الآن (أو /cancel).",
+                           f"الأصل:\n<code>{html.escape(str(row.get('src')))}</code>\n\nالترجمة الحالية:\n<code>{html.escape(str(row.get('value')))}</code>\n\n"
+                           "✏️ أرسل الترجمة الصحيحة الآن (أو /cancel). الأرقام 1001 و1002… مكان أرقام وأسماء، خلّها كما هي.",
                            parse_mode="HTML")
     bot.register_next_step_handler(msg, _bxl_fix_save)
 
@@ -25706,6 +25912,10 @@ def _bxl_fix_save(message):
     text = (message.text or '').strip()
     if not doc_id or not text or text.startswith('/'):
         bot.send_message(message.chat.id, "تم الإلغاء.")
+        return
+    src_row = db.bot_i18n.find_one({'_id': doc_id}, {'src': 1}) or {}
+    if not _bx_marks_ok(src_row.get('src', ''), text):
+        bot.send_message(message.chat.id, "❌ لازم الأرقام 1001، 1002… تبقى موجودة في الترجمة (هي مكان الأرقام والأسماء). جرّب مرة ثانية من «✏️ تصحيح ترجمة».")
         return
     row = db.bot_i18n.find_one_and_update({'_id': doc_id}, {'$set': {'value': text[:600], 'fixed': True, 'fixed_by': message.from_user.id}})
     if row:
@@ -35920,18 +36130,18 @@ def _wa_translate_html(html_src, lang):
         return html_src
     target = _WA_TR_LANG.get(lang, 'en')
     if lang in BOT_XLANGS:
-        keys = [_bx_desc_lines(texts[i]) for i in idx]
-        flat = {k for ks in keys for k in ks}
+        plans, flat = [], set()
+        for i in idx:
+            plan = []
+            _bx_split(texts[i], lang, False, plan, flat)
+            plans.append(plan)
         res = _bx_resolve(lang, flat) if flat else {}
         if not all(k in res for k in flat):
             res.update(_bx_resolve(lang, {k for k in flat if k not in res}))
         if not all(k in res for k in flat):
             return None
-        for i, ks in zip(idx, keys):
-            line = texts[i]
-            for k in sorted(ks, key=len, reverse=True):
-                line = line.replace(k, res[k])
-            parts[i][1] = html.escape(line.strip(), quote=False)
+        for i, plan in zip(idx, plans):
+            parts[i][1] = html.escape(_bx_join(plan, res).strip(), quote=False)
         return '\n'.join(a + b + c for a, b, c in parts)
     joined = '\n'.join(texts[i] for i in idx)
     deadline = time.time() + 14
@@ -36122,7 +36332,7 @@ _WA_POST_ROUTES = {
 }
 _WA_HEAVY = {'/webapp/buy': 12, '/webapp/deposit/create': 10, '/webapp/tr': 20, '/webapp/desc': 40,
              '/webapp/api/generate': 5, '/webapp/api/regen': 5, '/webapp/api/disable': 5, '/webapp/api/webhook': 8,
-             '/webapp/api/toggle': 60, '/webapp/cgpt/renew': 8, '/webapp/lang': 20, '/webapp/uidict': 40}
+             '/webapp/api/toggle': 60, '/webapp/cgpt/renew': 8, '/webapp/lang': 20, '/webapp/uidict': 60}
 
 
 # ============================================================

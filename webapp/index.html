@@ -1973,6 +1973,11 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .lc-item[data-pos="-2"]{transform:translateX(calc(var(--gx) * -2.1)) scale(.5)}
 .lc-item[data-pos="2"]{transform:translateX(calc(var(--gx) * 2.1)) scale(.5)}
 .lang-car .lc-ctrl{gap:14px}
+/* 21 ─ زر اللغة: علم فقط · سطر اللغة في الملف الشخصي */
+.lang-btn{gap:0;padding-inline:8px}
+.lang-btn > span:not(.flag):not(.flag-ce){display:none}
+.mrow .lang-val{display:inline-flex;align-items:center;gap:7px}
+.mrow .lang-val .flag{width:20px;height:14px;border-radius:3px}
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -2174,32 +2179,30 @@ function setSiteLangs(codes) {
 }
 const UID = {};
 function uiDictApply(l) {
-  const m = store.get('ui2:' + l, {}), d = I[l], miss = new Set();
+  const m = store.get('ui3:' + l, {}), d = I[l], miss = new Set();
   for (const k in I.en) { const src = I.en[k]; if (typeof src !== 'string' || !/\p{L}{2}/u.test(src)) continue; if (m[src] != null) d[k] = m[src]; else miss.add(src); }
   return { m, miss: [...miss] };
 }
 async function uiDictLoad(l) {
+  /* نصوص الواجهة تجي جاهزة من الترجمات المحفوظة في البوت (نفس اللي يستخدمها البوت ويعدّلها المالك).
+     لو في نصوص لسه ما ترجمت، السيرفر يبدأ يترجمها ونرجع نسأل كل شوي لين تكتمل. */
   if (!XL[l] || UID[l]) return;
   UID[l] = 1;
-  let { m, miss } = uiDictApply(l), round = 0;
+  const m = store.get('ui3:' + l, {});
   const paint = () => { uiDictApply(l); if (LANG === l && S.screen && !Sheets.length) renderAll(); };
-  while (miss.length && LANG === l && round < 8) {
-    let got = 0, failed = 0;
-    for (let i = 0; i < miss.length && LANG === l; i += 40) {
-      const items = miss.slice(i, i + 40); let r = null;
-      try { r = await api('uidict', { lang: l, items }); } catch (e) {}
-      if (!r || !r.ok || !Array.isArray(r.items)) { failed += items.length; continue; }
-      items.forEach((src, j) => { const o = r.items[j]; if (typeof o === 'string' && o.trim() && (o !== src || r.full)) { m[src] = o; got++; } else failed++; });
-      store.set('ui2:' + l, m);
-      if (got && i === 0 && round === 0) paint();          // أول دفعة تظهر فوراً
+  try {
+    for (let round = 0; round < 60 && LANG === l; round++) {
+      let r = null;
+      try { r = await api('uidict', { lang: l, all: 1 }); } catch (e) {}
+      if (r && r.ok && r.map) {
+        let n = 0;
+        for (const k in r.map) if (r.map[k] && m[k] !== r.map[k]) { m[k] = r.map[k]; n++; }
+        if (n) { store.set('ui3:' + l, m); paint(); }
+        if (!r.missing) break;
+      }
+      await new Promise(res => setTimeout(res, round < 8 ? 2500 : round < 14 ? 6000 : 20000));
     }
-    if (got) paint();
-    miss = uiDictApply(l).miss;
-    if (!failed || !miss.length) break;
-    round++;
-    await new Promise(res => setTimeout(res, Math.min(30000, 2500 * 2 ** round)));   // المترجم مشغول: نعيد المحاولة تلقائياً
-  }
-  UID[l] = 0;
+  } finally { UID[l] = 0; }
 }
 let LANG = 'en';
 function t(k, v) {
@@ -2888,7 +2891,7 @@ function renderShell() {
   dock.hidden = !shell;
   top.innerHTML = `
     <div class="brand">${brandMark()}<span class="wordmark">${esc(brandName()[0])}${brandName()[1] ? ' <b>' + esc(brandName()[1]) + '</b>' : ''}</span></div>
-    <button class="lang-btn" data-act="lang-open" aria-haspopup="dialog" aria-label="${esc(t('language'))}">${flagH(LANG, true) || LANG_GLOBE}<span>${esc((LANGS.find(x => x[0] === LANG) || ['', LANG.toUpperCase()])[1])}</span></button>
+    <button class="lang-btn" data-act="lang-open" aria-haspopup="dialog" aria-label="${esc(t('language'))}">${flagH(LANG, true) || LANG_GLOBE}</button>
     <button class="chip-bal num" data-act="funds" aria-label="${esc(t('addFunds'))}">${slot('balance', 'purse', 'ae')}<span id="hbal">${usdShort(S.user ? S.user.balance : 0)}</span></button>
     <button class="icon-btn" data-act="activity" aria-label="${esc(t('activity'))}">${ic.bell}<span class="dot" id="hdot" ${S.pending ? '' : 'hidden'}></span></button>`;
   const tabs = tabsList();
@@ -3147,7 +3150,7 @@ function stopStoreRender(reset) {
   StoreRender.io = null; StoreRender.frame = null; StoreRender.grid = null;
   if (reset) { StoreRender.items = []; StoreRender.shown = 0; StoreRender.key = ''; }
 }
-function moreProductsLabel() { return ({ ar: 'عرض المزيد', en: 'Show more', es: 'Ver más', ru: 'Показать ещё', zh: '显示更多' })[LANG] || 'Show more'; }
+function moreProductsLabel() { return ({ ar: 'عرض المزيد', en: 'Show more', es: 'Ver más', ru: 'Показать ещё', zh: '显示更多' })[LANG] || trq('Show more'); }
 function bindStoreMore() {
   StoreRender.grid = $('#grid');
   const more = $('#products-more');
@@ -3387,7 +3390,7 @@ function renderProduct(sh, p, st, onlyDyn) {
     sh.title(nm(p)).body(`
       <div class="pv hero-vis ${oos ? 'is-oos' : ''}${p.image ? '' : ecCls(p.emoji_id)}"${p.image ? ` style="--h:${brandHue(p)}"` : ecAttrs(p.emoji_id, `--h:${brandHue(p)}`)}>${p.image || !p.emoji_id ? '' : '<span class="pv-bg" aria-hidden="true"></span>'}${visual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
       <div class="tags">${tags.join('')}</div>
-      ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : hasTr ? `<div class="tr-chip">${st.showTr ? esc(t('autoTr')) + ' · ' : ''}<button class="linkish" data-act="translate">${esc(st.showTr ? t('original') : t('translate'))}</button></div>` : ''}` : ''}
+      ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : ''}` : ''}
       ${durs}${email}
       <div id="ptiers">${tiers}</div><div id="pqtyw">${qty}</div><div id="psum">${summary}</div>${admin}`);
   } else {
@@ -3858,7 +3861,7 @@ function trqNeeded(s) {
 }
 function trq(s, arOnly) {
   s = String(s || ''); if (!s || !trqNeeded(s) || (arOnly && !/[\u0600-\u06FF]/.test(s))) return s;
-  const m = TRQ.mem[LANG] || (TRQ.mem[LANG] = store.get('trq2:' + LANG, {}));
+  const m = TRQ.mem[LANG] || (TRQ.mem[LANG] = store.get('trq3:' + LANG, {}));
   if (m[s] != null) return m[s];
   if (s.length > 600 || (TRQ.wait[LANG + '\0' + s] || 0) > Date.now()) return s;
   TRQ.q.add(s);
@@ -3879,7 +3882,7 @@ async function trqFlush() {
     if (typeof out === 'string' && out.trim() && out !== src) { m[src] = out; done.push(src); }
     else { failed++; TRQ.wait[lang + '\0' + src] = Date.now() + 8000; }   // فشل مؤقت: ما ينحفظ، نعيد المحاولة بعد شوي
   });
-  if (done.length) { const keys = Object.keys(m); if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(k => delete m[k]); store.set('trq2:' + lang, m); }
+  if (done.length) { const keys = Object.keys(m); if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(k => delete m[k]); store.set('trq3:' + lang, m); }
   if (failed && lang === LANG) setTimeout(() => { if (lang === LANG && S.screen && !Sheets.length) renderView(); }, 8500);
   if (done.length && lang === LANG) {
     const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
@@ -3892,7 +3895,7 @@ function noteTr(note) {
   for (const [re, key, names] of NOTE_PAT) { const m = note.match(re); if (m) { const v = {}; names.forEach((n, i) => { v[n] = m[i + 1]; }); return t(key, v); } }
   return trq(note);
 }
-const cnm = c => isAr() ? (c.name_ar || c.name_en || '') : trq(c.name_en || c.name_ar || '');
+const cnm = c => isAr() ? (c.name_ar || c.name_en || '') : (c.name_en || c.name_ar || '');   // اسم القسم يبقى بأصله
 const lbl2 = (o, k) => isAr() ? (o[k + '_ar'] || o[k + '_en'] || '') : trq(o[k + '_en'] || o[k + '_ar'] || '');
 function histSub(it) {
   if (it.type === 'deposit') return trq(it.method || '', true);   // أسماء طرق الدفع (Binance Pay…) تبقى كما هي
@@ -4268,12 +4271,12 @@ function vProfile() {
     ${vipCard()}
     ${inv}
     <div class="menu">
-      <div class="mrow"><span class="gl">${slotH('lang', ic.globe)}</span><span class="mlbl">${esc(t('language'))}</span><div class="seg">${LANGS.map(([c, l]) => `<button class="${c === LANG ? 'on' : ''}" data-act="lang" data-v="${c}">${l}</button>`).join('')}</div></div>
+      <button class="mrow" data-act="lang-open"><span class="gl">${slotH('lang', ic.globe)}</span><span class="mlbl">${esc(t('language'))}</span><span class="val lang-val">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></span>${ic.chev}</button>
       ${S.store.support ? `<button class="mrow" data-act="support">${slot('support', 'speech')}<span class="mlbl">${esc(t('support'))}</span><span class="val" dir="ltr">@${esc(S.store.support)}</span>${ic.chev}</button>` : ''}
       <button class="mrow" data-act="terms">${slot('terms', 'memo')}<span class="mlbl">${esc(t('terms'))}</span>${ic.chev}</button>
       ${S.store.bot ? `<button class="mrow" data-act="openchat">${ae('rocket')}<span class="mlbl">${esc(t('openChat'))}</span><span class="val" dir="ltr">@${esc(S.store.bot)}</span>${ic.chev}</button>` : ''}
     </div>
-    <p class="foot">${esc(S.store.name || 'LARA STOCK')} · ${esc(lang ? lang[1] : '')}</p>`;
+    <p class="foot">${esc(S.store.name || 'LARA STOCK')} · ${esc(langName(LANG))}</p>`;
 }
 async function openTerms() {
   const sh = openSheet({ title: t('terms'), body: `<div class="skel" style="height:180px"></div>` });
