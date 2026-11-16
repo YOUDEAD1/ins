@@ -112,6 +112,18 @@ def test_balance_gift_reads_fresh_balance_and_escapes_admin_note(mod):
 def test_bot_language_button_overrides_previous_app_language(mod, monkeypatch):
     choose(mod, 'ru')
     monkeypatch.setattr(mod, 'start_handler', Mock())
+    # With extra bot languages enabled the button opens a picker; choosing there overrides the app language.
+    mod.toggle_lang(callback(mod, 'toggle_language'))
+    assert mod.db.users.find_one({'user_id': 1001})['ui_lang'] == 'ru'
+    mod.init_lang_selection(callback(mod, 'init_lang_en'))
+    user = mod.db.users.find_one({'user_id': 1001})
+    assert user['lang'] == user['ui_lang'] == 'en'
+    mod.init_lang_selection(callback(mod, 'init_lang_es'))
+    user = mod.db.users.find_one({'user_id': 1001})
+    assert (user['lang'], user['ui_lang']) == ('en', 'es')
+    # Owner switched extra languages off: the button is the old two-language toggle again.
+    mod._bx_cfg_save({'on': False, 'langs': []})
+    choose(mod, 'ru')
     mod.toggle_lang(callback(mod, 'toggle_language'))
     user = mod.db.users.find_one({'user_id': 1001})
     assert user['lang'] == user['ui_lang'] == 'en'

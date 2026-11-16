@@ -8745,6 +8745,288 @@ def bil(uid, ar_text, en_text):
     return en_text if get_lang(uid) == 'en' else ar_text
 
 
+# ═══════════ 🌐 لغات البوت الإضافية: ترجمة تلقائية لرسائل البوت وأزراره ═══════════
+# الزبون يختار لغته من «الإعدادات ← اللغة» (أو من الموقع)، والبوت يترجم له كل رسالة وزر قبل الإرسال.
+# الأكواد/الإيميلات/الأرقام/الروابط وما بداخل <code> لا تُترجم أبداً. أي خطأ ⇒ تُرسل الرسالة الأصلية كما هي.
+BOT_XLANGS = {
+    'es': ('🇪🇸', 'Español', 'es'), 'ru': ('🇷🇺', 'Русский', 'ru'), 'zh': ('🇨🇳', '中文', 'zh-CN'),
+    'fr': ('🇫🇷', 'Français', 'fr'), 'tr': ('🇹🇷', 'Türkçe', 'tr'), 'pt': ('🇧🇷', 'Português', 'pt'),
+    'de': ('🇩🇪', 'Deutsch', 'de'), 'id': ('🇮🇩', 'Indonesia', 'id'), 'hi': ('🇮🇳', 'हिन्दी', 'hi'),
+    'fa': ('🇮🇷', 'فارسی', 'fa'),
+}
+_BX_DEFAULT = {'on': True, 'langs': ['es', 'ru', 'zh']}
+_BX_MEM = {}
+_BX_CQ = {}
+_BX_STATE = {'pause_until': 0, 'day': '', 'n': 0}
+_BX_FIX = {}
+_BX_TAG = re.compile(r'(<[^>]+>)')
+_BX_TOKEN = re.compile(r'(\S*(?:[\d@_/\\|=#$%^*+~{}\[\]]|[a-z][A-Z]|\.[A-Za-z]{2,}\b)\S*)')
+_BX_NATIVE = {'ru': r'[Ѐ-ӿ]', 'zh': r'[一-鿿]', 'hi': r'[ऀ-ॿ]'}
+_BX_METHODS = {'sendMessage': 'text', 'editMessageText': 'text', 'sendPhoto': 'caption', 'sendDocument': 'caption',
+               'sendVideo': 'caption', 'sendAnimation': 'caption', 'editMessageCaption': 'caption',
+               'editMessageReplyMarkup': None, 'answerCallbackQuery': 'text'}
+
+
+def _bx_cfg():
+    try:
+        v = get_setting('bot_xlangs', None)
+    except Exception:
+        v = None
+    if not isinstance(v, dict):
+        return dict(_BX_DEFAULT)
+    return {'on': bool(v.get('on', True)), 'langs': [c for c in (v.get('langs') or []) if c in BOT_XLANGS]}
+
+
+def _bx_cfg_save(cfg):
+    db.settings.update_one({'key': 'bot_xlangs'}, {'$set': {'value': {'on': bool(cfg['on']), 'langs': list(cfg['langs'])}}}, upsert=True)
+    try:
+        _settings_cache_invalidate()
+    except Exception:
+        pass
+
+
+def _bx_enabled_langs():
+    cfg = _bx_cfg()
+    return [c for c in BOT_XLANGS if c in cfg['langs']] if cfg['on'] else []
+
+
+def _bx_target(chat_id):
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+    if cid <= 0:
+        return None
+    u = get_user_data_full(cid) or {}
+    code = u.get('ui_lang')
+    if code in ('ar', 'en', None) or code not in BOT_XLANGS:
+        return None
+    return code if code in _bx_enabled_langs() else None
+
+
+def _bx_id(lang, text):
+    return hashlib.sha256(('bx1\0' + lang + '\0' + text).encode()).hexdigest()
+
+
+def _bx_core(piece, lang):
+    """(بادئة، نص للترجمة، لاحقة) أو None لو القطعة ما تحتاج ترجمة."""
+    m = re.match(r'^(\W*)(.*?)(\W*)$', piece, re.S)
+    if not m or not m.group(2):
+        return None
+    core = m.group(2)
+    letters = re.findall(r'[^\W\d_]', core)
+    if len(letters) < 2:
+        return None
+    nat = _BX_NATIVE.get(lang)
+    if nat and len(re.findall(nat, core)) / len(letters) >= 0.6:
+        return None
+    return m.group(1), core, m.group(3)
+
+
+def _bx_split(text, lang, is_html, out, need):
+    """يقسّم النص إلى قطع: ثابتة (وسوم/أكواد/أرقام) وقابلة للترجمة."""
+    chunks = _BX_TAG.split(text) if is_html else [text]
+    frozen = 0
+    for ch in chunks:
+        if is_html and ch.startswith('<') and ch.endswith('>'):
+            name = re.match(r'</?\s*([a-zA-Z\-]+)', ch)
+            name = name.group(1).lower() if name else ''
+            if name in ('code', 'pre'):
+                frozen = max(0, frozen + (-1 if ch.startswith('</') else 1))
+            out.append(ch)
+            continue
+        if frozen or not ch:
+            out.append(ch)
+            continue
+        for ln in re.split(r'(\n)', ch):
+            for part in _BX_TOKEN.split(html.unescape(ln) if is_html else ln):
+                if not part:
+                    continue
+                got = None if _BX_TOKEN.fullmatch(part) else _bx_core(part, lang)
+                if not got:
+                    out.append(html.escape(part, quote=False) if is_html else part)
+                    continue
+                need.add(got[1])
+                out.append((got[0], got[1], got[2], is_html))
+
+
+def _bx_resolve(lang, need):
+    """يرجّع {نص: ترجمة} من الذاكرة ثم قاعدة البيانات ثم المترجم (بحدود وقت آمنة)."""
+    res, miss = {}, []
+    for t in need:
+        v = _BX_MEM.get((lang, t))
+        if v is None:
+            miss.append(t)
+        else:
+            res[t] = v
+    if not miss:
+        return res
+    ids = {_bx_id(lang, t): t for t in miss}
+    try:
+        for row in db.bot_i18n.find({'_id': {'$in': list(ids)}}, {'value': 1}):
+            t = ids.pop(row['_id'], None)
+            if t is not None and row.get('value'):
+                res[t] = _BX_MEM[(lang, t)] = row['value']
+    except Exception:
+        return res
+    todo = list(ids.values())
+    now = time.time()
+    day = time.strftime('%Y-%m-%d', time.gmtime())
+    if _BX_STATE['day'] != day:
+        _BX_STATE.update(day=day, n=0)
+    if not todo or now < _BX_STATE['pause_until'] or _BX_STATE['n'] >= 20000:
+        return res
+    gcode = BOT_XLANGS[lang][2]
+    deadline = now + 9
+    done = {}
+    try:
+        _BX_STATE['n'] += 1
+        joined = _translate_text_raw('\n'.join(todo)[:3400], gcode)
+        segs = [x.strip() for x in str(joined or '').split('\n')]
+        if joined and len(segs) == len(todo) and all(segs):
+            done = dict(zip(todo, segs))
+        else:
+            for t in todo[:14]:
+                if time.time() > deadline:
+                    break
+                _BX_STATE['n'] += 1
+                one = _translate_text_raw(t, gcode)
+                if one and one.strip():
+                    done[t] = one.strip()
+        if not done:
+            _BX_STATE['pause_until'] = time.time() + 120      # المترجم واقف: نكمل بالنص الأصلي دقيقتين
+    except Exception as exc:
+        _BX_STATE['pause_until'] = time.time() + 120
+        logger.debug(f'bot i18n translate err: {exc}')
+    if len(_BX_MEM) > 30000:
+        _BX_MEM.clear()
+    for t, v in done.items():
+        v = v[:max(200, len(t) * 4)]
+        res[t] = _BX_MEM[(lang, t)] = v
+        try:
+            db.bot_i18n.update_one({'_id': _bx_id(lang, t)}, {'$setOnInsert': {'lang': lang, 'src': t, 'value': v,
+                                   'at': int(time.time())}}, upsert=True)
+        except Exception:
+            pass
+    return res
+
+
+def _bx_join(parts, res):
+    out = []
+    for p in parts:
+        if isinstance(p, str):
+            out.append(p)
+        else:
+            pre, core, post, is_html = p
+            val = res.get(core, core)
+            out.append((html.escape(pre + val + post, quote=False)) if is_html else pre + val + post)
+    return ''.join(out)
+
+
+def _bx_apply(method_name, params):
+    field = _BX_METHODS[method_name]
+    if method_name == 'answerCallbackQuery':
+        lang = _bx_target(_BX_CQ.get(str(params.get('callback_query_id'))))
+    else:
+        lang = _bx_target(params.get('chat_id'))
+    if not lang:
+        return params
+    need, text_parts, markup, btn_parts = set(), None, None, []
+    text = params.get(field) if field else None
+    mode = str(params.get('parse_mode') or '').lower()
+    if isinstance(text, str) and text.strip() and not mode.startswith('markdown') \
+            and not params.get('entities') and not params.get('caption_entities'):
+        text_parts = []
+        _bx_split(text, lang, mode == 'html', text_parts, need)
+    raw_markup = params.get('reply_markup')
+    if isinstance(raw_markup, str) and '"inline_keyboard"' in raw_markup:
+        markup = json.loads(raw_markup)
+        for row in markup.get('inline_keyboard') or []:
+            for btn in row:
+                if isinstance(btn, dict) and isinstance(btn.get('text'), str):
+                    parts = []
+                    _bx_split(btn['text'], lang, False, parts, need)
+                    btn_parts.append((btn, parts))
+    if not need:
+        return params
+    res = _bx_resolve(lang, need)
+    if not res:
+        return params
+    params = dict(params)
+    if text_parts is not None:
+        new_text = _bx_join(text_parts, res)
+        limit = 1024 if field == 'caption' else (200 if method_name == 'answerCallbackQuery' else 4096)
+        if len(new_text) <= limit:
+            params[field] = new_text
+    if markup is not None:
+        for btn, parts in btn_parts:
+            btn['text'] = _bx_join(parts, res)[:64] or btn['text']
+        params['reply_markup'] = json.dumps(markup, ensure_ascii=False)
+    return params
+
+
+_bx_orig_make_request = telebot.apihelper._make_request
+
+
+def _bx_make_request(token, method_name, method='get', params=None, files=None):
+    try:
+        if params and method_name in _BX_METHODS and token == TOKEN:
+            params = _bx_apply(method_name, params)
+    except Exception as exc:
+        logger.debug(f'bot i18n skipped: {exc}')
+    return _bx_orig_make_request(token, method_name, method=method, params=params, files=files)
+
+
+telebot.apihelper._make_request = _bx_make_request
+_bx_orig_process_updates = bot.process_new_updates
+
+
+def _bx_process_updates(updates):
+    try:
+        for upd in updates or []:
+            cq = getattr(upd, 'callback_query', None)
+            if cq is not None:
+                if len(_BX_CQ) > 4000:
+                    _BX_CQ.clear()
+                _BX_CQ[str(cq.id)] = cq.from_user.id
+    except Exception:
+        pass
+    return _bx_orig_process_updates(updates)
+
+
+bot.process_new_updates = _bx_process_updates
+
+
+def _bx_lang_markup(uid, prefix='init_lang_'):
+    """أزرار اختيار اللغة: العربية + English + اللغات الإضافية اللي فعّلها المالك."""
+    cur = (get_user_data_full(uid) or {}).get('ui_lang') or get_lang(uid)
+    markup = InlineKeyboardMarkup(row_width=2)
+    rows = [('ar', '🇸🇦 العربية'), ('en', '🇬🇧 English')] + [(c, BOT_XLANGS[c][0] + ' ' + BOT_XLANGS[c][1]) for c in _bx_enabled_langs()]
+    markup.add(*[InlineKeyboardButton(('✅ ' if c == cur else '') + label, callback_data=prefix + c) for c, label in rows])
+    return markup
+
+
+_REF_NOTE_EN = [
+    (re.compile(r'^مكافأة إحالات متحققة تلقائي[ًا]+\s*·\s*الدفعة #(\d+)\s*\((\d+) إحالة\)$'), r'Auto-verified referral reward · batch #\1 (\2 referrals)'),
+    (re.compile(r'^مكافأة إحالات\s*·\s*الدفعة #(\d+)\s*\((\d+) إحالة\)$'), r'Referral reward · batch #\1 (\2 referrals)'),
+    (re.compile(r'^إحالة انرفضت \((\d+)\)\s*·\s*الدفعة #(\d+)$'), r'Referral rejected (\1) · batch #\2'),
+    (re.compile(r'^إحالة طلعت من القناة \((\d+)\)\s*·\s*الدفعة #(\d+)$'), r'Referral left the channel (\1) · batch #\2'),
+    (re.compile(r'^رجعت إحالة \((\d+)\)$'), r'Referral came back (\1)'),
+    (re.compile(r'^مكافأة شراء إحالة \((\d+)\)$'), r'Referral purchase reward (\1)'),
+]
+
+
+def _ref_note_local(note, lang):
+    """ملاحظات الإحالات محفوظة بالعربي؛ لغير العربي نعرضها بالإنجليزي."""
+    note = str(note or '')
+    if lang == 'ar' or not note:
+        return note
+    for pattern, english in _REF_NOTE_EN:
+        if pattern.match(note.strip()):
+            return pattern.sub(english, note.strip())
+    return note
+
+
 def send_no_balance(uid):
     """يرسل رسالة رصيد غير كافٍ + زر الشحن مباشرة"""
     l = get_lang(uid)
@@ -10225,6 +10507,9 @@ def start_handler(message):
             InlineKeyboardButton("🇸🇦 العربية", callback_data="init_lang_ar"),
             InlineKeyboardButton("🇬🇧 English", callback_data="init_lang_en")
         )
+        _extra_langs = _bx_enabled_langs()
+        if _extra_langs:
+            markup.add(*[InlineKeyboardButton(BOT_XLANGS[c][0] + ' ' + BOT_XLANGS[c][1], callback_data="init_lang_" + c) for c in _extra_langs])
         bot.send_message(chat_id, "🌐 <b>الرجاء اختيار لغتك / Please choose your language:</b>", reply_markup=markup, parse_mode="HTML")
         return
 
@@ -10411,11 +10696,16 @@ def show_terms(call):
 def init_lang_selection(call):
     bot.answer_callback_query(call.id)
     new_lang = call.data.replace("init_lang_", "").strip()
-    if new_lang not in ['ar', 'en']:
-        new_lang = 'ar'
+    if new_lang in _bx_enabled_langs():
+        # لغة إضافية: القوائم تُبنى بالإنجليزي ثم تُترجم تلقائياً للغة الزبون
+        lang_update = {'lang': 'en', 'ui_lang': new_lang, 'lang_chosen': True}
+    else:
+        if new_lang not in ['ar', 'en']:
+            new_lang = 'ar'
+        lang_update = {'lang': new_lang, 'ui_lang': new_lang, 'lang_chosen': True}
     db.users.update_one(
         {'user_id': call.from_user.id},
-        {'$set': {'lang': new_lang, 'ui_lang': new_lang, 'lang_chosen': True}}
+        {'$set': lang_update}
     )
     _invalidate_user_cache(call.from_user.id)
     try: bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -10429,6 +10719,14 @@ def toggle_lang(call):
     uid = call.from_user.id
     if is_user_banned(uid): return
     u = get_user_data_full(uid)
+    if _bx_enabled_langs():
+        # في لغات إضافية مفعّلة: نعرض قائمة اختيار بدل التبديل بين لغتين فقط
+        try:
+            bot.edit_message_text("🌐 <b>اختر لغتك / Choose your language:</b>", call.message.chat.id,
+                                  call.message.message_id, reply_markup=_bx_lang_markup(uid), parse_mode="HTML")
+            return
+        except Exception:
+            pass
     new_l = 'en' if u.get('lang', 'ar') == 'ar' else 'ar'
     db.users.update_one({'user_id': uid}, {'$set': {'lang': new_l, 'ui_lang': new_l, 'lang_chosen': True}})
     _invalidate_user_cache(uid)
@@ -24754,6 +25052,8 @@ def ad_texts_main_ui(call):
     markup.add(InlineKeyboardButton("📢 أزرار النشر (الموقع / البوت)", callback_data="ad_cms_notice"))
     markup.add(InlineKeyboardButton("🤖 ChatGPT Business", callback_data="ad_cms_cgpt"))
     markup.add(InlineKeyboardButton("👑 نصوص VIP", callback_data="ad_cms_vip"))
+    markup.add(InlineKeyboardButton("👥 نصوص الإحالات", callback_data="ad_cms_refs"),
+               InlineKeyboardButton("🌐 لغات البوت والترجمة", callback_data="ad_bxl"))
     markup.add(InlineKeyboardButton("🔎 البحث والمتوفر (أزرار ورسائل)", callback_data="ad_cms_shop"))
     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
@@ -24762,6 +25062,136 @@ def ad_texts_main_ui(call):
         markup.add(InlineKeyboardButton('🏪 المتاجر والاشتراك (WWC)', callback_data='ad_cms_wwc_0'))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
     bot.edit_message_text("✏️ <b>نظام التخصيص (CMS):</b>\nاختر ماذا تريد أن تخصص:", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_cms_refs")
+@admin_required
+def ad_cms_refs_ui(call):
+    """كل نصوص الإحالات في مكان واحد (نفس مفاتيح «نصوص الرسائل»)."""
+    bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("👥 رسالة قسم الإحالات", callback_data="edit_txt_invite_txt"))
+    markup.add(InlineKeyboardButton("🛡 تعليمات الإحالات والصرف التلقائي", callback_data="edit_txt_ref_auto_rules"))
+    markup.add(InlineKeyboardButton("📈 رسالة التقدم (باقي X للمكافأة)", callback_data="edit_txt_ref_progress_dm"))
+    markup.add(InlineKeyboardButton("🎉 رسالة المُحيل (وصل للمكافأة)", callback_data="edit_txt_ref_milestone_dm"))
+    markup.add(InlineKeyboardButton("💌 رسالة المُحيل (شراء صديقه)", callback_data="edit_txt_ref_purchase_dm"))
+    markup.add(InlineKeyboardButton("📊 لوق: إحالة جديدة (قناة اللوق)", callback_data="edit_txt_log_ref_progress"))
+    markup.add(InlineKeyboardButton("🏆 لوق: إنجاز الإحالات", callback_data="edit_txt_log_ref_milestone"))
+    markup.add(InlineKeyboardButton("🎁 لوق: مكافأة شراء إحالة", callback_data="edit_txt_log_ref_purchase"))
+    markup.add(InlineKeyboardButton("🔙 التخصيص", callback_data="ad_texts_main"))
+    bot.edit_message_text("👥 <b>نصوص الإحالات</b>\nاختر النص اللي تبي تعدّله:", call.message.chat.id,
+                          call.message.message_id, reply_markup=markup, parse_mode="HTML")
+
+
+def _bxl_view(chat_id, message_id=None):
+    cfg = _bx_cfg()
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(InlineKeyboardButton(("🟢 الترجمة التلقائية: شغّالة" if cfg['on'] else "🔴 الترجمة التلقائية: متوقفة"), callback_data="ad_bxl_on"))
+    markup.add(*[InlineKeyboardButton(("✅ " if c in cfg['langs'] else "▫️ ") + v[0] + " " + v[1], callback_data="ad_bxl_t_" + c)
+                 for c, v in BOT_XLANGS.items()])
+    markup.add(InlineKeyboardButton("✏️ تصحيح ترجمة", callback_data="ad_bxl_fix"))
+    markup.add(InlineKeyboardButton("🧹 مسح الترجمات المحفوظة", callback_data="ad_bxl_clear"))
+    markup.add(InlineKeyboardButton("🔙 التخصيص", callback_data="ad_texts_main"))
+    try:
+        saved, fixed = db.bot_i18n.count_documents({}), db.bot_i18n.count_documents({'fixed': True})
+    except Exception:
+        saved = fixed = 0
+    txt = ("🌐 <b>لغات البوت</b>\n\n"
+           "العربية والإنجليزية ثابتتان. فعّل اللغات الإضافية التي تريدها، وستظهر للزبون في «الإعدادات ← اللغة».\n"
+           "البوت يترجم الرسائل والأزرار تلقائياً، والأكواد والإيميلات والأرقام تبقى كما هي.\n\n"
+           f"💾 ترجمات محفوظة: <b>{saved}</b> · مصحّحة يدوياً: <b>{fixed}</b>")
+    if message_id:
+        try:
+            bot.edit_message_text(txt, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_bxl" or call.data == "ad_bxl_on" or call.data.startswith("ad_bxl_t_") or call.data == "ad_bxl_clear")
+@admin_required
+def ad_bxl_ui(call):
+    bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    cfg = _bx_cfg()
+    note = None
+    if call.data == "ad_bxl_on":
+        cfg['on'] = not cfg['on']
+        _bx_cfg_save(cfg)
+    elif call.data.startswith("ad_bxl_t_"):
+        code = call.data[len("ad_bxl_t_"):]
+        if code in BOT_XLANGS:
+            cfg['langs'] = [c for c in cfg['langs'] if c != code] if code in cfg['langs'] else cfg['langs'] + [code]
+            _bx_cfg_save(cfg)
+    elif call.data == "ad_bxl_clear":
+        try:
+            db.bot_i18n.delete_many({'fixed': {'$ne': True}})
+        except Exception:
+            pass
+        _BX_MEM.clear()
+        note = "تم المسح. الترجمات المصحّحة يدوياً محفوظة."
+    bot.answer_callback_query(call.id, note or '')
+    _bxl_view(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_bxl_fix")
+@admin_required
+def ad_bxl_fix_start(call):
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(call.message.chat.id, "✏️ انسخ الجملة المترجمة الخاطئة كما تظهر في البوت وأرسلها هنا.\n(أو أرسل /cancel للإلغاء)")
+    bot.register_next_step_handler(msg, _bxl_fix_find)
+
+
+def _bxl_fix_find(message):
+    if not _is_admin_check(message.from_user.id):
+        return
+    text = (message.text or '').strip()
+    if not text or text.startswith('/'):
+        bot.send_message(message.chat.id, "تم الإلغاء.")
+        return
+    core = _bx_core(text, '') or ('', text, '')
+    rows = list(db.bot_i18n.find({'value': core[1]}).limit(6))
+    if not rows:
+        rows = list(db.bot_i18n.find({'value': {'$regex': re.escape(core[1][:80]), '$options': 'i'}}).limit(6))
+    if not rows:
+        bot.send_message(message.chat.id, "ما لقيت هذه الجملة في الترجمات المحفوظة. انسخها بالضبط كما تظهر (سطر واحد بدون أرقام أو إيموجي).")
+        return
+    markup = InlineKeyboardMarkup(row_width=1)
+    for row in rows:
+        markup.add(InlineKeyboardButton(f"{BOT_XLANGS.get(row.get('lang'), ('', ''))[0]} {str(row.get('value'))[:40]}", callback_data="ad_bxl_pick_" + row['_id'][:40]))
+    markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_bxl"))
+    bot.send_message(message.chat.id, "اختر الجملة التي تريد تصحيحها:", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_bxl_pick_"))
+@admin_required
+def ad_bxl_fix_pick(call):
+    bot.answer_callback_query(call.id)
+    row = db.bot_i18n.find_one({'_id': {'$regex': '^' + re.escape(call.data[len("ad_bxl_pick_"):])}})
+    if not row:
+        bot.send_message(call.message.chat.id, "الجملة غير موجودة.")
+        return
+    _BX_FIX[call.from_user.id] = row['_id']
+    msg = bot.send_message(call.message.chat.id,
+                           f"الأصل:\n<code>{html.escape(str(row.get('src')))}</code>\n\nالترجمة الحالية:\n<code>{html.escape(str(row.get('value')))}</code>\n\n✏️ أرسل الترجمة الصحيحة الآن (أو /cancel).",
+                           parse_mode="HTML")
+    bot.register_next_step_handler(msg, _bxl_fix_save)
+
+
+def _bxl_fix_save(message):
+    if not _is_admin_check(message.from_user.id):
+        return
+    doc_id = _BX_FIX.pop(message.from_user.id, None)
+    text = (message.text or '').strip()
+    if not doc_id or not text or text.startswith('/'):
+        bot.send_message(message.chat.id, "تم الإلغاء.")
+        return
+    row = db.bot_i18n.find_one_and_update({'_id': doc_id}, {'$set': {'value': text[:600], 'fixed': True, 'fixed_by': message.from_user.id}})
+    if row:
+        _BX_MEM[(row.get('lang'), row.get('src'))] = text[:600]
+    bot.send_message(message.chat.id, "✅ تم حفظ الترجمة الصحيحة، وستظهر للزبائن من الآن.")
+    _bxl_view(message.chat.id)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_cms_msgs")
 @admin_required
@@ -29527,11 +29957,11 @@ def user_view_balance_logs(call):
         if l == 'ar':
             type_label = _BAL_LBL_AR.get(t) or ("🔄 تعويض" if t == 'compensation' else ("➖ خصم" if amt < 0 else "💰 إضافة"))
             txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
-            if note: txt += f"📝 <code>{note}</code>\n"
+            if note: txt += f"📝 <code>{_ref_note_local(note, l)}</code>\n"
         else:
             type_label = _BAL_LBL_EN.get(t) or ("🔄 Compensation" if t == 'compensation' else ("➖ Deduction" if amt < 0 else "💰 Manual Add"))
             txt += f"{type_label} | <b>{sign}${amt:.2f}</b> | 🕐 {date_str}\n"
-            if note: txt += f"📝 <code>{note}</code>\n"
+            if note: txt += f"📝 <code>{_ref_note_local(note, l)}</code>\n"
         txt += "──────────\n"
     markup = InlineKeyboardMarkup(row_width=2)
     nav = []
@@ -34937,6 +35367,8 @@ def _wa_tr_needed(text, lang):
     letters = re.findall(r'[^\W\d_]', plain)
     if len(letters) < 3:
         return False
+    if lang not in _WA_TR_SCRIPT:        # الإسبانية وأي لغة بحروف لاتينية: ما نقدر نميّزها عن الإنجليزي بالحروف
+        return True
     native = len(re.findall(_WA_TR_SCRIPT.get(lang, r'[A-Za-z]'), plain))
     return native / max(1, len(letters)) < 0.6
 
