@@ -46,12 +46,11 @@ def test_negative_referrer_balance_still_gets_the_purchase_reward(mod, monkeypat
     assert _bal(mod) == round(-.4 + reward, 6) and mod.db.purchase_rewards.count_documents({}) == 1
 
 
-def test_deductions_on_a_negative_balance_are_still_protected(mod):
+def test_deductions_on_a_negative_balance_are_applied_directly(mod):
     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
     for kind, amount in (('ref_clawback', -.5), ('ref_purchase', -.1)):
-        with pytest.raises(ValueError):
-            mod._ref_money(1001, amount, kind, 'test', event_key='neg-' + kind)
-    assert _bal(mod) == -.4
+        mod._ref_money(1001, amount, kind, 'test', event_key='neg-' + kind)
+    assert round(_bal(mod), 4) == -1.0
 
 
 def test_normal_referrer_reward_is_unchanged(mod):
@@ -98,20 +97,17 @@ def test_interrupted_award_is_finished_and_recorded_once(mod, monkeypatch):
     assert len([m for m in MESSAGES[sent:] if m[0] == 1001]) == 1
 
 
-def test_clawback_on_a_negative_balance_waits_quietly(mod, monkeypatch):
+def test_clawback_on_a_negative_balance_is_deducted_at_once_and_quietly(mod, monkeypatch):
     referral(mod, paid=True)
     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -.4}})
     notices = Mock()
     monkeypatch.setattr(mod, 'notify_admins', notices)
     mod.mark_referral_status(5001, 'left')
     mod._ref_resume_financial()
-    assert mod._ref_find(5001)['cb_status'] == 'processing' and _bal(mod) == -.4
-    assert _alerts(mod) == [] and notices.call_count == 1
-    mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': .25}})
-    mod._ref_resume_financial()
-    assert mod._ref_find(5001)['cb_status'] == 'applied'
-    user = mod.db.users.find_one({'user_id': 1001})
-    assert user['balance'] == 0 and user['ref_debt'] == .75
+    assert mod._ref_find(5001)['cb_status'] == 'applied' and round(_bal(mod), 4) == -1.4
+    assert _alerts(mod) == [] and notices.call_count == 0
+    assert not [m for m in MESSAGES if m[0] == 1001]
+    assert not mod.db.users.find_one({'user_id': 1001}).get('ref_debt')
 
 
 def test_timed_delete_of_an_already_deleted_message_is_quiet(mod, monkeypatch):

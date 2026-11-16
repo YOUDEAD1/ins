@@ -5043,7 +5043,10 @@ def mark_referral_status(invited_id, new_status):
     try:
         invited_id = int(invited_id)
         if new_status == 'active':
-            if not _ref_countable(_ref_find(invited_id)) or check_forced_sub(invited_id) is not True:
+            _current = _ref_find(invited_id)
+            if (_current or {}).get('bot_blocked'):      # حاظر البوت: ما ترجع الإحالة نشطة حتى يفك الحظر
+                return False
+            if not _ref_countable(_current) or check_forced_sub(invited_id) is not True:
                 return False
         
         # 🛡 atomic update — يحدّث فقط لو الحالة تختلف
@@ -5502,7 +5505,7 @@ def _ref_money_finish(event, receipt):
     db.balance_logs.update_one({'_id': 'ref:' + key}, {'$setOnInsert': {
         'user_id': rid, 'type': event['kind'], 'amount': receipt['balance_delta'],
         'nominal_amount': event['amount'], 'debt_delta': receipt['debt_delta'],
-        'ref_debt_after': receipt['debt_after'], 'ref_event': key, 'note': event['note'],
+        'ref_debt_after': receipt['debt_after'], 'ref_event': key, 'note': event['note'], 'direct_rule': True,
         'date': datetime.datetime.fromtimestamp(event['created_at'], datetime.timezone.utc).replace(tzinfo=None),
         'new_balance': receipt['balance_after']}}, upsert=True)
     db.users.update_one({'user_id': rid}, {'$unset': {'_ref_ops.' + key: ''}})
@@ -5542,14 +5545,13 @@ def _ref_money(rid, delta, kind, note, event_key=None):
             if saved:
                 return _ref_money_finish(event, saved)
             balance = _ref_units(user.get('balance'))
-            # Owner's rule (update 35): the purchase referral reward is always credited, even onto a negative
-            # balance — a credit can only reduce the deficit. Deductions on a negative balance still wait for review.
-            if balance < 0 and not (kind == 'ref_purchase' and nominal > 0):
-                raise ValueError('Negative balance requires ledger review before referral movement')
+            # Owner's rule (update 43): a referral that leaves costs its full value straight from the balance,
+            # even when that takes the balance below zero. Nothing is parked as a separate liability any more and
+            # nothing waits for review; credits keep settling liabilities recorded by older versions first.
             debt, earned = max(0, _ref_units(user.get('ref_debt'))), max(0, _ref_units(user.get(field)))
             if nominal < 0:
-                balance_delta = -min(balance, -nominal)
-                debt_delta = -nominal + balance_delta
+                balance_delta = nominal
+                debt_delta = 0
             else:
                 debt_delta = -min(debt, nominal)
                 balance_delta = nominal + debt_delta
@@ -5703,11 +5705,7 @@ def _ref_clawback(rec, reason=None):
                 'event_id': user['_ref_event_id']}}, upsert=True)
             db.referrals_v2.update_one({'invited_id': invited, 'cb_token': token},
                                        {'$set': {'cb_status': 'applied', 'cb_event_id': user['_ref_event_id']}})
-            try:
-                text = _notification_text(rid, 'ref_clawback_dm', unit, -receipt['balance_delta'], receipt['debt_delta'])
-                bot.send_message(rid, text, parse_mode='HTML')
-            except Exception:
-                pass
+            # Owner's rule (update 43): no chat message for a reversal; it is listed in the balance history.
             return unit
     except Exception as e:
         if _ref_is_negative_hold(e):
@@ -5757,12 +5755,7 @@ def _ref_refund(rec):
                 'debt_cancelled': -user['_ref_receipt']['debt_delta']}}, upsert=True)
             db.referrals_v2.update_one({'invited_id': invited, 'cb_amount': amount}, {'$unset': {
                 'cb_amount': '', 'cb_at': '', 'cb_token': '', 'cb_status': '', 'cb_event_id': '', 'cb_refund_pending': ''}})
-            try:
-                receipt = user['_ref_receipt']
-                text = _notification_text(rid, 'ref_refund_dm', amount, receipt['balance_delta'], -receipt['debt_delta'])
-                bot.send_message(rid, text, parse_mode='HTML')
-            except Exception:
-                pass
+            # Silent as well (update 43): the matching reversal was not announced either.
             return amount
     except Exception as e:
         if _ref_is_negative_hold(e):
@@ -6235,6 +6228,10 @@ def _ref_repair_plan(uid):
             break
         if after != running or log.get('type') not in ('ref_clawback', 'ref_refund') or not amount:
             break
+        if log.get('direct_rule'):
+            return {'user_id': int(uid), 'state': 'direct_deduction_rule', 'corrected': False,
+                    'balance_before': balance / 10000,
+                    'reason': 'Negative balance comes from the direct referral deduction rule; left as it is.'}
         if (log['type'] == 'ref_clawback' and amount >= 0) or (log['type'] == 'ref_refund' and amount <= 0):
             break
         evidence.append(str(log['_id']))
@@ -9152,6 +9149,27 @@ def _ref_channel_membership_changed(update):
         'sub_next_check_at': int(time.time()), 'membership_event_at': int(time.time()),
         'membership_event_pending': True}})
     _REF_SCAN_WAKE.set()
+
+
+@bot.my_chat_member_handler(func=lambda update: getattr(update.chat, 'type', '') == 'private')
+def _ref_bot_block_changed(update):
+    """Owner's rule (update 43): a referred user who blocks the bot counts as gone, exactly like leaving the
+    channel; unblocking the bot lets the normal membership check bring the referral (and its value) back."""
+    try:
+        uid = int(update.from_user.id)
+        blocked = getattr(update.new_chat_member, 'status', None) == 'kicked'
+        if not db.referrals_v2.find_one({'invited_id': uid}, {'_id': 1}):
+            return
+        if blocked:
+            db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'bot_blocked': True, 'bot_blocked_at': int(time.time())}})
+            mark_referral_status(uid, 'left')
+        else:
+            db.referrals_v2.update_one({'invited_id': uid}, {
+                '$unset': {'bot_blocked': '', 'bot_blocked_at': ''},
+                '$set': {'sub_next_check_at': int(time.time()), 'membership_event_pending': True}})
+            _REF_SCAN_WAKE.set()
+    except Exception:
+        logger.exception('Referral bot-block update could not be processed')
 
 
 def _ref_allowed_updates():

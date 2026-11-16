@@ -102,14 +102,13 @@ def test_background_startup_only_reports_existing_negative_balances_without_recl
     assert not mod.db.ref_balance_reconciliations.count_documents({})
 
 
-def test_a_negative_balance_requires_review_before_a_new_automatic_referral_movement(mod):
+def test_a_negative_balance_no_longer_blocks_a_referral_movement(mod):
     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -50}})
     mod.db.balance_logs.insert_one({'user_id': 1001, 'type': 'ref_clawback', 'amount': -60,
         'new_balance': -50, 'date': dt.datetime.now()})
-    with pytest.raises(ValueError, match='ledger review'):
-        mod._ref_money(1001, 1, 'ref_reward', 'Saved reward', event_key='await-review')
-    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -50
-    assert mod.db.ref_money_events.find_one({})['status'] == 'prepared'
+    mod._ref_money(1001, 1, 'ref_reward', 'Saved reward', event_key='await-review')
+    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -49
+    assert mod.db.ref_money_events.find_one({})['status'] == 'applied'
     assert not mod.db.ref_balance_reconciliations.count_documents({})
 
 

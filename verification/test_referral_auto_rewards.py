@@ -402,7 +402,7 @@ def test_an_unpaid_member_who_left_is_replaced_before_the_saved_batch_is_paid(mo
     assert 'ms_batch' not in mod._ref_find(6001)
 
 
-def test_departure_during_a_lost_payment_response_is_reconciled_without_negative_cash(mod, monkeypatch):
+def test_departure_during_a_lost_payment_response_is_deducted_directly_from_the_balance(mod, monkeypatch):
     ready(mod)
     original = mod._ref_money
     def committed_then_lost(*args, **kwargs):
@@ -416,7 +416,8 @@ def test_departure_during_a_lost_payment_response_is_reconciled_without_negative
     mod.db.referrals_v2.update_one({'invited_id': 6001}, {'$set': {'status': 'left'}})
     retry(mod); retry(mod)
     user = mod.db.users.find_one({'user_id': 1001})
-    assert user['balance'] == 0 and user['ref_debt'] == .01
+    # Owner's rule: the departure costs its value straight from the balance, below zero if needed.
+    assert user['balance'] == -.01 and not user.get('ref_debt')
     assert user['ref_v2_earned'] == .09
     assert mod.db.ref_money_events.count_documents({'kind': 'ref_reward'}) == 1
     assert mod.db.ref_money_events.count_documents({'kind': 'ref_clawback'}) == 1
@@ -443,15 +444,15 @@ def test_banned_referrer_does_not_receive_an_automatic_reward(mod):
     assert balance(mod) == 100.1
 
 
-def test_legacy_negative_balance_is_not_rewritten_or_migrated_by_the_new_policy(mod):
+def test_a_negative_balance_still_receives_the_automatic_reward_and_is_never_migrated(mod):
     ready(mod)
     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': -50., 'ref_v2_earned': 7.}})
     mod.update_referrer_balance(1001); retry(mod)
     user = mod.db.users.find_one({'user_id': 1001})
-    assert user['balance'] == -50 and user['ref_v2_earned'] == 7
+    assert user['balance'] == -49.9 and user['ref_v2_earned'] == 7.1
     assert not mod.db.ref_balance_reconciliations.count_documents({})
-    assert not mod.db.balance_logs.count_documents({})
-    assert auto_batches(mod)[0]['status'] == 'auto_paying'
+    assert mod.db.balance_logs.count_documents({}) == 1
+    assert auto_batches(mod)[0]['status'] == 'paid'
 
 
 @pytest.mark.parametrize('language,phrase', [('ar', 'مكافأة الإحالات'), ('en', 'Referral reward!'),

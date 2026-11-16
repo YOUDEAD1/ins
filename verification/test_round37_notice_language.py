@@ -92,13 +92,12 @@ def test_paid_milestone_notice_and_idempotent_wallet_follow_ui_language(mod, lan
 
 
 @pytest.mark.parametrize('lang', ['ar', 'en', 'ru', 'zh'])
-def test_reversal_and_refund_both_follow_app_locale_and_refund_exact_value(mod, lang):
+def test_reversal_and_refund_are_silent_and_refund_exact_value(mod, lang):
     choose(mod, lang); rec = referral(mod, paid=True, amount=.5)
-    assert mod._ref_clawback(rec) == .5
-    assert_language(dm(), lang)
     MESSAGES.clear()
+    assert mod._ref_clawback(rec) == .5
     assert mod._ref_refund(mod._ref_find(5001)) == .5
-    assert_language(dm(), lang)
+    assert dm() == ''        # owner's rule: neither movement sends a chat message
     assert mod.db.users.find_one({'user_id': 1001})['balance'] == 100
 
 

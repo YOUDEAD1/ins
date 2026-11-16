@@ -157,18 +157,18 @@ def test_membership_timeout_does_not_count_as_successful_website_verification(mo
     assert not mod._wa_forced_check({'id': 5001}, {})[1]['subscribed']
 
 
-def test_reversal_cannot_make_spendable_balance_negative_and_return_restores_exact_value(mod):
+def test_reversal_is_deducted_in_full_even_below_zero_and_return_restores_exact_value(mod):
     referral(mod, paid=True)
     mod.db.users.update_one({'user_id': 1001}, {'$set': {'balance': .25}})
     mod.mark_referral_status(5001, 'left')
     user = mod.db.users.find_one({'user_id': 1001})
-    assert user['balance'] == 0 and user['ref_debt'] == .75
+    assert user['balance'] == -.75 and not user.get('ref_debt')
     assert user['ref_v2_earned'] == 0
     mod.mark_referral_status(5001, 'left')
-    assert mod.db.users.find_one({'user_id': 1001})['ref_debt'] == .75
+    assert mod.db.users.find_one({'user_id': 1001})['balance'] == -.75
     mod.mark_referral_status(5001, 'active')
     user = mod.db.users.find_one({'user_id': 1001})
-    assert user['balance'] == .25 and user['ref_debt'] == 0 and user['ref_v2_earned'] == 1
+    assert user['balance'] == .25 and not user.get('ref_debt') and user['ref_v2_earned'] == 1
     assert mod.db.ref_money_events.count_documents({}) == 2
 
 
