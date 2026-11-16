@@ -22,7 +22,7 @@ class TranslationService:
     CACHE_LIMIT = 256
     CACHE_BYTES = 512 * 1024
     RESPONSE_LIMIT = 256 * 1024
-    COOLDOWN = 30
+    COOLDOWN = 10
 
     def __init__(self, namespace):
         self.g = namespace
@@ -30,7 +30,7 @@ class TranslationService:
                          ('GoogleTranslator', '_translate_text_raw', '_translate_single_line',
                           '_translate_product_description', '_BAD_TR_MARKERS')}
         self.lock = threading.Lock()
-        self.slots = threading.BoundedSemaphore(2)
+        self.slots = threading.BoundedSemaphore(4)
         self.cache = OrderedDict()
         self.cache_bytes = 0
         self.inflight = {}
@@ -161,7 +161,7 @@ class TranslationService:
         if not leader:
             flight['done'].wait(14)
             return flight['value']
-        acquired = self.slots.acquire(blocking=False)
+        acquired = self.slots.acquire(timeout=8)    # busy ≠ broken: wait for a free slot
         try:
             if not acquired:
                 return None

@@ -540,7 +540,7 @@ def _webapp_translate(identity, lang, items):
         if not value.strip() or lang == 'ar':
             output.append(value)
             continue
-        cache_id = hashlib.sha256((lang + '\0' + value).encode()).hexdigest()
+        cache_id = hashlib.sha256(('tr2\0' + lang + '\0' + value).encode()).hexdigest()
         cached = db.webapp_i18n.find_one({'_id': cache_id}, {'value': 1})
         if cached:
             output.append(cached['value'])
@@ -548,7 +548,7 @@ def _webapp_translate(identity, lang, items):
         # Bound new provider calls to protect the bot's bandwidth and translation quota.
         day = time.strftime('%Y-%m-%d', time.gmtime())
         usage = db.webapp_translation_usage.find_one_and_update(
-            {'_id': f"{identity['id']}:{day}", 'count': {'$lt': 50}},
+            {'_id': f"{identity['id']}:{day}", 'count': {'$lt': 400}},
             {'$inc': {'count': 1}}, return_document=True)
         if usage is None:
             existing = db.webapp_translation_usage.find_one({'_id': f"{identity['id']}:{day}"})
@@ -560,14 +560,17 @@ def _webapp_translate(identity, lang, items):
             except Exception:
                 output.append(value)
                 continue
-        try:
-            translated = GoogleTranslator(source='auto', target=lang).translate(value)
-            result = str(translated or value)[:1200]
-            db.webapp_i18n.update_one({'_id': cache_id},
-                {'$setOnInsert': {'value': result}}, upsert=True)
+        translated = _bx_translate(value, lang, time.time() + 10)
+        if translated and translated.strip() and translated.strip() != value.strip():
+            result = translated.strip()[:1200]
+            try:
+                db.webapp_i18n.update_one({'_id': cache_id},
+                    {'$setOnInsert': {'value': result}}, upsert=True)
+            except Exception:
+                pass
             output.append(result)
-        except Exception:
-            output.append(value)
+        else:
+            output.append(None)          # فشل مؤقت: الموقع يعرض الأصل ويحاول مرة ثانية لاحقاً
     return output
 
 
@@ -3028,8 +3031,9 @@ class APIHandler(BaseHTTPRequestHandler):
                 identity = _webapp_telegram_user(body.get('initData'))
                 if not identity or not db.users.find_one({'user_id': identity['id'], 'is_banned': {'$ne': 1}}):
                     return _json_resp(self, 401, {'message': 'Open this page from the Telegram bot'})
-                return _json_resp(self, 200, {'items': _webapp_translate(
-                    identity, body.get('lang'), body.get('items'))})
+                _src_items = body.get('items')
+                _out_items = _webapp_translate(identity, body.get('lang'), _src_items)
+                return _json_resp(self, 200, {'items': [o if o is not None else i for o, i in zip(_out_items, _src_items)]})
             except (ValueError, TypeError, json.JSONDecodeError):
                 return _json_resp(self, 400, {'message': 'Invalid translation request'})
         gw = _get_api_gateway()
@@ -8754,7 +8758,7 @@ BOT_XLANGS = {
 _BX_DEFAULT = {'on': True, 'langs': ['es', 'ru', 'zh']}
 _BX_MEM = {}
 _BX_CQ = {}
-_BX_STATE = {'pause_until': 0, 'day': '', 'n': 0}
+_BX_STATE = {'pause_until': 0, 'day': '', 'n': 0, 'fails': 0}
 _BX_FIX = {}
 _BX_TAG = re.compile(r'(<[^>]+>)')
 _BX_TOKEN = re.compile(r'(\S*(?:[\d@_/\\|=#$%^*+~{}\[\]]|[a-z][A-Z]|\.[A-Za-z]{2,}\b)\S*)')
@@ -8762,6 +8766,41 @@ _BX_NATIVE = {'ru': r'[Ѐ-ӿ]', 'zh': r'[一-鿿]', 'hi': r'[ऀ-ॿ]'}
 _BX_METHODS = {'sendMessage': 'text', 'editMessageText': 'text', 'sendPhoto': 'caption', 'sendDocument': 'caption',
                'sendVideo': 'caption', 'sendAnimation': 'caption', 'editMessageCaption': 'caption',
                'editMessageReplyMarkup': None, 'answerCallbackQuery': 'text'}
+
+
+_BX_TR_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _bx_translate(text, gcode, deadline=None):
+    """ترجمة نص واحد بصبر: لو المترجم مشغول نستنى بدل ما نرجّع إنجليزي، ولو الحارس في فترة تهدئة
+    نجرب الناقل القديم مباشرة. يرجّع الترجمة أو None (والفشل ما ينحفظ أبداً كترجمة)."""
+    if not text or not str(text).strip():
+        return None
+    deadline = deadline or (time.time() + 12)
+    if not _BX_TR_SLOTS.acquire(timeout=max(0.5, deadline - time.time())):
+        return None
+    try:
+        while True:
+            try:
+                value = _translate_text_raw(text, gcode)
+            except Exception:
+                value = None
+            if value and str(value).strip():
+                return str(value)
+            service = globals().get('_translation_service')
+            legacy = service.original.get('_translate_text_raw') if service else None
+            if legacy and getattr(service, 'retry_at', 0) > time.monotonic():
+                try:
+                    value = legacy(text, gcode)
+                except Exception:
+                    value = None
+                if value and str(value).strip():
+                    return str(value)
+            if time.time() + 1.2 > deadline:
+                return None
+            time.sleep(0.8)
+    finally:
+        _BX_TR_SLOTS.release()
 
 
 def _bx_cfg():
@@ -8873,28 +8912,44 @@ def _bx_resolve(lang, need):
         _BX_STATE.update(day=day, n=0)
     if not todo or now < _BX_STATE['pause_until'] or _BX_STATE['n'] >= 20000:
         return res
-    gcode = BOT_XLANGS[lang][2]
-    deadline = now + 9
+    gcode = BOT_XLANGS.get(lang, (None, None, lang))[2]
+    # بعد فشل قريب ما نخلّي الزبون ينتظر طويلاً: محاولة قصيرة ثم النص الأصلي
+    deadline = now + (7 if not _BX_STATE.get('fails') else 3)
     done = {}
     try:
-        _BX_STATE['n'] += 1
-        joined = _translate_text_raw('\n'.join(todo)[:3400], gcode)
-        segs = [x.strip() for x in str(joined or '').split('\n')]
-        if joined and len(segs) == len(todo) and all(segs):
-            done = dict(zip(todo, segs))
-        else:
-            for t in todo[:14]:
+        groups, cur, size = [], [], 0
+        for t in todo:                           # دفعات صغيرة (≤40 جملة و≤2500 حرف) حتى ما تنقسم جملة بين طلبين
+            if cur and (len(cur) >= 40 or size + len(t) > 2500):
+                groups.append(cur); cur, size = [], 0
+            cur.append(t); size += len(t) + 1
+        if cur:
+            groups.append(cur)
+        for group in groups:
+            if time.time() > deadline:
+                break
+            _BX_STATE['n'] += 1
+            joined = _bx_translate('\n'.join(group), gcode, deadline)
+            segs = [x.strip() for x in str(joined or '').split('\n')]
+            if joined and len(segs) == len(group) and all(segs):
+                done.update(zip(group, segs))
+                continue
+            for t in group:                      # Google دمج الأسطر: نترجم كل جملة لحالها
                 if time.time() > deadline:
                     break
                 _BX_STATE['n'] += 1
-                one = _translate_text_raw(t, gcode)
+                one = _bx_translate(t, gcode, deadline)
                 if one and one.strip():
                     done[t] = one.strip()
-        if not done:
-            _BX_STATE['pause_until'] = time.time() + 120      # المترجم واقف: نكمل بالنص الأصلي دقيقتين
+        if done:
+            _BX_STATE['fails'] = 0
+        else:
+            _BX_STATE['fails'] = _BX_STATE.get('fails', 0) + 1
+            if _BX_STATE['fails'] >= 3:          # 3 محاولات متتالية فشلت كلها: استراحة قصيرة فقط
+                _BX_STATE['pause_until'] = time.time() + 15
+                _BX_STATE['fails'] = 0
+            logger.warning('Bot translation unavailable for %s (%s texts); original text sent', lang, len(todo))
     except Exception as exc:
-        _BX_STATE['pause_until'] = time.time() + 120
-        logger.debug(f'bot i18n translate err: {exc}')
+        logger.warning(f'bot i18n translate err: {type(exc).__name__}')
     if len(_BX_MEM) > 30000:
         _BX_MEM.clear()
     for t, v in done.items():
@@ -9071,15 +9126,216 @@ def _wa_uidict(identity, body):
     if lang not in BOT_XLANGS or lang not in _wa_site_langs() or not isinstance(items, list) or len(items) > 40 \
             or any(not isinstance(x, str) or len(x) > 600 for x in items):
         return 400, {'error': 'bad_request'}
+    out, full = _bx_translate_items(lang, items)
+    return 200, {'ok': True, 'full': full, 'items': [o if o is not None else x for o, x in zip(out, items)]}
+
+
+
+# ═══════════ 🌐 ترجمة كل شيء مرة واحدة وحفظها (ثم المالك يعدّل بملف) ═══════════
+_BX_WARM = {}                     # lang → {'running', 'done', 'total', 'failed', 'at'}
+_BX_WARM_LOCK = threading.Lock()
+
+
+def _bx_translate_items(lang, items):
+    """ترجمة قائمة نصوص من مخزن الترجمات المشترك (البوت + الموقع). الفاشل يرجع None."""
     need, plans = set(), []
     for x in items:
         parts = []
         _bx_split(x, lang, '<' in x and '>' in x, parts, need)
         plans.append(parts)
     res = _bx_resolve(lang, need) if need else {}
-    return 200, {'ok': True, 'full': all(t in res for t in need),
-                 'items': [_bx_join(parts, res) for parts in plans]}
+    out = []
+    for x, parts in zip(items, plans):
+        cores = [p[1] for p in parts if not isinstance(p, str)]
+        out.append(_bx_join(parts, res) if all(c in res for c in cores) else None)
+    return out, all(t in res for t in need)
 
+
+def _bx_site_ui_texts():
+    """نصوص واجهة الموقع الإنجليزية (القاموس I.en داخل webapp/index.html)."""
+    try:
+        with open(os.path.join(WEBAPP_DIR, 'index.html'), encoding='utf-8') as fh:
+            page = fh.read()
+    except Exception:
+        return []
+    start = page.find('const I = {')
+    start = page.find('en:{', start) if start >= 0 else -1
+    if start < 0:
+        return []
+    out, depth, i = [], 0, start + 3
+    pair = re.compile(r"([A-Za-z_$][\w$]*)\s*:\s*('(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")")
+    while i < len(page):
+        ch = page[i]
+        if ch in '\'"':
+            j = i + 1
+            while j < len(page) and page[j] != ch:
+                j += 2 if page[j] == '\\' else 1
+            i = j + 1
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    for _key, lit in pair.findall(page[start:i]):
+        try:
+            out.append(json.loads('"' + lit[1:-1].replace('"', '\\"').replace("\\'", "'") + '"') if lit[0] == "'" else json.loads(lit))
+        except Exception:
+            continue
+    return out
+
+
+def _bx_code_texts():
+    """نصوص إنجليزية مكتوبة داخل الكود (bil / lang == 'en' / 'en': …) — قراءة سطر بسطر، خفيفة على الذاكرة."""
+    import ast as _ast
+    import warnings
+    lit = re.compile(r"(?<![A-Za-z0-9_])([fFrRuU]{0,2})(\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*')")
+    ctx = re.compile(r"== ?['\"]en['\"]|bil\(|['\"]en['\"] ?:|_en\b\s*=|text_en")
+    out = []
+    try:
+        with open(os.path.abspath(__file__), encoding='utf-8') as fh:
+            for line in fh:
+                if not ctx.search(line) or 'logger.' in line:
+                    continue
+                for prefix, quoted in lit.findall(line):
+                    body = quoted
+                    if 'f' in prefix.lower():
+                        body = re.sub(r'\{[^{}]*\}', '{}', body)
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore')
+                            value = _ast.literal_eval(body)
+                    except Exception:
+                        continue
+                    if isinstance(value, str):
+                        out.append(value)
+    except Exception:
+        pass
+    return out
+
+
+def _bx_all_texts():
+    """كل النصوص الإنجليزية اللي يشوفها الزبون في البوت والموقع."""
+    texts = []
+    texts += [v for v in (LANG.get('en') or {}).values() if isinstance(v, str)]
+    texts += [v.get('en') for v in _NOTIFICATION_TEXTS.values() if isinstance(v, dict) and isinstance(v.get('en'), str)]
+    texts += [v for v in (DEFAULT_BUTTONS.get('en') or {}).values() if isinstance(v, str)]
+    try:
+        texts += [r.get('value') for r in db.custom_texts.find({'lang': 'en'}, {'value': 1})]
+        texts += [r.get('text') for r in db.custom_buttons.find({'lang': 'en'}, {'text': 1})]
+        texts += [c.get('name_en') or c.get('name_ar') for c in db.catalogs.find({}, {'name_en': 1, 'name_ar': 1})]
+    except Exception:
+        pass
+    texts += _bx_code_texts()
+    texts += _bx_site_ui_texts()
+    seen, out = set(), []
+    for t in texts:
+        if not isinstance(t, str) or not t.strip() or t in seen or re.search(r'[؀-ۿ]', t):
+            continue
+        if len(re.findall(r'[A-Za-z]{2,}', t)) < 1 or re.fullmatch(r'[\w./:%-]+', t) and not re.search(r'[A-Z][a-z]', t):
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _bx_desc_lines(src):
+    """أسطر وصف المنتج بالشكل اللي يترجمها الموقع (سطر نص صافي بدون إيموجي/وسوم الأطراف)."""
+    out = []
+    for ln in (src or '').split('\n'):
+        plain = html.unescape(re.sub(r'<[^>]+>', '', ln)).strip(' \t•·▪●-–')
+        plain = re.sub(r'^[☀-➿\U0001F000-\U0001FAFF️‍\s]+|[☀-➿\U0001F000-\U0001FAFF️‍\s]+$', '', plain)
+        if re.search(r'[^\W\d_]', plain):
+            out.append(plain)
+    return out
+
+
+def _bx_warm_lang(lang, notify_chat=None):
+    """يترجم كل النصوص للغة وحدة ويحفظها. المحفوظ مسبقاً ما يتترجم مرة ثانية."""
+    with _BX_WARM_LOCK:
+        if (_BX_WARM.get(lang) or {}).get('running'):
+            return
+        _BX_WARM[lang] = {'running': True, 'done': 0, 'total': 0, 'failed': 0, 'at': int(time.time())}
+    state = _BX_WARM[lang]
+    try:
+        need = set()
+        for t in _bx_all_texts():
+            _bx_split(t, lang, '<' in t and '>' in t, [], need)
+        try:
+            for p in _wa_build_catalog(include_hidden=False)['products']:
+                for d in (p.get('desc_en') or p.get('desc_ar') or '',):
+                    if not re.search(r'[؀-ۿ]', d):
+                        need.update(_bx_desc_lines(d))
+                        _bx_split(d, lang, '<' in d, [], need)
+        except Exception:
+            pass
+        need = sorted(need)
+        have = set()
+        for i in range(0, len(need), 400):
+            ids = {_bx_id(lang, t): t for t in need[i:i + 400]}
+            have.update(ids[r['_id']] for r in db.bot_i18n.find({'_id': {'$in': list(ids)}}, {'_id': 1}))
+        todo = [t for t in need if t not in have]
+        state.update(total=len(need), done=len(have))
+        for i in range(0, len(todo), 30):
+            chunk = todo[i:i + 30]
+            for attempt in range(4):
+                if not _bx_cfg()['on'] or lang not in _bx_enabled_langs():
+                    return
+                got = _bx_resolve(lang, set(chunk))
+                if got:
+                    break
+                time.sleep(20 * (attempt + 1))         # المترجم مشغول/واقف: نستنى ونعيد نفس الدفعة
+            state['done'] += len([t for t in chunk if t in got])
+            state['failed'] += len([t for t in chunk if t not in got])
+            time.sleep(0.6)
+    except Exception:
+        logger.exception('Bot language warm-up failed for %s', lang)
+    finally:
+        state['running'] = False
+        state['at'] = int(time.time())
+        if notify_chat:
+            try:
+                bot.send_message(notify_chat, f"✅ انتهت ترجمة {BOT_XLANGS.get(lang, ('', lang))[1]}: محفوظ {state['done']} من {state['total']}"
+                                 + (f" (تعذّر {state['failed']}، تنترجم أول ما تُستخدم)" if state['failed'] else ''))
+            except Exception:
+                pass
+
+
+def _bx_warm_all(delay=45, notify_chat=None):
+    time.sleep(delay)
+    for code in _bx_enabled_langs():
+        _bx_warm_lang(code, notify_chat)
+
+
+def _bx_export_file(lang):
+    rows = list(db.bot_i18n.find({'lang': lang}, {'src': 1, 'value': 1, 'fixed': 1}).sort('src', 1))
+    head = [f"LARA — ترجمات {BOT_XLANGS[lang][1]} ({lang})",
+            "عدّل فقط السطر اللي يبدأ بالسهم ←  ثم احفظ الملف وأرسله للبوت من «📥 رفع ملف معدّل».",
+            "لا تغيّر السطر اللي فيه # ولا السطر EN.", ""]
+    body = []
+    for r in rows:
+        body += [f"# {r['_id'][:16]}{'  ✏️' if r.get('fixed') else ''}", f"EN: {r.get('src', '')}", f"← {r.get('value', '')}", ""]
+    data = io.BytesIO('\n'.join(head + body).encode('utf-8'))
+    data.name = f'translations-{lang}.txt'
+    return data, len(rows)
+
+
+def _bx_import_file(lang, text):
+    rows = {r['_id'][:16]: r for r in db.bot_i18n.find({'lang': lang}, {'src': 1, 'value': 1})}
+    changed = 0
+    for block in re.split(r'\n(?=# )', '\n' + text.replace('\r\n', '\n')):
+        m = re.match(r'\s*# ([0-9a-f]{16})[^\n]*\n(?:EN: [^\n]*\n)?← ?(.*?)\s*$', block.strip('\n') + '\n', re.S)
+        if not m:
+            continue
+        row, value = rows.get(m.group(1)), m.group(2).strip()
+        if not row or not value or value == row.get('value'):
+            continue
+        db.bot_i18n.update_one({'_id': row['_id']}, {'$set': {'value': value[:600], 'fixed': True}})
+        _BX_MEM[(lang, row.get('src'))] = value[:600]
+        changed += 1
+    return changed
 
 _REF_NOTE_EN = [
     (re.compile(r'^مكافأة إحالات متحققة تلقائي[ًا]+\s*·\s*الدفعة #(\d+)\s*\((\d+) إحالة\)$'), r'Auto-verified referral reward · batch #\1 (\2 referrals)'),
@@ -25178,6 +25434,9 @@ def _bxl_view(chat_id, message_id=None):
     markup.add(InlineKeyboardButton(("🟢 الترجمة التلقائية: شغّالة" if cfg['on'] else "🔴 الترجمة التلقائية: متوقفة"), callback_data="ad_bxl_on"))
     markup.add(*[InlineKeyboardButton(("✅ " if c in cfg['langs'] else "▫️ ") + v[0] + " " + v[1], callback_data="ad_bxl_t_" + c)
                  for c, v in BOT_XLANGS.items()])
+    markup.add(InlineKeyboardButton("🔄 ترجمة كل شيء الآن وحفظه", callback_data="ad_bxl_warm"))
+    markup.add(InlineKeyboardButton("📤 تنزيل ملف الترجمة", callback_data="ad_bxl_exp"),
+               InlineKeyboardButton("📥 رفع ملف معدّل", callback_data="ad_bxl_imp"))
     markup.add(InlineKeyboardButton("🎨 تخصيص أزرار اللغات", callback_data="ad_bxl_btns"))
     markup.add(InlineKeyboardButton("✏️ تصحيح ترجمة", callback_data="ad_bxl_fix"))
     markup.add(InlineKeyboardButton("🧹 مسح الترجمات المحفوظة", callback_data="ad_bxl_clear"))
@@ -25189,7 +25448,18 @@ def _bxl_view(chat_id, message_id=None):
     txt = ("🌐 <b>لغات البوت</b>\n\n"
            "العربية والإنجليزية ثابتتان. فعّل اللغات الإضافية التي تريدها، وستظهر للزبون في «الإعدادات ← اللغة».\n"
            "البوت يترجم الرسائل والأزرار تلقائياً، والأكواد والإيميلات والأرقام تبقى كما هي.\n\n"
-           f"💾 ترجمات محفوظة: <b>{saved}</b> · مصحّحة يدوياً: <b>{fixed}</b>")
+           f"💾 ترجمات محفوظة: <b>{saved}</b> · معدّلة يدوياً: <b>{fixed}</b>")
+    lines = []
+    for code in cfg['langs']:
+        st = _BX_WARM.get(code)
+        try:
+            n = db.bot_i18n.count_documents({'lang': code})
+        except Exception:
+            n = 0
+        tag = (f"⏳ {st['done']}/{st['total']}" if st and st.get('running') else f"{n} محفوظة")
+        lines.append(f"{BOT_XLANGS[code][0]} {BOT_XLANGS[code][1]}: {tag}")
+    if lines:
+        txt += "\n" + "\n".join(lines)
     if message_id:
         try:
             bot.edit_message_text(txt, chat_id, message_id, reply_markup=markup, parse_mode="HTML")
@@ -25211,8 +25481,12 @@ def ad_bxl_ui(call):
     elif call.data.startswith("ad_bxl_t_"):
         code = call.data[len("ad_bxl_t_"):]
         if code in BOT_XLANGS:
+            turned_on = code not in cfg['langs']
             cfg['langs'] = [c for c in cfg['langs'] if c != code] if code in cfg['langs'] else cfg['langs'] + [code]
             _bx_cfg_save(cfg)
+            if turned_on and cfg['on']:
+                threading.Thread(target=_bx_warm_lang, args=(code, call.message.chat.id), daemon=True, name='bot-i18n-warm-' + code).start()
+                note = "✅ تفعّلت. بدأت ترجمة كل النصوص لهذه اللغة وحفظها."
     elif call.data == "ad_bxl_clear":
         try:
             db.bot_i18n.delete_many({'fixed': {'$ne': True}})
@@ -25319,6 +25593,66 @@ def _bxl_btn_save(message, code):
     _bx_btn_cfg_save(cfg)
     bot.send_message(message.chat.id, "✅ تم حفظ الزر.")
     _bxl_btn_view(message.chat.id, code)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "ad_bxl_warm")
+@admin_required
+def ad_bxl_warm(call):
+    langs = _bx_enabled_langs()
+    if not langs:
+        bot.answer_callback_query(call.id, "فعّل لغة أولاً", show_alert=True)
+        return
+    bot.answer_callback_query(call.id, "بدأت الترجمة… أرسل لك لما تخلص", show_alert=True)
+    threading.Thread(target=_bx_warm_all, kwargs={'delay': 0, 'notify_chat': call.message.chat.id},
+                     daemon=True, name='bot-i18n-warm-now').start()
+    time.sleep(1.5)
+    _bxl_view(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ("ad_bxl_exp", "ad_bxl_imp") or call.data.startswith(("ad_bxl_exp_", "ad_bxl_imp_")))
+@admin_required
+def ad_bxl_file(call):
+    bot.answer_callback_query(call.id)
+    bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
+    data = call.data
+    if data in ("ad_bxl_exp", "ad_bxl_imp"):
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(*[InlineKeyboardButton(BOT_XLANGS[c][0] + " " + BOT_XLANGS[c][1], callback_data=f"{data}_{c}")
+                     for c in BOT_XLANGS if db.bot_i18n.count_documents({'lang': c}, limit=1)])
+        markup.add(InlineKeyboardButton("🔙 لغات البوت", callback_data="ad_bxl"))
+        bot.edit_message_text("اختر اللغة:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        return
+    code = data.rsplit('_', 1)[1]
+    if code not in BOT_XLANGS:
+        return
+    if data.startswith("ad_bxl_exp_"):
+        doc, n = _bx_export_file(code)
+        bot.send_document(call.message.chat.id, doc,
+                          caption=f"📤 {n} ترجمة {BOT_XLANGS[code][1]}.\nعدّل الأسطر اللي تبدأ بـ ← ثم ارجع وارفع الملف من «📥 رفع ملف معدّل».")
+        return
+    msg = bot.send_message(call.message.chat.id, f"📥 أرسل الآن ملف ترجمة {BOT_XLANGS[code][1]} بعد التعديل (ملف .txt).\n(أو «الغاء»)")
+    bot.register_next_step_handler(msg, _bxl_import_step, code)
+
+
+def _bxl_import_step(message, code):
+    if not _is_admin_check(message.from_user.id):
+        return
+    doc = getattr(message, 'document', None)
+    if not doc:
+        bot.send_message(message.chat.id, "❌ ما وصل ملف. ارجع واضغط «📥 رفع ملف معدّل» مرة ثانية.")
+        return
+    if (doc.file_size or 0) > 8 * 1024 * 1024:
+        bot.send_message(message.chat.id, "❌ الملف كبير جداً.")
+        return
+    try:
+        raw = bot.download_file(bot.get_file(doc.file_id).file_path)
+        changed = _bx_import_file(code, raw.decode('utf-8-sig'))
+    except Exception:
+        logger.exception('Translation import failed')
+        bot.send_message(message.chat.id, "❌ ما قدرت أقرأ الملف. تأكد إنه نفس الملف اللي نزّلته من البوت.")
+        return
+    bot.send_message(message.chat.id, f"✅ تم حفظ {changed} ترجمة معدّلة لـ {BOT_XLANGS[code][1]}. تظهر للزبائن من الآن في البوت والموقع.")
+    _bxl_view(message.chat.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_bxl_fix")
@@ -35269,6 +35603,9 @@ def _wa_terms(identity, body):
 def _wa_translate_ep(identity, body):
     lang = str(body.get('lang') or '')
     items = body.get('items') or []
+    if lang in BOT_XLANGS and isinstance(items, list) and len(items) <= 30:
+        clean = [_wa_plain(x, 600) for x in items if isinstance(x, str)]
+        return 200, {'ok': True, 'items': _bx_translate_items(lang, clean)[0]}
     if lang == 'zh':
         lang = 'zh-CN'
     if not isinstance(items, list) or len(items) > 30:
@@ -35582,22 +35919,34 @@ def _wa_translate_html(html_src, lang):
     if not idx:
         return html_src
     target = _WA_TR_LANG.get(lang, 'en')
+    if lang in BOT_XLANGS:
+        keys = [_bx_desc_lines(texts[i]) for i in idx]
+        flat = {k for ks in keys for k in ks}
+        res = _bx_resolve(lang, flat) if flat else {}
+        if not all(k in res for k in flat):
+            res.update(_bx_resolve(lang, {k for k in flat if k not in res}))
+        if not all(k in res for k in flat):
+            return None
+        for i, ks in zip(idx, keys):
+            line = texts[i]
+            for k in sorted(ks, key=len, reverse=True):
+                line = line.replace(k, res[k])
+            parts[i][1] = html.escape(line.strip(), quote=False)
+        return '\n'.join(a + b + c for a, b, c in parts)
     joined = '\n'.join(texts[i] for i in idx)
+    deadline = time.time() + 14
     out = None
-    try:
-        tr = GoogleTranslator(source='auto', target=target).translate(joined[:4800])
-        segs = str(tr or '').split('\n')
-        if len(segs) == len(idx):
-            out = segs
-    except Exception:
-        out = None
+    tr = _bx_translate(joined[:3400], target, deadline) if len(joined) <= 3400 else None
+    segs = str(tr or '').split('\n')
+    if tr and len(segs) == len(idx):
+        out = segs
     if out is None:
         out = []
         for i in idx:
-            try:
-                out.append(str(GoogleTranslator(source='auto', target=target).translate(texts[i]) or texts[i]))
-            except Exception:
-                out.append(texts[i])
+            one = _bx_translate(texts[i], target, deadline)
+            if not one:
+                return None                  # ناقص: ما نعرض ولا نحفظ نصاً نصفه إنجليزي
+            out.append(one)
     for i, t in zip(idx, out):
         parts[i][1] = html.escape(t.strip(), quote=False)
     return '\n'.join(a + b + c for a, b, c in parts)
@@ -35615,8 +35964,8 @@ def _wa_desc_tr(identity, body):
     src = p.get('desc_ar' if lang == 'ar' else 'desc_en') or p.get('desc_en') or p.get('desc_ar') or ''
     if not src or not _wa_tr_needed(src, lang):
         return 200, {'ok': True, 'html': None}
-    cid = hashlib.sha256(('desc2\0' + lang + '\0' + src).encode()).hexdigest()
-    hit = db.webapp_i18n.find_one({'_id': cid}, {'value': 1})
+    cid = hashlib.sha256(('desc3\0' + lang + '\0' + src).encode()).hexdigest()
+    hit = None if lang in BOT_XLANGS else db.webapp_i18n.find_one({'_id': cid}, {'value': 1})
     if hit:
         return 200, {'ok': True, 'html': hit['value'], 'cached': True}
     day = time.strftime('%Y-%m-%d', time.gmtime())
@@ -35625,7 +35974,12 @@ def _wa_desc_tr(identity, body):
     if _WA_TR_DAY['n'] >= 3000:          # سقف يومي لطلبات الترجمة الجديدة للمتجر كله
         return 200, {'ok': True, 'html': None}
     _WA_TR_DAY['n'] += 1
-    out = _wa_rich(_wa_translate_html(src, lang), 6000)
+    translated = _wa_translate_html(src, lang)
+    if not translated or translated == src:
+        return 200, {'ok': True, 'html': None, 'retry': True}
+    out = _wa_rich(translated, 6000)
+    if lang in BOT_XLANGS:
+        return 200, {'ok': True, 'html': out}          # محفوظ سطراً سطراً في مخزن الترجمات (قابل للتعديل)
     try:
         db.webapp_i18n.update_one({'_id': cid}, {'$setOnInsert': {'value': out}}, upsert=True)
     except Exception:
@@ -42860,6 +43214,7 @@ def run_bot():
     threading.Thread(target=_wa_setup_menu_button, daemon=True, name='webapp-menu-button').start()
     threading.Thread(target=_wa_owner_hello, daemon=True, name='webapp-owner-hello').start()
     threading.Thread(target=_vip_backfill_thread, daemon=True, name='vip-backfill').start()
+    threading.Thread(target=_bx_warm_all, daemon=True, name='bot-i18n-warm').start()
     threading.Thread(target=_sec_admin_watch_loop, daemon=True, name='security-admin-watch').start()
     try:
         _recover_external_approval_notices()

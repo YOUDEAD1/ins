@@ -2047,8 +2047,8 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
   if (w) { w.innerHTML = ''; for (var i = 0; i < word.length; i++) { var it = document.createElement('i'); it.style.setProperty('--i', i); it.textContent = word[i]; w.appendChild(it); }
            if (word.length > 8) w.style.fontSize = Math.max(18, Math.round(30 * 8 / word.length)) + 'px'; }
   if (su) su.textContent = sub;
-  var st = document.getElementById('ld-status'); if (st) st.textContent = L[lang].c;
-  var el = document.getElementById('page-loading'); if (el) el.setAttribute('aria-label', L[lang].l);
+  var st = document.getElementById('ld-status'); if (st) st.textContent = (L[lang] || L.en).c;
+  var el = document.getElementById('page-loading'); if (el) el.setAttribute('aria-label', (L[lang] || L.en).l);
   window.__LD = { lang: lang, L: L, t0: Date.now() };
 })();
 </script>
@@ -2174,24 +2174,32 @@ function setSiteLangs(codes) {
 }
 const UID = {};
 function uiDictApply(l) {
-  const m = store.get('ui:' + l, {}), d = I[l], miss = new Set();
+  const m = store.get('ui2:' + l, {}), d = I[l], miss = new Set();
   for (const k in I.en) { const src = I.en[k]; if (typeof src !== 'string' || !/\p{L}{2}/u.test(src)) continue; if (m[src] != null) d[k] = m[src]; else miss.add(src); }
   return { m, miss: [...miss] };
 }
 async function uiDictLoad(l) {
   if (!XL[l] || UID[l]) return;
   UID[l] = 1;
-  const { m, miss } = uiDictApply(l); let got = 0;
-  for (let i = 0; i < miss.length && LANG === l; i += 40) {
-    const items = miss.slice(i, i + 40); let r = null;
-    try { r = await api('uidict', { lang: l, items }); } catch (e) {}
-    if (!r || !r.ok || !Array.isArray(r.items)) break;
-    items.forEach((src, j) => { const o = r.items[j]; if (typeof o === 'string' && o && (o !== src || r.full)) { m[src] = o; got++; } });
-    store.set('ui:' + l, m);
-    if (!r.full) break;                      // المترجم مشغول: نكمل الباقي في الفتحة الجاية
+  let { m, miss } = uiDictApply(l), round = 0;
+  const paint = () => { uiDictApply(l); if (LANG === l && S.screen && !Sheets.length) renderAll(); };
+  while (miss.length && LANG === l && round < 8) {
+    let got = 0, failed = 0;
+    for (let i = 0; i < miss.length && LANG === l; i += 40) {
+      const items = miss.slice(i, i + 40); let r = null;
+      try { r = await api('uidict', { lang: l, items }); } catch (e) {}
+      if (!r || !r.ok || !Array.isArray(r.items)) { failed += items.length; continue; }
+      items.forEach((src, j) => { const o = r.items[j]; if (typeof o === 'string' && o.trim() && (o !== src || r.full)) { m[src] = o; got++; } else failed++; });
+      store.set('ui2:' + l, m);
+      if (got && i === 0 && round === 0) paint();          // أول دفعة تظهر فوراً
+    }
+    if (got) paint();
+    miss = uiDictApply(l).miss;
+    if (!failed || !miss.length) break;
+    round++;
+    await new Promise(res => setTimeout(res, Math.min(30000, 2500 * 2 ** round)));   // المترجم مشغول: نعيد المحاولة تلقائياً
   }
   UID[l] = 0;
-  if (got) { uiDictApply(l); if (LANG === l && S.screen && !Sheets.length) renderAll(); }
 }
 let LANG = 'en';
 function t(k, v) {
@@ -3329,6 +3337,7 @@ async function autoTranslate(sh, p, st) {
   if (!sh.el.isConnected) return;
   if (r.ok && r.html) { S.trc[k] = r.html; st.tr = r.html; st.showTr = true; } else st.tr = null;
   renderProduct(sh, p, st);
+  if (r.ok && !r.html && r.retry && !st.trRetry) { st.trRetry = 1; setTimeout(() => { if (sh.el.isConnected) autoTranslate(sh, p, st); }, 6000); }
 }
 function priceOf(p, st) {
   if (p.kind === 'cgpt') { const d = (p.durations || []).find(x => x.id === st.dur); return vipUnit(p, d ? d.price : p.price); }
@@ -3838,7 +3847,7 @@ const NOTE_PAT = [
   [/^إحالة طلعت من القناة \((\d+)\)\s*·\s*الدفعة #(\d+)$/, 'note_ref_left', ['id', 'b']],
   [/^رجعت إحالة \((\d+)\)$/, 'note_ref_back', ['id']],
   [/^مكافأة شراء إحالة \((\d+)\)$/, 'note_ref_buy', ['id']]];
-const TRQ = { mem: {}, q: new Set(), timer: 0, busy: false };
+const TRQ = { mem: {}, q: new Set(), timer: 0, busy: false, wait: {} };
 function trqNeeded(s) {
   const letters = String(s).match(/\p{L}/gu) || [];
   if (letters.length < 2 || LANG === 'ar') return false;
@@ -3849,9 +3858,9 @@ function trqNeeded(s) {
 }
 function trq(s, arOnly) {
   s = String(s || ''); if (!s || !trqNeeded(s) || (arOnly && !/[\u0600-\u06FF]/.test(s))) return s;
-  const m = TRQ.mem[LANG] || (TRQ.mem[LANG] = store.get('trq:' + LANG, {}));
+  const m = TRQ.mem[LANG] || (TRQ.mem[LANG] = store.get('trq2:' + LANG, {}));
   if (m[s] != null) return m[s];
-  if (s.length > 600) return s;
+  if (s.length > 600 || (TRQ.wait[LANG + '\0' + s] || 0) > Date.now()) return s;
   TRQ.q.add(s);
   if (!TRQ.timer) TRQ.timer = setTimeout(trqFlush, 60);
   return s;
@@ -3864,11 +3873,17 @@ async function trqFlush() {
   let r = null; try { r = await api('tr', { lang, items }); } catch (e) {}
   TRQ.busy = false;
   const m = TRQ.mem[lang] || (TRQ.mem[lang] = {}), done = [];
-  items.forEach((src, i) => { const out = r && r.ok && r.items && r.items[i]; m[src] = out && typeof out === 'string' ? out : src; if (m[src] !== src) done.push(src); });
-  if (r && r.ok) { const keys = Object.keys(m); if (keys.length > 400) keys.slice(0, keys.length - 400).forEach(k => delete m[k]); store.set('trq:' + lang, m); }
+  let failed = 0;
+  items.forEach((src, i) => {
+    const out = r && r.ok && r.items && r.items[i];
+    if (typeof out === 'string' && out.trim() && out !== src) { m[src] = out; done.push(src); }
+    else { failed++; TRQ.wait[lang + '\0' + src] = Date.now() + 8000; }   // فشل مؤقت: ما ينحفظ، نعيد المحاولة بعد شوي
+  });
+  if (done.length) { const keys = Object.keys(m); if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(k => delete m[k]); store.set('trq2:' + lang, m); }
+  if (failed && lang === LANG) setTimeout(() => { if (lang === LANG && S.screen && !Sheets.length) renderView(); }, 8500);
   if (done.length && lang === LANG) {
     const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
-    while ((n = w.nextNode())) { const v = n.nodeValue; if (!v || v.length < 2) continue; for (const src of done) if (v.includes(src)) { n.nodeValue = v.split(src).join(m[src]); break; } }
+    while ((n = w.nextNode())) { const v = n.nodeValue; if (!v || v.length < 2) continue; for (const src of done) if (v.includes(src) && !v.includes(m[src])) { n.nodeValue = v.split(src).join(m[src]); break; } }
   }
   if (TRQ.q.size) TRQ.timer = setTimeout(trqFlush, 60);
 }
