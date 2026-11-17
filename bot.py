@@ -8763,7 +8763,7 @@ _BX_FIX = {}
 _BX_TAG = re.compile(r'(<[^>]+>)')
 _BX_TOKEN = re.compile(r'(\S*(?:[\d@_/\\|=#$%^*+~{}\[\]]|[a-z][A-Z]|\.[A-Za-z]{2,}\b)\S*)')
 _BX_NATIVE = {'ru': r'[Ѐ-ӿ]', 'zh': r'[一-鿿]', 'hi': r'[ऀ-ॿ]'}
-_BX_METHODS = {'sendMessage': 'text', 'editMessageText': 'text', 'sendPhoto': 'caption', 'sendDocument': 'caption',
+_BX_METHODS = {'copyMessage': 'caption', 'sendMessage': 'text', 'editMessageText': 'text', 'sendPhoto': 'caption', 'sendDocument': 'caption',
                'sendVideo': 'caption', 'sendAnimation': 'caption', 'editMessageCaption': 'caption',
                'editMessageReplyMarkup': None, 'answerCallbackQuery': 'text'}
 
@@ -9168,9 +9168,18 @@ def _bx_apply_inner(method_name, params, field, lang):
 _bx_orig_make_request = telebot.apihelper._make_request
 
 
+class _bx_no_translate:
+    """نص مترجم مسبقاً: لا تترجمه مرة ثانية (الأزرار تبقى كما بُنيت بلغة الزبون)."""
+    def __enter__(self):
+        _BX_KEEP_EXTRA.off = True
+
+    def __exit__(self, *exc):
+        _BX_KEEP_EXTRA.off = False
+
+
 def _bx_make_request(token, method_name, method='get', params=None, files=None):
     try:
-        if params and method_name in _BX_METHODS and token == TOKEN:
+        if params and method_name in _BX_METHODS and token == TOKEN and not getattr(_BX_KEEP_EXTRA, 'off', False):
             params = _bx_apply(method_name, params)
     except Exception as exc:
         logger.debug(f'bot i18n skipped: {exc}')
@@ -9409,6 +9418,11 @@ def _bx_all_texts():
     texts += [v for v in (LANG.get('en') or {}).values() if isinstance(v, str)]
     texts += [v.get('en') for v in _NOTIFICATION_TEXTS.values() if isinstance(v, dict) and isinstance(v.get('en'), str)]
     texts += [v for v in (DEFAULT_BUTTONS.get('en') or {}).values() if isinstance(v, str)]
+    try:                                   # صفحة الشروط (النص المعدّل إن وجد)
+        row = db.custom_texts.find_one({'key': 'terms_content', 'lang': 'en'}, {'value': 1}) or {}
+        texts += _bx_desc_lines(_wa_rich(row.get('value') or LANG['en'].get('terms_content', ''), 8000))
+    except Exception:
+        pass
     try:
         texts += [r.get('value') for r in db.custom_texts.find({'lang': 'en'}, {'value': 1})]
         texts += [r.get('text') for r in db.custom_buttons.find({'lang': 'en'}, {'text': 1})]
@@ -18535,7 +18549,7 @@ def _bc_users():
     """Persist intent before sending; an interrupted recipient is not sent twice."""
     job = getattr(_BC_CONTEXT, 'job', None)
     if job is None:
-        yield from db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).batch_size(50)
+        yield from db.users.find({}, {'user_id': 1, 'lang': 1, 'lang_chosen': 1, 'ui_lang': 1}).batch_size(50)
         return
     last = job.get('last_user')
     while True:
@@ -18543,7 +18557,7 @@ def _bc_users():
         if last is not None:
             bounds['$gt'] = last
         batch = list(db.users.find({'_id': bounds},
-            {'user_id': 1, 'lang': 1, 'lang_chosen': 1}).sort('_id', 1).limit(50))
+            {'user_id': 1, 'lang': 1, 'lang_chosen': 1, 'ui_lang': 1}).sort('_id', 1).limit(50))
         if not batch:
             return
         for user in batch:
@@ -31000,7 +31014,9 @@ def admin_bc_pick_product(message):
     _bc_pending[uid] = {
         'msg_id': message.message_id,
         'chat_id': message.chat.id,
-        'product_id': None  # None = للكل
+        'product_id': None,  # None = للكل
+        # المحتوى نفسه (HTML) حتى يوصل كل زبون بلغته؛ أسماء المنتجات والأرقام تبقى كما هي
+        'content': _bc_capture(message),
     }
     _bc_show_folders(uid)
 
@@ -31236,12 +31252,52 @@ def admin_bc_exe(call):
     job = {'_id': token, 'kind': 'manual', 'status': 'queued', 'owner_id': uid,
            'created_at': time.time(), 'source_message': pending['msg_id'],
            'source_chat': pending['chat_id'], 'product_id': pending.get('product_id'),
-           'catalog_id': pending.get('catalog_id'), 'label': pending.get('label', '')}
+           'catalog_id': pending.get('catalog_id'), 'label': pending.get('label', ''),
+           'content': pending.get('content')}
     db.ext_broadcast_approvals.update_one({'_id': token}, {'$setOnInsert': job}, upsert=True)
     _bc_pending.pop(uid, None)
     _ext_start_broadcast_worker()
     _EXT_BC_WAKE.set()
     bot.send_message(uid, '📢 أُضيف البرودكاست إلى طابور الإرسال. سيصلك تقرير عند الانتهاء.')
+
+
+def _bc_capture(message):
+    """نص/تعليق رسالة البرودكاست بصيغة HTML (يحفظ الإيموجي البريميوم والتنسيق)."""
+    try:
+        if getattr(message, 'text', None):
+            return {'kind': 'text', 'html': message.html_text}
+        if getattr(message, 'caption', None):
+            return {'kind': 'caption', 'html': message.html_caption}
+    except Exception:
+        logger.exception('Broadcast content capture failed')
+    return None
+
+
+def _bc_user_lang(user):
+    """لغة الزبون للبرودكاست: لغة إضافية مفعّلة، وإلا العربي/الإنجليزي."""
+    ui = user.get('ui_lang')
+    if ui in _bx_enabled_langs():
+        return ui
+    return get_lang(user['user_id'])
+
+
+def _bc_translated(job, lang, cache):
+    """ترجمة محتوى البرودكاست مرة وحدة لكل لغة (لا ترجمة لو اللغة نفسها لغة الرسالة)."""
+    content = job.get('content') or {}
+    src = content.get('html')
+    if not src:
+        return None
+    source_lang = 'ar' if re.search(r'[؀-ۿ]', re.sub(r'<[^>]+>', '', src)) else 'en'
+    if lang == source_lang:
+        return None
+    if lang not in cache:
+        need, parts = set(), []
+        _bx_split(src, lang, True, parts, need)
+        res = _bx_resolve(lang, need) if need else {}
+        if need and not all(t in res for t in need):
+            res.update(_bx_resolve(lang, {t for t in need if t not in res}))
+        cache[lang] = _bx_join(parts, res) if all(t in res for t in need) else None
+    return cache[lang]
 
 
 def _run_manual_broadcast_job(job):
@@ -31250,6 +31306,7 @@ def _run_manual_broadcast_job(job):
     sent, failed, blocked = job.get('sent', 0), job.get('failed', 0), job.get('blocked', 0)
     _nu_p = _notify_url(product_id) if product_id else None          # الزر يفتح الموقع على المنتج
     _nu_c = (_notify_url() if catalog_id == 'nocat' else _notify_url(cat=catalog_id)) if catalog_id else None
+    tr_cache = {}                                  # ترجمة الرسالة مرة وحدة لكل لغة
     for user in _bc_users():
         tuid = user['user_id']
         try:
@@ -31281,7 +31338,16 @@ def _run_manual_broadcast_job(job):
                         markup = InlineKeyboardMarkup()
                         markup = _notice_pair(tuid, cat=catalog_id, fallback_cb=f'cat_{catalog_id}')
 
-            _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
+            translated = _bc_translated(job, _bc_user_lang(user), tr_cache) if job.get('content') else None
+            if translated and job['content'].get('kind') == 'text' and len(translated) <= 4096:
+                with _bx_no_translate():
+                    _broadcast_deliver(bot.send_message, tuid, translated, parse_mode='HTML', reply_markup=markup)
+            elif translated and job['content'].get('kind') == 'caption' and len(translated) <= 1024:
+                with _bx_no_translate():
+                    _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, caption=translated,
+                                       parse_mode='HTML', reply_markup=markup)
+            else:
+                _broadcast_deliver(bot.copy_message, tuid, src_chat_id, src_msg_id, reply_markup=markup)
             sent += 1
         except _BroadcastLeaseLost:
             raise
@@ -35807,7 +35873,13 @@ def _wa_referrals(identity, body):
 
 
 def _wa_terms(identity, body):
-    return 200, {'ok': True, 'html': _wa_rich(get_text(identity['id'], 'terms_content'), 8000)}
+    src = _wa_rich(get_text(identity['id'], 'terms_content'), 8000)
+    lang = (get_user_data_full(identity['id']) or {}).get('ui_lang')
+    if lang in BOT_XLANGS and lang in _wa_site_langs():
+        translated = _wa_translate_html(src, lang)       # نفس الترجمات المحفوظة (قابلة للتعديل)
+        if translated:
+            return 200, {'ok': True, 'html': _wa_rich(translated, 8000)}
+    return 200, {'ok': True, 'html': src}
 
 
 def _wa_translate_ep(identity, body):

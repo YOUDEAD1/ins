@@ -1978,6 +1978,21 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .lang-btn > span:not(.flag):not(.flag-ce){display:none}
 .mrow .lang-val{display:inline-flex;align-items:center;gap:7px}
 .mrow .lang-val .flag{width:20px;height:14px;border-radius:3px}
+/* 22 ─ إيموجي اللغات البريميوم أكبر (إيموجي تيليجرام فيها فراغ حولها فتبان أصغر من حجمها) */
+.lang-btn .flag-ce{width:31px;height:31px;margin:-2px -3px}
+.lang-btn:has(.flag-ce){padding:0;width:36px;justify-content:center}
+.lc-flag:has(.flag-ce){height:124px}
+.lc-flag .flag-ce{width:124px;height:124px}
+/* العلم المرفرف في نافذة اختيار اللغة أكبر */
+.lang-car .lc-flag{height:70px}
+.lang-car .lc-flag .flag{width:102px;height:68px;border-radius:7px}
+.lang-car .lc-flag .flag i{border-radius:0}
+.lang-car .lc-flag .flag i:first-child{border-radius:7px 0 0 7px}
+.lang-car .lc-flag .flag i:last-child{border-radius:0 7px 7px 0}
+@media (max-width:350px){.lang-car .lc-flag{height:58px}.lang-car .lc-flag .flag{width:84px;height:56px}
+  .lc-flag:has(.flag-ce){height:96px}.lc-flag .flag-ce{width:96px;height:96px}}
+.lang-veil .flag-ce.big{width:104px;height:104px}
+.mrow .lang-val .flag-ce{width:30px;height:30px;margin-block:-4px}
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -5991,7 +6006,7 @@ function openLang() {
   const n = LANGS.length;
   let idx = Math.max(0, LANGS.findIndex(x => x[0] === LANG));
   const arrow = d => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + (d < 0 ? 'M14.5 5.5L8 12l6.5 6.5' : 'M9.5 5.5L16 12l-6.5 6.5') + '"/></svg>';
-  const items = LANGS.map(([c, l], i) => '<button class="lc-item" data-act="lc-go" data-i="' + i + '" lang="' + esc(c) + '" dir="' + (isRtl(c) ? 'rtl' : 'ltr') + '"><span class="lc-name">' + esc(langName(c)) + '</span><span class="lc-code">' + esc(l) + '</span></button>').join('');
+  const items = LANGS.map(([c, l], i) => '<button class="lc-item" data-act="lc-go" data-i="' + i + '" lang="' + esc(c) + '" dir="' + (isRtl(c) ? 'rtl' : 'ltr') + '"><span class="lc-name">' + esc(langName(c)) + '</span></button>').join('');
   const body = '<div class="lang-car" dir="ltr">' +
     '<div class="lc-flag" aria-hidden="true"></div>' +
     '<div class="lc-track" role="listbox" tabindex="0" aria-label="' + esc(t('language')) + '">' + items + '</div>' +
