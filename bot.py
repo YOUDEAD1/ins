@@ -636,6 +636,8 @@ def _json_resp(h, code, data):
         h.send_header('Content-Type', 'application/json; charset=utf-8')
         for _hk, _hv in (getattr(h, '_extra_headers', None) or ()):
             h.send_header(_hk, _hv)
+        if getattr(h, '_extra_headers', None) is not None and str(getattr(h, 'path', '')).startswith('/webapp/'):
+            h.send_header('X-Content-Type-Options', 'nosniff')
         h.send_header('X-Bot-API-Revision', 'ext-purchase-v3')
         h.send_header('Access-Control-Allow-Origin', '*')
         h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data, If-None-Match')
@@ -35964,7 +35966,7 @@ def _wa_referrals(identity, body):
     in_batch = in_batch % threshold
     site = _web_public_url() if getattr(_WEB_CTX, 'on', False) else None
     return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
-                 **({'web_link': f"{site}?ref={uid}"} if site else {}),
+                 **({'web_link': f"{site.rstrip('/')}/r/{_web_ref_code(uid)}"} if site else {}),
                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
                  'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
@@ -38475,7 +38477,11 @@ def _web_hash(value):
 
 
 def _web_ip(handler):
-    return (handler.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or handler.client_address[0])[:64]
+    # Render يمر عبر Cloudflare: CF-Connecting-IP يكتبه Cloudflare نفسه (ما يقدر الزائر يزوّره)، وإلا آخر عنوان أضافه البروكسي
+    ip = (handler.headers.get('CF-Connecting-IP') or handler.headers.get('True-Client-IP') or '').strip()
+    if not re.fullmatch(r'[0-9A-Fa-f:.]{3,45}', ip):
+        ip = handler.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or handler.client_address[0]
+    return ip[:64]
 
 
 def _web_cookie(handler):
@@ -38529,6 +38535,29 @@ def _web_device(ua):
     return f"{browser} · {system}" if system else browser
 
 
+def _web_pick_new():
+    return 10 + secrets.randbelow(90)
+
+
+def _web_pick_buttons(uid, prefix, code, pick):
+    """🔢 مطابقة الرقم: الموقع يعرض رقم، والبوت يعرض 3 أرقام — اللي ما شاف الموقع (مثلاً وصله رابط من محتال) ما يعرف أي رقم يضغط."""
+    opts = {int(pick)}
+    while len(opts) < 3:
+        opts.add(_web_pick_new())
+    opts = list(opts)
+    random.SystemRandom().shuffle(opts)
+    return [InlineKeyboardButton(f"{n}", callback_data=f"{prefix}_ok_{code}_{n}") for n in opts]
+
+
+def _web_pick_parse(data):
+    """wl_ok_<code>_<n> → (code, n) | wl_no_<code> → (code, None)"""
+    rest = data[6:]
+    if data[3:6] != 'ok_':
+        return rest, None
+    code, _, n = rest.rpartition('_')
+    return (code, int(n)) if code and n.isdigit() else ('', None)
+
+
 def _web_login_start(handler, body):
     ip = _web_ip(handler)
     if not _wa_rate_ok(f"wls:{ip}", 40, 600):
@@ -38537,10 +38566,11 @@ def _web_login_start(handler, body):
     if not username:
         return 503, {'error': 'server_error'}
     code, poll, now = secrets.token_urlsafe(18), secrets.token_urlsafe(32), int(time.time())
+    pick = _web_pick_new()
     db.web_logins.insert_one({'_id': code, 'poll': _web_hash(poll), 'status': 'pending', 'created_at': now,
-                              'expires_at': now + WEB_LOGIN_TTL, 'ip': ip, 'ref': _web_ref_of(body),
+                              'expires_at': now + WEB_LOGIN_TTL, 'ip': ip, 'ref': _web_ref_of(body), 'pick': pick,
                               'ua': str(handler.headers.get('User-Agent') or '')[:300]})
-    return 200, {'ok': True, 'poll': poll, 'link': f"https://t.me/{username}?start=wl_{code}", 'expires_in': WEB_LOGIN_TTL}
+    return 200, {'ok': True, 'poll': poll, 'pick': pick, 'link': f"https://t.me/{username}?start=wl_{code}", 'expires_in': WEB_LOGIN_TTL}
 
 
 def _web_login_poll(handler, body):
@@ -38559,7 +38589,8 @@ def _web_login_poll(handler, body):
         return 200, {'ok': True, 'status': 'approved'}
     if status == 'pending' and int(doc.get('expires_at') or 0) < now:
         status = 'expired'
-    return 200, {'ok': True, 'status': status if status in ('pending', 'denied') else 'expired'}
+    return 200, {'ok': True, 'status': status if status in ('pending', 'denied') else 'expired',
+                 **({'error': 'wrong_pick'} if doc.get('reason') == 'wrong_pick' else {})}
 
 
 def _web_login_claim(handler, body):
@@ -38608,16 +38639,16 @@ def _web_login_prompt(chat_id, uid, code, new_user=False):
         except Exception as exc:
             logger.debug(f'web login referral: {exc}')
     device = html.escape(_web_device(doc.get('ua')))
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton(bil(uid, "✅ نعم، أنا اللي أسجل الدخول", "✅ Yes, it's me signing in"), callback_data=f"wl_ok_{doc['_id']}"),
-               InlineKeyboardButton(bil(uid, "❌ لا، مو أنا", "❌ No, it's not me"), callback_data=f"wl_no_{doc['_id']}"))
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.row(*_web_pick_buttons(uid, 'wl', doc['_id'], doc.get('pick') or _web_pick_new()))
+    markup.row(InlineKeyboardButton(bil(uid, "❌ مو أنا", "❌ It's not me"), callback_data=f"wl_no_{doc['_id']}"))
     bot.send_message(chat_id, bil(uid,
         f"🔐 <b>تسجيل دخول للموقع</b>\n\nجهاز يطلب الدخول لحسابك:\n💻 <b>{device}</b>\n\n"
-        "اضغط «نعم» فقط لو أنت اللي تحاول تدخل الموقع الحين.\n"
-        "⚠️ لو أحد أرسل لك هذا الرابط، اضغط «لا» — بيقدر يدخل حسابك ويستخدم رصيدك.",
+        "🔢 <b>اضغط نفس الرقم اللي يظهر لك في الموقع.</b>\n"
+        "⚠️ لو ما تشوف رقم في الموقع، أو أحد أرسل لك هذا الرابط، اضغط «مو أنا» — بيقدر يدخل حسابك ويستخدم رصيدك.",
         f"🔐 <b>Website sign-in</b>\n\nA device wants to sign in to your account:\n💻 <b>{device}</b>\n\n"
-        "Tap “Yes” only if you are signing in to the website right now.\n"
-        "⚠️ If someone sent you this link, tap “No” — they could use your account and balance."),
+        "🔢 <b>Tap the same number the website is showing you.</b>\n"
+        "⚠️ If you don't see a number on the website, or someone sent you this link, tap “It's not me” — they could use your account and balance."),
         reply_markup=markup, parse_mode="HTML")
 
 
@@ -38628,17 +38659,28 @@ def _web_login_answer(call):
         n = db.web_sessions.delete_many({'user_id': uid}).deleted_count
         bot.answer_callback_query(call.id, bil(uid, f"تم تسجيل الخروج من {n} جهاز", f"Signed out of {n} device(s)"), show_alert=True)
         return
-    approve, code = call.data.startswith('wl_ok_'), call.data[6:]
+    code, picked = _web_pick_parse(call.data)
+    approve = picked is not None
     if is_user_banned(uid):
         bot.answer_callback_query(call.id)
         return
     now = int(time.time())
     claim = secrets.token_urlsafe(24)
+    wrong = False
+    if approve:
+        cur = db.web_logins.find_one({'_id': code}, {'pick': 1}) or {}
+        if int(cur.get('pick') or -1) != picked:
+            approve, wrong = False, True          # رقم غلط ← نرفض الطلب كامل (ما في محاولة ثانية)
     doc = db.web_logins.find_one_and_update({'_id': code, 'status': 'pending', 'expires_at': {'$gte': now}},
                                             {'$set': {'status': 'approved' if approve else 'denied', 'user_id': uid, 'answered_at': now,
-                                                      **({'claim': _web_hash(claim)} if approve else {})}})
+                                                      **({'claim': _web_hash(claim)} if approve else {}),
+                                                      **({'reason': 'wrong_pick'} if wrong else {})}})
     bot.answer_callback_query(call.id)
-    if not doc:
+    if doc and wrong:
+        text = bil(uid, "🛡 <b>الرقم غلط — ألغينا الطلب لحمايتك.</b>\nلو كنت أنت، ارجع للموقع واضغط «تسجيل الدخول» من جديد واختر نفس الرقم اللي يظهر لك.",
+                   "🛡 <b>Wrong number — we cancelled the request to protect you.</b>\nIf it was you, go back to the website, tap “Sign in” again and pick the number it shows.")
+        markup = None
+    elif not doc:
         text = bil(uid, "⌛ هذا الطلب انتهى أو تم استخدامه.", "⌛ This request has expired or was already used.")
         markup = None
     elif approve:
@@ -38822,12 +38864,30 @@ def _web_pw_valid(pw):
     return isinstance(pw, str) and 8 <= len(pw) <= 128
 
 
+def _web_login_alert(uid, via, handler):
+    """🔐 دخول جديد للموقع بالإيميل/Google على حساب مربوط بتيليجرام ← تنبيه في البوت لصاحب الحساب."""
+    if _web_is_uid(uid) or via not in ('email', 'google'):
+        return
+    dev = _web_device(handler.headers.get('User-Agent'))
+    ip = _web_ip(handler)
+    ip = (ip.rsplit('.', 1)[0] + '.•') if '.' in ip else ip[:9]
+    how = {'email': ('الإيميل وكلمة السر', 'email and password'), 'google': ('حساب Google', 'Google')}[via]
+    try:
+        bot.send_message(int(uid), bil(int(uid),
+            f"🔐 <b>دخول جديد لحسابك في الموقع</b>\n💻 {html.escape(dev)} · {html.escape(ip)}\n🔑 عن طريق {how[0]}\n\nلو مو أنت: ادخل الموقع ← حسابي ← «أجهزتي» وطلّع الجهاز، وغيّر كلمة السر.",
+            f"🔐 <b>New sign-in to your account on the website</b>\n💻 {html.escape(dev)} · {html.escape(ip)}\n🔑 With {how[1]}\n\nNot you? Open the website → Profile → “My devices”, sign that device out and change your password."),
+            parse_mode="HTML")
+    except Exception as exc:
+        logger.debug(f'web login alert: {exc}')
+
+
 def _web_session_new(handler, uid, via):
     now, token = int(time.time()), secrets.token_urlsafe(32)
     db.web_sessions.insert_one({'_id': _web_hash(token), 'user_id': int(uid), 'created_at': now, 'last_seen': now,
                                 'expires_at': now + WEB_SESSION_DAYS * 86400, 'ip': _web_ip(handler), 'via': via,
                                 'ua': str(handler.headers.get('User-Agent') or '')[:300]})
     _web_set_cookie(handler, token, WEB_SESSION_DAYS * 86400)
+    threading.Thread(target=_web_login_alert, args=(int(uid), via, handler), daemon=True).start()
 
 
 def _web_ref_of(body, uid=None):
@@ -38839,6 +38899,32 @@ def _web_ref_of(body, uid=None):
     if not u or u.get('is_banned') == 1:
         return None
     return int(u.get('web_merged_into') or ref)
+
+
+_B36 = '0123456789abcdefghijklmnopqrstuvwxyz'
+
+
+def _web_ref_code(uid):
+    """رقم الحساب ← كود قصير لرابط الدعوة (larastock.store/r/kd3f9x) بدل الأرقام الطويلة."""
+    uid = int(uid)
+    n, pre = (uid - WEB_UID_BASE, 'w') if _web_is_uid(uid) else (uid, '')
+    out = ''
+    while True:
+        n, r = divmod(n, 36)
+        out = _B36[r] + out
+        if not n:
+            break
+    return pre + out
+
+
+def _web_ref_decode(code):
+    code = str(code or '').strip().lower()
+    if not re.fullmatch(r'w?[0-9a-z]{1,14}', code):
+        return None
+    try:
+        return WEB_UID_BASE + int(code[1:], 36) if code.startswith('w') else int(code, 36)
+    except ValueError:
+        return None
 
 
 def _web_create_user(name, email_addr, lang, ref):
@@ -39031,7 +39117,7 @@ def _web_email_reset(handler, body):
     uid, err = _web_user_ok(acc['user_id'])
     if err:
         return 403, {'error': err}
-    db.web_sessions.delete_many({'user_id': uid, 'via': 'email'})       # كلمة السر تغيّرت: نطلّع الأجهزة الثانية
+    db.web_sessions.delete_many({'user_id': uid})       # كلمة السر تغيّرت: نطلّع كل الأجهزة (إيميل وGoogle وتيليجرام)
     _web_session_new(handler, uid, 'email')
     return 200, {'ok': True}
 
@@ -39142,9 +39228,10 @@ def _web_link_start(identity, body):
     if db.pending_deposits.find_one({'user_id': uid, 'status': 'pending', 'expires_at': {'$gt': int(time.time())}}, {'_id': 1}):
         return 409, {'error': 'link_pending_deposit'}
     code, poll, now = secrets.token_urlsafe(18), secrets.token_urlsafe(32), int(time.time())
-    db.web_links.insert_one({'_id': code, 'poll': _web_hash(poll), 'w_uid': uid, 'status': 'pending',
+    pick = _web_pick_new()
+    db.web_links.insert_one({'_id': code, 'poll': _web_hash(poll), 'w_uid': uid, 'status': 'pending', 'pick': pick,
                              'created_at': now, 'expires_at': now + WEB_LOGIN_TTL})
-    return 200, {'ok': True, 'poll': poll, 'link': f"https://t.me/{username}?start=wk_{code}", 'expires_in': WEB_LOGIN_TTL}
+    return 200, {'ok': True, 'poll': poll, 'pick': pick, 'link': f"https://t.me/{username}?start=wk_{code}", 'expires_in': WEB_LOGIN_TTL}
 
 
 def _web_link_poll(identity, body):
@@ -39213,22 +39300,33 @@ def _web_link_prompt(chat_id, uid, code, new_user=False):
         return
     if new_user:
         db.web_links.update_one({'_id': doc['_id'], 'tg_new': {'$exists': False}}, {'$set': {'tg_new': True}})
+    already = db.web_accounts.find_one({'user_id': int(uid)}, {'_id': 1})
+    if already:
+        # 🛡 حساب تيليجرام واحد ← إيميل واحد بس. يمنع إن أحد يرسل لك رابط ربط ويسيطر على رصيدك بإيميله
+        db.web_links.update_one({'_id': doc['_id'], 'status': 'pending'}, {'$set': {'status': 'failed', 'error': 'tg_already_linked'}})
+        bot.send_message(chat_id, bil(uid,
+            f"🛡 حسابك في تيليجرام مربوط من قبل بالإيميل <b>{html.escape(_web_mask_email(already['_id']))}</b>.\nما ينفع تربطه بحساب موقع ثاني.\n\n⚠️ لو أحد أرسل لك هذا الرابط، لا تثق فيه — الربط يعطيه دخول على رصيدك.",
+            f"🛡 Your Telegram account is already linked to <b>{html.escape(_web_mask_email(already['_id']))}</b>.\nIt can't be linked to another website account.\n\n⚠️ If someone sent you this link, don't trust it — linking would give them access to your balance."),
+            parse_mode="HTML")
+        return
     w = int(doc['w_uid'])
     wu = db.users.find_one({'user_id': w}) or {}
     acc = db.web_accounts.find_one({'user_id': w}, {'_id': 1}) or {}
     bal = round(_wa_fnum(wu.get('balance')), 2)
     orders = db.orders.count_documents({'user_id': w})
     email_txt = html.escape(_web_mask_email(acc.get('_id')) or '—')
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton(bil(uid, "✅ اربط الحسابين", "✅ Link the accounts"), callback_data=f"wk_ok_{doc['_id']}"),
-               InlineKeyboardButton(bil(uid, "❌ إلغاء", "❌ Cancel"), callback_data=f"wk_no_{doc['_id']}"))
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.row(*_web_pick_buttons(uid, 'wk', doc['_id'], doc.get('pick') or _web_pick_new()))
+    markup.row(InlineKeyboardButton(bil(uid, "❌ إلغاء", "❌ Cancel"), callback_data=f"wk_no_{doc['_id']}"))
     bot.send_message(chat_id, bil(uid,
         f"🔗 <b>ربط حساب الموقع بتيليجرام</b>\n\n✉️ الحساب: <b>{email_txt}</b>\n💰 رصيده: <b>${bal:.2f}</b>\n🧾 طلباته: <b>{orders}</b>\n\n"
-        "بعد الربط ينتقل رصيده وطلباته وأكواده لحسابك هنا، وتقدر تدخل الموقع بالإيميل أو بتيليجرام — نفس الحساب.\n"
-        "⚠️ الربط ما يتلغى بعدين، واضغط «اربط» فقط لو هذا حسابك أنت.",
+        "بعد الربط ينتقل رصيده وطلباته وأكواده لحسابك هنا، وتقدر تدخل الموقع بالإيميل أو بتيليجرام — نفس الحساب.\n\n"
+        "⚠️ <b>انتبه:</b> صاحب هذا الإيميل بيقدر يدخل حسابك ويصرف رصيدك. اربط فقط لو الإيميل إيميلك أنت وأنت اللي طلبت الربط من الموقع. لو أحد أرسل لك الرابط، اضغط «إلغاء».\n\n"
+        "🔢 <b>للربط: اضغط نفس الرقم اللي يظهر لك في الموقع.</b>",
         f"🔗 <b>Link your website account to Telegram</b>\n\n✉️ Account: <b>{email_txt}</b>\n💰 Balance: <b>${bal:.2f}</b>\n🧾 Orders: <b>{orders}</b>\n\n"
-        "After linking, its balance, orders and codes move to this Telegram account, and you can sign in to the website with email or Telegram — same account.\n"
-        "⚠️ Linking can't be undone. Tap “Link” only if this is your own account."),
+        "After linking, its balance, orders and codes move to this Telegram account, and you can sign in to the website with email or Telegram — same account.\n\n"
+        "⚠️ <b>Careful:</b> whoever owns this email will be able to open your account and spend your balance. Link only if it's your own email and you started the linking on the website. If someone sent you this link, tap “Cancel”.\n\n"
+        "🔢 <b>To link: tap the same number the website is showing you.</b>"),
         reply_markup=markup, parse_mode="HTML")
 
 
@@ -39244,6 +39342,8 @@ def _web_merge(w, t, tg_new=False):
             raise RuntimeError('busy')
         if db.pending_deposits.find_one({'user_id': w, 'status': 'pending', 'expires_at': {'$gt': int(time.time())}}, {'_id': 1}):
             raise RuntimeError('pending_deposit')
+        if db.web_accounts.find_one({'user_id': t}, {'_id': 1}):
+            raise RuntimeError('tg_already_linked')        # نفس الحماية وقت التنفيذ (لو انضغط رابطين بنفس الوقت)
         wu = db.users.find_one_and_update({'user_id': w, 'web_merged_into': {'$exists': False}},
                                           {'$set': {'web_merged_into': t, 'web_merging': True, 'balance': 0.0,
                                                     'ref_v2_earned': 0.0, 'ref_v2_purchase_earned': 0.0, 'ref_debt': 0.0}})
@@ -39294,15 +39394,25 @@ def _web_merge(w, t, tg_new=False):
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('wk_ok_', 'wk_no_')))
 def _web_link_answer(call):
     uid = call.from_user.id
-    approve, code = call.data.startswith('wk_ok_'), call.data[6:]
+    code, picked = _web_pick_parse(call.data)
+    approve = picked is not None
     bot.answer_callback_query(call.id)
     if is_user_banned(uid):
         return
     now = int(time.time())
+    wrong = False
+    if approve:
+        cur = db.web_links.find_one({'_id': code}, {'pick': 1}) or {}
+        if int(cur.get('pick') or -1) != picked:
+            approve, wrong = False, True
     doc = db.web_links.find_one_and_update({'_id': code, 'status': 'pending', 'expires_at': {'$gte': now}},
-                                           {'$set': {'status': 'linking' if approve else 'denied', 't_uid': uid, 'answered_at': now}})
+                                           {'$set': {'status': 'linking' if approve else 'denied', 't_uid': uid, 'answered_at': now,
+                                                     **({'error': 'wrong_pick'} if wrong else {})}})
     markup = None
-    if not doc:
+    if doc and wrong:
+        text = bil(uid, "🛡 <b>الرقم غلط — ألغينا الربط لحمايتك.</b>\nلو كنت أنت، ارجع للموقع وابدأ الربط من جديد واختر نفس الرقم اللي يظهر لك.",
+                   "🛡 <b>Wrong number — we cancelled the linking to protect you.</b>\nIf it was you, start again on the website and pick the number it shows.")
+    elif not doc:
         text = bil(uid, "⌛ هذا الطلب انتهى أو تم استخدامه.", "⌛ This request has expired or was already used.")
     elif not approve:
         text = bil(uid, "🛡 تم الإلغاء. ما تغيّر شي.", "🛡 Cancelled. Nothing changed.")
@@ -39319,10 +39429,14 @@ def _web_link_answer(call):
                 notify_admins(f"🔗 حساب موقع <code>{int(doc['w_uid'])}</code> انربط بتيليجرام <code>{uid}</code> (رصيد منقول ${res['balance']:.2f})")
         except Exception as exc:
             reason = str(exc)
-            db.web_links.update_one({'_id': code}, {'$set': {'status': 'failed', 'error': 'link_pending_deposit' if reason == 'pending_deposit' else 'server_error'}})
+            db.web_links.update_one({'_id': code}, {'$set': {'status': 'failed', 'error': {'pending_deposit': 'link_pending_deposit', 'tg_already_linked': 'tg_already_linked'}.get(reason, 'server_error')}})
             if reason == 'pending_deposit':
                 text = bil(uid, "⏳ عند حساب الموقع عملية دفع ما خلصت. كمّلها أو ألغها من الموقع وبعدين اربط.",
                            "⏳ The website account has a payment in progress. Finish or cancel it on the website, then link.")
+            elif reason == 'tg_already_linked':
+                db.web_links.update_one({'_id': code}, {'$set': {'error': 'tg_already_linked'}})
+                text = bil(uid, "🛡 حسابك في تيليجرام مربوط من قبل بإيميل ثاني. ما ينفع تربطه بحساب موقع ثاني.",
+                           "🛡 Your Telegram account is already linked to another email. It can't be linked to a second website account.")
             else:
                 logger.exception('web merge failed')
                 text = bil(uid, "❌ ما قدرنا نربط الحين. حاول بعد شوي أو تواصل مع الدعم.",
@@ -39436,6 +39550,9 @@ def _wa_maybe_handle_post(handler):
     if p in _WEB_PUBLIC_POST:
         if not _web_host_ok(handler):
             _json_resp(handler, 403, {'error': 'telegram_only'})
+            return True
+        if handler.headers.get('X-Lara-Web') != '1':      # 🛡 يمنع أي موقع ثاني يرسل طلبات دخول/تسجيل باسم زوارك
+            _json_resp(handler, 403, {'error': 'forbidden'})
             return True
         try:
             code, data = _WEB_PUBLIC_POST[p](handler, body)
@@ -39802,8 +39919,8 @@ def _web_head_html(page=None):
     tags = [
         '<base href="/">',
         '<link rel="manifest" href="/manifest.webmanifest">',
-        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">',
-        '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=2">',
+        '<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">',
         '<meta name="mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
@@ -39831,13 +39948,11 @@ def _web_icon(size, maskable=False):
     if key in _WEB_ICON_CACHE:
         return _WEB_ICON_CACHE[key]
     from PIL import Image
-    logo = Image.open(os.path.join(WEBAPP_DIR, 'logo.webp')).convert('RGBA')
-    canvas = Image.new('RGBA', (size, size), (8, 11, 18, 255))
-    inner = int(size * (0.62 if maskable else 0.8))
-    logo.thumbnail((inner, inner), Image.LANCZOS)
-    canvas.alpha_composite(logo, ((size - logo.width) // 2, (size - logo.height) // 2))
+    # الشعار بخلفيته كاملة (نفس شكل المتجر) — بدون إطار داكن حوله، عشان يبان كبير في التبويب والشاشة الرئيسية
+    logo = Image.open(os.path.join(WEBAPP_DIR, 'logo.webp')).convert('RGB')
+    canvas = logo.resize((size, size), Image.LANCZOS)
     buf = io.BytesIO()
-    canvas.convert('RGB').save(buf, 'PNG', optimize=True)
+    canvas.save(buf, 'PNG', optimize=True)
     _WEB_ICON_CACHE[key] = buf.getvalue()
     return _WEB_ICON_CACHE[key]
 
@@ -39863,9 +39978,9 @@ def _web_site_get(handler, raw):
         man = {'name': store, 'short_name': store[:12], 'start_url': '/?src=app', 'scope': '/', 'id': '/',
                'display': 'standalone', 'background_color': '#080b12', 'theme_color': '#080b12',
                'description': (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} store",
-               'icons': [{'src': '/icon-192.png', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-512.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-maskable.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
+               'icons': [{'src': '/icon-192.png?v=2', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-512.png?v=2', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-maskable.png?v=2', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
         _wa_send(handler, 200, json.dumps(man, ensure_ascii=False), 'application/manifest+json', 'public, max-age=3600')
         return True
     if raw == '/sw.js':
@@ -39889,6 +40004,14 @@ def _web_site_get(handler, raw):
         xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
                + ''.join(f"<url><loc>{html.escape(u)}</loc></url>" for u in urls) + '</urlset>')
         _wa_send(handler, 200, xml, 'application/xml', 'public, max-age=3600')
+        return True
+    if raw.startswith('/r/'):          # رابط الدعوة القصير ← المتجر مع حفظ صاحب الدعوة
+        ref = _web_ref_decode(raw[3:].strip('/'))
+        handler.send_response(302)
+        handler.send_header('Location', f"/?ref={ref}" if ref and db.users.find_one({'user_id': ref}, {'_id': 1}) else '/')
+        handler.send_header('Cache-Control', 'no-store')
+        handler.send_header('Content-Length', '0')
+        handler.end_headers()
         return True
     if raw.startswith('/p/'):
         pid = urllib.parse.unquote(raw[3:].strip('/'))[:120]
@@ -39945,7 +40068,7 @@ def _wa_static(handler, rel, page=None):
         site_flag = '1' if _web_host_ok(handler) else ''
         bot_name = re.sub(r'[^A-Za-z0-9_]', '', get_bot_username() or '')[:40]
         head, title = _web_head_html(page) if site_flag else ('', None)
-        vkey = (path, mtime, site_flag, bot_name, hashlib.sha1(head.encode()).hexdigest() if head else '')
+        vkey = (path, mtime, site_flag, bot_name, hashlib.sha1(head.encode(), usedforsecurity=False).hexdigest() if head else '')
         variant = _WA_HTML_VARIANTS.get(vkey)
         if not variant:
             raw_v = data.replace(b'<meta name="lara-site" content="">', f'<meta name="lara-site" content="{site_flag}">'.encode()) \
@@ -39966,12 +40089,19 @@ def _wa_static(handler, rel, page=None):
         data = hit[3]
         extra['Content-Encoding'] = 'gzip'
     if ext == 'html':
+        on_site = _web_host_ok(handler)
+        # 🛡 موقعك ما ينفتح داخل إطار موقع ثاني (clickjacking)؛ الميني أب يبقى ينفتح داخل تيليجرام ويب
+        frame = "frame-ancestors 'none'; " if on_site else "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; "
+        extra.update({'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+                      'Cross-Origin-Opener-Policy': 'same-origin-allow-popups'})
+        if on_site:
+            extra.update({'X-Frame-Options': 'DENY', 'Strict-Transport-Security': 'max-age=31536000'})
         extra.update({'Referrer-Policy': 'strict-origin-when-cross-origin',
                  'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdn.jsdelivr.net https://accounts.google.com; "
                                              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' data: https://fonts.gstatic.com; "
                                              "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https:; "
                                              "frame-src 'self' https://accounts.google.com; "
-                                             "object-src 'none'; base-uri 'self'; form-action 'none'")})
+                                             + frame + "object-src 'none'; base-uri 'self'; form-action 'none'")})
     return _wa_send(handler, 200, data, mime, cache, extra)
 
 
