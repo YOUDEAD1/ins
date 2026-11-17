@@ -634,6 +634,8 @@ def _json_resp(h, code, data):
         payload = gzip.compress(raw, compresslevel=5, mtime=0) if compressed else raw
         h.send_response(code)
         h.send_header('Content-Type', 'application/json; charset=utf-8')
+        for _hk, _hv in (getattr(h, '_extra_headers', None) or ()):
+            h.send_header(_hk, _hv)
         h.send_header('X-Bot-API-Revision', 'ext-purchase-v3')
         h.send_header('Access-Control-Allow-Origin', '*')
         h.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-API-Key, X-Shop-API-Key, Idempotency-Key, X-Telegram-Init-Data, If-None-Match')
@@ -6127,7 +6129,9 @@ def award_purchase_referral_reward(buyer_uid, product_name="", purchase_amount=0
         ref_record = _ref_find(buyer_uid)
         if not ref_record:
             return False  # المشتري ما له مُحيل
-        if ref_record.get('status') != 'active' or not _ref_countable(ref_record):
+        web_ok = (ref_record.get('web_ref') and _web_is_uid(buyer_uid) and ref_record.get('status') == 'pending'
+                  and ref_record.get('dv') != 'rejected')      # 🌐 إحالة من الموقع: الشراء الحقيقي هو الإثبات
+        if not web_ok and (ref_record.get('status') != 'active' or not _ref_countable(ref_record)):
             return False  # 🛡 الأدمن رفض هذي الإحالة (جهاز مكرر / وهمي)
         
         referrer_id = int(ref_record.get('referrer_id', 0))
@@ -9177,12 +9181,62 @@ class _bx_no_translate:
         _BX_KEEP_EXTRA.off = False
 
 
+# 🌐 حسابات الموقع بدون تيليجرام (إيميل / Google) لها أرقام من هذا المدى — خارج أرقام تيليجرام تماماً
+WEB_UID_BASE = 8_000_000_000_000_000
+WEB_UID_END = 9_000_000_000_000_000
+
+
+def _web_is_uid(uid):
+    try:
+        return WEB_UID_BASE <= int(uid) < WEB_UID_END
+    except (TypeError, ValueError):
+        return False
+
+
+def _web_inbox_capture(uid, method_name, params):
+    """رسالة من البوت لحساب موقع (ما عنده تيليجرام) ← تنحفظ في «رسائلي» داخل الموقع بدل ما تضيع."""
+    raw = str(params.get('text') or params.get('caption') or '')
+    text = html.unescape(re.sub(r'<[^>]+>', '', raw)).strip()
+    if method_name not in ('sendMessage',) and not text:
+        text = '📎'
+    now = int(time.time())
+    if text:
+        try:
+            db.web_inbox.insert_one({'user_id': int(uid), 'text': text[:4000], 'method': method_name, 'ts': now, 'read': False})
+        except Exception as exc:
+            logger.debug(f'web inbox: {exc}')
+    msg = {'message_id': random.randint(1, 2_000_000_000), 'date': now,
+           'chat': {'id': int(uid), 'type': 'private', 'first_name': ''}, 'text': text[:4000]}
+    return [msg] if method_name == 'sendMediaGroup' else msg
+
+
+def _web_tg_bypass(method_name, params):
+    """طلبات تيليجرام لأرقام حسابات الموقع ما تروح لتيليجرام (الرقم مو موجود هناك)."""
+    if not params:
+        return None
+    cid, member = params.get('chat_id'), params.get('user_id')
+    if cid is not None and _web_is_uid(cid):
+        if method_name.startswith('send') or method_name in ('copyMessage', 'forwardMessage'):
+            return _web_inbox_capture(int(cid), method_name, params)
+        if method_name.startswith(('edit', 'delete', 'pin', 'unpin', 'set')) or method_name == 'sendChatAction':
+            return True
+        raise telebot.apihelper.ApiTelegramException(method_name, None, {'ok': False, 'error_code': 400,
+                                                                         'description': 'Bad Request: chat not found'})
+    if member is not None and _web_is_uid(member) and method_name == 'getChatMember':
+        return {'status': 'member', 'user': {'id': int(member), 'is_bot': False, 'first_name': 'Web'}}
+    return None
+
+
 def _bx_make_request(token, method_name, method='get', params=None, files=None):
     try:
         if params and method_name in _BX_METHODS and token == TOKEN and not getattr(_BX_KEEP_EXTRA, 'off', False):
             params = _bx_apply(method_name, params)
     except Exception as exc:
         logger.debug(f'bot i18n skipped: {exc}')
+    if params and token == TOKEN:
+        bypass = _web_tg_bypass(method_name, params)
+        if bypass is not None:
+            return bypass
     return _bx_orig_make_request(token, method_name, method=method, params=params, files=files)
 
 
@@ -11029,6 +11083,18 @@ def start_handler(message):
     if is_user_banned(uid):
         bot.send_message(chat_id, get_text(uid, 'banned'), parse_mode="HTML")
         return
+
+    _wl_arg = '' if is_callback else ((message.text or '').split(maxsplit=1)[1:2] or [''])[0]
+    if _wl_arg.startswith('wl_') and chat_id == uid:
+        if get_user_data_full(uid):
+            _web_login_prompt(chat_id, uid, _wl_arg[3:])   # 🌐 تأكيد تسجيل الدخول للموقع
+            return
+        threading.Timer(2.5, lambda: _web_login_prompt(chat_id, uid, _wl_arg[3:], True)).start()   # زبون جديد: بعد التسجيل
+    if _wl_arg.startswith('wk_') and chat_id == uid:
+        if get_user_data_full(uid):
+            _web_link_prompt(chat_id, uid, _wl_arg[3:])      # 🔗 ربط حساب الموقع (إيميل/Google) بتيليجرام
+            return
+        threading.Timer(2.5, lambda: _web_link_prompt(chat_id, uid, _wl_arg[3:], True)).start()
 
     user = get_user_data_full(uid)
     user_was_new = (user is None)
@@ -35060,7 +35126,7 @@ def _wa_methods(lang):
     """طرق الشحن الظاهرة — نفس ترتيب وإخفاء قائمة الإيداع في البوت."""
     out = []
     try:
-        if not is_coin_hidden('stars'):
+        if not is_coin_hidden('stars') and not getattr(_WEB_CTX, 'on', False):     # الموقع الخارجي: بدون نجوم
             out.append({'id': 'stars', 'name': 'Telegram Stars', 'net': 'Stars', 'min': 0.1, 'max': 1000,
                         'rate': STARS_RATE, 'emoji_id': _wa_btn_emoji(lang, 'btn_stars')})
     except Exception:
@@ -35559,6 +35625,8 @@ def _wa_deposit_create(identity, body):
     if amount < m['min'] or amount > m['max']:
         return 400, {'error': 'amount_range', 'min': m['min'], 'max': m['max']}
 
+    if method == 'stars' and identity.get('_web'):
+        return 400, {'error': 'method_unavailable'}
     if method == 'stars':
         stars = int(amount * STARS_RATE)
         if stars < 1:
@@ -35861,7 +35929,9 @@ def _wa_referrals(identity, body):
     reward = _wa_fnum(get_referral_reward())
     in_batch, threshold, _left = ref_progress(uid)
     in_batch = in_batch % threshold
+    site = _web_public_url() if getattr(_WEB_CTX, 'on', False) else None
     return 200, {'ok': True, 'link': f"https://t.me/{get_bot_username()}?start={uid}",
+                 **({'web_link': f"{site}?ref={uid}"} if site else {}),
                  'pending': pending, 'active': active, 'left': left, 'clicks': clicks,
                  'earned_refs': round(_wa_fnum(u.get('ref_v2_earned')), 2),
                  'ref_debt': round(_wa_fnum(u.get('ref_debt')), 4),
@@ -37249,6 +37319,8 @@ except ValueError:
 
 def _wa_admin(identity):
     uid = identity['id']
+    if identity.get('_web'):
+        return None, (403, {'error': 'telegram_only'})
     if not _is_admin_check(uid):
         return None, (403, {'error': 'forbidden'})
     # 🛡 لوحة الإدارة تحتاج جلسة حديثة (ساعة افتراضياً): رابط/جلسة قديمة مسروقة ما تفتح بيانات العملاء.
@@ -38324,10 +38396,970 @@ _WA_HEAVY['/webapp/admin/vc'] = 120
 
 
 
+# ═══════════ 🌐 الموقع الخارجي (نفس المتجر، خارج تيليجرام) ═══════════
+# العنوان: https://<سيرفرك>/shop/  (أو WEBSITE_URL لو عندك دومين خاص).
+# تسجيل الدخول: الموقع يعطي رابط للبوت ← الزبون يضغط «تأكيد» في البوت ← الموقع يدخل لحاله.
+# الجلسة: كوكي HttpOnly + SameSite=Strict لمدة 30 يوم، ولازم ترويسة X-Lara-Web (حماية CSRF).
+# على الموقع: لا نجوم تيليجرام، ولوحة الإدارة والتحقق من الإحالات داخل تيليجرام فقط.
+WEB_COOKIE = 'lara_ws'
+WEB_SESSION_DAYS = 30
+WEB_LOGIN_TTL = 300
+_WEB_CTX = threading.local()
+_WEB_TELEGRAM_ONLY = ('/webapp/verify', '/webapp/verify/challenge')
+
+
+_WEB_PLATFORM_HOSTS = ('.onrender.com', '.railway.app', '.koyeb.app', '.herokuapp.com', '.fly.dev')
+
+
+def _web_site_host():
+    """دومين الموقع الخارجي: نفس «الرابط الأساسي» لو كان دومينك الخاص.
+    عنوان الاستضافة المجاني (xxx.onrender.com) ما يفتح الموقع — يشتغل عليه الـ API والميني أب فقط."""
+    src, url = _baseurl_source()
+    if not url or not src or src.startswith('auto:'):
+        return None
+    host = (urllib.parse.urlparse(url).hostname or '').lower()
+    if not host or host.endswith(_WEB_PLATFORM_HOSTS):
+        return None
+    return host
+
+
+def _web_host_ok(handler):
+    site = _web_site_host()
+    host = (handler.headers.get('Host') or '').split(':')[0].strip().lower()
+    return bool(site and host) and host in (site, 'www.' + site) or (bool(site) and site == 'www.' + host)
+
+
+def _web_public_url():
+    site = _web_site_host()
+    if not site:
+        return None
+    base = _get_server_url() or ''
+    return (base.rstrip('/') if urllib.parse.urlparse(base).hostname == site else 'https://' + site) + '/'
+
+
+def _web_hash(value):
+    return hashlib.sha256(('lara-web\0' + str(value)).encode()).hexdigest()
+
+
+def _web_ip(handler):
+    return (handler.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or handler.client_address[0])[:64]
+
+
+def _web_cookie(handler):
+    raw = handler.headers.get('Cookie') or ''
+    for part in raw.split(';'):
+        name, _, value = part.strip().partition('=')
+        if name == WEB_COOKIE and 20 <= len(value) <= 100 and re.fullmatch(r'[A-Za-z0-9_\-]+', value):
+            return value
+    return None
+
+
+def _web_set_cookie(handler, token, max_age):
+    host = (handler.headers.get('Host') or '').split(':')[0]
+    secure = host not in ('localhost', '127.0.0.1')
+    handler._extra_headers.append(('Set-Cookie', f"{WEB_COOKIE}={token}; Path=/; Max-Age={int(max_age)}; HttpOnly; SameSite=Strict"
+                                                 + ('; Secure' if secure else '')))
+
+
+def _web_identity(handler):
+    """جلسة الموقع ⇒ نفس شكل بيانات تيليجرام اللي تستخدمها كل الواجهات."""
+    if handler.headers.get('X-Lara-Web') != '1' or not _web_host_ok(handler):
+        return None
+    token = _web_cookie(handler)
+    if not token:
+        return None
+    now = int(time.time())
+    doc = db.web_sessions.find_one({'_id': _web_hash(token)})
+    if not doc or int(doc.get('expires_at') or 0) < now:
+        return None
+    u = db.users.find_one({'user_id': doc['user_id']}, {'user_id': 1, 'name': 1, 'first_name': 1, 'username': 1, 'web_merged_into': 1})
+    if u and u.get('web_merged_into'):          # حساب موقع انربط بتيليجرام ← الجلسة تكمل على الحساب الموحّد
+        db.web_sessions.update_one({'_id': doc['_id']}, {'$set': {'user_id': int(u['web_merged_into'])}})
+        u = db.users.find_one({'user_id': int(u['web_merged_into'])}, {'user_id': 1, 'name': 1, 'first_name': 1, 'username': 1})
+    if not u:
+        return None
+    _WEB_CTX.token = token
+    if now - int(doc.get('last_seen') or 0) > 600:
+        db.web_sessions.update_one({'_id': doc['_id']}, {'$set': {'last_seen': now, 'ip': _web_ip(handler)}})
+    return {'id': int(u['user_id']), 'first_name': str(u.get('first_name') or u.get('name') or ''), 'last_name': '',
+            'username': str(u.get('username') or ''), 'language_code': '', 'photo_url': '',
+            '_start_param': '', '_auth_date': now, '_web': True}
+
+
+def _web_device(ua):
+    ua = str(ua or '')
+    browser = next((n for n, rx in (('Edge', r'Edg/'), ('Opera', r'OPR/|Opera'), ('Samsung Internet', r'SamsungBrowser'),
+                                    ('Firefox', r'Firefox/'), ('Chrome', r'Chrome/|CriOS/'), ('Safari', r'Safari/'))
+                    if re.search(rx, ua)), 'Browser')
+    system = next((n for n, rx in (('iPhone', r'iPhone'), ('iPad', r'iPad'), ('Android', r'Android'), ('Windows', r'Windows'),
+                                   ('Mac', r'Macintosh|Mac OS'), ('Linux', r'Linux')) if re.search(rx, ua)), '')
+    return f"{browser} · {system}" if system else browser
+
+
+def _web_login_start(handler, body):
+    ip = _web_ip(handler)
+    if not _wa_rate_ok(f"wls:{ip}", 40, 600):
+        return 429, {'error': 'rate_limited'}
+    username = get_bot_username()
+    if not username:
+        return 503, {'error': 'server_error'}
+    code, poll, now = secrets.token_urlsafe(18), secrets.token_urlsafe(32), int(time.time())
+    db.web_logins.insert_one({'_id': code, 'poll': _web_hash(poll), 'status': 'pending', 'created_at': now,
+                              'expires_at': now + WEB_LOGIN_TTL, 'ip': ip, 'ref': _web_ref_of(body),
+                              'ua': str(handler.headers.get('User-Agent') or '')[:300]})
+    return 200, {'ok': True, 'poll': poll, 'link': f"https://t.me/{username}?start=wl_{code}", 'expires_in': WEB_LOGIN_TTL}
+
+
+def _web_login_poll(handler, body):
+    if not _wa_rate_ok(f"wlp:{_web_ip(handler)}", 240):
+        return 429, {'error': 'rate_limited'}
+    poll = str(body.get('poll') or '')[:100]
+    doc = db.web_logins.find_one({'poll': _web_hash(poll)}) if poll else None
+    now = int(time.time())
+    if not doc:
+        return 200, {'ok': True, 'status': 'expired'}
+    status = doc.get('status')
+    if status == 'approved':
+        if not db.web_logins.find_one_and_update({'_id': doc['_id'], 'status': 'approved'}, {'$set': {'status': 'used', 'used_at': now}}):
+            return 200, {'ok': True, 'status': 'expired'}
+        _web_session_new(handler, int(doc['user_id']), 'telegram')
+        return 200, {'ok': True, 'status': 'approved'}
+    if status == 'pending' and int(doc.get('expires_at') or 0) < now:
+        status = 'expired'
+    return 200, {'ok': True, 'status': status if status in ('pending', 'denied') else 'expired'}
+
+
+def _web_logout(handler, body):
+    token = _web_cookie(handler)
+    if token:
+        db.web_sessions.delete_one({'_id': _web_hash(token)})
+    _web_set_cookie(handler, 'x' * 24, 0)
+    return 200, {'ok': True}
+
+
+_WEB_PUBLIC_POST = {'/webapp/web/login/start': _web_login_start, '/webapp/web/login/poll': _web_login_poll,
+                    '/webapp/web/logout': _web_logout}
+for _wp in _WEB_PUBLIC_POST:          # مسجّلة في جدول المسارات (تُخدم قبل فحص الهوية)
+    _WA_POST_ROUTES[_wp] = lambda identity, body: (400, {'error': 'bad_request'})
+
+
+def _web_login_prompt(chat_id, uid, code, new_user=False):
+    """رسالة البوت: تأكيد تسجيل الدخول للموقع."""
+    doc = db.web_logins.find_one({'_id': str(code)[:40]})
+    if not doc or doc.get('status') != 'pending' or int(doc.get('expires_at') or 0) < time.time():
+        bot.send_message(chat_id, bil(uid, "⌛ رابط تسجيل الدخول انتهى. ارجع للموقع واضغط «تسجيل الدخول» من جديد.",
+                                      "⌛ This sign-in link has expired. Go back to the website and tap “Sign in” again."))
+        return
+    if new_user and doc.get('ref') and int(doc['ref']) != uid:
+        try:
+            register_new_referral(uid, int(doc['ref']))     # جاي من رابط إحالة الموقع ← إحالة تيليجرام عادية (بنفس التحقق)
+        except Exception as exc:
+            logger.debug(f'web login referral: {exc}')
+    device = html.escape(_web_device(doc.get('ua')))
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton(bil(uid, "✅ نعم، أنا اللي أسجل الدخول", "✅ Yes, it's me signing in"), callback_data=f"wl_ok_{doc['_id']}"),
+               InlineKeyboardButton(bil(uid, "❌ لا، مو أنا", "❌ No, it's not me"), callback_data=f"wl_no_{doc['_id']}"))
+    bot.send_message(chat_id, bil(uid,
+        f"🔐 <b>تسجيل دخول للموقع</b>\n\nجهاز يطلب الدخول لحسابك:\n💻 <b>{device}</b>\n\n"
+        "اضغط «نعم» فقط لو أنت اللي تحاول تدخل الموقع الحين.\n"
+        "⚠️ لو أحد أرسل لك هذا الرابط، اضغط «لا» — بيقدر يدخل حسابك ويستخدم رصيدك.",
+        f"🔐 <b>Website sign-in</b>\n\nA device wants to sign in to your account:\n💻 <b>{device}</b>\n\n"
+        "Tap “Yes” only if you are signing in to the website right now.\n"
+        "⚠️ If someone sent you this link, tap “No” — they could use your account and balance."),
+        reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('wl_ok_', 'wl_no_')) or call.data == 'wl_outall')
+def _web_login_answer(call):
+    uid = call.from_user.id
+    if call.data == 'wl_outall':
+        n = db.web_sessions.delete_many({'user_id': uid}).deleted_count
+        bot.answer_callback_query(call.id, bil(uid, f"تم تسجيل الخروج من {n} جهاز", f"Signed out of {n} device(s)"), show_alert=True)
+        return
+    approve, code = call.data.startswith('wl_ok_'), call.data[6:]
+    if is_user_banned(uid):
+        bot.answer_callback_query(call.id)
+        return
+    now = int(time.time())
+    doc = db.web_logins.find_one_and_update({'_id': code, 'status': 'pending', 'expires_at': {'$gte': now}},
+                                            {'$set': {'status': 'approved' if approve else 'denied', 'user_id': uid, 'answered_at': now}})
+    bot.answer_callback_query(call.id)
+    if not doc:
+        text = bil(uid, "⌛ هذا الطلب انتهى أو تم استخدامه.", "⌛ This request has expired or was already used.")
+        markup = None
+    elif approve:
+        text = bil(uid, "✅ <b>تم تسجيل الدخول</b>\nارجع للموقع، بيفتح حسابك خلال ثواني.",
+                   "✅ <b>Signed in</b>\nGo back to the website — your account opens in a few seconds.")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(bil(uid, "🚪 تسجيل الخروج من كل الأجهزة", "🚪 Sign out of all devices"), callback_data='wl_outall'))
+    else:
+        text = bil(uid, "🛡 تم الرفض. ما أحد دخل حسابك.", "🛡 Declined. Nobody signed in to your account.")
+        markup = None
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+
+
+def _web_indexes():
+    try:
+        db.web_logins.create_index('poll')
+        db.web_logins.create_index('created_at', expireAfterSeconds=3600)
+        db.web_sessions.create_index('user_id')
+        db.web_sessions.create_index('expires_at', expireAfterSeconds=0)
+    except Exception as exc:
+        logger.debug(f'web indexes: {exc}')
+
+
+_web_indexes()
+
+
+# ═══════════ 🌐 حسابات الموقع: إيميل وكلمة سر، Google، ربط تيليجرام ودمج الرصيد ═══════════
+# المتغيرات (في Render → Environment، ما تنكتب في الكود):
+#   BREVO_API_KEY + MAIL_FROM        إرسال الإيميلات (أكواد التحقق + الإيصالات) عبر Brevo — يشتغل على Render المجاني
+#   أو SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS (+MAIL_FROM)  — Render المجاني يمنع منافذ SMTP، فهذا للخطط المدفوعة
+#   GOOGLE_CLIENT_ID                 زر «المتابعة بحساب Google»
+#   MAIL_FROM_NAME (اختياري)         اسم المرسل (افتراضياً اسم المتجر)
+WEB_CODE_TTL = 600
+WEB_CODE_TRIES = 5
+_WEB_EMAIL_RE = re.compile(r'^[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63})*\.[A-Za-z]{2,24}$')
+_WEB_MERGE_SKIP = {'users', 'web_accounts', 'web_sessions', 'web_logins', 'web_links', 'web_codes', 'web_merges',
+                   'referrals_v2', 'counters', 'bot_i18n', 'webapp_i18n', 'settings', 'custom_texts'}
+_WEB_GUEST_POST = ('/webapp/catalog', '/webapp/tr', '/webapp/desc', '/webapp/uidict', '/webapp/terms')
+_WEB_RECEIPT_PATHS = ('/webapp/buy', '/webapp/cart/checkout', '/webapp/cart/status')
+
+
+def _web_email_norm(value):
+    e = str(value or '').strip().lower()[:254]
+    return e if _WEB_EMAIL_RE.match(e) else ''
+
+
+def _web_mask_email(e):
+    name, _, dom = str(e or '').partition('@')
+    if not dom:
+        return ''
+    return (name[:2] + '•' * max(1, min(6, len(name) - 2))) + '@' + dom
+
+
+def _web_mail_cfg():
+    return {'brevo': (os.getenv('BREVO_API_KEY') or '').strip(),
+            'from': (os.getenv('MAIL_FROM') or os.getenv('SMTP_FROM') or os.getenv('SMTP_USER') or '').strip(),
+            'name': (os.getenv('MAIL_FROM_NAME') or WEBAPP_STORE_NAME or 'LARA STOCK').strip()[:60],
+            'host': (os.getenv('SMTP_HOST') or '').strip(), 'port': int(os.getenv('SMTP_PORT') or 587),
+            'user': (os.getenv('SMTP_USER') or '').strip(), 'pass': (os.getenv('SMTP_PASS') or '').strip()}
+
+
+def _web_mail_ready():
+    c = _web_mail_cfg()
+    return bool(_web_email_norm(c['from']) and (c['brevo'] or (c['host'] and c['user'] and c['pass'])))
+
+
+def _web_google_id():
+    v = (os.getenv('GOOGLE_CLIENT_ID') or '').strip()
+    return v if re.fullmatch(r'[0-9A-Za-z\-_.]{10,200}\.apps\.googleusercontent\.com', v) else ''
+
+
+def _web_auth_options():
+    return {'telegram': bool(get_bot_username()), 'email': _web_mail_ready(), 'google': _web_google_id()}
+
+
+def _web_send_mail(to, subject, text, html_body):
+    c = _web_mail_cfg()
+    if c['brevo']:
+        r = requests.post('https://api.brevo.com/v3/smtp/email', timeout=20,
+                          headers={'api-key': c['brevo'], 'accept': 'application/json', 'content-type': 'application/json'},
+                          json={'sender': {'email': c['from'], 'name': c['name']}, 'to': [{'email': to}],
+                                'subject': subject, 'htmlContent': html_body, 'textContent': text})
+        if r.status_code >= 300:
+            raise RuntimeError(f'Brevo {r.status_code}: {r.text[:200]}')
+        return True
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+    from email.utils import formataddr
+    msg = EmailMessage()
+    msg['Subject'], msg['From'], msg['To'] = subject, formataddr((c['name'], c['from'])), to
+    msg.set_content(text)
+    msg.add_alternative(html_body, subtype='html')
+    ctx = ssl.create_default_context()
+    if c['port'] == 465:
+        with smtplib.SMTP_SSL(c['host'], 465, context=ctx, timeout=20) as s:
+            s.login(c['user'], c['pass'])
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(c['host'], c['port'], timeout=20) as s:
+            s.starttls(context=ctx)
+            s.login(c['user'], c['pass'])
+            s.send_message(msg)
+    return True
+
+
+def _web_mail_page(lang, title, paragraphs, code=None, rows=None, foot=None):
+    """قالب إيميل بسيط باسم المتجر (يشتغل في Gmail و Outlook والجوال)."""
+    rtl = lang in ('ar', 'fa')
+    brand = html.escape(WEBAPP_STORE_NAME or 'LARA STOCK')
+    body = ''.join(f'<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#2b3140">{p}</p>' for p in paragraphs)
+    if code:
+        body += (f'<div style="margin:22px 0;padding:18px;border-radius:14px;background:#f1f4fb;text-align:center;'
+                 f'font:700 34px/1 monospace;letter-spacing:10px;color:#101522" dir="ltr">{html.escape(code)}</div>')
+    if rows:
+        body += '<table role="presentation" width="100%" style="border-collapse:collapse;margin:8px 0 16px">' + ''.join(
+            f'<tr><td style="padding:9px 0;border-bottom:1px solid #e6e9f0;color:#6a7285;font-size:13px">{html.escape(k)}</td>'
+            f'<td style="padding:9px 0;border-bottom:1px solid #e6e9f0;font-size:14px;color:#101522;text-align:{"left" if rtl else "right"}" dir="ltr">{v}</td></tr>'
+            for k, v in rows) + '</table>'
+    if foot:
+        body += f'<p style="margin:0;color:#8a91a3;font-size:12px">{html.escape(foot)}</p>'
+    return (f'<!doctype html><html lang="{lang}" dir="{"rtl" if rtl else "ltr"}"><body style="margin:0;background:#eef1f6;'
+            f'font-family:-apple-system,Segoe UI,Roboto,Tahoma,Arial,sans-serif"><table role="presentation" width="100%"><tr><td align="center" style="padding:28px 12px">'
+            f'<table role="presentation" width="100%" style="max-width:520px;background:#fff;border-radius:18px;padding:28px">'
+            f'<tr><td><div style="font:700 15px/1 sans-serif;letter-spacing:.5px;color:#3d6bff;margin-bottom:18px">{brand}</div>'
+            f'<h1 style="font-size:21px;margin:0 0 14px;color:#101522">{html.escape(title)}</h1>{body}'
+            f'</td></tr></table></td></tr></table></body></html>')
+
+
+def _web_mail_async(to, subject, text, html_body):
+    def work():
+        try:
+            _web_send_mail(to, subject, text, html_body)
+        except Exception as exc:
+            logger.warning(f'🌐 website email to {_web_mask_email(to)} failed: {exc}')
+    threading.Thread(target=work, daemon=True, name='web-mail').start()
+
+
+_WEB_MAIL_TX = {
+    'signup': {'ar': ('كود تفعيل حسابك', 'اكتب هذا الكود في الموقع عشان تفعّل حسابك. ينتهي خلال 10 دقائق.'),
+               'en': ('Your verification code', 'Enter this code on the website to activate your account. It expires in 10 minutes.')},
+    'reset': {'ar': ('كود تغيير كلمة السر', 'اكتب هذا الكود في الموقع عشان تختار كلمة سر جديدة. ينتهي خلال 10 دقائق.'),
+              'en': ('Your password reset code', 'Enter this code on the website to choose a new password. It expires in 10 minutes.')},
+}
+
+
+def _web_send_code(email_addr, purpose, code, lang):
+    lang = 'ar' if lang in ('ar', 'fa') else 'en'
+    title, line = _WEB_MAIL_TX[purpose][lang]
+    note = ('لو ما طلبت هذا الكود، تجاهل الإيميل وحسابك بأمان.' if lang == 'ar'
+            else "If you didn't ask for this code, ignore this email — your account is safe.")
+    brand = WEBAPP_STORE_NAME or 'LARA STOCK'
+    _web_mail_async(email_addr, f"{code} — {title} · {brand}", f"{title}\n\n{code}\n\n{line}\n{note}",
+                    _web_mail_page(lang, title, [html.escape(line)], code=code, foot=note))
+
+
+def _web_pw_hash(pw):
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac('sha256', pw.encode('utf-8'), salt, 240000)
+    return f"pbkdf2$240000${salt.hex()}${dk.hex()}"
+
+
+def _web_pw_ok(pw, stored):
+    try:
+        kind, rounds, salt, digest = str(stored or '').split('$')
+        if kind != 'pbkdf2':
+            return False
+        dk = hashlib.pbkdf2_hmac('sha256', str(pw).encode('utf-8'), bytes.fromhex(salt), int(rounds))
+        return hmac.compare_digest(dk.hex(), digest)
+    except Exception:
+        return False
+
+
+def _web_pw_valid(pw):
+    return isinstance(pw, str) and 8 <= len(pw) <= 128
+
+
+def _web_session_new(handler, uid, via):
+    now, token = int(time.time()), secrets.token_urlsafe(32)
+    db.web_sessions.insert_one({'_id': _web_hash(token), 'user_id': int(uid), 'created_at': now, 'last_seen': now,
+                                'expires_at': now + WEB_SESSION_DAYS * 86400, 'ip': _web_ip(handler), 'via': via,
+                                'ua': str(handler.headers.get('User-Agent') or '')[:300]})
+    _web_set_cookie(handler, token, WEB_SESSION_DAYS * 86400)
+
+
+def _web_ref_of(body, uid=None):
+    raw = str(body.get('ref') or '').strip()
+    if not raw.isdigit() or len(raw) > 20 or (uid is not None and int(raw) == int(uid)):
+        return None
+    ref = int(raw)
+    u = db.users.find_one({'user_id': ref}, {'is_banned': 1, 'web_merged_into': 1})
+    if not u or u.get('is_banned') == 1:
+        return None
+    return int(u.get('web_merged_into') or ref)
+
+
+def _web_create_user(name, email_addr, lang, ref):
+    """حساب جديد من الموقع (بدون تيليجرام) — نفس شكل حسابات البوت، برقم من مدى الموقع."""
+    for _ in range(5):
+        seq = db.counters.find_one_and_update({'_id': 'web_uid'}, {'$inc': {'seq': 1}}, upsert=True, return_document=True)
+        uid = WEB_UID_BASE + int(seq.get('seq') or 1)
+        if not db.users.find_one({'user_id': uid}, {'_id': 1}):
+            break
+    else:
+        raise RuntimeError('web uid allocation failed')
+    site_lang = lang if lang in _wa_site_langs() else None
+    db.users.insert_one({'user_id': uid, 'name': _wa_plain(name, 60) or email_addr.split('@')[0][:30],
+                         'first_name': _wa_plain(name, 60), 'username': '', 'balance': 0.0, 'ref_v2_earned': 0.0,
+                         'lang_chosen': True, 'lang': 'ar' if lang == 'ar' else 'en', 'ui_lang': site_lang,
+                         'is_admin': 0, 'is_banned': 0, 'web_only': True, 'email': email_addr, 'source': 'website',
+                         'joined_at': datetime.datetime.utcnow()})
+    _invalidate_user_cache(uid)
+    if ref and int(ref) != uid:
+        try:
+            if register_new_referral(uid, int(ref)):
+                # إحالة من الموقع: ما تنحسب إلا بعد ربط تيليجرام والتحقق، أو مكافأة الشراء عند الشراء
+                db.referrals_v2.update_one({'invited_id': uid}, {'$set': {'web_ref': True}})
+        except Exception as exc:
+            logger.debug(f'web referral: {exc}')
+    try:
+        notify_admins(f"🌐 <b>حساب جديد من الموقع</b>\n👤 {html.escape(_wa_plain(name, 60) or '—')}\n✉️ <code>{html.escape(_web_mask_email(email_addr))}</code>\n🆔 <code>{uid}</code>"
+                      + (f"\n👥 بإحالة من <code>{int(ref)}</code>" if ref else ''))
+    except Exception:
+        pass
+    return uid
+
+
+def _web_lang(body):
+    lang = str(body.get('lang') or '')[:5]
+    return lang if lang in ('ar', 'en', 'es', 'ru', 'zh') or lang in BOT_XLANGS else 'en'
+
+
+def _web_code_issue(email_addr, purpose, lang, data=None):
+    now = int(time.time())
+    key = f"{purpose}:{email_addr}"
+    old = db.web_codes.find_one({'_id': key})
+    if old and now - int(old.get('sent_at') or 0) < 55:
+        return {'ok': True, 'sent': True, 'resend_in': 55 - (now - int(old.get('sent_at') or 0))}
+    if old and int(old.get('sends') or 0) >= 6 and now - int(old.get('first_at') or now) < 3600:
+        return {'error': 'too_many'}
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    first = int(old.get('first_at') or now) if old and now - int(old.get('first_at') or now) < 3600 else now
+    sends = (int(old.get('sends') or 0) + 1) if first != now else 1
+    db.web_codes.replace_one({'_id': key}, {'_id': key, 'code': _web_hash(code), 'tries': 0, 'sent_at': now, 'first_at': first,
+                                            'sends': sends, 'expires_at': now + WEB_CODE_TTL, 'data': data or {}}, upsert=True)
+    _web_send_code(email_addr, purpose, code, lang)
+    return {'ok': True, 'sent': True, 'resend_in': 55}
+
+
+def _web_code_check(email_addr, purpose, code):
+    """يرجّع (doc, None) لو الكود صحيح، أو (None, خطأ)."""
+    code = re.sub(r'\D', '', str(code or ''))[:6]
+    key = f"{purpose}:{email_addr}"
+    doc = db.web_codes.find_one({'_id': key})
+    now = int(time.time())
+    if not doc or int(doc.get('expires_at') or 0) < now:
+        return None, 'code_expired'
+    if int(doc.get('tries') or 0) >= WEB_CODE_TRIES:
+        return None, 'code_expired'
+    if len(code) != 6 or not hmac.compare_digest(_web_hash(code), str(doc.get('code') or '')):
+        db.web_codes.update_one({'_id': key}, {'$inc': {'tries': 1}})
+        return None, 'bad_code'
+    if not db.web_codes.find_one_and_delete({'_id': key, 'code': doc['code']}):
+        return None, 'code_expired'
+    return doc, None
+
+
+def _web_user_ok(uid):
+    u = db.users.find_one({'user_id': int(uid)}, {'is_banned': 1, 'web_merged_into': 1})
+    if not u:
+        return None, 'no_account'
+    if u.get('web_merged_into'):
+        return _web_user_ok(u['web_merged_into'])
+    if u.get('is_banned') == 1:
+        return None, 'banned'
+    return int(uid), None
+
+
+def _web_email_signup(handler, body):
+    ip = _web_ip(handler)
+    if not _wa_rate_ok(f"wes:{ip}", 12, 600):
+        return 429, {'error': 'too_many'}
+    if not _web_mail_ready():
+        return 503, {'error': 'unavailable'}
+    email_addr, pw = _web_email_norm(body.get('email')), body.get('password')
+    name = _wa_plain(body.get('name'), 60)
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    if not _web_pw_valid(pw):
+        return 400, {'error': 'weak_password'}
+    acc = db.web_accounts.find_one({'_id': email_addr})
+    if acc:
+        return 409, {'error': 'email_taken' if acc.get('pw') else 'use_google'}
+    if not _wa_rate_ok(f"wese:{email_addr}", 6, 3600):
+        return 429, {'error': 'too_many'}
+    out = _web_code_issue(email_addr, 'signup', _web_lang(body),
+                          {'pw': _web_pw_hash(pw), 'name': name, 'ref': _web_ref_of(body), 'lang': _web_lang(body)})
+    return (429 if out.get('error') else 200), out
+
+
+def _web_email_verify(handler, body):
+    if not _wa_rate_ok(f"wev:{_web_ip(handler)}", 30, 600):
+        return 429, {'error': 'too_many'}
+    email_addr = _web_email_norm(body.get('email'))
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    doc, err = _web_code_check(email_addr, 'signup', body.get('code'))
+    if err:
+        return 400, {'error': err}
+    data = doc.get('data') or {}
+    acc = db.web_accounts.find_one({'_id': email_addr})
+    if acc:
+        uid = int(acc['user_id'])
+        if not acc.get('pw'):
+            db.web_accounts.update_one({'_id': email_addr}, {'$set': {'pw': data.get('pw'), 'verified': True}})
+    else:
+        uid = _web_create_user(data.get('name') or '', email_addr, data.get('lang') or 'en', data.get('ref'))
+        try:
+            db.web_accounts.insert_one({'_id': email_addr, 'user_id': uid, 'pw': data.get('pw'), 'verified': True,
+                                        'created_at': int(time.time()), 'via': 'email'})
+        except Exception:
+            acc = db.web_accounts.find_one({'_id': email_addr}) or {}
+            uid = int(acc.get('user_id') or uid)
+    uid, err = _web_user_ok(uid)
+    if err:
+        return 403, {'error': err}
+    _web_session_new(handler, uid, 'email')
+    return 200, {'ok': True}
+
+
+def _web_email_login(handler, body):
+    ip = _web_ip(handler)
+    email_addr = _web_email_norm(body.get('email'))
+    if not _wa_rate_ok(f"wel:{ip}", 20, 600) or (email_addr and not _wa_rate_ok(f"wele:{email_addr}", 8, 900)):
+        return 429, {'error': 'too_many'}
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    acc = db.web_accounts.find_one({'_id': email_addr})
+    if acc and not acc.get('pw') and acc.get('google_sub'):
+        return 400, {'error': 'use_google'}
+    if not acc or not _web_pw_ok(body.get('password'), acc.get('pw')):
+        if not acc:
+            _web_pw_ok('x', 'pbkdf2$240000$00$00')     # نفس الوقت تقريباً، ما يكشف لو الإيميل مسجل
+        return 401, {'error': 'bad_login'}
+    uid, err = _web_user_ok(acc['user_id'])
+    if err:
+        return 403, {'error': err}
+    _web_session_new(handler, uid, 'email')
+    return 200, {'ok': True}
+
+
+def _web_email_forgot(handler, body):
+    if not _wa_rate_ok(f"wef:{_web_ip(handler)}", 10, 600):
+        return 429, {'error': 'too_many'}
+    if not _web_mail_ready():
+        return 503, {'error': 'unavailable'}
+    email_addr = _web_email_norm(body.get('email'))
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    acc = db.web_accounts.find_one({'_id': email_addr}, {'_id': 1})
+    if acc and _wa_rate_ok(f"wefe:{email_addr}", 6, 3600):
+        out = _web_code_issue(email_addr, 'reset', _web_lang(body))
+        if out.get('error'):
+            return 429, out
+        return 200, out
+    return 200, {'ok': True, 'sent': True, 'resend_in': 55}     # نفس الرد دائماً: ما نكشف الإيميلات المسجلة
+
+
+def _web_email_reset(handler, body):
+    if not _wa_rate_ok(f"wer:{_web_ip(handler)}", 30, 600):
+        return 429, {'error': 'too_many'}
+    email_addr, pw = _web_email_norm(body.get('email')), body.get('password')
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    if not _web_pw_valid(pw):
+        return 400, {'error': 'weak_password'}
+    doc, err = _web_code_check(email_addr, 'reset', body.get('code'))
+    if err:
+        return 400, {'error': err}
+    acc = db.web_accounts.find_one_and_update({'_id': email_addr}, {'$set': {'pw': _web_pw_hash(pw), 'verified': True,
+                                                                             'pw_changed_at': int(time.time())}})
+    if not acc:
+        return 400, {'error': 'code_expired'}
+    uid, err = _web_user_ok(acc['user_id'])
+    if err:
+        return 403, {'error': err}
+    db.web_sessions.delete_many({'user_id': uid, 'via': 'email'})       # كلمة السر تغيّرت: نطلّع الأجهزة الثانية
+    _web_session_new(handler, uid, 'email')
+    return 200, {'ok': True}
+
+
+def _web_google(handler, body):
+    if not _wa_rate_ok(f"weg:{_web_ip(handler)}", 30, 600):
+        return 429, {'error': 'too_many'}
+    client_id = _web_google_id()
+    cred = str(body.get('credential') or '')
+    if not client_id or not cred or len(cred) > 4096:
+        return 400, {'error': 'google_failed'}
+    try:
+        r = requests.get('https://oauth2.googleapis.com/tokeninfo', params={'id_token': cred}, timeout=12)
+        info = r.json() if r.status_code == 200 else {}
+    except Exception:
+        info = {}
+    if (info.get('aud') != client_id or info.get('iss') not in ('accounts.google.com', 'https://accounts.google.com')
+            or str(info.get('email_verified')).lower() != 'true' or int(info.get('exp') or 0) < time.time() or not info.get('sub')):
+        return 401, {'error': 'google_failed'}
+    sub, email_addr = str(info['sub'])[:64], _web_email_norm(info.get('email'))
+    if not email_addr:
+        return 401, {'error': 'google_failed'}
+    acc = db.web_accounts.find_one({'google_sub': sub}) or db.web_accounts.find_one({'_id': email_addr})
+    if acc:
+        db.web_accounts.update_one({'_id': acc['_id']}, {'$set': {'google_sub': sub, 'verified': True}})
+        uid = int(acc['user_id'])
+    else:
+        name = _wa_plain(info.get('name') or info.get('given_name'), 60)
+        uid = _web_create_user(name, email_addr, _web_lang(body), _web_ref_of(body))
+        try:
+            db.web_accounts.insert_one({'_id': email_addr, 'user_id': uid, 'google_sub': sub, 'verified': True,
+                                        'created_at': int(time.time()), 'via': 'google'})
+        except Exception:
+            acc = db.web_accounts.find_one({'_id': email_addr}) or {}
+            uid = int(acc.get('user_id') or uid)
+    uid, err = _web_user_ok(uid)
+    if err:
+        return 403, {'error': err}
+    _web_session_new(handler, uid, 'google')
+    return 200, {'ok': True}
+
+
+def _web_guest(handler, body):
+    """زائر بدون تسجيل دخول: يشوف المنتجات والأسعار، والدخول يُطلب بس وقت الشراء."""
+    if not _wa_rate_ok(f"wgu:{_web_ip(handler)}", 60):
+        return 429, {'error': 'rate_limited'}
+    lang = 'ar' if _web_lang(body) == 'ar' else 'en'
+    cat = _wa_build_catalog(include_hidden=False)
+    nav = _wa_slot_emojis(lang)
+    site_langs = _wa_langs_view()
+    emoji_ids = [p['emoji_id'] for p in cat['products'] if p.get('emoji_id')] + \
+                [c['emoji_id'] for c in cat['catalogs'] if c.get('emoji_id')] + [v for v in nav.values() if v] + \
+                [x['emoji_id'] for x in site_langs if x.get('emoji_id')]
+    _wa_prefetch_emoji(emoji_ids)
+    return 200, {'ok': True, 'guest': True, 'web': True, 'langs': site_langs,
+                 'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(), 'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
+                 'deposit': {'methods': [], 'protection': False}, 'nav': nav, 'texts': _wa_texts(), 'vip': {'enabled': False},
+                 'forced': None, 'catalogs': cat['catalogs'], 'products': cat['products'],
+                 'catalog_version': _net_catalog_version(cat), 'pending': None, 'locked': False, 'verify': False,
+                 'server_time': int(time.time()), 'cart_enabled': _cart_enabled(), 'auth': _web_auth_options()}
+
+
+def _web_auth_cfg(handler, body):
+    return 200, {'ok': True, 'auth': _web_auth_options()}
+
+
+_WEB_PUBLIC_POST.update({'/webapp/web/guest': _web_guest, '/webapp/web/auth': _web_auth_cfg,
+                         '/webapp/web/email/signup': _web_email_signup, '/webapp/web/email/verify': _web_email_verify,
+                         '/webapp/web/email/login': _web_email_login, '/webapp/web/email/forgot': _web_email_forgot,
+                         '/webapp/web/email/reset': _web_email_reset, '/webapp/web/google': _web_google})
+for _wp in _WEB_PUBLIC_POST:
+    _WA_POST_ROUTES.setdefault(_wp, lambda identity, body: (400, {'error': 'bad_request'}))
+
+
+# ─────────── حساب الموقع (بعد تسجيل الدخول): الربط، الأجهزة، الرسائل ───────────
+def _web_account_view(uid):
+    accs = list(db.web_accounts.find({'user_id': int(uid)}, {'_id': 1, 'pw': 1, 'google_sub': 1}).limit(5))
+    unread = 0
+    try:
+        unread = db.web_inbox.count_documents({'user_id': int(uid), 'read': False}, limit=99)
+    except Exception:
+        pass
+    return {'web_only': _web_is_uid(uid), 'emails': [_web_mask_email(a['_id']) for a in accs],
+            'email': accs[0]['_id'] if accs else '', 'password': any(a.get('pw') for a in accs),
+            'google': any(a.get('google_sub') for a in accs), 'unread': unread,
+            'sessions': db.web_sessions.count_documents({'user_id': int(uid), 'expires_at': {'$gt': int(time.time())}})}
+
+
+def _web_only_route(fn):
+    def wrapped(identity, body):
+        if not identity.get('_web'):
+            return 403, {'error': 'forbidden'}
+        return fn(identity, body)
+    return wrapped
+
+
+def _web_account_ep(identity, body):
+    return 200, {'ok': True, 'account': _web_account_view(identity['id'])}
+
+
+def _web_link_start(identity, body):
+    uid = identity['id']
+    if not _web_is_uid(uid):
+        return 400, {'error': 'bad_request'}
+    username = get_bot_username()
+    if not username:
+        return 503, {'error': 'unavailable'}
+    if db.pending_deposits.find_one({'user_id': uid, 'status': 'pending', 'expires_at': {'$gt': int(time.time())}}, {'_id': 1}):
+        return 409, {'error': 'link_pending_deposit'}
+    code, poll, now = secrets.token_urlsafe(18), secrets.token_urlsafe(32), int(time.time())
+    db.web_links.insert_one({'_id': code, 'poll': _web_hash(poll), 'w_uid': uid, 'status': 'pending',
+                             'created_at': now, 'expires_at': now + WEB_LOGIN_TTL})
+    return 200, {'ok': True, 'poll': poll, 'link': f"https://t.me/{username}?start=wk_{code}", 'expires_in': WEB_LOGIN_TTL}
+
+
+def _web_link_poll(identity, body):
+    poll = str(body.get('poll') or '')[:100]
+    doc = db.web_links.find_one({'poll': _web_hash(poll)}) if poll else None
+    if not doc or int(doc.get('w_uid') or 0) != int(identity['id']) and int(doc.get('t_uid') or 0) != int(identity['id']):
+        return 200, {'ok': True, 'status': 'expired'}
+    status = doc.get('status')
+    if status == 'pending' and int(doc.get('expires_at') or 0) < time.time():
+        status = 'expired'
+    return 200, {'ok': True, 'status': status if status in ('pending', 'linking', 'done', 'denied', 'failed') else 'expired',
+                 'error': doc.get('error')}
+
+
+def _web_sessions_ep(identity, body):
+    uid, now = int(identity['id']), int(time.time())
+    current = _web_hash(getattr(_WEB_CTX, 'token', '') or '')
+    out = []
+    for s in db.web_sessions.find({'user_id': uid, 'expires_at': {'$gt': now}}).sort('last_seen', -1).limit(30):
+        ip = str(s.get('ip') or '')
+        out.append({'id': str(s['_id'])[:16], 'device': _web_device(s.get('ua')), 'via': s.get('via') or 'telegram',
+                    'ip': (ip.rsplit('.', 1)[0] + '.•' if '.' in ip else ip[:9] + '…') if ip else '',
+                    'last_seen': int(s.get('last_seen') or 0), 'created_at': int(s.get('created_at') or 0),
+                    'current': s['_id'] == current})
+    return 200, {'ok': True, 'sessions': out}
+
+
+def _web_sessions_revoke(identity, body):
+    uid = int(identity['id'])
+    current = _web_hash(getattr(_WEB_CTX, 'token', '') or '')
+    target = str(body.get('id') or '')
+    if target == 'others':
+        n = db.web_sessions.delete_many({'user_id': uid, '_id': {'$ne': current}}).deleted_count
+    elif re.fullmatch(r'[0-9a-f]{16}', target):
+        n = db.web_sessions.delete_many({'user_id': uid, '_id': {'$regex': f'^{target}', '$ne': current}}).deleted_count
+    else:
+        return 400, {'error': 'bad_request'}
+    data = _web_sessions_ep(identity, {})[1]
+    data['revoked'] = n
+    return 200, data
+
+
+def _web_inbox_ep(identity, body):
+    uid = int(identity['id'])
+    items = [{'text': d.get('text') or '', 'ts': int(d.get('ts') or 0), 'read': bool(d.get('read'))}
+             for d in db.web_inbox.find({'user_id': uid}).sort('ts', -1).limit(60)]
+    db.web_inbox.update_many({'user_id': uid, 'read': False}, {'$set': {'read': True}})
+    return 200, {'ok': True, 'items': items}
+
+
+_WA_POST_ROUTES.update({'/webapp/web/account': _web_only_route(_web_account_ep),
+                        '/webapp/web/link/start': _web_only_route(_web_link_start),
+                        '/webapp/web/link/poll': _web_only_route(_web_link_poll),
+                        '/webapp/web/sessions': _web_only_route(_web_sessions_ep),
+                        '/webapp/web/sessions/revoke': _web_only_route(_web_sessions_revoke),
+                        '/webapp/web/inbox': _web_only_route(_web_inbox_ep)})
+_WA_HEAVY.update({'/webapp/web/link/start': 10, '/webapp/web/sessions/revoke': 20})
+
+
+# ─────────── ربط حساب الموقع بتيليجرام (من البوت) + دمج الرصيد والطلبات ───────────
+def _web_link_prompt(chat_id, uid, code, new_user=False):
+    doc = db.web_links.find_one({'_id': str(code)[:40]})
+    if not doc or doc.get('status') != 'pending' or int(doc.get('expires_at') or 0) < time.time():
+        bot.send_message(chat_id, bil(uid, "⌛ رابط الربط انتهى. ارجع للموقع واضغط «ربط تيليجرام» من جديد.",
+                                      "⌛ This link has expired. Go back to the website and tap “Link Telegram” again."))
+        return
+    if new_user:
+        db.web_links.update_one({'_id': doc['_id'], 'tg_new': {'$exists': False}}, {'$set': {'tg_new': True}})
+    w = int(doc['w_uid'])
+    wu = db.users.find_one({'user_id': w}) or {}
+    acc = db.web_accounts.find_one({'user_id': w}, {'_id': 1}) or {}
+    bal = round(_wa_fnum(wu.get('balance')), 2)
+    orders = db.orders.count_documents({'user_id': w})
+    email_txt = html.escape(_web_mask_email(acc.get('_id')) or '—')
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton(bil(uid, "✅ اربط الحسابين", "✅ Link the accounts"), callback_data=f"wk_ok_{doc['_id']}"),
+               InlineKeyboardButton(bil(uid, "❌ إلغاء", "❌ Cancel"), callback_data=f"wk_no_{doc['_id']}"))
+    bot.send_message(chat_id, bil(uid,
+        f"🔗 <b>ربط حساب الموقع بتيليجرام</b>\n\n✉️ الحساب: <b>{email_txt}</b>\n💰 رصيده: <b>${bal:.2f}</b>\n🧾 طلباته: <b>{orders}</b>\n\n"
+        "بعد الربط ينتقل رصيده وطلباته وأكواده لحسابك هنا، وتقدر تدخل الموقع بالإيميل أو بتيليجرام — نفس الحساب.\n"
+        "⚠️ الربط ما يتلغى بعدين، واضغط «اربط» فقط لو هذا حسابك أنت.",
+        f"🔗 <b>Link your website account to Telegram</b>\n\n✉️ Account: <b>{email_txt}</b>\n💰 Balance: <b>${bal:.2f}</b>\n🧾 Orders: <b>{orders}</b>\n\n"
+        "After linking, its balance, orders and codes move to this Telegram account, and you can sign in to the website with email or Telegram — same account.\n"
+        "⚠️ Linking can't be undone. Tap “Link” only if this is your own account."),
+        reply_markup=markup, parse_mode="HTML")
+
+
+def _web_merge(w, t, tg_new=False):
+    """ينقل حساب الموقع (w) لحساب تيليجرام (t): الرصيد + الطلبات + السجلات + الأجهزة. مرة وحدة فقط."""
+    w, t = int(w), int(t)
+    if not _web_is_uid(w) or _web_is_uid(t) or w == t:
+        raise ValueError('bad merge')
+    locks = [_wa_user_lock(w), _wa_user_lock(t)]
+    got = [lk.acquire(timeout=15) for lk in locks]
+    try:
+        if not all(got):
+            raise RuntimeError('busy')
+        if db.pending_deposits.find_one({'user_id': w, 'status': 'pending', 'expires_at': {'$gt': int(time.time())}}, {'_id': 1}):
+            raise RuntimeError('pending_deposit')
+        wu = db.users.find_one_and_update({'user_id': w, 'web_merged_into': {'$exists': False}},
+                                          {'$set': {'web_merged_into': t, 'web_merging': True, 'balance': 0.0,
+                                                    'ref_v2_earned': 0.0, 'ref_v2_purchase_earned': 0.0, 'ref_debt': 0.0}})
+        if not wu:
+            raise RuntimeError('already_linked')
+        bal = round(_wa_fnum(wu.get('balance')), 6)
+        inc = {'balance': bal, 'ref_v2_earned': _wa_fnum(wu.get('ref_v2_earned')),
+               'ref_v2_purchase_earned': _wa_fnum(wu.get('ref_v2_purchase_earned')), 'ref_debt': _wa_fnum(wu.get('ref_debt'))}
+        merge_id = db.web_merges.insert_one({'w_uid': w, 't_uid': t, 'moved': inc, 'status': 'started',
+                                             'at': datetime.datetime.utcnow()}).inserted_id
+        db.users.update_one({'user_id': t}, {'$inc': {k: v for k, v in inc.items() if v}})
+        moved, failed = {}, []
+        for name in db.list_collection_names():
+            if name in _WEB_MERGE_SKIP or name.startswith('system.'):
+                continue
+            try:
+                if db[name].find_one({'user_id': w}, {'_id': 1}):
+                    moved[name] = db[name].update_many({'user_id': w}, {'$set': {'user_id': t, 'web_merged_from': w}}).modified_count
+            except Exception as exc:
+                failed.append(f"{name}: {str(exc)[:80]}")
+        db.web_sessions.update_many({'user_id': w}, {'$set': {'user_id': t}})
+        db.web_accounts.update_many({'user_id': w}, {'$set': {'user_id': t, 'linked_at': int(time.time())}})
+        db.referrals_v2.update_many({'referrer_id': w}, {'$set': {'referrer_id': t}})
+        rec = db.referrals_v2.find_one_and_delete({'invited_id': w})
+        if rec and tg_new and rec.get('status') == 'pending' and int(rec.get('referrer_id') or 0) not in (0, t):
+            try:
+                register_new_referral(t, int(rec['referrer_id']))     # حساب تيليجرام جديد ← نفس تحقق الإحالات العادي
+            except Exception as exc:
+                logger.debug(f'web merge referral: {exc}')
+        acc = db.web_accounts.find_one({'user_id': t}, {'_id': 1})
+        if acc:
+            db.users.update_one({'user_id': t, 'email': {'$exists': False}}, {'$set': {'email': acc['_id']}})
+        db.users.update_one({'user_id': w}, {'$unset': {'web_merging': 1}})
+        db.web_merges.update_one({'_id': merge_id}, {'$set': {'status': 'done', 'collections': moved, 'failed': failed}})
+        _invalidate_user_cache(w)
+        _invalidate_user_cache(t)
+        try:
+            _wa_invalidate_catalog()
+        except Exception:
+            pass
+        return {'balance': bal, 'orders': moved.get('orders', 0), 'failed': failed}
+    finally:
+        for lk, ok in zip(locks, got):
+            if ok:
+                lk.release()
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('wk_ok_', 'wk_no_')))
+def _web_link_answer(call):
+    uid = call.from_user.id
+    approve, code = call.data.startswith('wk_ok_'), call.data[6:]
+    bot.answer_callback_query(call.id)
+    if is_user_banned(uid):
+        return
+    now = int(time.time())
+    doc = db.web_links.find_one_and_update({'_id': code, 'status': 'pending', 'expires_at': {'$gte': now}},
+                                           {'$set': {'status': 'linking' if approve else 'denied', 't_uid': uid, 'answered_at': now}})
+    markup = None
+    if not doc:
+        text = bil(uid, "⌛ هذا الطلب انتهى أو تم استخدامه.", "⌛ This request has expired or was already used.")
+    elif not approve:
+        text = bil(uid, "🛡 تم الإلغاء. ما تغيّر شي.", "🛡 Cancelled. Nothing changed.")
+    else:
+        try:
+            res = _web_merge(doc['w_uid'], uid, bool(doc.get('tg_new')))
+            db.web_links.update_one({'_id': code}, {'$set': {'status': 'done'}})
+            text = bil(uid, f"✅ <b>تم الربط</b>\nانضاف لحسابك <b>${res['balance']:.2f}</b> و<b>{res['orders']}</b> طلب. ارجع للموقع، بيتحدث لحاله.",
+                       f"✅ <b>Linked</b>\n<b>${res['balance']:.2f}</b> and <b>{res['orders']}</b> orders were added to your account. Go back to the website — it updates by itself.")
+            if res['failed']:
+                notify_admins(f"⚠️ دمج حساب موقع <code>{int(doc['w_uid'])}</code> ← <code>{uid}</code>: جداول ما انتقلت:\n" +
+                              html.escape('\n'.join(res['failed'])[:1500]))
+            else:
+                notify_admins(f"🔗 حساب موقع <code>{int(doc['w_uid'])}</code> انربط بتيليجرام <code>{uid}</code> (رصيد منقول ${res['balance']:.2f})")
+        except Exception as exc:
+            reason = str(exc)
+            db.web_links.update_one({'_id': code}, {'$set': {'status': 'failed', 'error': 'link_pending_deposit' if reason == 'pending_deposit' else 'server_error'}})
+            if reason == 'pending_deposit':
+                text = bil(uid, "⏳ عند حساب الموقع عملية دفع ما خلصت. كمّلها أو ألغها من الموقع وبعدين اربط.",
+                           "⏳ The website account has a payment in progress. Finish or cancel it on the website, then link.")
+            else:
+                logger.exception('web merge failed')
+                text = bil(uid, "❌ ما قدرنا نربط الحين. حاول بعد شوي أو تواصل مع الدعم.",
+                           "❌ We couldn't link the accounts right now. Try again shortly or contact support.")
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        bot.send_message(call.message.chat.id, text, parse_mode="HTML")
+
+
+# ─────────── 🧾 إيصال على الإيميل بعد كل شراء من الموقع ───────────
+_WEB_RECEIPT_LOCKS = {}
+
+
+def _web_receipt_async(uid, lang):
+    def work():
+        lk = _WEB_RECEIPT_LOCKS.setdefault(uid, threading.Lock())
+        if not lk.acquire(blocking=False):
+            return
+        try:
+            time.sleep(2)
+            _web_receipt_send(uid, lang)
+        except Exception as exc:
+            logger.warning(f'🌐 receipt email failed for {uid}: {exc}')
+        finally:
+            lk.release()
+            if len(_WEB_RECEIPT_LOCKS) > 2000:
+                _WEB_RECEIPT_LOCKS.clear()
+    if _web_mail_ready():
+        threading.Thread(target=work, daemon=True, name='web-receipt').start()
+
+
+def _web_receipt_send(uid, lang):
+    acc = db.web_accounts.find_one({'user_id': int(uid)}, {'_id': 1})
+    if not acc:
+        return
+    u = db.users.find_one({'user_id': int(uid)}, {'web_receipt_after': 1, 'balance': 1}) or {}
+    floor = ObjectId.from_datetime(datetime.datetime.utcnow() - datetime.timedelta(minutes=30))
+    after = u.get('web_receipt_after')
+    q = {'user_id': int(uid), '_id': {'$gt': max(floor, after) if isinstance(after, ObjectId) else floor}}
+    orders = list(db.orders.find(q).sort('_id', 1).limit(50))
+    if not orders:
+        return
+    db.users.update_one({'user_id': int(uid)}, {'$set': {'web_receipt_after': orders[-1]['_id']}})
+    cat = _wa_build_catalog(include_hidden=True)
+    names = {str(p['id']): (p.get('name_ar') if lang == 'ar' else p.get('name_en')) or p.get('name_en') for p in cat['products']}
+    ar = lang == 'ar'
+    rows, codes, total = [], [], 0.0
+    for o in orders:
+        pid = str(o.get('product_id') or '')
+        name = names.get(pid) or names.get(pid.split('_')[0]) or pid
+        price = _wa_fnum(o.get('total_price') if o.get('total_price') is not None else o.get('price'))
+        total += price
+        rows.append((f"{name} × {int(o.get('qty') or 1)}", html.escape(f"${price:.2f}")))
+        c = str(o.get('code_delivered') or '').strip()
+        if c and not c.startswith('API:'):
+            codes.append(c)
+    oid = next((str(o.get('order_id')) for o in reversed(orders) if o.get('order_id')), '')
+    if oid:
+        rows.insert(0, ('رقم الطلب' if ar else 'Order ID', f"<b>{html.escape(oid)}</b>"))
+    rows.append(('الإجمالي' if ar else 'Total', f"<b>${total:.2f}</b>"))
+    rows.append(('رصيدك الحين' if ar else 'Balance now', html.escape(f"${_wa_fnum(u.get('balance')):.2f}")))
+    paras = [html.escape('شكراً لشرائك! هذي تفاصيل طلبك.' if ar else 'Thanks for your order! Here are the details.')]
+    if codes:
+        paras.append(('<b>' + ('الأكواد:' if ar else 'Your codes:') + '</b><br>' + '<br>'.join(
+            f'<code dir="ltr" style="font-size:14px;background:#f1f4fb;padding:3px 6px;border-radius:6px">{html.escape(c[:300])}</code>' for c in codes[:100])))
+    site = _web_public_url()
+    if site:
+        paras.append(f'<a href="{html.escape(site)}" style="color:#3d6bff">' + ('افتح طلباتك في الموقع' if ar else 'Open your orders on the website') + '</a>')
+    title = ('إيصال الشراء' if ar else 'Your receipt') + (f" · {oid}" if oid else '')
+    text = title + '\n\n' + '\n'.join(f"{k}: {re.sub('<[^>]+>', '', v)}" for k, v in rows) + ('\n\n' + '\n'.join(codes[:100]) if codes else '')
+    _web_send_mail(acc['_id'], f"{title} · {WEBAPP_STORE_NAME or 'LARA STOCK'}", text,
+                   _web_mail_page('ar' if ar else 'en', title, paras, rows=rows))
+
+
+def _web_indexes2():
+    try:
+        db.web_accounts.create_index('user_id')
+        db.web_accounts.create_index('google_sub', sparse=True)
+        db.web_codes.create_index('expires_at', expireAfterSeconds=3600)
+        db.web_links.create_index('poll')
+        db.web_links.create_index('created_at', expireAfterSeconds=86400)
+        db.web_inbox.create_index([('user_id', 1), ('ts', -1)])
+    except Exception as exc:
+        logger.debug(f'web indexes2: {exc}')
+
+
+_web_indexes2()
+
+
 def _wa_maybe_handle_post(handler):
     p = urllib.parse.urlparse(handler.path).path.rstrip('/')
     fn = _WA_POST_ROUTES.get(p)
-    if not fn:
+    if not fn and p not in _WEB_PUBLIC_POST:
         return False
     try:
         size = int(handler.headers.get('Content-Length', '0') or 0)
@@ -38336,6 +39368,7 @@ def _wa_maybe_handle_post(handler):
     if size > _WA_BIG_BODY.get(p, 20000):
         _json_resp(handler, 413, {'error': 'too_large'})
         return True
+    handler._extra_headers = []
     body = {}
     if size > 0:
         try:
@@ -38343,16 +39376,41 @@ def _wa_maybe_handle_post(handler):
         except Exception:
             _json_resp(handler, 400, {'error': 'bad_json'})
             return True
+    if p in _WEB_PUBLIC_POST:
+        if not _web_host_ok(handler):
+            _json_resp(handler, 403, {'error': 'telegram_only'})
+            return True
+        try:
+            code, data = _WEB_PUBLIC_POST[p](handler, body)
+        except Exception as exc:
+            logger.exception('website %s failed: %s', p, type(exc).__name__)
+            code, data = 500, {'error': 'server_error'}
+        _json_resp(handler, code, data)
+        return True
     identity = _wa_verify(handler.headers.get('X-Telegram-Init-Data') or body.get('initData'))
+    if not identity and not handler.headers.get('X-Telegram-Init-Data'):
+        identity = _web_identity(handler)          # الموقع الخارجي (جلسة كوكي)
+        if not identity and p in _WEB_GUEST_POST and handler.headers.get('X-Lara-Web') == '1' and _web_host_ok(handler):
+            if not _wa_rate_ok(f"wgp:{_web_ip(handler)}:{p}", 90):      # زائر بدون حساب: تصفح المنتجات والترجمة فقط
+                _json_resp(handler, 429, {'error': 'rate_limited'})
+                return True
+            identity = {'id': 0, 'first_name': '', 'last_name': '', 'username': '', 'language_code': '', 'photo_url': '',
+                        '_start_param': '', '_auth_date': int(time.time()), '_web': True, '_guest': True}
     if not identity:
         _json_resp(handler, 401, {'error': 'auth'})
         return True
+    if identity.get('_web') and (p.startswith('/webapp/admin') or p in _WEB_TELEGRAM_ONLY):
+        _json_resp(handler, 403, {'error': 'telegram_only'})
+        return True
+    _WEB_CTX.on = bool(identity.get('_web'))
+    handler._lara_web = _WEB_CTX.on
     uid = identity['id']
+    rk = f"g{_web_ip(handler)}" if identity.get('_guest') else uid      # الزوار: الحد لكل جهاز، مو للكل
     if p in _WA_HEAVY:
-        if not _wa_rate_ok(f"{uid}:{p}", _WA_HEAVY[p]):
+        if not _wa_rate_ok(f"{rk}:{p}", _WA_HEAVY[p]):
             _json_resp(handler, 429, {'error': 'rate_limited'})
             return True
-    elif not _wa_rate_ok(f"{uid}:r", 150):
+    elif not _wa_rate_ok(f"{rk}:r", 150):
         _json_resp(handler, 429, {'error': 'rate_limited'})
         return True
     previous_source = _log_src_get()
@@ -38364,6 +39422,23 @@ def _wa_maybe_handle_post(handler):
             except Exception as exc:
                 logger.exception('webapp %s failed: %s', p, type(exc).__name__)
                 code, data = 500, {'error': 'server_error'}
+            finally:
+                _WEB_CTX.on = False
+            if identity.get('_web') and isinstance(data, dict):
+                data['web'] = True
+                if isinstance(data.get('user'), dict):
+                    data['user']['is_admin'] = False      # لوحة الإدارة داخل تيليجرام فقط
+                if p == '/webapp/bootstrap' and code == 200 and not identity.get('_guest'):
+                    try:
+                        data['account'] = _web_account_view(uid)
+                        data['auth'] = _web_auth_options()
+                        if _web_is_uid(uid):
+                            data['verify'] = False        # تحقق الإحالات بعد ربط تيليجرام
+                    except Exception as exc:
+                        logger.debug(f'web account view: {exc}')
+                if p in _WEB_RECEIPT_PATHS and code == 200 and not identity.get('_guest') and data.get('ok') is not False:
+                    _web_receipt_async(uid, 'ar' if str(body.get('lang') or '') == 'ar' or
+                                       (get_user_data_full(uid) or {}).get('ui_lang') == 'ar' else 'en')
             # Record the last authenticated Mini App IP for admin account lookup.
             # Trust the rightmost forwarded address, which is the platform proxy's address.
             try:
@@ -38391,6 +39466,7 @@ _WA_MIME_EXT = {'application/x-tgsticker': 'tgs', 'video/webm': 'webm', 'image/w
                 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif'}
 _WA_INFLIGHT = {}
 _WA_STATIC_CACHE = {}
+_WA_HTML_VARIANTS = {}
 
 
 def _wa_send(handler, code, data, mime, cache='no-store', extra=None):
@@ -38648,7 +39724,125 @@ def _wa_product_image(pid):
     return None
 
 
-def _wa_static(handler, rel):
+def _web_head_html(page=None):
+    """وسوم الموقع على دومينك: تثبيت كتطبيق (PWA) + معاينة الروابط + Google. page = منتج (/p/<id>)."""
+    base = (_web_public_url() or '/').rstrip('/')
+    store = WEBAPP_STORE_NAME or 'LARA STOCK'
+    title = store
+    desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} — digital codes and subscriptions with instant delivery."
+    image, url = f"{base}/icon-512.png", f"{base}/"
+    if page:
+        p = next((x for x in _wa_build_catalog(include_hidden=False)['products'] if str(x.get('id')) == str(page)), None)
+        if p:
+            name = p.get('name_en') or p.get('name_ar') or store
+            title = f"{name} · {store}"
+            plain = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', p.get('desc_en') or p.get('desc_ar') or ''))).strip()
+            desc = (f"${_wa_fnum(p.get('price')):.2f} — " + (plain or desc))[:300]
+            if p.get('image'):
+                image = base + str(p['image']) if str(p['image']).startswith('/') else str(p['image'])
+            url = f"{base}/p/{urllib.parse.quote(str(page), safe='')}"
+    e = html.escape
+    tags = [
+        '<base href="/">',
+        '<link rel="manifest" href="/manifest.webmanifest">',
+        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">',
+        '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+        '<meta name="mobile-web-app-capable" content="yes">',
+        '<meta name="apple-mobile-web-app-capable" content="yes">',
+        '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
+        f'<meta name="apple-mobile-web-app-title" content="{e(store)}">',
+        f'<meta name="description" content="{e(desc)}">',
+        f'<link rel="canonical" href="{e(url)}">',
+        '<meta property="og:type" content="' + ('product' if page else 'website') + '">',
+        f'<meta property="og:site_name" content="{e(store)}">',
+        f'<meta property="og:title" content="{e(title)}">',
+        f'<meta property="og:description" content="{e(desc)}">',
+        f'<meta property="og:url" content="{e(url)}">',
+        f'<meta property="og:image" content="{e(image)}">',
+        '<meta name="twitter:card" content="summary_large_image">',
+        f'<meta name="lara-google" content="{e(_web_google_id())}">',
+    ]
+    return '\n'.join(tags), (title if page else None)
+
+
+_WEB_ICON_CACHE = {}
+
+
+def _web_icon(size, maskable=False):
+    """أيقونة التطبيق من logo.webp (مربعة بخلفية المتجر) — بدون ملفات جديدة."""
+    key = (size, maskable)
+    if key in _WEB_ICON_CACHE:
+        return _WEB_ICON_CACHE[key]
+    from PIL import Image
+    logo = Image.open(os.path.join(WEBAPP_DIR, 'logo.webp')).convert('RGBA')
+    canvas = Image.new('RGBA', (size, size), (8, 11, 18, 255))
+    inner = int(size * (0.62 if maskable else 0.8))
+    logo.thumbnail((inner, inner), Image.LANCZOS)
+    canvas.alpha_composite(logo, ((size - logo.width) // 2, (size - logo.height) // 2))
+    buf = io.BytesIO()
+    canvas.convert('RGB').save(buf, 'PNG', optimize=True)
+    _WEB_ICON_CACHE[key] = buf.getvalue()
+    return _WEB_ICON_CACHE[key]
+
+
+_WEB_SW_JS = """/* LARA website app shell: works offline for the first screen; never caches account data. */
+const C = 'lara-shell-v1';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())));
+self.addEventListener('fetch', e => {
+  const r = e.request;
+  if (r.method !== 'GET' || r.mode !== 'navigate') return;
+  e.respondWith(fetch(r).then(res => { if (res.ok) { const cp = res.clone(); caches.open(C).then(c => c.put('/', cp)); } return res; })
+    .catch(() => caches.match('/').then(m => m || Response.error())));
+});
+"""
+
+
+def _web_site_get(handler, raw):
+    """ملفات الموقع على دومينك: التطبيق (PWA)، الأيقونات، صفحات المنتجات، وخريطة الموقع لـ Google."""
+    base = (_web_public_url() or '/').rstrip('/')
+    store = WEBAPP_STORE_NAME or 'LARA STOCK'
+    if raw == '/manifest.webmanifest':
+        man = {'name': store, 'short_name': store[:12], 'start_url': '/?src=app', 'scope': '/', 'id': '/',
+               'display': 'standalone', 'background_color': '#080b12', 'theme_color': '#080b12',
+               'description': (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} store",
+               'icons': [{'src': '/icon-192.png', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-512.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-maskable.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
+        _wa_send(handler, 200, json.dumps(man, ensure_ascii=False), 'application/manifest+json', 'public, max-age=3600')
+        return True
+    if raw == '/sw.js':
+        _wa_send(handler, 200, _WEB_SW_JS, 'application/javascript', 'no-cache', {'Service-Worker-Allowed': '/'})
+        return True
+    icons = {'/icon-192.png': (192, False), '/icon-512.png': (512, False), '/icon-maskable.png': (512, True),
+             '/apple-touch-icon.png': (180, False), '/favicon.ico': (48, False)}
+    if raw in icons:
+        try:
+            _wa_send(handler, 200, _web_icon(*icons[raw]), 'image/png', 'public, max-age=86400')
+        except Exception as exc:
+            logger.debug(f'web icon: {exc}')
+            _json_resp(handler, 404, {'error': 'Not found'})
+        return True
+    if raw == '/robots.txt':
+        _wa_send(handler, 200, f"User-agent: *\nAllow: /\nDisallow: /webapp/\nSitemap: {base}/sitemap.xml\n", 'text/plain; charset=utf-8', 'public, max-age=3600')
+        return True
+    if raw == '/sitemap.xml':
+        urls = [f"{base}/"] + [f"{base}/p/{urllib.parse.quote(str(p['id']), safe='')}"
+                                for p in _wa_build_catalog(include_hidden=False)['products'][:5000]]
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+               + ''.join(f"<url><loc>{html.escape(u)}</loc></url>" for u in urls) + '</urlset>')
+        _wa_send(handler, 200, xml, 'application/xml', 'public, max-age=3600')
+        return True
+    if raw.startswith('/p/'):
+        pid = urllib.parse.unquote(raw[3:].strip('/'))[:120]
+        if not pid or '/' in pid:
+            return False
+        _wa_static(handler, 'index.html', page=pid)
+        return True
+    return False
+
+
+def _wa_static(handler, rel, page=None):
     rel = (rel or '').lstrip('/') or 'index.html'
     if '..' in rel or not re.fullmatch(r'[A-Za-z0-9_\-./]+', rel):
         return _json_resp(handler, 404, {'error': 'Not found'})
@@ -38690,14 +39884,36 @@ def _wa_static(handler, rel):
             pass
     if unchanged:
         return _wa_send(handler, 304, b'', mime, cache, extra)
+    if ext == 'html' and b'<meta name="lara-site" content="">' in data:
+        site_flag = '1' if _web_host_ok(handler) else ''
+        bot_name = re.sub(r'[^A-Za-z0-9_]', '', get_bot_username() or '')[:40]
+        head, title = _web_head_html(page) if site_flag else ('', None)
+        vkey = (path, mtime, site_flag, bot_name, hashlib.sha1(head.encode()).hexdigest() if head else '')
+        variant = _WA_HTML_VARIANTS.get(vkey)
+        if not variant:
+            raw_v = data.replace(b'<meta name="lara-site" content="">', f'<meta name="lara-site" content="{site_flag}">'.encode()) \
+                        .replace(b'<meta name="lara-bot" content="">', f'<meta name="lara-bot" content="{bot_name}">'.encode()) \
+                        .replace(b'<!--lara-head-->', head.encode())
+            if title:
+                raw_v = re.sub(rb'<title>[^<]*</title>', b'<title>' + html.escape(title).encode() + b'</title>', raw_v, count=1)
+            variant = (raw_v, _wa_gzip.compress(raw_v, 6), 'W/"' + hashlib.sha256(raw_v).hexdigest()[:32] + '"')
+            if len(_WA_HTML_VARIANTS) > 64:
+                _WA_HTML_VARIANTS.clear()
+            _WA_HTML_VARIANTS[vkey] = variant
+        data, hit = variant[0], (hit[0], variant[0], variant[2], variant[1])
+        extra['ETag'] = variant[2]
+        values = [v.strip() for v in str(handler.headers.get('If-None-Match', '')).split(',')]
+        if any(v.removeprefix('W/') == variant[2].removeprefix('W/') for v in values if v):
+            return _wa_send(handler, 304, b'', mime, cache, extra)
     if hit[3] and _net_accepts_gzip(handler.headers):
         data = hit[3]
         extra['Content-Encoding'] = 'gzip'
     if ext == 'html':
         extra.update({'Referrer-Policy': 'strict-origin-when-cross-origin',
-                 'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdn.jsdelivr.net; "
-                                             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; "
+                 'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdn.jsdelivr.net https://accounts.google.com; "
+                                             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' data: https://fonts.gstatic.com; "
                                              "img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self' https:; "
+                                             "frame-src 'self' https://accounts.google.com; "
                                              "object-src 'none'; base-uri 'self'; form-action 'none'")})
     return _wa_send(handler, 200, data, mime, cache, extra)
 
@@ -38713,6 +39929,29 @@ def _wa_maybe_handle_get(handler):
         return True
     if raw.startswith('/app/'):
         _wa_static(handler, raw[5:])
+        return True
+    site = _web_host_ok(handler)
+    if site and (raw == '/shop' or raw.startswith('/shop/')):      # الرابط القديم ← الدومين نفسه
+        handler.send_response(301)
+        handler.send_header('Location', '/' + raw[6:] + (('?' + parsed.query) if parsed.query else ''))
+        handler.send_header('Content-Length', '0')
+        handler.end_headers()
+        return True
+    if raw == '/shop':
+        handler.send_response(301)
+        handler.send_header('Location', '/shop/' + (('?' + parsed.query) if parsed.query else ''))
+        handler.send_header('Content-Length', '0')
+        handler.end_headers()
+        return True
+    if raw.startswith('/shop/'):                    # عنوان غير دومينك: الصفحة تقول «افتح المتجر من تيليجرام»
+        _wa_static(handler, raw[6:])
+        return True
+    if site and _web_site_get(handler, raw):
+        return True
+    if site and not raw.startswith('/webapp/') and (raw == '/' or (
+            re.fullmatch(r'/[A-Za-z0-9_\-./]+', raw) and '..' not in raw
+            and os.path.isfile(os.path.join(WEBAPP_DIR, raw.lstrip('/'))))):
+        _wa_static(handler, raw.lstrip('/'))         # 🌐 الموقع الخارجي على دومينك مباشرة
         return True
     if raw.startswith('/webapp/dl/'):
         _wa_dl_get(handler, raw)
@@ -40438,7 +41677,8 @@ def _baseurl_screen():
          f"🔗 الرابط الحالي: <code>{html.escape(url or '— ما لقيت رابط')}</code>",
          f"📍 المصدر: {src_txt}", "━━━━━━━━━━━━━━",
          f"🔌 رابط الـ API لعملائك:\n<code>{html.escape((url or '…') + '/' + gw)}</code>",
-         f"🛍 رابط الموقع (Mini App):\n<code>{html.escape(wa or '—')}</code>"]
+         f"🛍 رابط الموقع (Mini App):\n<code>{html.escape(wa or '—')}</code>",
+         f"🌐 الموقع الخارجي (برا تيليجرام):\n<code>{html.escape(_web_public_url() or '— يحتاج دومينك الخاص')}</code>"]
     if (os.getenv('WEBAPP_URL', '') or '').strip():
         L.append("<i>⚠️ رابط الموقع مثبّت من متغير WEBAPP_URL — لو غيّرت الدومين غيّره هناك بعد (أو امسحه عشان يتبع الرابط هذا).</i>")
     L += ["━━━━━━━━━━━━━━",
@@ -40496,7 +41736,9 @@ def _baseurl_done_text(old):
     gw = _get_api_gateway()
     t = ["✅ <b>تم حفظ الرابط الأساسي</b>", "",
          f"🔌 رابط الـ API الجديد:\n<code>{html.escape(url + '/' + gw)}</code>",
-         f"🛍 الموقع: <code>{html.escape(_wa_public_url() or '—')}</code>", "",
+         f"🛍 الموقع: <code>{html.escape(_wa_public_url() or '—')}</code>",
+         (f"🌐 الموقع الخارجي: <code>{html.escape(_web_public_url())}</code>" if _web_public_url()
+          else "🌐 الموقع الخارجي: يشتغل على دومينك الخاص فقط (مو رابط الاستضافة المجاني)."), "",
          "• المفاتيح (API Keys) ما تغيّرت — بس الرابط.",
          "• زر المتجر في البوت انضبط على الرابط الجديد."]
     if old and old != url:
