@@ -1,5 +1,5 @@
 -- =====================================================================
--- SafwanTiger Shop Bot — initial schema
+-- LARA STOCK / WWC Child Store — Schema & Atomic RPCs
 -- Run this in the Supabase SQL editor (or `supabase db push`).
 --
 -- All statements use `if not exists` so this file is safe to re-run.
@@ -192,7 +192,7 @@ alter table public.referrals       enable row level security;
 insert into public.settings (key, value) values
     ('color.in_stock',     '"green"'::jsonb),
     ('color.out_of_stock', '"red"'::jsonb),
-    ('text.welcome',       '"Welcome to SafwanTiger Shop"'::jsonb),
+    ('text.welcome',       '"Welcome to LARA STOCK"'::jsonb),
     ('text.menu_button',   '"Main Menu"'::jsonb)
 on conflict (key) do nothing;
 
@@ -2168,8 +2168,11 @@ begin
  return result;
 end $$;
 create or replace function public.redeem_gift_atomic(p_user_id bigint,p_code text) returns jsonb language plpgsql security definer set search_path=public as $$
-declare g gift_codes; b numeric;
+declare u users; g gift_codes; b numeric;
 begin
+ perform pg_advisory_xact_lock(p_user_id);
+ select * into u from users where telegram_id=p_user_id for update;
+ if not found or u.is_banned then raise exception 'USER_UNAVAILABLE';end if;
  select * into g from gift_codes where code=p_code for update;
  if not found or g.amount<=0 or g.expires_at<=now() then raise exception 'GIFT_UNAVAILABLE';end if;
  if (g.max_redemptions is not null and (select count(*) from gift_code_redemptions where code=p_code)>=g.max_redemptions) or (select count(*) from gift_code_redemptions where code=p_code and user_id=p_user_id)>=g.per_user_limit then raise exception 'GIFT_LIMIT';end if;
@@ -2382,7 +2385,7 @@ begin
  elsif p_action='warn' then
   if not su then raise exception 'FORBIDDEN';end if;update wwc_platform_shops set warned_at=now() where id=p_id and warned_at is null;
  elsif p_action='credentials' then
-  update wwc_platform_shops set secret_box=p_payload->>'secret_box',token_fingerprint=p_payload->>'token_fingerprint',database_fingerprint=p_payload->>'database_fingerprint',bot_username=coalesce(p_payload->>'bot_username',bot_username),owner_lang=coalesce(p_payload->>'owner_lang',owner_lang),status=case when status in('locked','suspended') then status else 'setup' end where id=p_id;
+  update wwc_platform_shops set secret_box=p_payload->>'secret_box',token_fingerprint=p_payload->>'token_fingerprint',database_fingerprint=p_payload->>'database_fingerprint',bot_id=coalesce((p_payload->>'bot_id')::bigint,bot_id),bot_username=coalesce(p_payload->>'bot_username',bot_username),owner_lang=coalesce(p_payload->>'owner_lang',owner_lang),status=case when status in('locked','suspended') then status else 'setup' end where id=p_id;
  else raise exception 'INVALID_ACTION';end if;
  update wwc_platform_shops set updated_at=now() where id=p_id returning * into s;
  delete from wwc_platform_events where kind='customer' and created_at<now()-interval '7 days';return to_jsonb(s);

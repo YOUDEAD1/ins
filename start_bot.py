@@ -70,9 +70,7 @@ def install():
     if not interpreter.is_file():
         print('Creating a separate Python environment...', flush=True)
         venv.EnvBuilder(with_pip=True).create(PROJECT / '.venv')
-    req = PROJECT / 'requirements-tested.txt'
-    if not req.is_file():
-        req = PROJECT / 'requirements.txt'
+    req = PROJECT / 'requirements.txt'
     if not req.is_file():
         raise RuntimeError('requirements.txt is missing.')
     fingerprint = hashlib.sha256(req.read_bytes()).hexdigest()

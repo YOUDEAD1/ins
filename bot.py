@@ -4,7 +4,7 @@ import os
 # Coordinate before imports can start payment/referral threads or Telegram polling.
 # Test/import-only modules do not claim a production runtime lease.
 if __name__ == '__main__':
-    from runtime_handoff import acquire_runtime
+    from lara_core.runtime_handoff import acquire_runtime
     _RUNTIME_HANDOFF = acquire_runtime()
 
 import functools
@@ -2036,20 +2036,6 @@ try: _ensure_event_indexes()
 except Exception: pass
 
 
-def _build_product_snapshot(pr):
-    """ينشئ snapshot صغير من المنتج للأحداث"""
-    if not pr: return {}
-    pid = str(pr.get('id', str(pr.get('_id', ''))))
-    manual = pr.get('is_manual', False)
-    return {
-        'product_id': pid,
-        'name_ar': pr.get('name_ar', ''),
-        'name_en': pr.get('name_en', ''),
-        'price': float(pr.get('price', 0)),
-        'is_manual': manual,
-        'is_hidden': pr.get('is_hidden', False),
-        'stock': 'unlimited' if manual else get_product_stock_count(pid)
-    }
 
 
 def _api_catalog_event_data(data, product_id):
@@ -2776,8 +2762,10 @@ class APIHandler(BaseHTTPRequestHandler):
                     'is_manual': False,
                     'custom_emoji_id': ep_emoji_id,
                     'has_premium_emoji': bool(ep_emoji_id),
-                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
-                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'name_ar_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
+                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
+                    'name_en_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
+                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
                     'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')), 'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                     'source': 'external_api',
                 }})
@@ -2809,8 +2797,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                 'custom_emoji_id': custom_emoji_id,
                 'has_premium_emoji': bool(custom_emoji_id),
-                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
-                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
+                'name_ar_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_ar))}'
+                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_ar))),
+                'name_en_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_en))}'
+                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_en)))
             }
             # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
             emoji_fields_s = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
@@ -3577,21 +3567,25 @@ class APIHandler(BaseHTTPRequestHandler):
 
 
 
+_HTTP_SERVER_STARTED = False
+_HTTP_SERVER_LOCK = threading.Lock()
+
+
 def keep_alive():
+    from http.server import ThreadingHTTPServer
     port = int(os.environ.get('PORT', 10000))
-    # ThreadingHTTPServer: كل طلب في خيط منفصل — طلب بطيء لا يعلّق الباقي
-    try:
-        from http.server import ThreadingHTTPServer
-        server = ThreadingHTTPServer(('0.0.0.0', port), APIHandler)
-    except Exception:
-        # إصدار قديم: نبني threading يدوياً
-        import socketserver
-        class _ThreadedHTTP(socketserver.ThreadingMixIn, HTTPServer):
-            daemon_threads = True
-        server = _ThreadedHTTP(('0.0.0.0', port), APIHandler)
+    server = ThreadingHTTPServer(('0.0.0.0', port), APIHandler)
+    server.daemon_threads = True
     server.serve_forever()
 
-threading.Thread(target=keep_alive, daemon=True).start()
+
+def _ensure_http_server_started():
+    global _HTTP_SERVER_STARTED
+    with _HTTP_SERVER_LOCK:
+        if _HTTP_SERVER_STARTED:
+            return
+        _HTTP_SERVER_STARTED = True
+    threading.Thread(target=keep_alive, daemon=True, name='lara-http-server').start()
 
 try:
     bot = telebot.TeleBot(TOKEN, use_class_middlewares=False,
@@ -5459,17 +5453,6 @@ def _ref_batches_migrate():
 
 
 # ─────────── 💸 خصم الإحالة اللي تطلع (بسعر دفعتها) + إرجاعه لو رجعت ───────────
-def _ref_legacy_unit():
-    """قيمة الإحالة الوحدة للإحالات اللي انحسبت قبل نظام الدفعات (محفوظة وقت التحديث)."""
-    try:
-        d = db.settings.find_one({'key': 'ref_batches_v2'}) or {}
-        if d.get('legacy_unit') is not None:
-            return float(d['legacy_unit'])
-        v = round(float(get_referral_reward()) / max(1, int(get_referral_threshold())), 4)
-        db.settings.update_one({'key': 'ref_batches_v2', 'legacy_unit': {'$exists': False}}, {'$set': {'legacy_unit': v}}, upsert=True)
-        return v
-    except Exception:
-        return 0.0
 
 
 def ref_unit_value(rec):
@@ -6584,11 +6567,7 @@ def background_referral_checker_v2():
 # هذا الـ thread الرئيسي يدور بهدوء، والتحديث الفوري يحصل في start_handler
 # Install before any referral background work can run. Missing policy code fails
 # startup explicitly rather than activating new referrals under an older rule.
-import importlib.util as _ref_auto_importlib
-_ref_auto_spec = _ref_auto_importlib.spec_from_file_location(
-    'lara_referral_auto_rewards', os.path.join(os.path.dirname(__file__), 'referral_auto_rewards.py'))
-_ref_auto_module = _ref_auto_importlib.module_from_spec(_ref_auto_spec)
-_ref_auto_spec.loader.exec_module(_ref_auto_module)
+from lara_core import referral_auto_rewards as _ref_auto_module
 _REF_AUTO_REWARDS = _ref_auto_module.install(globals())
 
 threading.Thread(target=background_referral_checker_v2, daemon=True).start()
@@ -7713,12 +7692,6 @@ def _is_bad_translation(src_text, result):
     return False
 
 
-def _translate_text_raw(text, target_lang, tries=3):
-    """يترجم نصاً خالصاً (بلا وسوم) مع رفض الردود الفاسدة.
-    يرجّع الترجمة أو None (فيبقى النص الأصلي بدل نص مشوّه)."""
-    if not text or not text.strip():
-        return None
-
 _LEGACY_TRANSLATOR_SLOTS = threading.BoundedSemaphore(2)
 
 
@@ -7945,174 +7918,6 @@ def _translate_single_line(line, target_lang='en'):
         return line
 
 
-def _translate_line_core(line, target_lang='en', protect_html=True):
-    """
-    يترجم سطر واحد مع حفظ كامل لـ:
-    - Premium Emojis <tg-emoji> (بالترقيم الموضعي الآمن)
-    - HTML tags <b><i><code> إلخ
-    - Placeholders {}
-    - URLs
-    - إيموجي عادية
-    
-    الاستراتيجية: نفصل كل عنصر محمي ونضعه في قاموس بـ UUID ثابت لا يتغير بالترجمة.
-    """
-    try:
-        # 🔑 رموز حماية قصيرة ومرقّمة (XQ0QX) بدل UUID عشوائي طويل (XPROTX+8):
-        #    المترجم يمزّق الرموز الطويلة العشوائية كثيراً → يضيع العنصر المحمي،
-        #    وأشهر عرض لهذا: اختفاء <tg-emoji> ثم إلغاء الترجمة بالكامل
-        #    (تحذير: tg-emoji count mismatch → returning original).
-        vault = {}          # key → (نوع العنصر، النص الأصلي)
-        _seq = [0]
-
-        def protect_item(text_to_protect, kind='other'):
-            idx = _seq[0]; _seq[0] += 1
-            key = f"XQ{idx}QX"
-            vault[key] = (kind, text_to_protect)
-            return f" {key} "
-        
-        temp = line
-        
-        # 1. Premium Emojis — أعلى أولوية (قبل أي شيء)
-        temp = re.sub(
-            r'<tg-emoji[^>]*>.*?</tg-emoji>',
-            lambda m: protect_item(m.group(0), 'tg_emoji'),
-            temp,
-            flags=re.DOTALL
-        )
-        
-        # 2. Code/Pre blocks
-        temp = re.sub(r'<code>.*?</code>', lambda m: protect_item(m.group(0), 'html'), temp, flags=re.DOTALL)
-        temp = re.sub(r'<pre>.*?</pre>', lambda m: protect_item(m.group(0), 'html'), temp, flags=re.DOTALL)
-        
-        # 3. URLs
-        temp = re.sub(r'https?://[^\s<>"]+', lambda m: protect_item(m.group(0), 'url'), temp)
-        
-        # 4. Placeholders
-        temp = re.sub(r'\{[^}]*\}', lambda m: protect_item(m.group(0), 'placeholder'), temp)
-        
-        # 5. فواصل بصرية
-        temp = re.sub(r'[━─═]{2,}', lambda m: protect_item(m.group(0), 'deco'), temp)
-        
-        # 6. HTML tags (نحمي فقط الـ tags، محتواها يُترجم)
-        #    عند إعادة المحاولة نتركها بلا حماية: جوجل يحافظ على <b>/<i> عادةً،
-        #    وتقليل عدد الرموز يرفع نسبة نجاح الترجمة كثيراً.
-        if protect_html:
-            temp = re.sub(r'</?[a-zA-Z][^>]*>', lambda m: protect_item(m.group(0), 'html'), temp)
-        
-        # 7. إيموجي عادية
-        emoji_pat = re.compile(
-            r"[\u2600-\u27BF\U0001F000-\U0001F9FF\U0001FA00-\U0001FAFF\u200d\ufe0f]+",
-            flags=re.UNICODE
-        )
-        temp = emoji_pat.sub(lambda m: protect_item(m.group(0), 'emoji'), temp)
-        
-        # تحقق: لو ما بقي نص حقيقي
-        clean_check = re.sub(r'(?i)XQ\d{1,3}QX', '', temp).strip()
-        if not clean_check or len(clean_check) < 2:
-            return line
-        
-        # 🌐 الترجمة
-        translated = None
-        import requests
-        original_get = requests.get
-        def patched_get(*args, **kwargs):
-            kwargs['timeout'] = 4.0  # 4 seconds timeout
-            return original_get(*args, **kwargs)
-            
-        requests.get = patched_get
-        try:
-            try:
-                translated = GoogleTranslator(source='auto', target=target_lang).translate(temp)
-            except Exception as e:
-                logger.warning(f"Direct translation failed: {e}. Retrying with proxies...")
-                
-            if not translated:
-                proxies_to_try = list(VERIFIED_PROXIES)
-                if proxies_to_try:
-                    random.shuffle(proxies_to_try)
-                    for proxy in proxies_to_try[:5]:
-                        try:
-                            translated = GoogleTranslator(
-                                source='auto',
-                                target=target_lang,
-                                proxies={'http': proxy, 'https': proxy}
-                            ).translate(temp)
-                            if translated:
-                                logger.info(f"Translation succeeded using proxy: {proxy}")
-                                break
-                        except Exception as proxy_err:
-                            logger.debug(f"Translation proxy {proxy} failed: {proxy_err}")
-        finally:
-            requests.get = original_get
-            
-        if not translated:
-            return line
-        
-        # 🔁 تطبيع المفاتيح: المترجم قد يضيف مسافات أو يغيّر حالة الأحرف (x q 0 q x)
-        translated = re.sub(
-            r'(?i)x\s*q\s*(\d{1,3})\s*q\s*x',
-            lambda m: f"XQ{m.group(1)}QX",
-            translated
-        )
-        
-        # 🔁 استرجاع العناصر المحمية
-        for key, (_kind, original) in vault.items():
-            translated = re.sub(re.escape(key), lambda m, _o=original: _o, translated, flags=re.IGNORECASE)
-        
-        # 🧹 نظّف أي مفتاح مشوّه لم يُسترجع (نعالج فقدان محتواه بالأسفل)
-        translated = re.sub(r'(?i)X\s*Q\s*\d{1,3}\s*Q\s*X', '', translated)
-        
-        # 🛠 استرجاع ذكي: بدل إلغاء الترجمة كلياً عند ضياع عنصر،
-        #    نعيد إدراج ما يمكن إدراجه بأمان (الأيقونات)، ونلغي فقط عند ضياع
-        #    عنصر لا يجوز تخمين مكانه (وسم HTML / رابط / placeholder).
-        missing_critical = False
-        missing_tg = []
-        missing_emoji = []
-        for _key, (_kind, _orig) in vault.items():
-            if not _orig or _orig in translated:
-                continue
-            if _kind == 'tg_emoji':
-                missing_tg.append(_orig)
-            elif _kind == 'emoji':
-                missing_emoji.append(_orig)
-            elif _kind == 'deco':
-                pass  # فواصل بصرية: فقدانها غير مؤثر
-            else:
-                missing_critical = True
-        
-        if missing_critical:
-            logger.warning("protected tag/url lost in translation - returning original line")
-            return line
-        
-        # نعيد الأيقونات المفقودة: tg-emoji للبداية (مكانها الطبيعي)، والعادية للنهاية
-        if missing_tg or missing_emoji:
-            _body = translated.strip()
-            if missing_tg:
-                _body = ''.join(missing_tg) + (' ' + _body if _body else '')
-            if missing_emoji:
-                _body = (_body + ' ' if _body else '') + ''.join(missing_emoji)
-            translated = _body
-            logger.info(
-                f"recovered lost icons after translation "
-                f"(tg-emoji: {len(missing_tg)}, emoji: {len(missing_emoji)})"
-            )
-        
-        # 🧽 تنظيف المسافات الزائدة الناتجة عن حشو الرموز (" KEY ")
-        translated = re.sub(r'[ \t]{2,}', ' ', translated)
-        translated = re.sub(r'(<[a-zA-Z][^>]*>) +', r'\1', translated)   # <b> نص  →  <b>نص
-        translated = re.sub(r' +(</[a-zA-Z][^>]*>)', r'\1', translated)  # نص </b>  →  نص</b>
-        
-        # 🛡 فحص نهائي: عدد tg-emoji لازم يكون نفسه
-        orig_tg = len(re.findall(r'<tg-emoji', line))
-        result_tg = len(re.findall(r'<tg-emoji', translated))
-        if orig_tg != result_tg:
-            logger.warning(f"tg-emoji count mismatch after translation ({orig_tg} vs {result_tg}) - returning original")
-            return line
-        
-        return translated.strip()
-    except Exception as e:
-        logger.debug(f"Single line translation error: {e}")
-        return line
 
 
 def extract_custom_emojis_to_html(message):
@@ -8490,13 +8295,6 @@ def _catalog_pull_product(p):
         logger.debug(f"catalog pull: {e}")
 
 
-def _find_product_light(pid):
-    """للقوائم: المنتج بدون الوصف من الذاكرة (بدون أي استعلام)."""
-    now = time.time()
-    if _PRODUCTS_BY_ID_CACHE['exp'] <= now:
-        _get_all_products_cached()
-    p = _PRODUCTS_BY_ID_CACHE['map'].get(str(pid))
-    return p if p is not None else find_product(pid)
 
 
 def find_product(pid):
@@ -8850,19 +8648,6 @@ def _bx_id(lang, text):
     return hashlib.sha256(('bx1\0' + lang + '\0' + text).encode()).hexdigest()
 
 
-def _bx_core(piece, lang):
-    """(بادئة، نص للترجمة، لاحقة) أو None لو القطعة ما تحتاج ترجمة."""
-    m = re.match(r'^(\W*)(.*?)(\W*)$', piece, re.S)
-    if not m or not m.group(2):
-        return None
-    core = m.group(2)
-    letters = re.findall(r'[^\W\d_]', core)
-    if len(letters) < 2:
-        return None
-    nat = _BX_NATIVE.get(lang)
-    if nat and len(re.findall(nat, core)) / len(letters) >= 0.6:
-        return None
-    return m.group(1), core, m.group(3)
 
 
 # أسماء تبقى بأصلها ولا تُترجم أبداً: أسماء المنتجات، أسماء الأقسام (المجلدات)، اسم المتجر،
@@ -15634,62 +15419,6 @@ def _alert_ambiguous_deposit(coin, amount_usd, records):
         pass
 
 
-def find_pending_allowing_shortfall(amount_usd, coin, up_tol=0.03, down_max=None):
-    """يطابق إيداعاً معلّقاً عند نقص ضئيل جداً (رسوم شبكة فقط).
-
-    ⚠️ خطر أمني حقيقي: لو وسّعنا النقص، قد يُنسب تحويل شخصٍ دفع فعلاً إلى
-    شخصٍ آخر "جرّب فقط" وله إيداع معلّق بمبلغ قريب. لذا:
-    - النقص المسموح ≤ 0.03$ فقط (رسوم نموذجية).
-    - حارس 1: مرشّح وحيد ضمن النطاق الضيّق، وإلا رفض.
-    - حارس 2: لا يوجد أي إيداع آخر قريب (±0.15$) من الواصل، وإلا رفض.
-    - عند أي التباس: لا نعطي أحداً (أأمن من الخطأ).
-    """
-    try:
-        amount_usd = float(amount_usd)
-        # 🛡 نفحص عبر كل العملات التي تصل لنفس المحفظة (Bybit)
-        if str(coin).startswith('BYBIT') or coin in ('USDT', 'USDT_BEP20'):
-            match_coins = ['BYBIT_UID', 'BYBIT_TRC20', 'BYBIT_BEP20', 'USDT', 'USDT_BEP20']
-        else:
-            match_coins = [coin]
-        records = list(db.pending_deposits.find({
-            'coin': {'$in': match_coins},
-            'status': 'pending',
-            'expires_at': {'$gt': int(time.time())}
-        }))
-        if not records:
-            return None
-
-        in_band = []
-        for r in records:
-            req = float(r.get('unique_amount_usd', 0))
-            if req <= 0:
-                continue
-            # 🛡 نقص ضئيل جداً فقط (رسوم شبكة): 0.03$ كحد أقصى
-            #    توسيعه يسبب نسب تحويل شخص دفع إلى شخص "جرّب فقط" بمبلغ قريب.
-            dmax = down_max if down_max is not None else 0.03
-            if req - dmax <= amount_usd <= req + up_tol:
-                in_band.append((abs(req - amount_usd), r))
-
-        if not in_band:
-            return None
-        # 🛡 حارس 1: أكثر من مرشّح ضمن النطاق → رفض
-        if len(in_band) > 1:
-            logger.warning(f"[SHORTFALL] {len(in_band)} إيداعات ضمن نطاق ${amount_usd} ({coin}) — رُفض للأمان")
-            return None
-        # 🛡 حارس 2: أي إيداع آخر قريب (±0.15$) من الواصل → الوضع ملتبس → رفض
-        #    يمنع إعطاء تحويل شخصٍ دفع لشخصٍ آخر جرّب بمبلغ مشابه.
-        winner = in_band[0][1]
-        for r in records:
-            if r.get('pending_id') == winner.get('pending_id'):
-                continue
-            other = float(r.get('unique_amount_usd', 0))
-            if abs(other - amount_usd) <= 0.15:
-                logger.warning(f"[SHORTFALL] إيداع آخر قريب (${other}) من ${amount_usd} — رُفض للأمان")
-                return None
-        return winner
-    except Exception as e:
-        logger.debug(f"find_pending_allowing_shortfall err: {e}")
-        return None
 
 
 def find_pending_deposit_for_amount(amount_usd, coin, tolerance=0.0001):
@@ -16127,11 +15856,12 @@ def _fetch_bep20_via_rpc(address, blocks_back=2400):
     TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
     CHUNK = 1000
-    start = max(0, latest - blocks_back)
+    safe_head = max(0, latest - 12)
+    start = max(0, safe_head - blocks_back)
     seen = set()
     b = start
-    while b <= latest:
-        end = min(b + CHUNK - 1, latest)
+    while b <= safe_head:
+        end = min(b + CHUNK - 1, safe_head)
         params = [{
             'fromBlock': hex(b),
             'toBlock': hex(end),
@@ -16143,9 +15873,11 @@ def _fetch_bep20_via_rpc(address, blocks_back=2400):
             for log in logs:
                 try:
                     tx_id = str(log.get('transactionHash', ''))
-                    if not tx_id or tx_id in seen:
+                    log_idx = str(log.get('logIndex', '0x0'))
+                    from_topic = str((log.get('topics') or ['', ''])[1] or '').lower()
+                    if not tx_id or from_topic == to_topic or (tx_id, log_idx) in seen:
                         continue
-                    seen.add(tx_id)
+                    seen.add((tx_id, log_idx))
                     amount = int(log.get('data', '0x0'), 16) / (10 ** 18)
                     if amount > 0:
                         out.append((tx_id, round(amount, 6), 0))
@@ -16256,75 +15988,6 @@ def check_usdt_blockchain_auto():
         logger.error(f"check_usdt_blockchain_auto error: {e}")
 
 
-def _check_usdt_binance_legacy():
-    """🔍 (احتياطي) يفحص USDT عبر Binance API — للعناوين على Binance"""
-    try:
-        # نشيك إن في pending
-        pending_count = db.pending_deposits.count_documents({
-            'coin': {'$in': ['USDT', 'USDT_BEP20']},
-            'status': 'pending',
-            'expires_at': {'$gt': int(time.time())}
-        })
-        if pending_count == 0:
-            return
-        
-        # نجلب آخر deposits من Binance
-        res = execute_binance_call(
-            lambda c: c.get_deposit_history(coin='USDT'),
-            max_retries=5
-        )
-        
-        if res is None:
-            return
-        
-        current_time_ms = int(time.time() * 1000)
-        cutoff_time_ms = current_time_ms - (45 * 60 * 1000)
-        
-        for d in res[:30]:
-            try:
-                tx_id = str(d.get('txId', ''))
-                if not tx_id:
-                    continue
-                
-                tx_time = int(d.get('insertTime', 0))
-                if tx_time and tx_time < cutoff_time_ms:
-                    continue
-                
-                # فقط الحوالات المؤكدة
-                if int(d.get('status', -1)) != 1:
-                    continue
-                
-                tx_id_normalized = normalize_tx_id(tx_id)
-                
-                if db.used_transactions.find_one({'transaction_id': tx_id_normalized}):
-                    continue
-                
-                amt = float(d.get('amount', 0))
-                if amt <= 0:
-                    continue
-                
-                # نطابق مع pending (TRC20 أو BEP20)
-                network = d.get('network', '').upper()
-                coins_to_check = []
-                if 'TRX' in network or 'TRC' in network:
-                    coins_to_check = ['USDT']
-                elif 'BSC' in network or 'BEP' in network:
-                    coins_to_check = ['USDT_BEP20']
-                else:
-                    coins_to_check = ['USDT', 'USDT_BEP20']
-                
-                for coin_check in coins_to_check:
-                    pending = find_pending_deposit_for_amount(amt, coin_check, tolerance=0.001)
-                    if pending:
-                        success = auto_credit_from_pending(pending, tx_id_normalized, f"USDT ({coin_check}) Auto")
-                        if success:
-                            logger.info(f"✅ AUTO-CREDITED USDT: user {pending['user_id']} → ${pending['base_amount_usd']:.2f}")
-                        break
-            except Exception as tx_err:
-                logger.debug(f"Skip USDT tx: {tx_err}")
-                continue
-    except Exception as e:
-        logger.error(f"check_usdt_blockchain_auto error: {e}")
 
 
 # ============================================================
@@ -16802,12 +16465,6 @@ def bybit_is_configured():
     return bool(k and s)
 
 
-def bybit_available_methods():
-    """Only internal UID deposits are offered; keep legacy settlement code."""
-    if not bybit_is_configured():
-        return []
-    _k, _s, uid_set, _b = _bybit_creds()
-    return ['UID'] if uid_set else []
 
 
 _BYBIT_HEALTH = {'credentials': None, 'retry_at': 0.0, 'reason': '', 'http': None, 'ret_code': None,
@@ -27406,10 +27063,15 @@ def admin_set_price(call):
     msg = bot.send_message(call.message.chat.id, "💰 <b>أرسل السعر الجديد بالدولار ($):</b>", parse_mode="HTML")
     
     def save_price(message):
+        if not _is_admin_check(message.from_user.id):
+            return
         if not hasattr(message, 'text') or hasattr(message, 'data'):
             return
         try:
             new_price = float(message.text.strip())
+            if not math.isfinite(new_price) or new_price <= 0 or new_price > 50000:
+                bot.send_message(message.chat.id, "❌ السعر غير صالح (يجب أن يكون رقماً موجباً وأقل من 50,000$).")
+                return
             db.settings.update_one({'key': key}, {'$set': {'value': new_price}}, upsert=True)
             bot.send_message(message.chat.id, f"✅ تم تحديث السعر بنجاح إلى <b>${new_price:.2f}</b>.", parse_mode="HTML")
             
@@ -30370,14 +30032,6 @@ def ad_dldep_handler(call):
         bot.send_message(call.message.chat.id, "❌ فشل إرسال الملف.")
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ad_dlbuy_"))
-@admin_required
-def admin_download_buy_hist(call):
-    """Export all scoped ledgers and delivered details, including suppliers and API."""
-    bot.answer_callback_query(call.id)
-    target_uid = int(call.data.replace('ad_dlbuy_', ''))
-    _up_send_export(call, target_uid)
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ad_full_hist_"))
 @admin_required
 def ad_full_history_handler(call):
@@ -31083,14 +30737,6 @@ def ad_gift_val(message):
             parse_mode="HTML", reply_markup=markup)
     else: bot.send_message(message.chat.id, "❌ ما لقيت المستخدم. تأكد إنه دخل البوت مرة على الأقل.")
 
-def ad_gift_finish(message, tid):
-    try:
-        val = float(message.text)
-        db.users.update_one({'user_id': tid}, {'$inc': {'balance': val}})
-        bot.send_message(message.from_user.id, "✅ Done.")
-        try: notify_balance_gift(tid, val)
-        except Exception as _e: logger.debug(f"gift notify err: {_e}")
-    except: bot.send_message(message.from_user.id, "❌ Error.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ad_logs_all")
 @admin_required
@@ -37509,12 +37155,34 @@ def _wa_admin_search(identity, body):
         c = admin_find_order(q)
         if c:
             return 200, {'ok': True, 'kind': 'order', 'order': c}
+    if q.isdigit() and len(q) >= 15 and db.users.find_one({'user_id': int(q)}, {'_id': 1}):   # آي دي حساب موقع (أرقام طويلة)
+        wu = db.users.find_one({'user_id': int(q)}, {'web_merged_into': 1}) or {}
+        tid = int(wu.get('web_merged_into') or q)
+        b = admin_user_brief(tid)
+        if b and not b.get('missing'):
+            b['email'] = _wa_admin_email_of(tid)
+            return 200, {'ok': True, 'kind': 'user', 'user': b}
+    if '@' in q and '.' in q.split('@')[-1]:          # بحث بإيميل حساب الموقع
+        acc = db.web_accounts.find_one({'_id': _web_email_norm(q) or q.lower()}, {'user_id': 1})
+        if acc:
+            wu = db.users.find_one({'user_id': int(acc['user_id'])}, {'web_merged_into': 1}) or {}
+            tid = int(wu.get('web_merged_into') or acc['user_id'])
+            b = admin_user_brief(tid)
+            if b and not b.get('missing'):
+                b['email'] = str(_web_email_norm(q) or q.lower())
+                return 200, {'ok': True, 'kind': 'user', 'user': b}
     target = admin_find_user(q)
     deep = admin_deep_search(q)
     hits = bool(deep and (deep['accounts'] or deep['orders'] or deep['deposits']))
     if target and not hits:
-        return 200, {'ok': True, 'kind': 'user', 'user': admin_user_brief(target)}
+        b = admin_user_brief(target)
+        if b and not b.get('missing'):
+            b['email'] = _wa_admin_email_of(target)
+        return 200, {'ok': True, 'kind': 'user', 'user': b}
     if hits or (deep and deep['users']):
+        for u in deep.get('users') or []:
+            if isinstance(u, dict) and u.get('id') and 'email' not in u:
+                u['email'] = _wa_admin_email_of(u['id'])
         return 200, dict(deep, ok=True, kind='deep')
     c = admin_find_order(q)
     if c:
@@ -37530,7 +37198,7 @@ def _wa_admin_search(identity, body):
                                              {'ip': rx}, {'ip_address': rx}]}, {'user_id': 1, 'name': 1, 'username': 1,
                                                                                   'balance': 1, 'last_webapp_ip': 1,
                                                                                   'ip': 1, 'ip_address': 1}).limit(12):
-                users.append({'id': u['user_id'], 'name': _wa_plain(u.get('name') or u.get('username') or u['user_id'], 60),
+                users.append({'id': u['user_id'], 'email': _wa_admin_email_of(u['user_id']), 'name': _wa_plain(u.get('name') or u.get('username') or u['user_id'], 60),
                               'username': u.get('username') or '', 'balance': round(_wa_fnum(u.get('balance')), 2),
                               'joined': _doc_ts(u), 'ip': _wa_plain(u.get('last_webapp_ip') or u.get('ip_address') or u.get('ip'), 45)})
     except Exception:
@@ -37585,12 +37253,44 @@ def _wa_admin_user(identity, body):
     purchase_data = _up_products(target)
     b.update(orders=purchase_data['summary']['orders'], spent=purchase_data['summary']['spent'])
     b['ref_debt'] = round(_wa_fnum((get_user_data_full(target) or {}).get('ref_debt')), 4)
+    b['email'] = _wa_admin_email_of(target)
     st = vip_state(target)
     vip = {'level': st['raw_level'], 'cents': st['cents'], 'override': st['override'],
            'remaining': st['remaining'], 'next': st['next']['level'] if st['next'] else None,
            'range': vip_range_txt(st['tier']).strip('⁦⁩') if st['tier'] else None}
     return 200, {'ok': True, 'user': b, 'orders': orders, 'deposits': deps, 'logs': logs, 'vip': vip,
-                 'me': uid, 'purchases': purchase_data}
+                 'me': uid, 'purchases': purchase_data, 'web': _wa_admin_web_info(target)}
+
+
+def _wa_admin_email_of(target):
+    """الإيميل المربوط بالحساب (حساب الموقع أو حساب موقع اندمج فيه) — للأدمن فقط."""
+    try:
+        ids = [int(target)] + [int(u['user_id']) for u in db.users.find({'web_merged_into': int(target)}, {'user_id': 1}).limit(5)]
+        a = db.web_accounts.find_one({'user_id': {'$in': ids}}, {'_id': 1})
+        return str(a['_id']) if a else ''
+    except Exception:
+        return ''
+
+
+def _wa_admin_web_info(target):
+    """حساب الموقع للأدمن: الإيميل وطريقة الدخول والأجهزة — بدون كلمة السر أبداً (محفوظة كبصمة مشفرة ما ترجع)."""
+    try:
+        ids = [int(target)] + [int(u['user_id']) for u in db.users.find({'web_merged_into': int(target)}, {'user_id': 1}).limit(5)]
+        accs = []
+        for a in db.web_accounts.find({'user_id': {'$in': ids}}).limit(5):
+            accs.append({'email': str(a['_id']), 'password': bool(a.get('pw')), 'google': bool(a.get('google_sub')),
+                         'verified': bool(a.get('verified')), 'created': int(a.get('created_at') or 0) or None,
+                         'pw_changed': int(a.get('pw_changed_at') or 0) or None, 'linked': int(a.get('linked_at') or 0) or None})
+        sess = []
+        for d in db.web_sessions.find({'user_id': {'$in': ids}}).sort('last_seen', -1).limit(10):
+            sess.append({'via': _wa_plain(d.get('via'), 20), 'device': _web_device(d.get('ua')),
+                         'ip': _wa_plain(d.get('ip'), 45), 'created': int(d.get('created_at') or 0),
+                         'seen': int(d.get('last_seen') or 0)})
+        return {'accounts': accs, 'sessions': sess, 'web_only': int(target) >= WEB_UID_BASE}
+    except Exception as exc:
+        logger.debug(f'admin web info: {exc}')
+        return {'accounts': [], 'sessions': [], 'web_only': False}
+
 
 
 def _wa_admin_balance(identity, body):
@@ -38828,6 +38528,8 @@ def _web_mail_async(to, subject, text, html_body):
 _WEB_MAIL_TX = {
     'signup': {'ar': ('كود تفعيل حسابك', 'اكتب هذا الكود في الموقع عشان تفعّل حسابك. ينتهي خلال 10 دقائق.'),
                'en': ('Your verification code', 'Enter this code on the website to activate your account. It expires in 10 minutes.')},
+    'login': {'ar': ('كود الدخول لحسابك', 'اكتب هذا الكود في الموقع عشان تدخل حسابك بدون كلمة سر. ينتهي خلال 10 دقائق.'),
+              'en': ('Your sign-in code', 'Enter this code on the website to sign in without a password. It expires in 10 minutes.')},
     'reset': {'ar': ('كود تغيير كلمة السر', 'اكتب هذا الكود في الموقع عشان تختار كلمة سر جديدة. ينتهي خلال 10 دقائق.'),
               'en': ('Your password reset code', 'Enter this code on the website to choose a new password. It expires in 10 minutes.')},
 }
@@ -39099,6 +38801,43 @@ def _web_email_forgot(handler, body):
     return 200, {'ok': True, 'sent': True, 'resend_in': 55}     # نفس الرد دائماً: ما نكشف الإيميلات المسجلة
 
 
+def _web_email_code(handler, body):
+    """الدخول برمز على الإيميل (بدون كلمة سر): يرسل كود 6 أرقام يموت بعد 10 دقائق."""
+    if not _wa_rate_ok(f"wec:{_web_ip(handler)}", 10, 600):
+        return 429, {'error': 'too_many'}
+    if not _web_mail_ready():
+        return 503, {'error': 'unavailable'}
+    email_addr = _web_email_norm(body.get('email'))
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    acc = db.web_accounts.find_one({'_id': email_addr}, {'_id': 1})
+    if acc and _wa_rate_ok(f"wece:{email_addr}", 6, 3600):
+        out = _web_code_issue(email_addr, 'login', _web_lang(body))
+        if out.get('error'):
+            return 429, out
+        return 200, out
+    return 200, {'ok': True, 'sent': True, 'resend_in': 55}     # نفس الرد دائماً: ما نكشف الإيميلات المسجلة
+
+
+def _web_email_code_login(handler, body):
+    if not _wa_rate_ok(f"wecl:{_web_ip(handler)}", 30, 600):
+        return 429, {'error': 'too_many'}
+    email_addr = _web_email_norm(body.get('email'))
+    if not email_addr:
+        return 400, {'error': 'bad_email'}
+    doc, err = _web_code_check(email_addr, 'login', body.get('code'))
+    if err:
+        return 400, {'error': err}
+    acc = db.web_accounts.find_one_and_update({'_id': email_addr}, {'$set': {'verified': True}})   # الكود يثبت إن الإيميل له
+    if not acc:
+        return 400, {'error': 'code_expired'}
+    uid, err = _web_user_ok(acc['user_id'])
+    if err:
+        return 403, {'error': err}
+    _web_session_new(handler, uid, 'email')
+    return 200, {'ok': True}
+
+
 def _web_email_reset(handler, body):
     if not _wa_rate_ok(f"wer:{_web_ip(handler)}", 30, 600):
         return 429, {'error': 'too_many'}
@@ -39187,7 +38926,8 @@ def _web_auth_cfg(handler, body):
 _WEB_PUBLIC_POST.update({'/webapp/web/guest': _web_guest, '/webapp/web/auth': _web_auth_cfg,
                          '/webapp/web/email/signup': _web_email_signup, '/webapp/web/email/verify': _web_email_verify,
                          '/webapp/web/email/login': _web_email_login, '/webapp/web/email/forgot': _web_email_forgot,
-                         '/webapp/web/email/reset': _web_email_reset, '/webapp/web/google': _web_google})
+                         '/webapp/web/email/reset': _web_email_reset, '/webapp/web/google': _web_google,
+                         '/webapp/web/email/code': _web_email_code, '/webapp/web/email/code_login': _web_email_code_login})
 for _wp in _WEB_PUBLIC_POST:
     _WA_POST_ROUTES.setdefault(_wp, lambda identity, body: (400, {'error': 'bad_request'}))
 
@@ -39898,19 +39638,45 @@ def _wa_product_image(pid):
     return None
 
 
-def _web_head_html(page=None):
+_WEB_SEO_LANGS = {
+    # لغة: (اسم المتجر بالكتابة المحلية، وصف المتجر، "شراء"، "تسليم فوري"، كلمات بحث شائعة)
+    'en': ('LARA STOCK', 'Digital codes & subscriptions', 'Buy', 'instant delivery', 'digital codes, subscriptions, gift cards, premium accounts, cheap subscriptions'),
+    'ar': ('لارا ستوك', 'اشتراكات وأكواد رقمية', 'شراء', 'تسليم فوري', 'اشتراكات, أكواد رقمية, بطاقات رقمية, شراء اشتراك, اشتراك رخيص, حسابات بريميوم'),
+    'es': ('LARA STOCK', 'Códigos digitales y suscripciones', 'Comprar', 'entrega inmediata', 'códigos digitales, suscripciones, tarjetas regalo, cuentas premium, suscripción barata'),
+    'ru': ('ЛАРА СТОК', 'Цифровые коды и подписки', 'Купить', 'мгновенная доставка', 'цифровые коды, подписки, подарочные карты, премиум аккаунты, дешевая подписка'),
+    'zh': ('LARA STOCK 商店', '数字兑换码与订阅', '购买', '即时发货', '数字兑换码, 订阅, 礼品卡, 会员账号, 便宜订阅'),
+    'fa': ('لارا استاک', 'کدهای دیجیتال و اشتراک‌ها', 'خرید', 'تحویل فوری', 'کد دیجیتال, اشتراک, گیفت کارت, اکانت پریمیوم, خرید اشتراک ارزان'),
+    'fr': ('LARA STOCK', 'Codes numériques et abonnements', 'Acheter', 'livraison instantanée', 'codes numériques, abonnements, cartes cadeaux, comptes premium, abonnement pas cher'),
+    'tr': ('LARA STOCK', 'Dijital kodlar ve abonelikler', 'Satın al', 'anında teslimat', 'dijital kod, abonelik, hediye kartı, premium hesap, ucuz abonelik'),
+    'pt': ('LARA STOCK', 'Códigos digitais e assinaturas', 'Comprar', 'entrega imediata', 'códigos digitais, assinaturas, gift cards, contas premium, assinatura barata'),
+    'de': ('LARA STOCK', 'Digitale Codes und Abos', 'Kaufen', 'sofortige Lieferung', 'digitale Codes, Abonnements, Geschenkkarten, Premium-Konten, günstiges Abo'),
+    'id': ('LARA STOCK', 'Kode digital dan langganan', 'Beli', 'pengiriman instan', 'kode digital, langganan, kartu hadiah, akun premium, langganan murah'),
+    'hi': ('लारा स्टॉक', 'डिजिटल कोड और सब्सक्रिप्शन', 'खरीदें', 'तुरंत डिलीवरी', 'डिजिटल कोड, सब्सक्रिप्शन, गिफ्ट कार्ड, प्रीमियम अकाउंट, सस्ता सब्सक्रिप्शन'),
+}
+
+
+def _web_head_html(page=None, hl=None):
     """وسوم الموقع على دومينك: تثبيت كتطبيق (PWA) + معاينة الروابط + Google (عنوان/وصف/بيانات منتجات منظّمة).
     يرجّع (وسوم الرأس، العنوان، محتوى للزواحف داخل <noscript>). page = منتج (/p/<id>)."""
     base = (_web_public_url() or '/').rstrip('/')
     store = WEBAPP_STORE_NAME or 'LARA STOCK'
     e = html.escape
-    tagline = 'Digital codes & subscriptions, instant delivery | أكواد واشتراكات رقمية'
-    title = f"{store} — {tagline}"
-    desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} — digital codes and subscriptions with instant delivery."
+    hl = hl if hl in _WEB_SEO_LANGS else None
+    L = _WEB_SEO_LANGS[hl or 'en']
+    A = _WEB_SEO_LANGS['ar']
+    loc_name = L[0] if L[0] != 'LARA STOCK' else store
+    if hl:                                   # صفحة بلغة محددة (?hl=xx): العنوان والوصف كله بهاللغة
+        title = f"{store} | {loc_name} — {L[1]}, {L[3]}" if loc_name != store else f"{store} — {L[1]}, {L[3]}"
+        desc = f"{loc_name}: {L[1]} — {L[3]}. Binance Pay, crypto."
+    else:                                    # الصفحة الأساسية: إنجليزي + عربي
+        title = f"{store} | {A[0]} — {L[1]} | {A[1]}"
+        desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:200] or f"{store} — digital codes and subscriptions with instant delivery."
+        desc = f"{desc} {A[0]}: {A[1]} — {A[3]}."
+    q = f"?hl={hl}" if hl else ''
     og_img = f"{base}/og.png?v=3"
     image, url, wide = og_img, f"{base}/", True
     products = _wa_build_catalog(include_hidden=False)['products']
-    plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}"
+    plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}" + q
     plain = lambda t: re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', t or ''))).strip()
     names = lambda x: (x.get('name_en') or '', x.get('name_ar') or '')
     prod = next((x for x in products if str(x.get('id')) == str(page)), None) if page else None
@@ -39918,10 +39684,15 @@ def _web_head_html(page=None):
         en, ar = names(prod)
         name = en or ar or store
         both = f"{en} | {ar}" if en and ar and en != ar else name
-        title = f"{both} — {store}"
+        loc = (ar or name) if hl in ('ar', 'fa') else name
         price = f"${_wa_fnum(prod.get('price')):.2f}"
-        body_d = plain(prod.get('desc_en')) or plain(prod.get('desc_ar'))
-        desc = (f"Buy {name}" + (f" ({ar})" if ar and ar != name else '') + f" for {price} — instant delivery. " + body_d)[:300].strip()
+        body_d = plain(prod.get('desc_ar') if hl in ('ar', 'fa') else prod.get('desc_en')) or plain(prod.get('desc_en')) or plain(prod.get('desc_ar'))
+        if hl:
+            title = f"{L[2]} {loc} — {price} | {loc_name}"
+            desc = (f"{L[2]} {loc} — {price}, {L[3]}. {loc_name}. " + body_d)[:300].strip()
+        else:
+            title = f"Buy {name} | {A[2]} {ar or name} — {store}"
+            desc = (f"Buy {name} for {price} — instant delivery. {A[2]} {ar or name} بسعر {price} — {A[3]}. " + body_d)[:300].strip()
         if prod.get('image'):
             image = base + str(prod['image']) if str(prod['image']).startswith('/') else str(prod['image'])
             wide = False
@@ -39936,7 +39707,9 @@ def _web_head_html(page=None):
         seo = (f'<h1>{e(both)}</h1><p>{e(desc)}</p><p>{e(price)}</p>'
                f'<p><a href="{e(base)}/">{e(store)}</a></p>')
     else:
-        ld = [{'@context': 'https://schema.org', '@type': 'WebSite', 'name': store, 'url': f"{base}/", 'description': desc},
+        url = f"{base}/{q}"
+        ld = [{'@context': 'https://schema.org', '@type': 'WebSite', 'name': store, 'url': f"{base}/",
+               'alternateName': sorted({v[0] for v in _WEB_SEO_LANGS.values()} - {store}), 'description': desc},
               {'@context': 'https://schema.org', '@type': 'Organization', 'name': store, 'url': f"{base}/",
                'logo': f"{base}/icon-512.png?v=3"},
               {'@context': 'https://schema.org', '@type': 'ItemList', 'name': f"{store} products",
@@ -39946,20 +39719,26 @@ def _web_head_html(page=None):
                + ''.join(f'<li><a href="{e(plink(x))}">{e(" | ".join(n for n in dict.fromkeys(names(x)) if n))}</a>'
                          f' — ${_wa_fnum(x.get("price")):.2f}</li>' for x in products[:300])
                + '</ul>')
+    path = f"/p/{urllib.parse.quote(str(prod.get('id')), safe='')}" if prod else '/'
+    kw = ', '.join([store, loc_name, A[0], L[4]] + ([n for n in dict.fromkeys(names(prod)) if n] if prod else
+                   [n for x in products[:20] for n in dict.fromkeys(names(x)) if n]))[:700]
+    alt = [f'<link rel="alternate" hreflang="{c}" href="{e(base + path)}?hl={c}">' for c in _WEB_SEO_LANGS]
+    alt.append(f'<link rel="alternate" hreflang="x-default" href="{e(base + path)}">')
     ld_json = json.dumps(ld, ensure_ascii=False).replace('<', '\\u003c')
     gsv = re.sub(r'[^A-Za-z0-9_\-]', '', os.getenv('GOOGLE_SITE_VERIFICATION') or '')[:100]
     tags = [
         '<base href="/">',
         '<link rel="manifest" href="/manifest.webmanifest">',
-        '<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=3">',
-        '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=3">',
-        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=3">',
+        '<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=4">',
+        '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=4">',
+        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">',
         '<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3">',
         '<meta name="mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
         f'<meta name="apple-mobile-web-app-title" content="{e(store)}">',
         f'<meta name="description" content="{e(desc)}">',
+        f'<meta name="keywords" content="{e(kw)}">',
         '<meta name="robots" content="index, follow, max-image-preview:large">',
         f'<link rel="canonical" href="{e(url)}">',
         '<meta property="og:type" content="' + ('product' if prod else 'website') + '">',
@@ -39978,6 +39757,8 @@ def _web_head_html(page=None):
     tags.append(f'<meta name="lara-google" content="{e(_web_google_id())}">')
     if gsv:
         tags.append(f'<meta name="google-site-verification" content="{gsv}">')
+    tags += alt
+    tags.append(f'<meta property="og:locale" content="{e(hl or "en")}">')
     tags.append(f'<script type="application/ld+json">{ld_json}</script>')
     return '\n'.join(tags), title, f'<noscript><div class="seo">{seo}</div></noscript>'
 
@@ -40012,9 +39793,10 @@ def _web_icon(size, maskable=False, rounded=True):
         return _WEB_ICON_CACHE[key]
     from PIL import Image
     big = size * 4                      # نرسم كبير ثم نصغّر = حواف ناعمة
-    tile = _web_tile(big, big, 0 if (maskable or not rounded) else int(big * .22))
+    clear = not maskable and rounded     # أيقونة التبويب/التطبيق: الشعار بس بدون خلفية
+    tile = Image.new('RGBA', (big, big), (0, 0, 0, 0)) if clear else _web_tile(big, big, 0)
     mark = _web_mark_img()
-    fit = .68 if maskable else .86      # maskable: لازم يبقى داخل المنطقة الآمنة (80%)
+    fit = .68 if maskable else .98 if clear else .86      # maskable: لازم يبقى داخل المنطقة الآمنة (80%)
     k = min(big * fit / mark.width, big * fit / mark.height)   # تكبير/تصغير (thumbnail ما يكبّر)
     mark = mark.resize((max(1, int(mark.width * k)), max(1, int(mark.height * k))), Image.LANCZOS)
     tile.alpha_composite(mark, ((big - mark.width) // 2, (big - mark.height) // 2 + int(big * .01)))
@@ -40073,9 +39855,7 @@ def _web_favicon_svg():
                    r'|<g mask="url\(#lmFaceM\)">.*?</g>', '', inner, flags=re.S)
     inner = re.sub(r'\s*\n\s*', '', inner)
     out = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
-           '<defs><radialGradient id="fbg" cx=".5" cy=".5" r=".7"><stop offset="0" stop-color="#0f2a5c"/><stop offset="1" stop-color="#080b12"/></radialGradient></defs>'
-           '<rect width="128" height="128" rx="28" fill="url(#fbg)"/>'
-           '<g transform="translate(64 64.5) scale(1.07) translate(-64.2 -56.3)">' + inner + '</g></svg>')
+           '<g transform="translate(64 64) scale(1.17) translate(-64.2 -56.3)">' + inner + '</g></svg>')
     _WEB_MARK_SVG.update(m=mtime, svg=out)
     return out
 
@@ -40101,9 +39881,9 @@ def _web_site_get(handler, raw):
         man = {'name': store, 'short_name': store[:12], 'start_url': '/?src=app', 'scope': '/', 'id': '/',
                'display': 'standalone', 'background_color': '#080b12', 'theme_color': '#080b12',
                'description': (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} store",
-               'icons': [{'src': '/icon-192.png?v=3', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-512.png?v=3', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-maskable.png?v=3', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
+               'icons': [{'src': '/icon-192.png?v=4', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-512.png?v=4', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-maskable.png?v=4', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
         _wa_send(handler, 200, json.dumps(man, ensure_ascii=False), 'application/manifest+json', 'public, max-age=3600')
         return True
     if raw == '/sw.js':
@@ -40138,10 +39918,13 @@ def _web_site_get(handler, raw):
                   f"Disallow: /webapp/\nSitemap: {base}/sitemap.xml\n"), 'text/plain; charset=utf-8', 'public, max-age=3600')
         return True
     if raw == '/sitemap.xml':
-        urls = [f"{base}/"] + [f"{base}/p/{urllib.parse.quote(str(p['id']), safe='')}"
-                                for p in _wa_build_catalog(include_hidden=False)['products'][:5000]]
-        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-               + ''.join(f"<url><loc>{html.escape(u)}</loc></url>" for u in urls) + '</urlset>')
+        paths = ['/'] + [f"/p/{urllib.parse.quote(str(p['id']), safe='')}"
+                         for p in _wa_build_catalog(include_hidden=False)['products'][:3000]]
+        alts = lambda pth: ''.join(f'<xhtml:link rel="alternate" hreflang="{c}" href="{html.escape(base + pth)}?hl={c}"/>'
+                                   for c in _WEB_SEO_LANGS) + f'<xhtml:link rel="alternate" hreflang="x-default" href="{html.escape(base + pth)}"/>'
+        locs = [(pth, '') for pth in paths] + [(pth, f'?hl={c}') for pth in paths for c in _WEB_SEO_LANGS]   # كل صفحة بكل لغة
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">'
+               + ''.join(f"<url><loc>{html.escape(base + pth + qq)}</loc>{alts(pth)}</url>" for pth, qq in locs[:45000]) + '</urlset>')
         _wa_send(handler, 200, xml, 'application/xml', 'public, max-age=3600')
         return True
     if raw.startswith('/r/'):          # رابط الدعوة القصير ← المتجر مع حفظ صاحب الدعوة
@@ -40206,7 +39989,8 @@ def _wa_static(handler, rel, page=None):
     if ext == 'html' and b'<meta name="lara-site" content="">' in data:
         site_flag = '1' if _web_host_ok(handler) else ''
         bot_name = re.sub(r'[^A-Za-z0-9_]', '', get_bot_username() or '')[:40]
-        head, title, seo_body = _web_head_html(page) if site_flag else ('', None, '')
+        hl_m = re.search(r'[?&]hl=([a-z]{2})(?:&|$)', str(getattr(handler, 'path', '') or ''))
+        head, title, seo_body = _web_head_html(page, hl_m.group(1) if hl_m else None) if site_flag else ('', None, '')
         vkey = (path, mtime, site_flag, bot_name, hashlib.sha1(head.encode(), usedforsecurity=False).hexdigest() if head else '')
         variant = _WA_HTML_VARIANTS.get(vkey)
         if not variant:
@@ -40490,18 +40274,6 @@ def _notify_url(pid=None, cat=None):
     return url + (('&' if '?' in url else '?') + urllib.parse.urlencode(q) if q else '')
 
 
-def _notify_btn(text, fallback_cb, url=None, style='success', emoji_id=None):
-    """زر الإشعار: يفتح الموقع (url من _notify_url) — ولو ما فيه رابط يرجع لزر البوت القديم."""
-    kw = {'text': text}
-    if url:
-        kw['web_app'] = types.WebAppInfo(url=url)
-    else:
-        kw['callback_data'] = fallback_cb
-    if style:
-        kw['style'] = style
-    if emoji_id:
-        kw['icon_custom_emoji_id'] = emoji_id
-    return CustomInlineButton(**kw)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ad_notify_open')
@@ -41558,8 +41330,6 @@ def profit_stats_multi(periods):
     return out
 
 
-def profit_stats(since):
-    return profit_stats_multi([('x', since)])['x']
 
 
 _PROFIT_CACHE = {'t': 0, 'v': None}
@@ -44099,8 +43869,10 @@ def _net_api_products_payload(uid):
                 # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                 'custom_emoji_id': custom_emoji_id,
                 'has_premium_emoji': bool(custom_emoji_id),
-                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
-                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
+                'name_ar_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_ar))}'
+                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_ar))),
+                'name_en_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_en))}'
+                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_en)))
             }
             # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
             emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
@@ -44144,8 +43916,10 @@ def _net_api_products_payload(uid):
                     'discount_tiers': [],
                     'custom_emoji_id': ep_emoji_id,
                     'has_premium_emoji': bool(ep_emoji_id),
-                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
-                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'name_ar_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
+                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
+                    'name_en_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
+                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
                     'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
                     'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                     'source': 'external_api',
@@ -44201,8 +43975,10 @@ def _net_api_products_payload(uid):
                         'duration_days': dur_days,
                         'custom_emoji_id': cg_emoji,
                         'has_premium_emoji': bool(cg_emoji),
-                        'name_ar_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
-                        'name_en_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+                        'name_ar_html': (f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {html.escape(str(full_name))}'
+                                         if cg_emoji and str(cg_emoji).isdigit() else html.escape(str(full_name))),
+                        'name_en_html': (f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {html.escape(str(full_name))}'
+                                         if cg_emoji and str(cg_emoji).isdigit() else html.escape(str(full_name))),
                         'desc_ar_html': cg_desc, 'desc_en_html': cg_desc,
                         'source': 'chatgpt_business',
                         'product_type': 'cgpt_main',
@@ -44982,73 +44758,32 @@ def _up_vc_back(session):
 
 
 
-# Additive translation repair; preserve the existing CMS and all legacy code.
-try:
-    import importlib.util as _tr_importlib
-    _tr_spec = _tr_importlib.spec_from_file_location('lara_translation_repair', os.path.join(os.path.dirname(__file__), 'translation_repair.py'))
-    _tr_module = _tr_importlib.module_from_spec(_tr_spec)
-    _tr_spec.loader.exec_module(_tr_module)
-    _tr_module.install(globals())
-except Exception:
-    logger.exception('Translation repair unavailable; legacy translator remains active')
-
-# Additive NSS / WWC platform integration. Existing handlers remain intact.
-try:
-    import importlib.util as _wwc_importlib
-    _wwc_spec = _wwc_importlib.spec_from_file_location('lara_wwc_platform', os.path.join(os.path.dirname(__file__), 'wwc_platform.py'))
-    _wwc_module = _wwc_importlib.module_from_spec(_wwc_spec)
-    _wwc_spec.loader.exec_module(_wwc_module)
-    _wwc_module.install(globals())
-except Exception:
-    logger.exception("WWC add-on unavailable; existing NSS store continues")
-
-# Additive channel composer; all previous publishing handlers remain available.
-try:
-    import importlib.util as _chbc_importlib
-    _chbc_spec = _chbc_importlib.spec_from_file_location('lara_channel_broadcast_upgrade', os.path.join(os.path.dirname(__file__), 'channel_broadcast_upgrade.py'))
-    _chbc_module = _chbc_importlib.module_from_spec(_chbc_spec)
-    _chbc_spec.loader.exec_module(_chbc_module)
-    _chbc_module.install(globals())
-except Exception:
-    logger.exception('Channel composer add-on unavailable; original publishing remains active')
-
-# Additive dashboard performance: keep every original report and admin handler.
-try:
-    import importlib.util as _admin_perf_importlib
-    _admin_perf_spec = _admin_perf_importlib.spec_from_file_location(
-        'lara_admin_performance', os.path.join(os.path.dirname(__file__), 'admin_performance.py'))
-    _admin_perf_module = _admin_perf_importlib.module_from_spec(_admin_perf_spec)
-    _admin_perf_spec.loader.exec_module(_admin_perf_module)
-    _ADMIN_PERFORMANCE = _admin_perf_module.install(globals())
-except Exception:
-    logger.exception('Dashboard acceleration unavailable; original admin handlers remain active')
-
-# Additive request reductions; original financial matching and totals remain.
-try:
-    import importlib.util as _traffic_importlib
-    _traffic_spec = _traffic_importlib.spec_from_file_location(
-        'lara_traffic_efficiency', os.path.join(os.path.dirname(__file__), 'traffic_efficiency.py'))
-    _traffic_module = _traffic_importlib.module_from_spec(_traffic_spec)
-    _traffic_spec.loader.exec_module(_traffic_module)
-    _TRAFFIC_EFFICIENCY = _traffic_module.install(globals())
-except Exception:
-    logger.exception('Request optimization unavailable; original checks remain active')
-
-# Fix confirmed sources in the exported network report; preserve all legacy paths.
-try:
-    import importlib.util as _report_importlib
-    _report_spec = _report_importlib.spec_from_file_location(
-        'lara_network_report_fixes', os.path.join(os.path.dirname(__file__), 'network_report_fixes.py'))
-    _report_module = _report_importlib.module_from_spec(_report_spec)
-    _report_spec.loader.exec_module(_report_module)
-    _NETWORK_REPORT_FIXES = _report_module.install(globals())
-except Exception:
-    logger.exception('Network report fixes unavailable; original service remains active')
+# ════════════════════════════════════════════════════════════════════
+# 🧩 LARA CORE MODULAR SUBSYSTEMS INSTALLATION
+# ════════════════════════════════════════════════════════════════════
+for _core_label, _core_import, _core_var in (
+    ('Translation repair', 'lara_core.translation_repair', '_TRANSLATION_REPAIR'),
+    ('WWC platform', 'lara_core.wwc_platform', '_WWC_PLATFORM'),
+    ('Channel composer', 'lara_core.channel_broadcast_upgrade', '_CHANNEL_COMPOSER'),
+    ('Admin performance', 'lara_core.admin_performance', '_ADMIN_PERFORMANCE'),
+    ('Traffic efficiency', 'lara_core.traffic_efficiency', '_TRAFFIC_EFFICIENCY'),
+    ('Network report fixes', 'lara_core.network_report_fixes', '_NETWORK_REPORT_FIXES'),
+    ('Unified ban guard', 'lara_core.ban_guard', '_UNIFIED_BAN_GUARD'),
+    ('TON & check engine', 'lara_core.ton_engine', '_TON_AND_CHECK_ENGINE'),
+    ('Security vault & hardening', 'lara_core.security_vault', '_SECURITY_HARDENING'),
+    ('Bot theme & crisp media', 'lara_core.bot_theme', '_BOT_THEME_UPGRADE'),
+):
+    try:
+        _mod = __import__(_core_import, fromlist=['install'])
+        globals()[_core_var] = _mod.install(globals())
+    except Exception:
+        logger.exception('%s module failed to install', _core_label)
 
 # 🚀 15. التشغيل
 # ============================================================
 def run_bot():
-    # All functions, imports and database initialization are now complete.
+    # Start HTTP server only AFTER all routes, guards, and lara_core modules are wired.
+    _ensure_http_server_started()
     _stock_visibility_ensure()
     _API_READY.set()
     logger.info('✅ Reseller API ready — ext-purchase-v3')
