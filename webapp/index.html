@@ -2163,6 +2163,7 @@ a.btn svg{flex:none}
 </style>
 </head>
 <body>
+<!--lara-body-->
 <div class="page-loading" id="page-loading" role="status" aria-live="polite" aria-label="Loading">
   <div class="ld" id="ld">
     <span class="ld-glow" aria-hidden="true"></span>
@@ -4395,6 +4396,7 @@ async function trqFlush() {
   });
   if (done.length) { const keys = Object.keys(m); if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(k => delete m[k]); store.set('trq3:' + lang, m); }
   if (failed && lang === LANG) setTimeout(() => { if (lang === LANG && S.screen && !Sheets.length) renderView(); }, 8500);
+  if (done.length && lang === LANG && document.querySelector('.api-sec') && !Sheets.length) setTimeout(() => { if (lang === LANG && document.querySelector('.api-sec') && !Sheets.length) renderView(); }, 30);   // صفحة الـAPI فيها نصوص مقطّعة (<bdi>) فنعيد رسمها
   if (done.length && lang === LANG) {
     const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
     while ((n = w.nextNode())) { const v = n.nodeValue; if (!v || v.length < 2) continue; for (const src of done) if (v.includes(src) && !v.includes(m[src])) { n.nodeValue = v.split(src).join(m[src]); break; } }
@@ -4901,7 +4903,8 @@ const API_I18N = {
     save: '保存', manual: '人工', instant: '即时', errCode: '代码', errMeaning: '含义', e400: '请求错误', e401: '缺少或无效的 API 密钥', e402: '余额不足', e404: '商品或订单不存在',
     e409: '库存不足 / 无座位', e429: '请求过多', e503: '暂时不可用——重试购买前先检查订单', pending202: '202 = 供应商结果待定——请轮询 GET /order/{id}' }
 };
-function at(k, v) { const d = API_I18N[LANG] || API_I18N.en; let s = d[k] != null ? d[k] : (API_I18N.en[k] != null ? API_I18N.en[k] : k); if (v) for (const x in v) s = s.split('{' + x + '}').join(v[x]); return s; }
+function at(k, v) { const d = API_I18N[LANG] || API_I18N.en; let s = d[k] != null ? d[k] : (API_I18N.en[k] != null ? API_I18N.en[k] : k); if (v) for (const x in v) s = s.split('{' + x + '}').join(v[x]); return API_I18N[LANG] ? s : trq(s); }   // لغات بدون قاموس API (es والمترجمة تلقائياً): نترجم النص من الإنجليزي
+function epD(e) { return e.d[LANG] || trq(e.d.en); }
 const EPD = (en, ar, ru, zh) => ({ en, ar, ru, zh });
 const EP = [
   { m: 'GET', p: '/products', d: EPD('Every product available to you (hidden ones excluded) with your price, live stock and premium emoji.', 'كل المنتجات المتاحة لك (بدون المخفية) مع سعرك والمخزون المباشر والإيموجي المميز.', 'Все доступные вам товары (без скрытых) с вашей ценой, остатком и премиум-эмодзи.', '你可用的全部商品（不含隐藏商品），含你的价格、实时库存和高级表情。'),
@@ -5128,7 +5131,7 @@ async function apiTry(e) {
 }
 function bidiCode(txt) { return esc(txt).replace(/((?:GET |POST )?\/[\w{}\/._?=&-]+|\b[a-z]+_[a-z_]+\b|Idempotency-Key|status = completed)/g, '<bdi dir="ltr">$1</bdi>'); }
 function epListHtml() {
-  const row = (e, i) => `<button class="ep-row" data-act="api-ep" data-v="${i}"><span class="mth ${e.m.toLowerCase()}">${e.m}</span><code dir="ltr">${esc(e.p)}</code><small>${bidiCode(e.d[LANG] || e.d.en)}</small>${ic.chev}</button>`;
+  const row = (e, i) => `<button class="ep-row" data-act="api-ep" data-v="${i}"><span class="mth ${e.m.toLowerCase()}">${e.m}</span><code dir="ltr">${esc(e.p)}</code><small>${bidiCode(epD(e))}</small>${ic.chev}</button>`;
   return `<section class="api-sec"><h2>${esc(at('endpoints'))} <span class="api-count">${EP.length}</span></h2>
     <div class="api-card eps">${EP.map(row).join('')}</div></section>`;
 }
@@ -5162,7 +5165,7 @@ function openEndpoint(i) {
   const render = sh => {
     const params = (e.params || []).length ? `<div class="lbl">${esc(at('params'))}</div><div class="ptable">${e.params.map(([n, w, ty, rq]) => `<div class="prow"><code dir="ltr">${esc(n)}</code><span class="pw">${esc(w)}</span><span class="pt" dir="ltr">${esc(ty)}</span><span class="pr ${rq ? 'rq' : ''}">${esc(rq ? at('req') : at('opt'))}</span></div>`).join('')}</div>` : '';
     sh.body(`<div class="ep-head"><span class="mth ${e.m.toLowerCase()}">${e.m}</span><code dir="ltr">${esc(e.p)}</code></div>
-      <p class="ep-desc">${bidiCode(e.d[LANG] || e.d.en)}</p>
+      <p class="ep-desc">${bidiCode(epD(e))}</p>
       ${params}
       ${tryHtml()}
       ${e.body ? `<div class="lbl">${esc(at('body'))}</div>${cblock(JSON.stringify(e.body, null, 2), 'json', 'JSON')}` : ''}

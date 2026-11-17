@@ -39899,62 +39899,185 @@ def _wa_product_image(pid):
 
 
 def _web_head_html(page=None):
-    """وسوم الموقع على دومينك: تثبيت كتطبيق (PWA) + معاينة الروابط + Google. page = منتج (/p/<id>)."""
+    """وسوم الموقع على دومينك: تثبيت كتطبيق (PWA) + معاينة الروابط + Google (عنوان/وصف/بيانات منتجات منظّمة).
+    يرجّع (وسوم الرأس، العنوان، محتوى للزواحف داخل <noscript>). page = منتج (/p/<id>)."""
     base = (_web_public_url() or '/').rstrip('/')
     store = WEBAPP_STORE_NAME or 'LARA STOCK'
-    title = store
-    desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} — digital codes and subscriptions with instant delivery."
-    image, url = f"{base}/icon-512.png", f"{base}/"
-    if page:
-        p = next((x for x in _wa_build_catalog(include_hidden=False)['products'] if str(x.get('id')) == str(page)), None)
-        if p:
-            name = p.get('name_en') or p.get('name_ar') or store
-            title = f"{name} · {store}"
-            plain = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', p.get('desc_en') or p.get('desc_ar') or ''))).strip()
-            desc = (f"${_wa_fnum(p.get('price')):.2f} — " + (plain or desc))[:300]
-            if p.get('image'):
-                image = base + str(p['image']) if str(p['image']).startswith('/') else str(p['image'])
-            url = f"{base}/p/{urllib.parse.quote(str(page), safe='')}"
     e = html.escape
+    tagline = 'Digital codes & subscriptions, instant delivery | أكواد واشتراكات رقمية'
+    title = f"{store} — {tagline}"
+    desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} — digital codes and subscriptions with instant delivery."
+    og_img = f"{base}/og.png?v=3"
+    image, url, wide = og_img, f"{base}/", True
+    products = _wa_build_catalog(include_hidden=False)['products']
+    plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}"
+    plain = lambda t: re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', t or ''))).strip()
+    names = lambda x: (x.get('name_en') or '', x.get('name_ar') or '')
+    prod = next((x for x in products if str(x.get('id')) == str(page)), None) if page else None
+    if prod:
+        en, ar = names(prod)
+        name = en or ar or store
+        both = f"{en} | {ar}" if en and ar and en != ar else name
+        title = f"{both} — {store}"
+        price = f"${_wa_fnum(prod.get('price')):.2f}"
+        body_d = plain(prod.get('desc_en')) or plain(prod.get('desc_ar'))
+        desc = (f"Buy {name}" + (f" ({ar})" if ar and ar != name else '') + f" for {price} — instant delivery. " + body_d)[:300].strip()
+        if prod.get('image'):
+            image = base + str(prod['image']) if str(prod['image']).startswith('/') else str(prod['image'])
+            wide = False
+        url = plink(prod)
+        ld = {'@context': 'https://schema.org', '@type': 'Product', 'name': name, 'description': desc,
+              'image': [image], 'url': url,
+              'offers': {'@type': 'Offer', 'url': url, 'priceCurrency': 'USD',
+                         'price': f"{_wa_fnum(prod.get('price')):.2f}", 'availability': 'https://schema.org/InStock',
+                         'seller': {'@type': 'Organization', 'name': store}}}
+        if ar and ar != name:
+            ld['alternateName'] = ar
+        seo = (f'<h1>{e(both)}</h1><p>{e(desc)}</p><p>{e(price)}</p>'
+               f'<p><a href="{e(base)}/">{e(store)}</a></p>')
+    else:
+        ld = [{'@context': 'https://schema.org', '@type': 'WebSite', 'name': store, 'url': f"{base}/", 'description': desc},
+              {'@context': 'https://schema.org', '@type': 'Organization', 'name': store, 'url': f"{base}/",
+               'logo': f"{base}/icon-512.png?v=3"},
+              {'@context': 'https://schema.org', '@type': 'ItemList', 'name': f"{store} products",
+               'itemListElement': [{'@type': 'ListItem', 'position': i + 1, 'url': plink(x), 'name': names(x)[0] or names(x)[1]}
+                                   for i, x in enumerate(products[:100])]}]
+        seo = (f'<h1>{e(store)}</h1><p>{e(desc)}</p><ul>'
+               + ''.join(f'<li><a href="{e(plink(x))}">{e(" | ".join(n for n in dict.fromkeys(names(x)) if n))}</a>'
+                         f' — ${_wa_fnum(x.get("price")):.2f}</li>' for x in products[:300])
+               + '</ul>')
+    ld_json = json.dumps(ld, ensure_ascii=False).replace('<', '\\u003c')
+    gsv = re.sub(r'[^A-Za-z0-9_\-]', '', os.getenv('GOOGLE_SITE_VERIFICATION') or '')[:100]
     tags = [
         '<base href="/">',
         '<link rel="manifest" href="/manifest.webmanifest">',
-        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=2">',
-        '<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">',
+        '<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=3">',
+        '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=3">',
+        '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=3">',
+        '<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3">',
         '<meta name="mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-capable" content="yes">',
         '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
         f'<meta name="apple-mobile-web-app-title" content="{e(store)}">',
         f'<meta name="description" content="{e(desc)}">',
+        '<meta name="robots" content="index, follow, max-image-preview:large">',
         f'<link rel="canonical" href="{e(url)}">',
-        '<meta property="og:type" content="' + ('product' if page else 'website') + '">',
+        '<meta property="og:type" content="' + ('product' if prod else 'website') + '">',
         f'<meta property="og:site_name" content="{e(store)}">',
         f'<meta property="og:title" content="{e(title)}">',
         f'<meta property="og:description" content="{e(desc)}">',
         f'<meta property="og:url" content="{e(url)}">',
         f'<meta property="og:image" content="{e(image)}">',
-        '<meta name="twitter:card" content="summary_large_image">',
-        f'<meta name="lara-google" content="{e(_web_google_id())}">',
+        f'<meta property="og:image:alt" content="{e(store)}">',
     ]
-    return '\n'.join(tags), (title if page else None)
+    if wide:
+        tags += ['<meta property="og:image:width" content="1200">', '<meta property="og:image:height" content="630">',
+                 '<meta name="twitter:card" content="summary_large_image">']
+    else:
+        tags.append('<meta name="twitter:card" content="summary">')
+    tags.append(f'<meta name="lara-google" content="{e(_web_google_id())}">')
+    if gsv:
+        tags.append(f'<meta name="google-site-verification" content="{gsv}">')
+    tags.append(f'<script type="application/ld+json">{ld_json}</script>')
+    return '\n'.join(tags), title, f'<noscript><div class="seo">{seo}</div></noscript>'
 
 
 _WEB_ICON_CACHE = {}
 
 
-def _web_icon(size, maskable=False):
-    """أيقونة التطبيق من logo.webp (مربعة بخلفية المتجر) — بدون ملفات جديدة."""
-    key = (size, maskable)
+def _web_mark_img():
+    from PIL import Image
+    return Image.open(os.path.join(WEBAPP_DIR, 'logo-mark.webp')).convert('RGBA')
+
+
+def _web_tile(w, h, radius=0):
+    """خلفية الموقع الداكنة مع توهج أزرق خفيف (نفس جو المتجر)."""
+    from PIL import Image, ImageDraw, ImageFilter
+    bg = Image.new('RGBA', (w, h), (8, 11, 18, 255))
+    glow = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    r = int(min(w, h) * .62)
+    ImageDraw.Draw(glow).ellipse((w // 2 - r, h // 2 - r, w // 2 + r, h // 2 + r), fill=(22, 92, 230, 95))
+    bg.alpha_composite(glow.filter(ImageFilter.GaussianBlur(max(2, r // 2))))
+    if radius:
+        m = Image.new('L', (w, h), 0)
+        ImageDraw.Draw(m).rounded_rectangle((0, 0, w - 1, h - 1), radius, fill=255)
+        bg.putalpha(m)
+    return bg
+
+
+def _web_icon(size, maskable=False, rounded=True):
+    """أيقونة الموقع/التطبيق = نفس شعار المتجر (حرف L والطيارة) كبير على خلفية الموقع."""
+    key = (size, maskable, rounded)
     if key in _WEB_ICON_CACHE:
         return _WEB_ICON_CACHE[key]
     from PIL import Image
-    # الشعار بخلفيته كاملة (نفس شكل المتجر) — بدون إطار داكن حوله، عشان يبان كبير في التبويب والشاشة الرئيسية
-    logo = Image.open(os.path.join(WEBAPP_DIR, 'logo.webp')).convert('RGB')
-    canvas = logo.resize((size, size), Image.LANCZOS)
+    big = size * 4                      # نرسم كبير ثم نصغّر = حواف ناعمة
+    tile = _web_tile(big, big, 0 if (maskable or not rounded) else int(big * .22))
+    mark = _web_mark_img()
+    fit = .68 if maskable else .86      # maskable: لازم يبقى داخل المنطقة الآمنة (80%)
+    k = min(big * fit / mark.width, big * fit / mark.height)   # تكبير/تصغير (thumbnail ما يكبّر)
+    mark = mark.resize((max(1, int(mark.width * k)), max(1, int(mark.height * k))), Image.LANCZOS)
+    tile.alpha_composite(mark, ((big - mark.width) // 2, (big - mark.height) // 2 + int(big * .01)))
+    out = tile.resize((size, size), Image.LANCZOS)
     buf = io.BytesIO()
-    canvas.save(buf, 'PNG', optimize=True)
+    out.save(buf, 'PNG', optimize=True)
     _WEB_ICON_CACHE[key] = buf.getvalue()
     return _WEB_ICON_CACHE[key]
+
+
+def _web_og_image():
+    """صورة معاينة الرابط (1200×630) لتيليجرام وواتساب وGoogle: الشعار + اسم المتجر."""
+    if 'og' in _WEB_ICON_CACHE:
+        return _WEB_ICON_CACHE['og']
+    from PIL import Image, ImageDraw, ImageFont
+    W, H = 1200, 630
+    img = _web_tile(W, H)
+    mark = _web_mark_img()
+    mark.thumbnail((400, 360), Image.LANCZOS)
+    img.alpha_composite(mark, (110, (H - mark.height) // 2))
+    d = ImageDraw.Draw(img)
+    store = (WEBAPP_STORE_NAME or 'LARA STOCK').strip()[:24]
+    x = 110 + mark.width + 70
+    size = 104
+    while size > 48:
+        f1 = ImageFont.load_default(size=size)
+        if d.textlength(store, font=f1) <= W - x - 70:
+            break
+        size -= 6
+    f2 = ImageFont.load_default(size=36)
+    d.text((x, H // 2 - size - 6), store, font=f1, fill=(255, 255, 255, 255), stroke_width=max(1, size // 40), stroke_fill=(255, 255, 255, 255))
+    tag = (os.getenv('WEBSITE_TAGLINE') or 'Digital codes · Instant delivery').strip()[:40]
+    d.text((x + 4, H // 2 + 22), tag, font=f2, fill=(150, 196, 255, 255))
+    buf = io.BytesIO()
+    img.convert('RGB').save(buf, 'PNG', optimize=True)
+    _WEB_ICON_CACHE['og'] = buf.getvalue()
+    return _WEB_ICON_CACHE['og']
+
+
+_WEB_MARK_SVG = {}
+
+
+def _web_favicon_svg():
+    """أيقونة التبويب كـ SVG حاد بأي حجم — مأخوذة من شعار الموقع نفسه داخل index.html (ثابت بدون حركة)."""
+    path = os.path.join(WEBAPP_DIR, 'index.html')
+    mtime = os.path.getmtime(path)
+    if _WEB_MARK_SVG.get('m') == mtime:
+        return _WEB_MARK_SVG['svg']
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+    a = src.index('<svg class="ld-mark"')
+    svg = src[a:src.index('</svg>', a)]
+    inner = svg[svg.index('>') + 1:]
+    inner = inner.replace(' mask="url(#lmDraw)"', '')
+    inner = re.sub(r'<mask id="lmDraw".*?</mask>|<mask id="lmFaceM".*?</mask>|<linearGradient id="lmSheen".*?</linearGradient>'
+                   r'|<g mask="url\(#lmFaceM\)">.*?</g>', '', inner, flags=re.S)
+    inner = re.sub(r'\s*\n\s*', '', inner)
+    out = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+           '<defs><radialGradient id="fbg" cx=".5" cy=".5" r=".7"><stop offset="0" stop-color="#0f2a5c"/><stop offset="1" stop-color="#080b12"/></radialGradient></defs>'
+           '<rect width="128" height="128" rx="28" fill="url(#fbg)"/>'
+           '<g transform="translate(64 64.5) scale(1.07) translate(-64.2 -56.3)">' + inner + '</g></svg>')
+    _WEB_MARK_SVG.update(m=mtime, svg=out)
+    return out
 
 
 _WEB_SW_JS = """/* LARA website app shell: works offline for the first screen; never caches account data. */
@@ -39978,16 +40101,30 @@ def _web_site_get(handler, raw):
         man = {'name': store, 'short_name': store[:12], 'start_url': '/?src=app', 'scope': '/', 'id': '/',
                'display': 'standalone', 'background_color': '#080b12', 'theme_color': '#080b12',
                'description': (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:300] or f"{store} store",
-               'icons': [{'src': '/icon-192.png?v=2', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-512.png?v=2', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
-                         {'src': '/icon-maskable.png?v=2', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
+               'icons': [{'src': '/icon-192.png?v=3', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-512.png?v=3', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any'},
+                         {'src': '/icon-maskable.png?v=3', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'}]}
         _wa_send(handler, 200, json.dumps(man, ensure_ascii=False), 'application/manifest+json', 'public, max-age=3600')
         return True
     if raw == '/sw.js':
         _wa_send(handler, 200, _WEB_SW_JS, 'application/javascript', 'no-cache', {'Service-Worker-Allowed': '/'})
         return True
+    if raw == '/favicon.svg':
+        try:
+            _wa_send(handler, 200, _web_favicon_svg(), 'image/svg+xml', 'public, max-age=86400')
+        except Exception as exc:
+            logger.debug(f'favicon svg: {exc}')
+            _json_resp(handler, 404, {'error': 'Not found'})
+        return True
+    if raw == '/og.png':
+        try:
+            _wa_send(handler, 200, _web_og_image(), 'image/png', 'public, max-age=86400')
+        except Exception as exc:
+            logger.debug(f'og image: {exc}')
+            _json_resp(handler, 404, {'error': 'Not found'})
+        return True
     icons = {'/icon-192.png': (192, False), '/icon-512.png': (512, False), '/icon-maskable.png': (512, True),
-             '/apple-touch-icon.png': (180, False), '/favicon.ico': (48, False)}
+             '/apple-touch-icon.png': (180, False, False), '/favicon.ico': (48, False), '/favicon-32.png': (32, False)}
     if raw in icons:
         try:
             _wa_send(handler, 200, _web_icon(*icons[raw]), 'image/png', 'public, max-age=86400')
@@ -39996,7 +40133,9 @@ def _web_site_get(handler, raw):
             _json_resp(handler, 404, {'error': 'Not found'})
         return True
     if raw == '/robots.txt':
-        _wa_send(handler, 200, f"User-agent: *\nAllow: /\nDisallow: /webapp/\nSitemap: {base}/sitemap.xml\n", 'text/plain; charset=utf-8', 'public, max-age=3600')
+        _wa_send(handler, 200, ("User-agent: *\nAllow: /\n"   # Google يحتاج طلبات المتجر للزوار عشان يشوف المنتجات (بدونها يشوف "لا يوجد اتصال")
+                  "Allow: /webapp/bootstrap\nAllow: /webapp/web/guest\nAllow: /webapp/ce/\nAllow: /webapp/img/\nAllow: /webapp/tr\n"
+                  f"Disallow: /webapp/\nSitemap: {base}/sitemap.xml\n"), 'text/plain; charset=utf-8', 'public, max-age=3600')
         return True
     if raw == '/sitemap.xml':
         urls = [f"{base}/"] + [f"{base}/p/{urllib.parse.quote(str(p['id']), safe='')}"
@@ -40067,13 +40206,16 @@ def _wa_static(handler, rel, page=None):
     if ext == 'html' and b'<meta name="lara-site" content="">' in data:
         site_flag = '1' if _web_host_ok(handler) else ''
         bot_name = re.sub(r'[^A-Za-z0-9_]', '', get_bot_username() or '')[:40]
-        head, title = _web_head_html(page) if site_flag else ('', None)
+        head, title, seo_body = _web_head_html(page) if site_flag else ('', None, '')
         vkey = (path, mtime, site_flag, bot_name, hashlib.sha1(head.encode(), usedforsecurity=False).hexdigest() if head else '')
         variant = _WA_HTML_VARIANTS.get(vkey)
         if not variant:
             raw_v = data.replace(b'<meta name="lara-site" content="">', f'<meta name="lara-site" content="{site_flag}">'.encode()) \
                         .replace(b'<meta name="lara-bot" content="">', f'<meta name="lara-bot" content="{bot_name}">'.encode()) \
-                        .replace(b'<!--lara-head-->', head.encode())
+                        .replace(b'<!--lara-head-->', head.encode()) \
+                        .replace(b'<!--lara-body-->', seo_body.encode())
+            if site_flag:          # على الموقع: أيقونة التبويب من الشعار الجديد بدل logo.webp
+                raw_v = raw_v.replace(b'<link rel="icon" type="image/webp" href="logo.webp">\n', b'')
             if title:
                 raw_v = re.sub(rb'<title>[^<]*</title>', b'<title>' + html.escape(title).encode() + b'</title>', raw_v, count=1)
             variant = (raw_v, _wa_gzip.compress(raw_v, 6), 'W/"' + hashlib.sha256(raw_v).hexdigest()[:32] + '"')
