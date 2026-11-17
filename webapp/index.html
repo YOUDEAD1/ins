@@ -2096,6 +2096,39 @@ a.btn svg{flex:none}
 .ibx-t{font-size:14px;line-height:1.6;white-space:normal;overflow-wrap:anywhere}
 .web-ref{display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:12.5px}
 .web-ref svg{flex:none;width:15px;height:15px;margin-top:2px}
+/* ═══ 26. شاشة التحميل: شعار المتجر نفسه + شريط تقدّم، بدون رسم متقطع ═══ */
+.ld-mark{display:none!important}
+#page-loading .ld::before,#page-loading .ld::after{display:none!important}
+.ld-logo{display:block;width:104px;height:104px;border-radius:30px;object-fit:cover;position:relative;z-index:1;
+  box-shadow:0 22px 60px -18px var(--glow),0 0 0 1px rgba(255,255,255,.08);
+  animation:ldLogoIn .7s cubic-bezier(.2,.8,.2,1) both,ldBreath 2.6s ease-in-out .7s infinite alternate}
+@keyframes ldLogoIn{from{opacity:0;transform:scale(.82) translateY(6px)}to{opacity:1;transform:none}}
+@keyframes ldBreath{from{transform:scale(1)}to{transform:scale(1.045)}}
+.ld-glow{top:-40px!important}
+.page-loading.soft .ld-logo{width:58px;height:58px;border-radius:18px;animation:ldBreath 1.6s ease-in-out infinite alternate}
+.page-loading.leaving .ld-logo{opacity:0;transform:scale(1.06);transition:opacity .3s ease,transform .3s ease}
+@media (prefers-reduced-motion:reduce){.ld-logo{animation:none}}
+
+/* ═══ 27. بطاقات المنتجات: أصغر وأوضح — صورة المنتج كبيرة، والاسم والسعر تحتها مباشرة ═══ */
+.grid{gap:12px}
+.card{border-radius:20px;background:var(--surface);box-shadow:0 10px 24px -18px rgba(0,0,0,.7);transition:transform .18s ease,box-shadow .2s ease}
+.card::after{border-radius:20px;border-color:color-mix(in srgb,var(--fg) 8%,transparent)}
+.card .pv{aspect-ratio:1/1;border-radius:0}
+.card .pv .vis{top:17%;left:21%;width:58%;height:58%}
+.card .pv:not(.is-oos)::after{left:27%;right:27%;bottom:9%;height:6%}
+.card .pv .mono-tile{font-size:clamp(38px,13vw,58px)}
+.card .body{position:relative;top:auto;left:auto;right:auto;bottom:auto;flex:1;gap:8px;padding:10px 12px 12px;border-radius:0;
+  background:transparent;border:0;box-shadow:none}
+.card .name{font-size:13.5px;line-height:1.35;min-height:2.7em}
+.card .price{font-size:16px}
+.card .add{width:32px;height:32px}
+.card .xmark{bottom:0}
+.card .pill{top:9px;height:24px}
+.card .pill.stock{inset-inline-start:9px}.card .pill.kind{inset-inline-end:9px}
+.card .oos-tag{top:9px}
+@media (hover:hover){.card:hover{transform:translateY(-3px);box-shadow:0 18px 34px -20px rgba(0,0,0,.8)}}
+@media (max-width:350px){.card .pv{aspect-ratio:1/1}.card .pv .vis{top:17%;height:58%}.card .xmark{bottom:0}}
+:root[data-theme="light"] .card{box-shadow:0 10px 24px -18px rgba(20,40,90,.35)}
 /* ═══ end of LARA polish layer ═══ */
 </style>
 </head>
@@ -2103,6 +2136,7 @@ a.btn svg{flex:none}
 <div class="page-loading" id="page-loading" role="status" aria-live="polite" aria-label="Loading">
   <div class="ld" id="ld">
     <span class="ld-glow" aria-hidden="true"></span>
+    <img class="ld-logo" src="logo.webp" alt="" width="104" height="104" decoding="async" fetchpriority="high">
     <svg class="ld-mark" viewBox="4 2 122 106" width="150" height="130" aria-hidden="true" focusable="false">
       <defs>
         <linearGradient id="lmBody" x1="0" y1="0" x2="1" y2=".25"><stop offset="0" stop-color="#5cc3ff"/><stop offset=".3" stop-color="#2b8fff"/><stop offset=".55" stop-color="#1170ff"/><stop offset="1" stop-color="#38bbff"/></linearGradient><linearGradient id="lmFootTop" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0f6cff"/><stop offset=".45" stop-color="#1ea4ff"/><stop offset="1" stop-color="#62dbff"/></linearGradient>
@@ -2513,7 +2547,7 @@ async function api(path, body) {
     try { data = await res.json(); } catch (e) {}
     if (!res.ok && !data.error) data.error = res.status === 401 ? 'auth' : 'server_error';
     data._s = res.status;
-    if (data.error === 'auth' && !path.startsWith('web/')) { if (WEB) { closeAllSheets(); S.user = null; S.screen = 'login'; renderAll(); } else { S.screen = 'auth'; renderAll(); } }
+    if (data.error === 'auth' && !path.startsWith('web/') && !(WEB && path === 'bootstrap')) { if (WEB) { closeAllSheets(); S.user = null; S.screen = 'login'; renderAll(); } else { S.screen = 'auth'; renderAll(); } }
     if (data && data.vip) S.vip = data.vip;
     if (typeof data.ref_debt === 'number' && S.user) { S.user.ref_debt = data.ref_debt; if (S.refs) S.refs.ref_debt = data.ref_debt; }
     if (typeof data.balance === 'number' && S.user) { S.user.balance = data.balance; updateHeader(); }
@@ -3118,9 +3152,12 @@ function openPvHow() {
     <button class="btn ghost full" style="margin-top:12px" data-act="pv-verify">${ic.info}${esc(t('pvVerify'))}</button>` });
 }
 /* ───────────────────────── 🌐 الموقع الخارجي: تسجيل الدخول عبر البوت ───────────────────────── */
+const LOCK_IC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>';
 const DEV_IC = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="14" height="10" rx="2"/><path d="M6 18h6"/><rect x="17" y="8" width="5" height="12" rx="1.5"/></svg>';
 const WL_OUT_IC = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M5 12h11"/></svg>';
 const WL = { state: 'idle', link: '', poll: '', exp: 0, timer: 0, busy: false, err: '' };
+const WLC = { token: '' };
+try { const q = new URLSearchParams(location.search), tk = q.get('wl'); if (tk && /^[A-Za-z0-9_-]{20,100}$/.test(tk)) { WLC.token = tk; q.delete('wl'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash); } } catch (e) {}
 const TG_PLANE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M21.4 4.1 2.9 11.2c-1.3.5-1.3 1.2-.2 1.6l4.7 1.5 1.8 5.6c.2.6.4.8.9.8.4 0 .6-.2.9-.5l2.3-2.2 4.7 3.5c.9.5 1.5.2 1.7-.8l3.1-14.6c.3-1.3-.5-1.9-1.4-1.5ZM8.4 14l9.3-5.9c.5-.3.9-.1.5.2l-7.6 6.9-.3 3.2L8.4 14Z"/></svg>';
 /* 🌐 خيارات الدخول (من السيرفر): تيليجرام دائماً، والإيميل وGoogle لو المالك فعّلهم */
 const AUTH = { telegram: true, email: false, google: metaOf('lara-google') };
@@ -3339,6 +3376,7 @@ async function wlPrepare(force) {
 function wlGo() {
   if (!WL.link) return;
   WL.state = 'wait';
+  store.set('wlPend', { p: WL.poll, l: WL.link, e: WL.exp });   // لو الصفحة انقفلت أو انعادت وأنت في تيليجرام، نكمّل الانتظار بعدين
   setTimeout(() => { renderView(); wlPoll(); }, 60);      // the link opens first, then the waiting screen shows
 }
 async function wlPoll() {
@@ -3346,8 +3384,8 @@ async function wlPoll() {
   if (S.screen !== 'login' || WL.state !== 'wait' || !WL.poll) return;
   const r = await api('web/login/poll', { poll: WL.poll });
   if (S.screen !== 'login' || WL.state !== 'wait') return;
-  if (r && r.status === 'approved') { Object.assign(WL, { state: 'idle', link: '', poll: '' }); hap('ok'); boot(); return; }
-  if (r && (r.status === 'expired' || r.status === 'denied')) { WL.state = r.status; renderView(); wlPrepare(true); return; }
+  if (r && r.status === 'approved') { store.set('wlPend', null); Object.assign(WL, { state: 'idle', link: '', poll: '' }); hap('ok'); S.guest = false; boot(); return; }
+  if (r && (r.status === 'expired' || r.status === 'denied')) { store.set('wlPend', null); WL.state = r.status; renderView(); wlPrepare(true); return; }
   WL.timer = setTimeout(wlPoll, document.hidden ? 4000 : 2000);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.screen === 'login') { if (WL.state === 'wait') wlPoll(); else if (!WL.link || Date.now() > WL.exp - 30000) wlPrepare(true); } });
@@ -3770,7 +3808,7 @@ function renderProduct(sh, p, st, onlyDyn) {
   let foot;
   if (oos) foot = `<button class="btn primary full" disabled>${esc(t('outOfStock'))}</button>`;
   else if (st.busy) foot = `<button class="btn primary full" disabled><span class="spin"></span>${esc(t('processing'))}</button>`;
-  else if (S.guest) foot = `<button class="btn primary full" data-act="need-login">${ic.lock}${esc(t('wfInBuy'))}</button>`;
+  else if (S.guest) foot = `<button class="btn primary full" data-act="need-login">${LOCK_IC}${esc(t('wfInBuy'))}</button>`;
   else if (lack) foot = `<button class="btn primary full" data-act="funds-need" data-v="${Math.ceil(lack)}">${bem('funds', ic.plus)}${esc(t('addFunds'))} · ${usd(lack)}</button>`;
   else foot = `<button class="btn ${st.arm ? 'confirm' : 'primary'} full" data-act="buy">${bem(st.arm ? 'verify' : 'buy', ae(st.arm ? 'check' : 'cart'))}${esc(st.arm ? t('confirmFor', { p: usd(total) }) : t('buyFor', { p: usd(total) }))}</button>`;
   if (!oos && S.cartEnabled !== false && !st.busy) foot = `<div class="product-actions"><button class="btn cart-add" data-act="cart-add">${CART_ICON}${esc(t('cartAdd'))}</button>${foot}</div>`;
@@ -4654,7 +4692,7 @@ function vProfile() {
       ${S.store.bot ? `<button class="mrow" data-act="openchat">${ae('rocket')}<span class="mlbl">${esc(t('openChat'))}</span><span class="val" dir="ltr">@${esc(S.store.bot)}</span>${ic.chev}</button>` : ''}
       ${acc.web_only ? `<button class="mrow" data-act="acc-inbox"><span class="gl">${ic.mail}</span><span class="mlbl">${esc(t('inboxT'))}</span>${acc.unread ? `<span class="po-n num">${acc.unread}</span>` : ''}${ic.chev}</button>` : ''}
       ${WEB ? `<button class="mrow" data-act="acc-dev"><span class="gl">${DEV_IC}</span><span class="mlbl">${esc(t('devT'))}</span>${acc.sessions ? `<span class="val num">${acc.sessions}</span>` : ''}${ic.chev}</button>` : ''}
-      ${pwaCan() ? `<button class="mrow" data-act="pwa"><span class="gl">${ic.download}</span><span class="mlbl">${esc(t('pwaRow'))}</span>${ic.chev}</button>` : ''}
+      ${pwaCan() ? `<button class="mrow" data-act="pwa"><span class="gl">${ic.down}</span><span class="mlbl">${esc(t('pwaRow'))}</span>${ic.chev}</button>` : ''}
       ${WEB ? `<button class="mrow wl-out" data-act="wl-out"><span class="gl">${WL_OUT_IC}</span><span class="mlbl">${esc(t('wlOut'))}</span>${ic.chev}</button>` : ''}
     </div>
     <p class="foot">${esc(S.store.name || 'LARA STOCK')} · ${esc(langName(LANG))}</p>`;
@@ -6298,7 +6336,7 @@ document.addEventListener('click', async e => {
     case 'joined': { el.disabled = true; const r = await api('forced/check'); el.disabled = false; if (r.subscribed) { S.forced = null; boot(); } else toast(t('notYet'), 'bad'); break; }
     case 'retry': boot(); break;
     case 'wl-go': wlGo(); break;
-    case 'wl-cancel': clearTimeout(WL.timer); WL.state = 'idle'; renderView(); break;
+    case 'wl-cancel': clearTimeout(WL.timer); store.set('wlPend', null); WL.state = 'idle'; renderView(); break;
     case 'wl-out': await api('web/logout'); clearTimeout(WL.timer); Object.assign(WL, { state: 'idle', link: '', poll: '' }); closeAllSheets(); S.user = null; S.account = null; S.guest = false; S.tab = 'store'; boot(); break;
     case 'need-login': needLogin(); break;
     case 'wl-browse': S.screen = 'app'; if (S.tab !== 'store') S.tab = 'store'; renderAll(); break;
@@ -6647,6 +6685,11 @@ async function boot() {
   S.screen = 'loading'; renderAll(); ldBootStart();
   if (!DEMO && !INIT && !WEB) { S.screen = 'notg'; renderAll(); return; }   // عنوان الاستضافة/الميني أب برا تيليجرام
   if (DEMO && !Ld.played) await new Promise(r => setTimeout(r, 3400));   // preview only: let the slow-motion intro play (real customers never wait)
+  if (WEB && WLC.token) {        // زر «افتح الموقع» من رسالة البوت بعد التأكيد
+    const tk = WLC.token; WLC.token = '';
+    const c = await api('web/login/claim', { token: tk });
+    if (c && c.ok) { S.guest = false; store.set('wlPend', null); }
+  }
   let r = WEB && S.guest ? { error: 'auth' } : await api('bootstrap');
   if (WEB && !r.ok && r.error === 'auth') {          // 🌐 بدون تسجيل دخول: المتجر يفتح للتصفح
     const g = await api('web/guest', { lang: LANG });
@@ -6678,6 +6721,11 @@ async function boot() {
   if (r.ok) ldStage('p');
   S.verify = !!r.verify;
   S.screen = S.verify ? 'verify' : S.forced ? 'gate' : 'app';
+  if (WEB && S.guest) {           // دخول بتيليجرام كان قيد الانتظار قبل ما الصفحة تنعاد: نكمّله
+    const pend = store.get('wlPend', null);
+    if (pend && pend.p && Date.now() < (pend.e || 0)) { Object.assign(WL, { state: 'wait', poll: pend.p, link: pend.l || '', exp: pend.e }); S.screen = 'login'; renderAll(); wlPoll(); return; }
+    if (pend) store.set('wlPend', null);
+  }
   S.orders = S.refs = null; S.hist.data = null;
   renderAll();
   if (S.screen === 'app') setTimeout(dvMark, 1500);

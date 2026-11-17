@@ -10102,7 +10102,30 @@ def _admin_notice_resume(recipient, incoming=False):
         return True
 
 
+def _markup_to_buttons(mk):
+    """InlineKeyboardMarkup ← قائمة أزرار بسيطة تنحفظ في قاعدة البيانات (طابور تنبيهات الأدمن)."""
+    out = []
+    try:
+        rows = mk.keyboard if hasattr(mk, 'keyboard') else (mk.get('inline_keyboard') if isinstance(mk, dict) else [])
+        for row in rows or []:
+            for b in row:
+                d = b.to_dict() if hasattr(b, 'to_dict') else dict(b)
+                if d.get('url'):
+                    out.append(('url', d.get('text', ''), d['url']))
+                elif d.get('copy_text'):
+                    out.append(('copy', d.get('text', ''), (d['copy_text'] or {}).get('text', '')))
+                elif d.get('callback_data'):
+                    out.append(('cb', d.get('text', ''), d['callback_data']))
+    except Exception as exc:
+        logger.debug(f'markup to buttons: {exc}')
+    return out or None
+
+
 def notify_admins(message_text, recipient_ids=None, reply_markup=None, buttons=None):
+    if buttons is not None and not isinstance(buttons, (list, tuple)):
+        buttons = _markup_to_buttons(buttons)          # أحياناً ينرسل InlineKeyboardMarkup بدل القائمة (كان يطيّح الحفظ)
+    if recipient_ids is None and reply_markup is not None and not buttons:
+        buttons = _markup_to_buttons(reply_markup)     # الطابور يحفظ الأزرار، فما تضيع
     if _log_src_get() == 'webapp' and isinstance(message_text, str) and 'Mini App' not in message_text and 'المصدر:' not in message_text:
         message_text = message_text + "\n🌐 <b>عبر الموقع (Mini App)</b>"
     if recipient_ids is None:
@@ -10982,6 +11005,8 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
             bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="HTML")
         return True
     except Exception as e:
+        if 'message is not modified' in str(e):      # ضغطة مكررة على نفس الزر: الرسالة أصلاً معروضة — مو خطأ
+            return True
         logger.error(f"Error in catalog_view_helper: {e}", exc_info=True)
         return False
 
@@ -11071,9 +11096,11 @@ def show_support(call):
 def start_handler(message):
     is_callback = isinstance(message, types.CallbackQuery)
     chat_id = message.message.chat.id if is_callback else message.chat.id
-    from_user = message.from_user
+    from_user = message.from_user or (None if is_callback else getattr(message, 'chat', None))   # رسالة قديمة بدون مرسل
+    if from_user is None or not getattr(from_user, 'id', None):
+        return
     uid = from_user.id
-    uname = from_user.username.lower() if from_user.username else ""
+    uname = from_user.username.lower() if getattr(from_user, 'username', None) else ""
     
     # 🛡 نمسح أي next_step handlers معلقة (يمنع تفسير /start كـ tx_id)
     try:
@@ -11106,11 +11133,17 @@ def start_handler(message):
         args = full_text.split()
         ref_candidate = args[1] if len(args) > 1 and args[1].isdigit() else None
         
-        db.users.insert_one({
-            'user_id': uid, 'name': from_user.first_name, 'username': uname, 
-            'balance': 0.0, 'ref_v2_earned': 0.0,
-            'lang_chosen': False, 'lang': 'ar', 'is_admin': 0, 'is_banned': 0
-        })
+        try:
+            db.users.insert_one({
+                'user_id': uid, 'name': from_user.first_name, 'username': uname, 
+                'balance': 0.0, 'ref_v2_earned': 0.0,
+                'lang_chosen': False, 'lang': 'ar', 'is_admin': 0, 'is_banned': 0
+            })
+        except Exception as dup_exc:
+            # ضغطتين /start بنفس اللحظة: الثانية تلقى الحساب انسجّل — نكمّل كأنه موجود بدل ما يطيح استقبال الرسائل
+            if 'E11000' not in str(dup_exc) and 'duplicate' not in str(dup_exc).lower():
+                raise
+            ref_candidate = None
         _invalidate_user_cache(uid)
         user = get_user_data_full(uid, use_cache=False)
         
@@ -38529,6 +38562,25 @@ def _web_login_poll(handler, body):
     return 200, {'ok': True, 'status': status if status in ('pending', 'denied') else 'expired'}
 
 
+def _web_login_claim(handler, body):
+    """زر «افتح الموقع» في رسالة البوت بعد التأكيد: يدخل الحساب حتى لو صفحة الدخول انقفلت أو انفتح متصفح ثاني."""
+    if not _wa_rate_ok(f"wlc:{_web_ip(handler)}", 30, 600):
+        return 429, {'error': 'too_many'}
+    tok = str(body.get('token') or '')[:100]
+    if len(tok) < 20:
+        return 400, {'error': 'expired'}
+    now = int(time.time())
+    doc = db.web_logins.find_one_and_update({'claim': _web_hash(tok), 'status': 'approved', 'answered_at': {'$gte': now - WEB_LOGIN_TTL}},
+                                            {'$set': {'status': 'used', 'used_at': now, 'used_via': 'claim'}})
+    if not doc:
+        return 400, {'error': 'expired'}
+    uid, err = _web_user_ok(doc['user_id'])
+    if err:
+        return 403, {'error': err}
+    _web_session_new(handler, uid, 'telegram')
+    return 200, {'ok': True}
+
+
 def _web_logout(handler, body):
     token = _web_cookie(handler)
     if token:
@@ -38538,7 +38590,7 @@ def _web_logout(handler, body):
 
 
 _WEB_PUBLIC_POST = {'/webapp/web/login/start': _web_login_start, '/webapp/web/login/poll': _web_login_poll,
-                    '/webapp/web/logout': _web_logout}
+                    '/webapp/web/login/claim': _web_login_claim, '/webapp/web/logout': _web_logout}
 for _wp in _WEB_PUBLIC_POST:          # مسجّلة في جدول المسارات (تُخدم قبل فحص الهوية)
     _WA_POST_ROUTES[_wp] = lambda identity, body: (400, {'error': 'bad_request'})
 
@@ -38581,16 +38633,21 @@ def _web_login_answer(call):
         bot.answer_callback_query(call.id)
         return
     now = int(time.time())
+    claim = secrets.token_urlsafe(24)
     doc = db.web_logins.find_one_and_update({'_id': code, 'status': 'pending', 'expires_at': {'$gte': now}},
-                                            {'$set': {'status': 'approved' if approve else 'denied', 'user_id': uid, 'answered_at': now}})
+                                            {'$set': {'status': 'approved' if approve else 'denied', 'user_id': uid, 'answered_at': now,
+                                                      **({'claim': _web_hash(claim)} if approve else {})}})
     bot.answer_callback_query(call.id)
     if not doc:
         text = bil(uid, "⌛ هذا الطلب انتهى أو تم استخدامه.", "⌛ This request has expired or was already used.")
         markup = None
     elif approve:
-        text = bil(uid, "✅ <b>تم تسجيل الدخول</b>\nارجع للموقع، بيفتح حسابك خلال ثواني.",
-                   "✅ <b>Signed in</b>\nGo back to the website — your account opens in a few seconds.")
+        text = bil(uid, "✅ <b>تم تسجيل الدخول</b>\nارجع للموقع، بيفتح حسابك خلال ثواني.\nلو قفلت صفحة الموقع، اضغط «افتح الموقع» تحت.",
+                   "✅ <b>Signed in</b>\nGo back to the website — your account opens in a few seconds.\nIf you closed the website page, tap “Open the website” below.")
         markup = InlineKeyboardMarkup()
+        site = _web_public_url()
+        if site:
+            markup.add(InlineKeyboardButton(bil(uid, "🌐 افتح الموقع", "🌐 Open the website"), url=f"{site}?wl={claim}"))
         markup.add(InlineKeyboardButton(bil(uid, "🚪 تسجيل الخروج من كل الأجهزة", "🚪 Sign out of all devices"), callback_data='wl_outall'))
     else:
         text = bil(uid, "🛡 تم الرفض. ما أحد دخل حسابك.", "🛡 Declined. Nobody signed in to your account.")
