@@ -100,26 +100,9 @@ class SecurityHardening:
         ns = self.ns
         vault = self.vault
 
-        # 1. Socket timeout on APIHandler against Slowloris ([LOW-01]) & security headers ([LOW-03])
-        ns['APIHandler'].timeout = 20
-        if '_json_resp' in ns:
-            orig_json_resp = ns['_json_resp']
-            @functools.wraps(orig_json_resp)
-            def hardened_json_resp(h, code, data):
-                try:
-                    existing = list(getattr(h, '_extra_headers', None) or ())
-                    existing_keys = {str(k).lower() for k, _ in existing}
-                    if not str(getattr(h, 'path', '')).startswith('/webapp/') and 'x-content-type-options' not in existing_keys:
-                        existing.append(('X-Content-Type-Options', 'nosniff'))
-                    if 'referrer-policy' not in existing_keys:
-                        existing.append(('Referrer-Policy', 'strict-origin-when-cross-origin'))
-                    h._extra_headers = existing
-                except Exception:
-                    pass
-                return orig_json_resp(h, code, data)
-            ns['_json_resp'] = hardened_json_resp
+        # Leave APIHandler, _json_resp, _ext_api_get & _ext_api_post 100% untouched so Reseller & Supplier APIs have zero behavioral/header changes!
 
-        # 2. Clamp WEBAPP_AUTH_MAX_AGE ([MED-08])
+        # 1. Clamp WEBAPP_AUTH_MAX_AGE ([MED-08])
         try:
             ns['WEBAPP_AUTH_MAX_AGE'] = max(300, min(int(ns.get('WEBAPP_AUTH_MAX_AGE', 7200)), 14400))
         except Exception:
@@ -174,7 +157,7 @@ class SecurityHardening:
                 return clean
             ns['_fetch_proxies_simple'] = safe_fetch_proxies
 
-        # 5. External Store & Base URL SSRF Protection ([HIGH-04])
+        # 5. External Store & Base URL SSRF Protection on Admin Save Only ([HIGH-04])
         if '_ext_validate_base_url' in ns:
             orig_ext_val = ns['_ext_validate_base_url']
             @functools.wraps(orig_ext_val)
@@ -186,19 +169,6 @@ class SecurityHardening:
                     return False, '', '❌ يُرفض الاتصال بالعناوين المحلية أو الداخلية (SSRF Protection).'
                 return ok, norm, err
             ns['_ext_validate_base_url'] = safe_ext_validate_base_url
-
-        for ext_fn_name in ('_ext_api_get', '_ext_api_post'):
-            if ext_fn_name in ns:
-                orig_ext_http = ns[ext_fn_name]
-                def make_safe_ext(fn):
-                    @functools.wraps(fn)
-                    def wrapped(store, path, *args, **kwargs):
-                        base = str((store or {}).get('base_url') or '')
-                        if not is_safe_public_url(base):
-                            raise RuntimeError('Blocked non-public external store URL')
-                        return fn(store, path, *args, **kwargs)
-                    return wrapped
-                ns[ext_fn_name] = make_safe_ext(orig_ext_http)
 
         if '_baseurl_probe' in ns:
             orig_probe = ns['_baseurl_probe']

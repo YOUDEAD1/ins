@@ -2762,10 +2762,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     'is_manual': False,
                     'custom_emoji_id': ep_emoji_id,
                     'has_premium_emoji': bool(ep_emoji_id),
-                    'name_ar_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
-                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
-                    'name_en_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
-                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
+                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
                     'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')), 'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                     'source': 'external_api',
                 }})
@@ -2797,10 +2795,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                 'custom_emoji_id': custom_emoji_id,
                 'has_premium_emoji': bool(custom_emoji_id),
-                'name_ar_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_ar))}'
-                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_ar))),
-                'name_en_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_en))}'
-                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_en)))
+                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
+                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
             }
             # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
             emoji_fields_s = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
@@ -3586,6 +3582,10 @@ def _ensure_http_server_started():
             return
         _HTTP_SERVER_STARTED = True
     threading.Thread(target=keep_alive, daemon=True, name='lara-http-server').start()
+
+
+if __name__ == '__main__':
+    _ensure_http_server_started()
 
 try:
     bot = telebot.TeleBot(TOKEN, use_class_middlewares=False,
@@ -43869,10 +43869,8 @@ def _net_api_products_payload(uid):
                 # 🌟 حقول الإيموجي المميز (Premium Emoji) — الاسم
                 'custom_emoji_id': custom_emoji_id,
                 'has_premium_emoji': bool(custom_emoji_id),
-                'name_ar_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_ar))}'
-                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_ar))),
-                'name_en_html': (f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {html.escape(str(p_name_en))}'
-                                 if custom_emoji_id and str(custom_emoji_id).isdigit() else html.escape(str(p_name_en)))
+                'name_ar_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_ar}' if custom_emoji_id else p_name_ar,
+                'name_en_html': f'<tg-emoji emoji-id="{custom_emoji_id}">✨</tg-emoji> {p_name_en}' if custom_emoji_id else p_name_en
             }
             # 🌟 إيموجي الوصف (desc_ar/desc_en تحتوي وسوم <tg-emoji> جاهزة للعرض بـ HTML)
             emoji_fields = _build_emoji_fields(pr, custom_emoji_id, p_desc_ar, p_desc_en)
@@ -43916,10 +43914,8 @@ def _net_api_products_payload(uid):
                     'discount_tiers': [],
                     'custom_emoji_id': ep_emoji_id,
                     'has_premium_emoji': bool(ep_emoji_id),
-                    'name_ar_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
-                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
-                    'name_en_html': (f'<tg-emoji emoji-id="{ep_emoji_id}">{html.escape(str(ep.get("emoji_char","✨")))}</tg-emoji> {html.escape(ep_name)}'
-                                     if ep_emoji_id and str(ep_emoji_id).isdigit() else html.escape(ep_name)),
+                    'name_ar_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
+                    'name_en_html': f'<tg-emoji emoji-id="{ep_emoji_id}">{ep.get("emoji_char","✨")}</tg-emoji> {ep_name}' if ep_emoji_id else ep_name,
                     'desc_ar_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'ar')),
                     'desc_en_html': _ext_safe_product_html(_ext_description_for_lang(ep, 'en')),
                     'source': 'external_api',
@@ -43975,10 +43971,8 @@ def _net_api_products_payload(uid):
                         'duration_days': dur_days,
                         'custom_emoji_id': cg_emoji,
                         'has_premium_emoji': bool(cg_emoji),
-                        'name_ar_html': (f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {html.escape(str(full_name))}'
-                                         if cg_emoji and str(cg_emoji).isdigit() else html.escape(str(full_name))),
-                        'name_en_html': (f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {html.escape(str(full_name))}'
-                                         if cg_emoji and str(cg_emoji).isdigit() else html.escape(str(full_name))),
+                        'name_ar_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
+                        'name_en_html': f'<tg-emoji emoji-id="{cg_emoji}">✨</tg-emoji> {full_name}' if cg_emoji else full_name,
                         'desc_ar_html': cg_desc, 'desc_en_html': cg_desc,
                         'source': 'chatgpt_business',
                         'product_type': 'cgpt_main',

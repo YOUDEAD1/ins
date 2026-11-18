@@ -21,6 +21,7 @@ class UnifiedBanGuard:
         self.db = ns['db']
         self.bot = ns['bot']
         self.orig = {}
+        self._cache = {}
         try:
             self.db.banned_emails.create_index('google_sub', sparse=True)
             self.db.banned_emails.create_index('uid')
@@ -107,25 +108,37 @@ class UnifiedBanGuard:
             return False
         if uid == self.ns.get('OWNER_ID'):
             return False
+        now_m = time.monotonic()
+        if _check_email:
+            cached = self._cache.get(uid)
+            if cached and cached[1] > now_m:
+                return cached[0]
+        res = False
         try:
             u = self.db.users.find_one({'user_id': uid}, {'is_banned': 1, 'web_merged_into': 1, 'email': 1})
             if u:
                 if u.get('is_banned') in (1, True):
-                    return True
-                merged = u.get('web_merged_into')
-                if merged is not None and int(merged) != uid:
-                    mu = self.db.users.find_one({'user_id': int(merged)}, {'is_banned': 1})
-                    if mu and mu.get('is_banned') in (1, True):
-                        return True
-                if _check_email and u.get('email') and self.db.banned_emails.find_one({'_id': self._norm_email(u['email'])}, {'_id': 1}):
-                    return True
-            if _check_email:
+                    res = True
+                else:
+                    merged = u.get('web_merged_into')
+                    if merged is not None and int(merged) != uid:
+                        mu = self.db.users.find_one({'user_id': int(merged)}, {'is_banned': 1})
+                        if mu and mu.get('is_banned') in (1, True):
+                            res = True
+                    if not res and _check_email and u.get('email') and self.db.banned_emails.find_one({'_id': self._norm_email(u['email'])}, {'_id': 1}):
+                        res = True
+            if not res and _check_email:
                 for acc in self.db.web_accounts.find({'user_id': uid}, {'_id': 1, 'banned': 1}).limit(5):
                     if acc.get('banned') or self.db.banned_emails.find_one({'_id': str(acc['_id'])}, {'_id': 1}):
-                        return True
+                        res = True
+                        break
         except Exception:
             pass
-        return False
+        if _check_email:
+            if len(self._cache) > 4000:
+                self._cache.clear()
+            self._cache[uid] = (res, now_m + 15.0)
+        return res
 
     def set_ban(self, target_uid=None, *, email=None, ban=True, reason='', by_admin=None):
         """Atomically ban or unban user(s) + linked website account(s) + email(s) + active sessions."""
@@ -215,6 +228,7 @@ class UnifiedBanGuard:
             if uid_list:
                 self.db.banned_emails.delete_many({'uid': {'$in': uid_list}})
 
+        self._cache.clear()
         return {'uids': uid_list, 'emails': sorted(emails), 'banned': bool(ban)}
 
     def resolve_target(self, raw_target):
