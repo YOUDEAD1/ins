@@ -2365,47 +2365,53 @@ img.ae {
 /* ═══ 33. PRINCIPAL DIRECTOR LOGIN PORTAL & SLOW-MOTION PAGE CHOREOGRAPHY ═══ */
 /* Macro Page-to-Page Slow-Motion View Transitions */
 ::view-transition-old(root) {
-  animation: laraVtOut .36s cubic-bezier(.32, 0, .2, 1) both;
+  animation: laraVtOut .46s cubic-bezier(.32, 0, .2, 1) both;
 }
 ::view-transition-new(root) {
-  animation: laraVtIn .66s cubic-bezier(.16, 1, .3, 1) both;
+  animation: laraVtIn .92s cubic-bezier(.16, 1, .3, 1) both;
 }
 :root[data-vt-dir="out"]::view-transition-new(root) {
-  animation: laraVtBackIn .62s cubic-bezier(.16, 1, .3, 1) both;
+  animation: laraVtBackIn .88s cubic-bezier(.16, 1, .3, 1) both;
 }
 @keyframes laraVtOut {
   from { opacity: 1; transform: scale(1); filter: blur(0px); }
-  to   { opacity: 0; transform: scale(.968); filter: blur(8px); }
+  to   { opacity: 0; transform: scale(.955); filter: blur(12px); }
 }
 @keyframes laraVtIn {
-  from { opacity: 0; transform: translateY(22px) scale(.985); filter: blur(10px); }
+  from { opacity: 0; transform: translateY(28px) scale(.975); filter: blur(14px); }
   to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
 }
 @keyframes laraVtBackIn {
-  from { opacity: 0; transform: translateY(-16px) scale(.985); filter: blur(8px); }
+  from { opacity: 0; transform: translateY(-22px) scale(.975); filter: blur(12px); }
   to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
 }
 
 /* Upgraded Silky Slow-Motion Dock Tab Glides */
-#view.sw-r { animation: laraTabR .52s cubic-bezier(.16, 1, .3, 1) both; }
-#view.sw-l { animation: laraTabL .52s cubic-bezier(.16, 1, .3, 1) both; }
+#view.sw-r { animation: laraTabR .74s cubic-bezier(.16, 1, .3, 1) both; }
+#view.sw-l { animation: laraTabL .74s cubic-bezier(.16, 1, .3, 1) both; }
 @keyframes laraTabR {
-  from { opacity: 0; transform: translateX(22px) scale(.992); filter: blur(4px); }
+  from { opacity: 0; transform: translateX(26px) scale(.99); filter: blur(6px); }
   to   { opacity: 1; transform: none; filter: blur(0px); }
 }
 @keyframes laraTabL {
-  from { opacity: 0; transform: translateX(-22px) scale(.992); filter: blur(4px); }
+  from { opacity: 0; transform: translateX(-26px) scale(.99); filter: blur(6px); }
   to   { opacity: 1; transform: none; filter: blur(0px); }
+}
+
+/* Center Login Portal Vertically & Horizontally Without Dock Padding */
+html[data-page="login"] main {
+  max-width: 1120px;
+  padding-block: 0;
 }
 
 /* Atmospheric Login Stage & Volumetric Aurora */
 .wl.wl3 {
   position: relative;
-  min-height: calc(100dvh - 32px);
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: clamp(20px, 4vh, 48px) 4px;
+  padding: clamp(24px, 4vh, 48px) 4px;
   isolation: isolate;
 }
 .wl-cosmos {
@@ -2418,27 +2424,27 @@ img.ae {
 .wl-orb {
   position: absolute;
   border-radius: 50%;
-  filter: blur(85px);
-  opacity: .42;
+  filter: blur(95px);
+  opacity: .38;
   will-change: transform;
 }
 .wl-orb.o1 {
-  width: min(560px, 85vw);
-  height: min(560px, 85vw);
+  width: min(580px, 85vw);
+  height: min(580px, 85vw);
   top: -14%;
   inset-inline-start: -8%;
-  background: radial-gradient(circle, rgba(43, 132, 255, .62), rgba(29, 78, 216, .18) 60%, transparent 75%);
-  animation: wlAurora1 18s ease-in-out infinite alternate;
+  background: radial-gradient(circle, rgba(43, 132, 255, .58), rgba(29, 78, 216, .16) 60%, transparent 75%);
+  animation: wlAurora1 20s ease-in-out infinite alternate;
 }
 .wl-orb.o2 {
-  width: min(500px, 80vw);
-  height: min(500px, 80vw);
+  width: min(520px, 80vw);
+  height: min(520px, 80vw);
   bottom: -16%;
   inset-inline-end: -8%;
-  background: radial-gradient(circle, rgba(20, 184, 166, .42), rgba(56, 189, 248, .15) 60%, transparent 75%);
-  animation: wlAurora2 22s ease-in-out infinite alternate;
+  background: radial-gradient(circle, rgba(20, 184, 166, .36), rgba(56, 189, 248, .14) 60%, transparent 75%);
+  animation: wlAurora2 24s ease-in-out infinite alternate;
 }
-:root[data-theme="light"] .wl-orb { opacity: .24; }
+:root[data-theme="light"] .wl-orb { opacity: .22; }
 @keyframes wlAurora1 {
   from { transform: translate3d(0, 0, 0) scale(1); }
   to   { transform: translate3d(6%, 8%, 0) scale(1.12); }
@@ -2451,44 +2457,44 @@ img.ae {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--fg) 5%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--fg) 5%, transparent) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 15%, transparent 78%);
-  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 15%, transparent 78%);
-  opacity: .55;
+    linear-gradient(to right, color-mix(in srgb, var(--fg) 3.5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--fg) 3.5%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 45%, #000 10%, transparent 72%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 45%, #000 10%, transparent 72%);
+  opacity: .22;
 }
 
 /* Editorial Split-Showcase Layout on Desktop, Focused Luxury Portal on Mobile */
 .wl-shell {
   width: 100%;
-  max-width: 452px;
+  max-width: 448px;
   margin-inline: auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 28px;
   align-items: center;
-  animation: wlPortalRise .72s cubic-bezier(.16, 1, .3, 1) both;
+  animation: wlPortalRise .95s cubic-bezier(.16, 1, .3, 1) both;
 }
 @keyframes wlPortalRise {
-  from { opacity: 0; transform: translateY(24px) scale(.98); }
-  to   { opacity: 1; transform: none; }
+  from { opacity: 0; transform: translateY(28px) scale(.975); filter: blur(10px); }
+  to   { opacity: 1; transform: none; filter: blur(0px); }
 }
 .wl-hero { display: none; }
 
 @media (min-width: 960px) {
   .wl-shell {
-    max-width: 980px;
-    grid-template-columns: 1.06fr .94fr;
-    gap: 48px;
-    padding-inline: 16px;
+    max-width: 1000px;
+    grid-template-columns: 1.08fr .92fr;
+    gap: 56px;
+    padding-inline: 20px;
   }
   .wl-hero {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     text-align: start;
-    gap: 16px;
+    gap: 18px;
   }
   .wl-head-emblem { display: none !important; }
 }
@@ -2500,13 +2506,13 @@ img.ae {
   place-items: center;
   border-radius: 28px;
   padding: 1.5px;
-  background: linear-gradient(145deg, rgba(125, 211, 252, .45), rgba(43, 132, 255, .12) 48%, rgba(255, 255, 255, .06));
-  box-shadow: 0 22px 48px -16px rgba(20, 96, 255, .52), inset 0 1px 0 rgba(255, 255, 255, .25);
+  background: linear-gradient(145deg, rgba(125, 211, 252, .50), rgba(43, 132, 255, .15) 48%, rgba(255, 255, 255, .07));
+  box-shadow: 0 22px 50px -14px rgba(20, 96, 255, .55), inset 0 1px 0 rgba(255, 255, 255, .28);
   overflow: hidden;
   animation: wlFloatSlow 6s ease-in-out infinite alternate;
 }
-.wl-pedestal { width: 92px; height: 92px; border-radius: 28px; }
-.wl-crystal  { width: 76px; height: 76px; border-radius: 24px; }
+.wl-pedestal { width: 96px; height: 96px; border-radius: 28px; }
+.wl-crystal  { width: 80px; height: 80px; border-radius: 25px; }
 @keyframes wlFloatSlow {
   from { transform: translateY(0); }
   to   { transform: translateY(-6px); }
@@ -2514,7 +2520,7 @@ img.ae {
 .wl-pedestal-beam, .wl-crystal-ring {
   position: absolute;
   inset: -45%;
-  background: conic-gradient(from 0deg, transparent 65%, rgba(96, 195, 255, .75) 85%, transparent 100%);
+  background: conic-gradient(from 0deg, transparent 65%, rgba(96, 195, 255, .82) 85%, transparent 100%);
   animation: wlSpin 7s linear infinite;
 }
 .wl-pedestal-in, .wl-crystal-in {
@@ -2524,72 +2530,74 @@ img.ae {
   border-radius: inherit;
   display: grid;
   place-items: center;
-  background: radial-gradient(85% 85% at 50% 20%, color-mix(in srgb, var(--accent) 26%, var(--surface-2)), var(--surface));
+  background: radial-gradient(85% 85% at 50% 18%, color-mix(in srgb, var(--accent) 28%, var(--surface-2)), var(--surface));
 }
-.wl-pedestal-in svg, .wl-pedestal-in img { width: 58px; height: auto; filter: drop-shadow(0 8px 18px rgba(43, 132, 255, .5)); }
-.wl-crystal-in svg, .wl-crystal-in img   { width: 48px; height: auto; filter: drop-shadow(0 6px 14px rgba(43, 132, 255, .5)); }
+.wl-pedestal-in img { width: 66px; height: 58px; object-fit: contain; filter: drop-shadow(0 10px 20px rgba(43, 132, 255, .55)); }
+.wl-crystal-in img  { width: 54px; height: 48px; object-fit: contain; filter: drop-shadow(0 8px 16px rgba(43, 132, 255, .52)); }
 
 .wl-hero-badge, .wl-eyebrow {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 13px;
+  padding: 6px 14px;
   border-radius: 999px;
   font: 700 11.5px/1 var(--f-display);
   letter-spacing: .18em;
   text-transform: uppercase;
   color: var(--accent-2);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent-2) 26%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 28%, transparent);
 }
 .wl-hero-title {
   margin: 0;
-  font-size: clamp(28px, 3vw, 38px);
-  line-height: 1.22;
-  letter-spacing: -.02em;
+  font-size: clamp(30px, 3.2vw, 40px);
+  line-height: 1.2;
+  letter-spacing: -.022em;
   font-weight: 800;
-  background: linear-gradient(180deg, var(--fg) 30%, color-mix(in srgb, var(--fg) 68%, var(--accent-2)));
+  background: linear-gradient(180deg, var(--fg) 35%, color-mix(in srgb, var(--fg) 68%, var(--accent-2)));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 :root[data-theme="light"] .wl-hero-title { color: var(--fg); background: none; }
-.wl-hero-sub {
-  margin: 0;
+.wl3 p.wl-hero-sub {
+  margin: 0 !important;
   font-size: 15.5px;
-  line-height: 1.65;
+  line-height: 1.68;
   color: var(--fg-2);
-  max-width: 44ch;
+  opacity: 1;
+  max-width: 46ch;
+  text-align: start;
 }
 .wl-pillars {
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 12px;
   width: 100%;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 .wl-pillar {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 13px 16px;
+  padding: 14px 16px;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--line);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
-  transition: transform .35s cubic-bezier(.16, 1, .3, 1), border-color .35s ease;
+  transition: transform .45s cubic-bezier(.16, 1, .3, 1), border-color .35s ease;
 }
 .wl-pillar:hover {
-  transform: translateX(4px);
+  transform: translateX(5px);
   border-color: color-mix(in srgb, var(--accent-2) 34%, var(--line));
 }
-[dir="rtl"] .wl-pillar:hover { transform: translateX(-4px); }
+[dir="rtl"] .wl-pillar:hover { transform: translateX(-5px); }
 .wl-pillar > i {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 42px;
+  height: 42px;
   border-radius: 13px;
   display: grid;
   place-items: center;
@@ -2598,34 +2606,34 @@ img.ae {
   border: 1px solid color-mix(in srgb, var(--accent-2) 22%, transparent);
 }
 .wl-pillar > i svg { width: 20px; height: 20px; }
-.wl-pillar b { display: block; font-size: 14px; font-weight: 700; color: var(--fg); margin-bottom: 2px; }
-.wl-pillar small { display: block; font-size: 12.5px; color: var(--fg-2); line-height: 1.45; }
+.wl-pillar b { display: block; font-size: 14.2px; font-weight: 700; color: var(--fg); margin-bottom: 2px; }
+.wl-pillar small { display: block; font-size: 12.6px; color: var(--fg-2); line-height: 1.45; }
 
 /* Specular Double-Bezel Auth Card */
 .wl3 .wl-card {
   position: relative;
   width: 100%;
-  max-width: 452px;
+  max-width: 448px;
   margin-inline: auto;
-  padding: 32px 26px 26px;
+  padding: 32px 28px 26px;
   border-radius: 30px;
   background:
-    radial-gradient(120% 65% at 50% -15%, rgba(56, 152, 255, .16), transparent 60%),
-    color-mix(in srgb, var(--surface) 84%, transparent);
+    radial-gradient(120% 65% at 50% -15%, rgba(56, 152, 255, .17), transparent 60%),
+    color-mix(in srgb, var(--surface) 86%, transparent);
   backdrop-filter: blur(28px) saturate(1.5);
   -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  border: 1px solid color-mix(in srgb, var(--accent-2) 18%, var(--line-2));
+  border: 1px solid color-mix(in srgb, var(--accent-2) 20%, var(--line-2));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, .13),
+    inset 0 1px 0 rgba(255, 255, 255, .14),
     inset 0 0 0 1px rgba(255, 255, 255, .03),
-    0 34px 85px -28px rgba(0, 0, 0, .82),
-    0 0 48px -24px var(--glow);
+    0 36px 90px -28px rgba(0, 0, 0, .84),
+    0 0 52px -24px var(--glow);
   will-change: height, transform;
 }
 :root[data-theme="light"] .wl3 .wl-card {
   background:
     radial-gradient(120% 65% at 50% -15%, rgba(43, 132, 255, .09), transparent 60%),
-    rgba(255, 255, 255, .90);
+    rgba(255, 255, 255, .92);
   border-color: rgba(15, 35, 75, .10);
   box-shadow: inset 0 1px 0 #fff, 0 28px 70px -30px rgba(15, 35, 80, .28);
 }
@@ -2637,85 +2645,73 @@ img.ae {
   gap: 12px;
   margin-bottom: 18px;
 }
-.wl-titles { text-align: center; margin-bottom: 20px; }
+.wl-titles { text-align: center; margin-bottom: 22px; }
 .wl-titles h1 {
-  font-size: 25px;
+  font-size: 26px;
   font-weight: 800;
-  letter-spacing: -.015em;
+  letter-spacing: -.018em;
   margin: 0 0 7px;
 }
-.wl-titles .wl-sub {
-  margin: 0 auto;
+.wl3 p.wl-sub {
+  margin: 0 auto !important;
   font-size: 14px;
   line-height: 1.6;
   color: var(--fg-2);
+  opacity: 1;
   max-width: 34ch;
 }
 
-/* Staggered Choreographed Entrance Inside Stage */
+/* Staggered Choreographed Slow-Motion Entrance Inside Stage */
 .wl-stagger {
-  animation: wlChildIn .58s cubic-bezier(.16, 1, .3, 1) both;
-  animation-delay: calc(var(--st, 0) * 48ms);
+  animation: wlChildIn .78s cubic-bezier(.16, 1, .3, 1) both;
+  animation-delay: calc(var(--st, 0) * 65ms);
 }
 @keyframes wlChildIn {
-  from { opacity: 0; transform: translateY(12px); }
+  from { opacity: 0; transform: translateY(14px); }
   to   { opacity: 1; transform: none; }
 }
 
-/* Sliding Pill Segmented Tabs (`Sign in` <-> `Create account`) & Method Switcher (`Code` <-> `Password`) */
-.wl3 .wf-tabs, .wl3 .wf-methods {
+/* Single Clean Sliding Pill Segmented Switcher (`Sign in` <-> `Create account`) */
+.wl3 .wf-tabs {
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
   padding: 4px;
   border-radius: 16px;
-  background: color-mix(in srgb, var(--bg) 55%, var(--surface-2));
+  background: color-mix(in srgb, var(--bg) 58%, var(--surface-2));
   border: 1px solid var(--line);
-  margin-bottom: 14px;
+  margin-bottom: 18px;
   isolation: isolate;
 }
-.wl3 .wf-methods {
-  border-radius: 14px;
-  margin-bottom: 16px;
-  background: color-mix(in srgb, var(--surface-2) 75%, transparent);
-}
-.wl3 .wf-pill, .wl3 .wf-mpill {
+.wl3 .wf-pill {
   position: absolute;
   top: 4px;
   bottom: 4px;
   inset-inline-start: 4px;
   width: calc(50% - 4px);
   border-radius: 12px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-3) 88%, var(--accent) 12%), var(--surface-2));
-  border: 1px solid color-mix(in srgb, var(--accent-2) 28%, var(--line-2));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10), 0 6px 16px -6px rgba(0, 0, 0, .45);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-3) 86%, var(--accent) 14%), var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--accent-2) 32%, var(--line-2));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .11), 0 8px 18px -6px rgba(0, 0, 0, .48);
   z-index: 0;
   transform: translateX(calc(var(--tab-i, 0) * 100%));
-  transition: transform .48s cubic-bezier(.22, 1, .36, 1);
+  transition: transform .78s cubic-bezier(.22, 1, .36, 1);
 }
-.wl3 .wf-mpill {
-  border-radius: 10px;
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  box-shadow: none;
-  transform: translateX(calc(var(--m-i, 0) * 100%));
-}
-[dir="rtl"] .wl3 .wf-pill  { transform: translateX(calc(var(--tab-i, 0) * -100%)); }
-[dir="rtl"] .wl3 .wf-mpill { transform: translateX(calc(var(--m-i, 0) * -100%)); }
+[dir="rtl"] .wl3 .wf-pill { transform: translateX(calc(var(--tab-i, 0) * -100%)); }
 :root[data-theme="light"] .wl3 .wf-pill {
   background: #fff;
   box-shadow: 0 4px 12px rgba(15, 35, 75, .10);
 }
-.wl3 .wf-tabs button, .wl3 .wf-methods button {
+.wl3 .wf-tabs button {
   position: relative;
   z-index: 1;
-  min-height: 41px;
+  min-height: 42px;
   border-radius: 12px;
   background: transparent !important;
   border: 0 !important;
   box-shadow: none !important;
   font: inherit;
-  font-size: 13.8px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--fg-3);
   display: inline-flex;
@@ -2723,21 +2719,68 @@ img.ae {
   justify-content: center;
   gap: 7px;
   cursor: pointer;
-  transition: color .3s ease;
+  transition: color .45s ease;
 }
-.wl3 .wf-methods button { min-height: 37px; font-size: 13px; font-weight: 600; }
-.wl3 .wf-methods button svg { width: 16px; height: 16px; }
-.wl3 .wf-tabs button.on    { color: var(--fg); }
-.wl3 .wf-methods button.on { color: var(--accent-2); }
-:root[data-theme="light"] .wl3 .wf-methods button.on { color: var(--accent); }
+.wl3 .wf-tabs button.on { color: var(--fg); }
+
+/* Inline Password <-> Email Code Pill Toggle */
+.wf-mode-toggle {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+.wf-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: color-mix(in srgb, var(--surface-2) 65%, transparent);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: color .25s ease, border-color .25s ease, background .25s ease, transform .25s ease;
+}
+.wf-mode-btn svg { width: 16px; height: 16px; color: var(--accent-2); }
+.wf-mode-btn:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent-2) 35%, var(--line-2));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+  transform: translateY(-1px);
+}
 
 /* Refined Inputs & Specular Shimmer Submit Button */
+.wl3 .wf-in:has(> input[dir="ltr"]) {
+  direction: ltr;
+}
+.wl3 #wf-form-slot, .wl3 #wl-stage {
+  position: relative;
+}
+.wl3 .wf-live-in {
+  position: relative;
+  z-index: 1;
+}
+.wl3 .wf-ghost-out {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 0;
+}
 .wl3 .wf-f input {
   min-height: 50px;
   border-radius: 15px;
   background: color-mix(in srgb, var(--bg) 42%, var(--surface));
   border: 1px solid var(--line-2);
-  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease;
+  transition: border-color .3s ease, box-shadow .3s ease, background .3s ease;
+}
+.wl3 .wf-f input::placeholder {
+  color: color-mix(in srgb, var(--fg-3) 72%, transparent);
+  font-weight: 400;
 }
 :root[data-theme="light"] .wl3 .wf-f input { background: #f8faff; }
 .wl3 .wf-f input:focus {
@@ -4073,20 +4116,22 @@ function screenMorph(mutator, dir = 1) {
   if (!vw || typeof vw.animate !== 'function') { mutator(); return; }
   const outAnim = vw.animate([
     { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' },
-    { opacity: 0, transform: `scale(${dir >= 0 ? 0.968 : 1.02}) translateY(${dir >= 0 ? -12 : 12}px)`, filter: 'blur(8px)' }
-  ], { duration: 250, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
+    { opacity: 0, transform: `scale(${dir >= 0 ? 0.955 : 1.025}) translateY(${dir >= 0 ? -16 : 16}px)`, filter: 'blur(12px)' }
+  ], { duration: 300, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
   outAnim.onfinish = () => {
     outAnim.cancel();
     mutator();
     const vw2 = $('#view');
     if (vw2 && typeof vw2.animate === 'function') {
       vw2.animate([
-        { opacity: 0, transform: `scale(0.982) translateY(${dir >= 0 ? 22 : -18}px)`, filter: 'blur(10px)' },
+        { opacity: 0, transform: `scale(0.975) translateY(${dir >= 0 ? 28 : -22}px)`, filter: 'blur(14px)' },
         { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' }
-      ], { duration: 640, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+      ], { duration: 880, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
     }
   };
 }
+
+const WL_MARK_IMG = '<img src="logo-mark.webp" alt="" decoding="async" onerror="this.src=\'logo.webp\'">';
 
 function wfStageHtml() {
   const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
@@ -4111,7 +4156,7 @@ function wfStageHtml() {
   }
 
   const more = AUTH.email || AUTH.google;
-  const mobileEmblem = `<div class="wl-head-emblem"><div class="wl-crystal"><span class="wl-crystal-ring" aria-hidden="true"></span><div class="wl-crystal-in">${brandMark()}</div></div><span class="wl-eyebrow">${brand}</span></div>`;
+  const mobileEmblem = `<div class="wl-head-emblem"><div class="wl-crystal"><span class="wl-crystal-ring" aria-hidden="true"></span><div class="wl-crystal-in">${WL_MARK_IMG}</div></div><span class="wl-eyebrow">${brand}</span></div>`;
 
   if (more && WF.mode !== 'home') {
     return `${mobileEmblem}${vEmailBox()}`;
@@ -4172,13 +4217,20 @@ function wfShakeCard() {
 
 function wfFormOnlyHtml() {
   const up = WF.tab === 'up', code = !up && WF.how === 'code';
-  return `${!up ? `<div class="wf-methods" style="--m-i:${code ? 0 : 1}"><i class="wf-mpill" aria-hidden="true"></i><button type="button" class="${code ? 'on' : ''}" data-act="wf-how" data-v="code">${WF_IC.email}<span>${esc(t('wfByCode'))}</span></button><button type="button" class="${code ? '' : 'on'}" data-act="wf-how" data-v="pw">${WF_IC.pw}<span>${esc(t('wfByPw'))}</span></button></div>` : ''}
-    <form class="wf" data-wform="${up ? 'signup' : code ? 'code_send' : 'login'}" novalidate>${wfMsg()}
-      ${up ? wfField('name', 'text', t('wfName'), 'name', 'maxlength="60"') : ''}
-      ${wfField('email', 'email', t('wfEmail'), code ? 'username' : 'email', 'inputmode="email"')}
-      ${code ? '' : wfField('pw', 'password', t('wfPw'), up ? 'new-password' : 'current-password', up ? 'minlength="8"' : '')}
+  const namePh = isAr() ? 'الاسم الكريم' : 'Your name';
+  return `<form class="wf" data-wform="${up ? 'signup' : code ? 'code_send' : 'login'}" novalidate>${wfMsg()}
+      ${up ? wfField('name', 'text', t('wfName'), 'name', `maxlength="60" placeholder="${esc(namePh)}"`) : ''}
+      ${wfField('email', 'email', t('wfEmail'), code ? 'username' : 'email', 'inputmode="email" placeholder="name@example.com"')}
+      ${code ? '' : wfField('pw', 'password', t('wfPw'), up ? 'new-password' : 'current-password', (up ? 'minlength="8" ' : '') + 'placeholder="••••••••"')}
       ${up ? `<small class="wf-hint">${esc(t('wfPwHint'))}</small>` : code ? `<small class="wf-hint">${esc(t('wfCodeHint'))}</small>` : `<div class="wf-forgot"><button type="button" class="linkish" data-act="wf-mode" data-v="forgot">${esc(t('wfForgot'))}</button></div>`}
-      ${wfBtn(up ? t('wfUp') : code ? t('wfSendCode') : t('wfIn'))}</form>`;
+      ${wfBtn(up ? t('wfUp') : code ? t('wfSendCode') : t('wfIn'))}
+      ${up ? '' : `<div class="wf-mode-toggle"><button type="button" class="wf-mode-btn" data-act="wf-how" data-v="${code ? 'pw' : 'code'}">${code ? WF_IC.pw : WF_IC.email}<span>${esc(code ? t('wfUsePw') : t('wfUseCode'))}</span></button></div>`}</form>`;
+}
+
+function _cancelAnims(el) {
+  if (el && typeof el.getAnimations === 'function') {
+    el.getAnimations().forEach(a => { try { a.cancel(); } catch (e) {} });
+  }
 }
 
 function wfMorphForm(mutator, dir = 1, afterFocus = null) {
@@ -4186,14 +4238,20 @@ function wfMorphForm(mutator, dir = 1, afterFocus = null) {
   if (!card || !slotEl || S.screen !== 'login' || WF.mode !== 'home' || noMotion() || typeof slotEl.animate !== 'function') {
     wfTransition(mutator, dir, afterFocus); return;
   }
+  _cancelAnims(card);
+  slotEl.querySelectorAll('.wf-ghost-out').forEach(g => g.remove());
+
   const h0 = card.offsetHeight;
-  card.style.height = h0 + 'px';
-  card.style.overflow = 'hidden';
+  const ghost = document.createElement('div');
+  ghost.className = 'wf-ghost-out';
+  ghost.setAttribute('aria-hidden', 'true');
+  ghost.innerHTML = slotEl.innerHTML;
+  ghost.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
 
   mutator();
   const up = WF.tab === 'up', code = !up && WF.how === 'code', more = AUTH.email || AUTH.google;
 
-  // 1) Glide the top segmented pill smoothly without re-mounting .wf-tabs!
+  // 1) Glide the top segmented pill smoothly in slow-motion without re-mounting .wf-tabs!
   const tabsEl = card.querySelector('.wf-tabs');
   if (tabsEl) {
     tabsEl.style.setProperty('--tab-i', up ? 1 : 0);
@@ -4204,61 +4262,46 @@ function wfMorphForm(mutator, dir = 1, afterFocus = null) {
     });
   }
 
-  // 2) Smoothly update title & subtitle text
+  // 2) Crisp smooth title & subtitle transition (zero text blur!)
   const titlesEl = card.querySelector('.wl-titles');
   if (titlesEl) {
+    _cancelAnims(titlesEl);
     const h1 = titlesEl.querySelector('h1'), p = titlesEl.querySelector('.wl-sub');
     const nextT = more ? (up ? t('wfHiUp') : t('wfHi')) : t('wlT');
     const nextS = more ? (up ? t('wfHiUpB') : AUTH.email && code ? t('wfStepB') : t('wfHiB')) : t('wlB');
-    if (h1 && h1.textContent !== nextT) {
-      h1.textContent = nextT;
-      titlesEl.animate([{ opacity: .35, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    if ((h1 && h1.textContent !== nextT) || (p && p.textContent !== nextS)) {
+      if (h1) h1.textContent = nextT;
+      if (p) p.textContent = nextS;
+      titlesEl.animate([{ opacity: .35, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 620, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
     }
-    if (p) p.textContent = nextS;
   }
 
-  // 3) If only switching Code <-> Password inside Sign-In, glide .wf-mpill in place too!
-  const existingMethods = slotEl.querySelector('.wf-methods');
-  const targetBody = existingMethods && !up ? slotEl.querySelector('form.wf') : slotEl;
-  if (existingMethods && !up) {
-    existingMethods.style.setProperty('--m-i', code ? 0 : 1);
-    existingMethods.querySelectorAll('button[data-act="wf-how"]').forEach(b => b.classList.toggle('on', (b.dataset.v === 'code') === code));
+  // 3) True overlapping slow-motion cross-dissolve + height morph (impossible to blank out!)
+  slotEl.innerHTML = `<div class="wf-live-in">${wfFormOnlyHtml()}</div>`;
+  const liveIn = slotEl.firstElementChild;
+  slotEl.appendChild(ghost);
+
+  card.style.height = 'auto';
+  const h1 = card.offsetHeight;
+  if (Math.abs(h1 - h0) > 2) {
+    card.style.overflow = 'hidden';
+    const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 820, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
   }
 
   const rtlSign = isRtl(LANG) ? -1 : 1;
-  const dx = dir * rtlSign * 18;
-  const outA = targetBody.animate([
-    { opacity: 1, transform: 'translateX(0)', filter: 'blur(0px)' },
-    { opacity: 0, transform: `translateX(${-dx * 0.7}px)`, filter: 'blur(4px)' }
-  ], { duration: 165, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+  const dx = dir * rtlSign * 24;
+  const gAnim = ghost.animate([
+    { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' },
+    { opacity: 0, transform: `translateX(${-dx}px) scale(0.985)`, filter: 'blur(7px)' }
+  ], { duration: 460, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
+  gAnim.onfinish = () => ghost.remove();
 
-  outA.onfinish = () => {
-    outA.cancel();
-    if (existingMethods && !up) {
-      const tmp = document.createElement('div');
-      tmp.innerHTML = wfFormOnlyHtml();
-      const newForm = tmp.querySelector('form.wf');
-      if (newForm && targetBody.parentNode) targetBody.replaceWith(newForm);
-    } else {
-      slotEl.innerHTML = wfFormOnlyHtml();
-    }
-    const animTarget = (existingMethods && !up) ? slotEl.querySelector('form.wf') : slotEl;
-    card.style.height = 'auto';
-    const h1 = card.offsetHeight;
-    if (Math.abs(h1 - h0) > 2) {
-      const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 540, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-      hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
-    } else {
-      card.style.height = ''; card.style.overflow = '';
-    }
-    if (animTarget && typeof animTarget.animate === 'function') {
-      const inA = animTarget.animate([
-        { opacity: 0, transform: `translateX(${dx}px)`, filter: 'blur(6px)' },
-        { opacity: 1, transform: 'translateX(0)', filter: 'blur(0px)' }
-      ], { duration: 500, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-      inA.onfinish = () => { if (afterFocus) afterFocus(); };
-    } else if (afterFocus) afterFocus();
-  };
+  const inA = liveIn.animate([
+    { opacity: 0, transform: `translateX(${dx}px) scale(0.99)`, filter: 'blur(7px)' },
+    { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' }
+  ], { duration: 760, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+  inA.onfinish = () => { if (afterFocus) afterFocus(); };
 }
 
 function wfTransition(mutator, dir = 1, afterFocus = null) {
@@ -4266,43 +4309,48 @@ function wfTransition(mutator, dir = 1, afterFocus = null) {
   if (!card || !stage || S.screen !== 'login' || noMotion() || typeof stage.animate !== 'function') {
     mutator(); renderView(); if (afterFocus) setTimeout(afterFocus, 60); return;
   }
-  if (_wfMorphBusy) { mutator(); stage.innerHTML = wfStageHtml(); hydrate(stage); gRender(); wfTick(); syncOtpSlots(); return; }
-  _wfMorphBusy = true;
+  _cancelAnims(card);
+  stage.querySelectorAll('.wf-ghost-out').forEach(g => g.remove());
+
   const rtlSign = isRtl(LANG) ? -1 : 1;
-  const dx = dir * rtlSign * 26;
+  const dx = dir * rtlSign * 30;
   const h0 = card.offsetHeight;
-  card.style.height = h0 + 'px';
-  card.style.overflow = 'hidden';
 
-  const exitAnim = stage.animate([
+  const ghost = document.createElement('div');
+  ghost.className = 'wf-ghost-out';
+  ghost.setAttribute('aria-hidden', 'true');
+  ghost.innerHTML = stage.innerHTML;
+  ghost.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
+
+  mutator();
+  stage.innerHTML = `<div class="wf-live-in">${wfStageHtml()}</div>`;
+  const liveIn = stage.firstElementChild;
+  stage.appendChild(ghost);
+
+  hydrate(liveIn);
+  gRender();
+  wfTick();
+  syncOtpSlots();
+
+  card.style.height = 'auto';
+  const h1 = card.offsetHeight;
+  if (Math.abs(h1 - h0) > 2) {
+    card.style.overflow = 'hidden';
+    const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 840, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
+  }
+
+  const gAnim = ghost.animate([
     { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' },
-    { opacity: 0, transform: `translateX(${-dx * 0.75}px) scale(0.985)`, filter: 'blur(6px)' }
-  ], { duration: 200, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+    { opacity: 0, transform: `translateX(${-dx}px) scale(0.98)`, filter: 'blur(8px)' }
+  ], { duration: 480, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
+  gAnim.onfinish = () => ghost.remove();
 
-  exitAnim.onfinish = () => {
-    exitAnim.cancel();
-    mutator();
-    stage.innerHTML = wfStageHtml();
-    hydrate(stage);
-    gRender();
-    wfTick();
-    syncOtpSlots();
-
-    card.style.height = 'auto';
-    const h1 = card.offsetHeight;
-    if (Math.abs(h1 - h0) > 2) {
-      const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 560, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-      hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
-    } else {
-      card.style.height = ''; card.style.overflow = '';
-    }
-
-    const enterAnim = stage.animate([
-      { opacity: 0, transform: `translateX(${dx}px) scale(0.985)`, filter: 'blur(8px)' },
-      { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' }
-    ], { duration: 560, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
-    enterAnim.onfinish = () => { _wfMorphBusy = false; if (afterFocus) afterFocus(); };
-  };
+  const enterAnim = liveIn.animate([
+    { opacity: 0, transform: `translateX(${dx}px) scale(0.985)`, filter: 'blur(9px)' },
+    { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' }
+  ], { duration: 800, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+  enterAnim.onfinish = () => { if (afterFocus) afterFocus(); };
 }
 
 function needLogin() {
@@ -4325,7 +4373,8 @@ const WF_IC = {
 
 function wfField(k, type, label, auto, extra) {
   const pw = type === 'password', shown = pw && WF.eye;
-  return `<label class="wf-f"><span>${esc(label)}</span><span class="wf-in">${WF_IC[k] || ''}<input data-wf="${k}" type="${shown ? 'text' : type}" value="${esc(WF[k] || '')}" autocomplete="${auto}" ${extra || ''} dir="${type === 'text' && k === 'name' ? 'auto' : 'ltr'}">${pw ? `<button type="button" class="wf-eye ${shown ? 'on' : ''}" data-act="wf-eye" aria-label="${esc(t('wfShow'))}" aria-pressed="${shown}">${WF_IC.eye}</button>` : ''}</span></label>`;
+  const fDir = (type === 'text' && k === 'name') ? (isRtl(LANG) ? 'rtl' : 'ltr') : 'ltr';
+  return `<label class="wf-f"><span>${esc(label)}</span><span class="wf-in">${WF_IC[k] || ''}<input data-wf="${k}" type="${shown ? 'text' : type}" value="${esc(WF[k] || '')}" autocomplete="${auto}" ${extra || ''} dir="${fDir}">${pw ? `<button type="button" class="wf-eye ${shown ? 'on' : ''}" data-act="wf-eye" aria-label="${esc(t('wfShow'))}" aria-pressed="${shown}">${WF_IC.eye}</button>` : ''}</span></label>`;
 }
 function wfMsg() { return (WF.err ? `<div class="wl-note" role="alert">${esc(WF.err)}</div>` : '') + (WF.ok ? `<div class="wf-ok" role="status">${esc(WF.ok)}</div>` : ''); }
 function wfBtn(label) { return `<button class="btn primary wf-go" type="submit" ${WF.busy ? 'disabled aria-busy="true"' : ''}><span class="wf-sheen" aria-hidden="true"></span>${WF.busy ? '<i class="wl-spin"></i>' : ''}<span>${esc(label)}</span></button>`; }
@@ -4384,7 +4433,7 @@ function vLogin() {
       <aside class="wl-hero" aria-hidden="true">
         <div class="wl-pedestal">
           <span class="wl-pedestal-beam"></span>
-          <div class="wl-pedestal-in">${brandMark()}</div>
+          <div class="wl-pedestal-in">${WL_MARK_IMG}</div>
         </div>
         <span class="wl-hero-badge">${brand}</span>
         <h2 class="wl-hero-title">${esc(isAr() ? 'بوابتك الرقمية الفاخرة للأكواد والاشتراكات' : 'Your Executive Digital Storefront')}</h2>
