@@ -38631,9 +38631,9 @@ def _web_ref_decode(code):
 
 def _web_create_user(name, email_addr, lang, ref):
     """حساب جديد من الموقع (بدون تيليجرام) — نفس شكل حسابات البوت، برقم من مدى الموقع."""
-    for _ in range(5):
-        seq = db.counters.find_one_and_update({'_id': 'web_uid'}, {'$inc': {'seq': 1}}, upsert=True, return_document=True)
-        uid = WEB_UID_BASE + int(seq.get('seq') or 1)
+    for _ in range(8):
+        # رقم عشوائي من 16 خانة (مثل 8473920165530218) — ما ينخمّن ولا يتطابق مع أرقام تيليجرام أبداً
+        uid = WEB_UID_BASE + 10_000_000_000 + secrets.randbelow(WEB_UID_END - WEB_UID_BASE - 10_000_000_000)
         if not db.users.find_one({'user_id': uid}, {'_id': 1}):
             break
     else:
