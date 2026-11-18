@@ -2361,6 +2361,610 @@ img.ae {
   height: 22px;
   color: var(--h, var(--accent-2));
 }
+
+/* ═══ 33. PRINCIPAL DIRECTOR LOGIN PORTAL & SLOW-MOTION PAGE CHOREOGRAPHY ═══ */
+/* Macro Page-to-Page Slow-Motion View Transitions */
+::view-transition-old(root) {
+  animation: laraVtOut .36s cubic-bezier(.32, 0, .2, 1) both;
+}
+::view-transition-new(root) {
+  animation: laraVtIn .66s cubic-bezier(.16, 1, .3, 1) both;
+}
+:root[data-vt-dir="out"]::view-transition-new(root) {
+  animation: laraVtBackIn .62s cubic-bezier(.16, 1, .3, 1) both;
+}
+@keyframes laraVtOut {
+  from { opacity: 1; transform: scale(1); filter: blur(0px); }
+  to   { opacity: 0; transform: scale(.968); filter: blur(8px); }
+}
+@keyframes laraVtIn {
+  from { opacity: 0; transform: translateY(22px) scale(.985); filter: blur(10px); }
+  to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
+}
+@keyframes laraVtBackIn {
+  from { opacity: 0; transform: translateY(-16px) scale(.985); filter: blur(8px); }
+  to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
+}
+
+/* Upgraded Silky Slow-Motion Dock Tab Glides */
+#view.sw-r { animation: laraTabR .52s cubic-bezier(.16, 1, .3, 1) both; }
+#view.sw-l { animation: laraTabL .52s cubic-bezier(.16, 1, .3, 1) both; }
+@keyframes laraTabR {
+  from { opacity: 0; transform: translateX(22px) scale(.992); filter: blur(4px); }
+  to   { opacity: 1; transform: none; filter: blur(0px); }
+}
+@keyframes laraTabL {
+  from { opacity: 0; transform: translateX(-22px) scale(.992); filter: blur(4px); }
+  to   { opacity: 1; transform: none; filter: blur(0px); }
+}
+
+/* Atmospheric Login Stage & Volumetric Aurora */
+.wl.wl3 {
+  position: relative;
+  min-height: calc(100dvh - 32px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(20px, 4vh, 48px) 4px;
+  isolation: isolate;
+}
+.wl-cosmos {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.wl-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(85px);
+  opacity: .42;
+  will-change: transform;
+}
+.wl-orb.o1 {
+  width: min(560px, 85vw);
+  height: min(560px, 85vw);
+  top: -14%;
+  inset-inline-start: -8%;
+  background: radial-gradient(circle, rgba(43, 132, 255, .62), rgba(29, 78, 216, .18) 60%, transparent 75%);
+  animation: wlAurora1 18s ease-in-out infinite alternate;
+}
+.wl-orb.o2 {
+  width: min(500px, 80vw);
+  height: min(500px, 80vw);
+  bottom: -16%;
+  inset-inline-end: -8%;
+  background: radial-gradient(circle, rgba(20, 184, 166, .42), rgba(56, 189, 248, .15) 60%, transparent 75%);
+  animation: wlAurora2 22s ease-in-out infinite alternate;
+}
+:root[data-theme="light"] .wl-orb { opacity: .24; }
+@keyframes wlAurora1 {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(6%, 8%, 0) scale(1.12); }
+}
+@keyframes wlAurora2 {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(-7%, -6%, 0) scale(1.14); }
+}
+.wl-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--fg) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--fg) 5%, transparent) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 15%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 45%, #000 15%, transparent 78%);
+  opacity: .55;
+}
+
+/* Editorial Split-Showcase Layout on Desktop, Focused Luxury Portal on Mobile */
+.wl-shell {
+  width: 100%;
+  max-width: 452px;
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+  animation: wlPortalRise .72s cubic-bezier(.16, 1, .3, 1) both;
+}
+@keyframes wlPortalRise {
+  from { opacity: 0; transform: translateY(24px) scale(.98); }
+  to   { opacity: 1; transform: none; }
+}
+.wl-hero { display: none; }
+
+@media (min-width: 960px) {
+  .wl-shell {
+    max-width: 980px;
+    grid-template-columns: 1.06fr .94fr;
+    gap: 48px;
+    padding-inline: 16px;
+  }
+  .wl-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: start;
+    gap: 16px;
+  }
+  .wl-head-emblem { display: none !important; }
+}
+
+/* Crystal Brand Pedestal (Desktop Hero & Mobile Emblem) */
+.wl-pedestal, .wl-crystal {
+  position: relative;
+  display: grid;
+  place-items: center;
+  border-radius: 28px;
+  padding: 1.5px;
+  background: linear-gradient(145deg, rgba(125, 211, 252, .45), rgba(43, 132, 255, .12) 48%, rgba(255, 255, 255, .06));
+  box-shadow: 0 22px 48px -16px rgba(20, 96, 255, .52), inset 0 1px 0 rgba(255, 255, 255, .25);
+  overflow: hidden;
+  animation: wlFloatSlow 6s ease-in-out infinite alternate;
+}
+.wl-pedestal { width: 92px; height: 92px; border-radius: 28px; }
+.wl-crystal  { width: 76px; height: 76px; border-radius: 24px; }
+@keyframes wlFloatSlow {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-6px); }
+}
+.wl-pedestal-beam, .wl-crystal-ring {
+  position: absolute;
+  inset: -45%;
+  background: conic-gradient(from 0deg, transparent 65%, rgba(96, 195, 255, .75) 85%, transparent 100%);
+  animation: wlSpin 7s linear infinite;
+}
+.wl-pedestal-in, .wl-crystal-in {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(85% 85% at 50% 20%, color-mix(in srgb, var(--accent) 26%, var(--surface-2)), var(--surface));
+}
+.wl-pedestal-in svg, .wl-pedestal-in img { width: 58px; height: auto; filter: drop-shadow(0 8px 18px rgba(43, 132, 255, .5)); }
+.wl-crystal-in svg, .wl-crystal-in img   { width: 48px; height: auto; filter: drop-shadow(0 6px 14px rgba(43, 132, 255, .5)); }
+
+.wl-hero-badge, .wl-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  font: 700 11.5px/1 var(--f-display);
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 26%, transparent);
+}
+.wl-hero-title {
+  margin: 0;
+  font-size: clamp(28px, 3vw, 38px);
+  line-height: 1.22;
+  letter-spacing: -.02em;
+  font-weight: 800;
+  background: linear-gradient(180deg, var(--fg) 30%, color-mix(in srgb, var(--fg) 68%, var(--accent-2)));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+:root[data-theme="light"] .wl-hero-title { color: var(--fg); background: none; }
+.wl-hero-sub {
+  margin: 0;
+  font-size: 15.5px;
+  line-height: 1.65;
+  color: var(--fg-2);
+  max-width: 44ch;
+}
+.wl-pillars {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  width: 100%;
+  margin-top: 8px;
+}
+.wl-pillar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+  transition: transform .35s cubic-bezier(.16, 1, .3, 1), border-color .35s ease;
+}
+.wl-pillar:hover {
+  transform: translateX(4px);
+  border-color: color-mix(in srgb, var(--accent-2) 34%, var(--line));
+}
+[dir="rtl"] .wl-pillar:hover { transform: translateX(-4px); }
+.wl-pillar > i {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 22%, transparent), color-mix(in srgb, var(--accent-2) 8%, transparent));
+  color: var(--accent-2);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 22%, transparent);
+}
+.wl-pillar > i svg { width: 20px; height: 20px; }
+.wl-pillar b { display: block; font-size: 14px; font-weight: 700; color: var(--fg); margin-bottom: 2px; }
+.wl-pillar small { display: block; font-size: 12.5px; color: var(--fg-2); line-height: 1.45; }
+
+/* Specular Double-Bezel Auth Card */
+.wl3 .wl-card {
+  position: relative;
+  width: 100%;
+  max-width: 452px;
+  margin-inline: auto;
+  padding: 32px 26px 26px;
+  border-radius: 30px;
+  background:
+    radial-gradient(120% 65% at 50% -15%, rgba(56, 152, 255, .16), transparent 60%),
+    color-mix(in srgb, var(--surface) 84%, transparent);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 18%, var(--line-2));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .13),
+    inset 0 0 0 1px rgba(255, 255, 255, .03),
+    0 34px 85px -28px rgba(0, 0, 0, .82),
+    0 0 48px -24px var(--glow);
+  will-change: height, transform;
+}
+:root[data-theme="light"] .wl3 .wl-card {
+  background:
+    radial-gradient(120% 65% at 50% -15%, rgba(43, 132, 255, .09), transparent 60%),
+    rgba(255, 255, 255, .90);
+  border-color: rgba(15, 35, 75, .10);
+  box-shadow: inset 0 1px 0 #fff, 0 28px 70px -30px rgba(15, 35, 80, .28);
+}
+
+.wl-head-emblem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.wl-titles { text-align: center; margin-bottom: 20px; }
+.wl-titles h1 {
+  font-size: 25px;
+  font-weight: 800;
+  letter-spacing: -.015em;
+  margin: 0 0 7px;
+}
+.wl-titles .wl-sub {
+  margin: 0 auto;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg-2);
+  max-width: 34ch;
+}
+
+/* Staggered Choreographed Entrance Inside Stage */
+.wl-stagger {
+  animation: wlChildIn .58s cubic-bezier(.16, 1, .3, 1) both;
+  animation-delay: calc(var(--st, 0) * 48ms);
+}
+@keyframes wlChildIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Sliding Pill Segmented Tabs (`Sign in` <-> `Create account`) & Method Switcher (`Code` <-> `Password`) */
+.wl3 .wf-tabs, .wl3 .wf-methods {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg) 55%, var(--surface-2));
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+  isolation: isolate;
+}
+.wl3 .wf-methods {
+  border-radius: 14px;
+  margin-bottom: 16px;
+  background: color-mix(in srgb, var(--surface-2) 75%, transparent);
+}
+.wl3 .wf-pill, .wl3 .wf-mpill {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  inset-inline-start: 4px;
+  width: calc(50% - 4px);
+  border-radius: 12px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-3) 88%, var(--accent) 12%), var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--accent-2) 28%, var(--line-2));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .10), 0 6px 16px -6px rgba(0, 0, 0, .45);
+  z-index: 0;
+  transform: translateX(calc(var(--tab-i, 0) * 100%));
+  transition: transform .48s cubic-bezier(.22, 1, .36, 1);
+}
+.wl3 .wf-mpill {
+  border-radius: 10px;
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: none;
+  transform: translateX(calc(var(--m-i, 0) * 100%));
+}
+[dir="rtl"] .wl3 .wf-pill  { transform: translateX(calc(var(--tab-i, 0) * -100%)); }
+[dir="rtl"] .wl3 .wf-mpill { transform: translateX(calc(var(--m-i, 0) * -100%)); }
+:root[data-theme="light"] .wl3 .wf-pill {
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(15, 35, 75, .10);
+}
+.wl3 .wf-tabs button, .wl3 .wf-methods button {
+  position: relative;
+  z-index: 1;
+  min-height: 41px;
+  border-radius: 12px;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  font: inherit;
+  font-size: 13.8px;
+  font-weight: 700;
+  color: var(--fg-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  cursor: pointer;
+  transition: color .3s ease;
+}
+.wl3 .wf-methods button { min-height: 37px; font-size: 13px; font-weight: 600; }
+.wl3 .wf-methods button svg { width: 16px; height: 16px; }
+.wl3 .wf-tabs button.on    { color: var(--fg); }
+.wl3 .wf-methods button.on { color: var(--accent-2); }
+:root[data-theme="light"] .wl3 .wf-methods button.on { color: var(--accent); }
+
+/* Refined Inputs & Specular Shimmer Submit Button */
+.wl3 .wf-f input {
+  min-height: 50px;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--bg) 42%, var(--surface));
+  border: 1px solid var(--line-2);
+  transition: border-color .25s ease, box-shadow .25s ease, background .25s ease;
+}
+:root[data-theme="light"] .wl3 .wf-f input { background: #f8faff; }
+.wl3 .wf-f input:focus {
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent), 0 8px 20px -10px var(--glow);
+}
+.wl3 .wf-go {
+  position: relative;
+  overflow: hidden;
+  min-height: 52px;
+  border-radius: 16px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  background: linear-gradient(135deg, #3b9eff 0%, #2563eb 55%, #1d4ed8 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), 0 12px 28px -8px rgba(37, 99, 235, .62);
+  transition: transform .22s cubic-bezier(.22, 1, .36, 1), box-shadow .25s ease;
+}
+.wl3 .wf-go:hover:not(:disabled) {
+  transform: translateY(-1.5px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 16px 34px -8px rgba(37, 99, 235, .75);
+}
+.wl3 .wf-go:active:not(:disabled) { transform: scale(.985); }
+.wf-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 32%, rgba(255, 255, 255, .26) 50%, transparent 68%);
+  background-size: 220% 100%;
+  animation: wfSheenSweep 4.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes wfSheenSweep {
+  0%, 55% { background-position: 130% 0; }
+  100%    { background-position: -130% 0; }
+}
+
+/* 6-Chamber Tactile OTP Input Matrix */
+.wf-otp {
+  position: relative;
+  margin: 6px 0 4px;
+}
+.wf-slots {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+.wf-slot {
+  height: 58px;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  font: 700 24px/1 var(--f-mono, ui-monospace, monospace);
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bg) 45%, var(--surface));
+  border: 1px solid var(--line-2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+  transition: border-color .22s ease, box-shadow .22s ease, transform .22s cubic-bezier(.22, 1, .36, 1), background .22s ease;
+  position: relative;
+}
+:root[data-theme="light"] .wf-slot { background: #f8faff; }
+.wf-slot.filled {
+  border-color: color-mix(in srgb, var(--accent-2) 50%, var(--line-2));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+.wf-slot.active {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 22%, transparent), 0 8px 18px -8px var(--glow);
+  transform: translateY(-2px);
+}
+.wf-slot.active:not(.filled)::after {
+  content: "";
+  width: 2px;
+  height: 22px;
+  border-radius: 2px;
+  background: var(--accent-2);
+  animation: wfCaret 1s steps(2, start) infinite;
+}
+@keyframes wfCaret { to { opacity: 0; } }
+.wf-slot.pop { animation: wfSlotPop .26s cubic-bezier(.2, 1.4, .4, 1); }
+@keyframes wfSlotPop {
+  0%   { transform: scale(.86); }
+  60%  { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+.wf-otp .wf-code {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: text;
+  font-size: 20px;
+  letter-spacing: 1em;
+}
+
+/* Luxury Telegram Sign-In Button & Waiting Sonar Scene */
+.wl-tg-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 0 18px;
+  border-radius: 15px;
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--fg);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 86%, #2aabee 14%), var(--surface-2));
+  border: 1px solid color-mix(in srgb, #2aabee 32%, var(--line-2));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
+  transition: transform .22s cubic-bezier(.22, 1, .36, 1), border-color .22s ease, box-shadow .22s ease;
+}
+.wl-tg-btn:hover:not(:disabled) {
+  transform: translateY(-1.5px);
+  border-color: rgba(42, 171, 238, .62);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 12px 26px -10px rgba(42, 171, 238, .42);
+}
+.wl-tg-ic {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(180deg, #38b6ff, #1d8cf0);
+  color: #fff;
+  box-shadow: 0 4px 10px rgba(29, 140, 240, .4);
+}
+.wl-tg-ic svg { width: 16px; height: 16px; }
+.wl-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 10px #22c55e;
+  margin-inline-start: 2px;
+}
+
+.wl-wait-scene {
+  text-align: center;
+  padding: 8px 0 2px;
+}
+.wl-sonar {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  margin: 14px auto 34px;
+  display: grid;
+  place-items: center;
+}
+.wl-sonar-core {
+  position: relative;
+  z-index: 2;
+  width: 78px;
+  height: 78px;
+  border-radius: 26px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #38b6ff, #1d74f5);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 18px 38px -10px rgba(29, 140, 240, .65);
+}
+.wl-sonar-core svg { width: 36px; height: 36px; }
+.wl-sonar > i {
+  position: absolute;
+  inset: 0;
+  border-radius: 30px;
+  border: 1.5px solid rgba(56, 182, 255, .55);
+  animation: wlSonarWave 3.3s cubic-bezier(.16, 1, .3, 1) infinite;
+}
+.wl-sonar > i:nth-child(2) { animation-delay: 1.1s; }
+.wl-sonar > i:nth-child(3) { animation-delay: 2.2s; }
+@keyframes wlSonarWave {
+  from { transform: scale(.9); opacity: .75; }
+  to   { transform: scale(1.75); opacity: 0; }
+}
+.wl-wait-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* Footer Controls */
+.wl-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.wl-foot:has(> :only-child) { justify-content: center; }
+.wl-foot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 13px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13.2px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: color .2s ease, border-color .2s ease, transform .2s ease;
+}
+.wl-foot-btn:hover, .wl3 .wl-lang:hover {
+  color: var(--fg);
+  border-color: var(--line-2);
+  transform: translateY(-1px);
+}
+@media (max-width: 400px) {
+  .wl3 .wl-card { padding: 24px 18px 20px; border-radius: 26px; }
+  .wf-slot { height: 50px; font-size: 21px; border-radius: 12px; }
+  .wf-slots { gap: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wl-orb, .wl-pedestal, .wl-crystal, .wl-pedestal-beam, .wl-crystal-ring, .wf-sheen, .wl-sonar > i, .wl-stagger, .wl-shell {
+    animation: none !important;
+  }
+  .wl3 .wf-pill, .wl3 .wf-mpill { transition: none !important; }
+}
 </style>
 </head>
 <body>
@@ -3319,7 +3923,9 @@ function setTab(k, fromTap) {
   if (S.tab === 'api' && S.apiUi) S.apiUi.reveal = false;   // بيانات الربط ترجع مخفية لما يطلع من تبويب الـ API
   S.tab = k; hap('select');
   const dk = dockKey(k);
-  const din = $('.dock-in'); if (din) din.style.setProperty('--i', Math.max(0, tabsList().findIndex(x => x[0] === dk)));
+  const tList = tabsList(), oldIdx = tList.findIndex(x => x[0] === was), newIdx = tList.findIndex(x => x[0] === dk);
+  if (!S.swDir && oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx) S.swDir = (newIdx > oldIdx ? 1 : -1) * (isRtl(LANG) ? -1 : 1);
+  const din = $('.dock-in'); if (din) din.style.setProperty('--i', Math.max(0, newIdx));
   document.querySelectorAll('.tab').forEach(b => { const on = b.dataset.v === dk; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); if (on && was !== dk) { b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); } });
   if (S.screen === 'app' && was === 'store' && k !== 'store') StoreKeep.y = window.scrollY;   // نرجع لنفس مكانك في المتجر
   const paint = () => {
@@ -3448,29 +4054,300 @@ const TG_PLANE = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="t
 const AUTH = { telegram: true, email: false, google: metaOf('lara-google') };
 const WF = { mode: 'home', tab: 'in', how: 'code', eye: false, email: '', pw: '', name: '', code: '', busy: false, err: '', ok: '', resendAt: 0, expAt: 0, purpose: '' };
 function webRef() { try { const r = store.get('webRef', null); if (r && r.v && Date.now() - r.t < 30 * 864e5) return String(r.v); } catch (e) {} return ''; }
-function needLogin() { closeAllSheets(); WL.state = 'idle'; WF.mode = 'home'; WF.err = ''; S.screen = 'login'; renderAll(); window.scrollTo({ top: 0 }); }
+/* ═══ CINEMATIC SLOW-MOTION SCREEN & AUTH STAGE CHOREOGRAPHY ═══ */
+const noMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+let _wfMorphBusy = false;
+
+function screenMorph(mutator, dir = 1) {
+  if (noMotion()) { mutator(); return; }
+  const root = document.documentElement;
+  if (typeof document.startViewTransition === 'function') {
+    root.dataset.vtDir = dir >= 0 ? 'in' : 'out';
+    try {
+      const vt = document.startViewTransition(() => { mutator(); });
+      vt.finished.finally(() => { delete root.dataset.vtDir; });
+      return;
+    } catch (e) { delete root.dataset.vtDir; }
+  }
+  const vw = $('#view');
+  if (!vw || typeof vw.animate !== 'function') { mutator(); return; }
+  const outAnim = vw.animate([
+    { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' },
+    { opacity: 0, transform: `scale(${dir >= 0 ? 0.968 : 1.02}) translateY(${dir >= 0 ? -12 : 12}px)`, filter: 'blur(8px)' }
+  ], { duration: 250, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
+  outAnim.onfinish = () => {
+    outAnim.cancel();
+    mutator();
+    const vw2 = $('#view');
+    if (vw2 && typeof vw2.animate === 'function') {
+      vw2.animate([
+        { opacity: 0, transform: `scale(0.982) translateY(${dir >= 0 ? 22 : -18}px)`, filter: 'blur(10px)' },
+        { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' }
+      ], { duration: 640, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    }
+  };
+}
+
+function wfStageHtml() {
+  const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
+  const go = WL.link
+    ? `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go"><span class="wl-tg-ic">${TG_PLANE}</span><span>${esc(t('wlBtn'))}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`
+    : `<button class="btn wl-tg-btn" disabled aria-busy="true"><i class="wl-spin"></i><span>${esc(t('wlBtn'))}</span></button>`;
+  const note = WL.denyMsg && WL.state === 'denied' ? WL.denyMsg : WL.state === 'expired' ? t('wlExp') : WL.state === 'denied' ? t('wlDen') : WL.err;
+  const browse = S.guest ? `<button class="wl-foot-btn primary-link" data-act="wl-browse"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${isRtl(LANG) ? 'M9 18l6-6-6-6' : 'M15 18l-6-6 6-6'}"/></svg><span>${esc(t('wlBrowse'))}</span></button>` : '';
+
+  if (WL.state === 'wait') {
+    return `<div class="wl-wait-scene">
+      <div class="wl-sonar" aria-hidden="true"><i></i><i></i><i></i><span class="wl-sonar-core">${TG_PLANE}</span></div>
+      <h1 class="wl-stagger" style="--st:1">${esc(t('wlWait'))}</h1>
+      ${WL.pick
+        ? `<p class="wl-pick-l wl-stagger" style="--st:2">${esc(t('pickB'))}</p><div class="wl-pick wl-stagger" style="--st:3" dir="ltr" aria-live="polite"><span>${esc(String(WL.pick))}</span></div>`
+        : `<p class="wl-sub wl-stagger" style="--st:2">${esc(t('wlWaitB'))}</p>`}
+      <div class="wl-wait-actions wl-stagger" style="--st:4">
+        ${WL.link ? `<a class="btn primary wl-again" href="${esc(WL.link)}" target="_blank" rel="noopener">${TG_PLANE}<span>${esc(t('wlAgain'))}</span></a>` : ''}
+        <button class="btn ghost full wl-cancel-btn" data-act="wl-cancel">${esc(t('wlCancel'))}</button>
+      </div>
+    </div>`;
+  }
+
+  const more = AUTH.email || AUTH.google;
+  const mobileEmblem = `<div class="wl-head-emblem"><div class="wl-crystal"><span class="wl-crystal-ring" aria-hidden="true"></span><div class="wl-crystal-in">${brandMark()}</div></div><span class="wl-eyebrow">${brand}</span></div>`;
+
+  if (more && WF.mode !== 'home') {
+    return `${mobileEmblem}${vEmailBox()}`;
+  }
+
+  const up = WF.tab === 'up';
+  const titleTxt = more ? (up ? t('wfHiUp') : t('wfHi')) : t('wlT');
+  const subTxt = more ? (up ? t('wfHiUpB') : AUTH.email && WF.how === 'code' ? t('wfStepB') : t('wfHiB')) : t('wlB');
+
+  return `${mobileEmblem}
+    <div class="wl-titles wl-stagger" style="--st:1">
+      <h1>${esc(titleTxt)}</h1>
+      <p class="wl-sub">${esc(subTxt)}</p>
+    </div>
+    ${AUTH.email ? `<div class="wl-stagger" style="--st:2">${vEmailBox()}</div>` : ''}
+    ${more ? `<div class="wf-or wl-stagger" style="--st:3"><span>${esc(t('wfOrCont'))}</span></div>` : ''}
+    ${note ? `<div class="wl-note wl-stagger" style="--st:3" role="alert">${esc(note)}</div>` : ''}
+    <div class="wl-alt wl-stagger" style="--st:4">
+      ${AUTH.google ? `<div class="g-wrap"><div id="g-btn" class="g-btn" aria-label="Google"></div></div>` : ''}
+      ${go}
+    </div>
+    ${more ? '' : `<small class="wl-how wl-stagger" style="--st:5">${ic.info}<span>${esc(t('wlHow'))}</span></small>`}
+    <div class="wl-foot wl-stagger" style="--st:5">
+      ${browse}
+      <button class="wl-lang" data-act="lang-open">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></button>
+    </div>`;
+}
+
+function syncOtpSlots() {
+  const box = document.querySelector('.wf-otp');
+  if (!box) return;
+  const val = String(WF.code || '');
+  const inp = box.querySelector('.wf-code');
+  const focused = document.activeElement === inp;
+  box.querySelectorAll('.wf-slot').forEach((sl, idx) => {
+    const ch = val[idx] || '';
+    const prev = sl.dataset.ch || '';
+    sl.dataset.ch = ch;
+    sl.textContent = ch;
+    sl.classList.toggle('filled', !!ch);
+    sl.classList.toggle('active', focused && (idx === val.length || (val.length === 6 && idx === 5)));
+    if (ch && ch !== prev) { sl.classList.remove('pop'); void sl.offsetWidth; sl.classList.add('pop'); }
+  });
+}
+
+function wfShakeCard() {
+  const card = document.querySelector('.wl-card');
+  if (!card || noMotion() || typeof card.animate !== 'function') return;
+  card.animate([
+    { transform: 'translateX(0)' },
+    { transform: 'translateX(-8px)' },
+    { transform: 'translateX(7px)' },
+    { transform: 'translateX(-5px)' },
+    { transform: 'translateX(3px)' },
+    { transform: 'translateX(0)' }
+  ], { duration: 380, easing: 'cubic-bezier(0.36, 0.07, 0.19, 0.97)' });
+}
+
+function wfFormOnlyHtml() {
+  const up = WF.tab === 'up', code = !up && WF.how === 'code';
+  return `${!up ? `<div class="wf-methods" style="--m-i:${code ? 0 : 1}"><i class="wf-mpill" aria-hidden="true"></i><button type="button" class="${code ? 'on' : ''}" data-act="wf-how" data-v="code">${WF_IC.email}<span>${esc(t('wfByCode'))}</span></button><button type="button" class="${code ? '' : 'on'}" data-act="wf-how" data-v="pw">${WF_IC.pw}<span>${esc(t('wfByPw'))}</span></button></div>` : ''}
+    <form class="wf" data-wform="${up ? 'signup' : code ? 'code_send' : 'login'}" novalidate>${wfMsg()}
+      ${up ? wfField('name', 'text', t('wfName'), 'name', 'maxlength="60"') : ''}
+      ${wfField('email', 'email', t('wfEmail'), code ? 'username' : 'email', 'inputmode="email"')}
+      ${code ? '' : wfField('pw', 'password', t('wfPw'), up ? 'new-password' : 'current-password', up ? 'minlength="8"' : '')}
+      ${up ? `<small class="wf-hint">${esc(t('wfPwHint'))}</small>` : code ? `<small class="wf-hint">${esc(t('wfCodeHint'))}</small>` : `<div class="wf-forgot"><button type="button" class="linkish" data-act="wf-mode" data-v="forgot">${esc(t('wfForgot'))}</button></div>`}
+      ${wfBtn(up ? t('wfUp') : code ? t('wfSendCode') : t('wfIn'))}</form>`;
+}
+
+function wfMorphForm(mutator, dir = 1, afterFocus = null) {
+  const card = document.querySelector('.wl-card'), slotEl = document.getElementById('wf-form-slot');
+  if (!card || !slotEl || S.screen !== 'login' || WF.mode !== 'home' || noMotion() || typeof slotEl.animate !== 'function') {
+    wfTransition(mutator, dir, afterFocus); return;
+  }
+  const h0 = card.offsetHeight;
+  card.style.height = h0 + 'px';
+  card.style.overflow = 'hidden';
+
+  mutator();
+  const up = WF.tab === 'up', code = !up && WF.how === 'code', more = AUTH.email || AUTH.google;
+
+  // 1) Glide the top segmented pill smoothly without re-mounting .wf-tabs!
+  const tabsEl = card.querySelector('.wf-tabs');
+  if (tabsEl) {
+    tabsEl.style.setProperty('--tab-i', up ? 1 : 0);
+    tabsEl.querySelectorAll('button[data-act="wf-tab"]').forEach(b => {
+      const on = (b.dataset.v === 'up') === up;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', on);
+    });
+  }
+
+  // 2) Smoothly update title & subtitle text
+  const titlesEl = card.querySelector('.wl-titles');
+  if (titlesEl) {
+    const h1 = titlesEl.querySelector('h1'), p = titlesEl.querySelector('.wl-sub');
+    const nextT = more ? (up ? t('wfHiUp') : t('wfHi')) : t('wlT');
+    const nextS = more ? (up ? t('wfHiUpB') : AUTH.email && code ? t('wfStepB') : t('wfHiB')) : t('wlB');
+    if (h1 && h1.textContent !== nextT) {
+      h1.textContent = nextT;
+      titlesEl.animate([{ opacity: .35, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    }
+    if (p) p.textContent = nextS;
+  }
+
+  // 3) If only switching Code <-> Password inside Sign-In, glide .wf-mpill in place too!
+  const existingMethods = slotEl.querySelector('.wf-methods');
+  const targetBody = existingMethods && !up ? slotEl.querySelector('form.wf') : slotEl;
+  if (existingMethods && !up) {
+    existingMethods.style.setProperty('--m-i', code ? 0 : 1);
+    existingMethods.querySelectorAll('button[data-act="wf-how"]').forEach(b => b.classList.toggle('on', (b.dataset.v === 'code') === code));
+  }
+
+  const rtlSign = isRtl(LANG) ? -1 : 1;
+  const dx = dir * rtlSign * 18;
+  const outA = targetBody.animate([
+    { opacity: 1, transform: 'translateX(0)', filter: 'blur(0px)' },
+    { opacity: 0, transform: `translateX(${-dx * 0.7}px)`, filter: 'blur(4px)' }
+  ], { duration: 165, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+
+  outA.onfinish = () => {
+    outA.cancel();
+    if (existingMethods && !up) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = wfFormOnlyHtml();
+      const newForm = tmp.querySelector('form.wf');
+      if (newForm && targetBody.parentNode) targetBody.replaceWith(newForm);
+    } else {
+      slotEl.innerHTML = wfFormOnlyHtml();
+    }
+    const animTarget = (existingMethods && !up) ? slotEl.querySelector('form.wf') : slotEl;
+    card.style.height = 'auto';
+    const h1 = card.offsetHeight;
+    if (Math.abs(h1 - h0) > 2) {
+      const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 540, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+      hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
+    } else {
+      card.style.height = ''; card.style.overflow = '';
+    }
+    if (animTarget && typeof animTarget.animate === 'function') {
+      const inA = animTarget.animate([
+        { opacity: 0, transform: `translateX(${dx}px)`, filter: 'blur(6px)' },
+        { opacity: 1, transform: 'translateX(0)', filter: 'blur(0px)' }
+      ], { duration: 500, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+      inA.onfinish = () => { if (afterFocus) afterFocus(); };
+    } else if (afterFocus) afterFocus();
+  };
+}
+
+function wfTransition(mutator, dir = 1, afterFocus = null) {
+  const card = document.querySelector('.wl-card'), stage = document.getElementById('wl-stage');
+  if (!card || !stage || S.screen !== 'login' || noMotion() || typeof stage.animate !== 'function') {
+    mutator(); renderView(); if (afterFocus) setTimeout(afterFocus, 60); return;
+  }
+  if (_wfMorphBusy) { mutator(); stage.innerHTML = wfStageHtml(); hydrate(stage); gRender(); wfTick(); syncOtpSlots(); return; }
+  _wfMorphBusy = true;
+  const rtlSign = isRtl(LANG) ? -1 : 1;
+  const dx = dir * rtlSign * 26;
+  const h0 = card.offsetHeight;
+  card.style.height = h0 + 'px';
+  card.style.overflow = 'hidden';
+
+  const exitAnim = stage.animate([
+    { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' },
+    { opacity: 0, transform: `translateX(${-dx * 0.75}px) scale(0.985)`, filter: 'blur(6px)' }
+  ], { duration: 200, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' });
+
+  exitAnim.onfinish = () => {
+    exitAnim.cancel();
+    mutator();
+    stage.innerHTML = wfStageHtml();
+    hydrate(stage);
+    gRender();
+    wfTick();
+    syncOtpSlots();
+
+    card.style.height = 'auto';
+    const h1 = card.offsetHeight;
+    if (Math.abs(h1 - h0) > 2) {
+      const hAnim = card.animate([{ height: h0 + 'px' }, { height: h1 + 'px' }], { duration: 560, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+      hAnim.onfinish = () => { card.style.height = ''; card.style.overflow = ''; };
+    } else {
+      card.style.height = ''; card.style.overflow = '';
+    }
+
+    const enterAnim = stage.animate([
+      { opacity: 0, transform: `translateX(${dx}px) scale(0.985)`, filter: 'blur(8px)' },
+      { opacity: 1, transform: 'translateX(0) scale(1)', filter: 'blur(0px)' }
+    ], { duration: 560, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+    enterAnim.onfinish = () => { _wfMorphBusy = false; if (afterFocus) afterFocus(); };
+  };
+}
+
+function needLogin() {
+  closeAllSheets();
+  screenMorph(() => {
+    WL.state = 'idle'; WF.mode = 'home'; WF.err = ''; S.screen = 'login';
+    renderAll(); window.scrollTo({ top: 0 });
+  }, 1);
+}
+
 const WF_IC = {
   email: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16v11H4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m4.5 7 7.5 6 7.5-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   pw: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="9.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   name: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 19.5c1.3-3.4 4-5 7-5s5.7 1.6 7 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
   eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+  sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>',
 };
+
 function wfField(k, type, label, auto, extra) {
   const pw = type === 'password', shown = pw && WF.eye;
   return `<label class="wf-f"><span>${esc(label)}</span><span class="wf-in">${WF_IC[k] || ''}<input data-wf="${k}" type="${shown ? 'text' : type}" value="${esc(WF[k] || '')}" autocomplete="${auto}" ${extra || ''} dir="${type === 'text' && k === 'name' ? 'auto' : 'ltr'}">${pw ? `<button type="button" class="wf-eye ${shown ? 'on' : ''}" data-act="wf-eye" aria-label="${esc(t('wfShow'))}" aria-pressed="${shown}">${WF_IC.eye}</button>` : ''}</span></label>`;
 }
 function wfMsg() { return (WF.err ? `<div class="wl-note" role="alert">${esc(WF.err)}</div>` : '') + (WF.ok ? `<div class="wf-ok" role="status">${esc(WF.ok)}</div>` : ''); }
-function wfBtn(label) { return `<button class="btn primary wf-go" type="submit" ${WF.busy ? 'disabled aria-busy="true"' : ''}>${WF.busy ? '<i class="wl-spin"></i>' : ''}<span>${esc(label)}</span></button>`; }
+function wfBtn(label) { return `<button class="btn primary wf-go" type="submit" ${WF.busy ? 'disabled aria-busy="true"' : ''}><span class="wf-sheen" aria-hidden="true"></span>${WF.busy ? '<i class="wl-spin"></i>' : ''}<span>${esc(label)}</span></button>`; }
+
 function vEmailBox() {
   if (WF.mode === 'code') {
     const left = Math.max(0, Math.ceil((WF.resendAt - Date.now()) / 1000));
     const exp = Math.max(0, Math.ceil(((WF.expAt || 0) - Date.now()) / 1000));
     const form = WF.purpose === 'reset' ? 'reset' : WF.purpose === 'login' ? 'code_login' : 'verify';
+    const digits = String(WF.code || '');
+    const slots = Array.from({ length: 6 }, (_, idx) => {
+      const ch = digits[idx] || '';
+      return `<span class="wf-slot ${ch ? 'filled' : ''} ${idx === digits.length ? 'active' : ''}" data-ch="${esc(ch)}" aria-hidden="true">${esc(ch)}</span>`;
+    }).join('');
     return `<form class="wf wf-codebox" data-wform="${form}" novalidate>
-      <div class="wf-mailic" aria-hidden="true">${WF_IC.email}</div>
-      <h2 class="wf-t">${esc(WF.purpose === 'reset' ? t('wfResetT') : t('wfCodeT'))}</h2>
-      <p class="wf-b">${esc(t('wfCodeB', { e: '\u0001' })).replace('\u0001', `<bdi dir="ltr" class="wf-em">${esc(WF.email)}</bdi>`)}</p>${wfMsg()}
-      <input class="wf-code" data-wf="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" value="${esc(WF.code)}" placeholder="••••••" dir="ltr" aria-label="${esc(t('wfCode'))}">
+      <div class="wf-mailic wl-stagger" style="--st:1" aria-hidden="true">${WF_IC.email}</div>
+      <h2 class="wf-t wl-stagger" style="--st:1">${esc(WF.purpose === 'reset' ? t('wfResetT') : t('wfCodeT'))}</h2>
+      <p class="wf-b wl-stagger" style="--st:2">${esc(t('wfCodeB', { e: '\u0001' })).replace('\u0001', `<bdi dir="ltr" class="wf-em">${esc(WF.email)}</bdi>`)}</p>${wfMsg()}
+      <div class="wf-otp wl-stagger" style="--st:3" dir="ltr">
+        <div class="wf-slots" aria-hidden="true">${slots}</div>
+        <input class="wf-code" data-wf="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]*" value="${esc(digits)}" dir="ltr" aria-label="${esc(t('wfCode'))}">
+      </div>
       ${WF.expAt ? `<small class="wf-exp ${exp ? '' : 'over'}" data-wf-exp>${esc(exp ? t('wfExp', { t: Math.floor(exp / 60) + ':' + String(exp % 60).padStart(2, '0') }) : t('wfExpired'))}</small>` : ''}
       ${WF.purpose === 'reset' ? wfField('pw', 'password', t('wfNewPw'), 'new-password', 'minlength="8"') + `<small class="wf-hint">${esc(t('wfPwHint'))}</small>` : ''}
       ${wfBtn(WF.purpose === 'reset' ? t('wfSave') : WF.purpose === 'login' ? t('wfIn') : t('wfVerify'))}
@@ -3479,72 +4356,79 @@ function vEmailBox() {
       ${WF.purpose === 'login' ? `<div class="wf-switch"><button type="button" class="linkish" data-act="wf-usepw">${WF_IC.pw}<span>${esc(t('wfUsePw'))}</span></button></div>` : ''}</form>`;
   }
   if (WF.mode === 'forgot') {
-    return `<form class="wf" data-wform="forgot" novalidate><div class="wf-mailic" aria-hidden="true">${WF_IC.pw}</div><h2 class="wf-t">${esc(t('wfResetT'))}</h2><p class="wf-b">${esc(t('wfForgotB'))}</p>${wfMsg()}
-      ${wfField('email', 'email', t('wfEmail'), 'email', 'inputmode="email"')}${wfBtn(t('wfSend'))}
-      <div class="wf-row"><button type="button" class="linkish" data-act="wf-mode" data-v="home">${esc(t('wfBack'))}</button></div></form>`;
+    return `<form class="wf" data-wform="forgot" novalidate><div class="wf-mailic wl-stagger" style="--st:1" aria-hidden="true">${WF_IC.pw}</div><h2 class="wf-t wl-stagger" style="--st:1">${esc(t('wfResetT'))}</h2><p class="wf-b wl-stagger" style="--st:2">${esc(t('wfForgotB'))}</p>${wfMsg()}
+      <div class="wl-stagger" style="--st:3">${wfField('email', 'email', t('wfEmail'), 'email', 'inputmode="email"')}</div>
+      <div class="wl-stagger" style="--st:4">${wfBtn(t('wfSend'))}</div>
+      <div class="wf-row wl-stagger" style="--st:5"><button type="button" class="linkish" data-act="wf-mode" data-v="home">${esc(t('wfBack'))}</button></div></form>`;
   }
-  const up = WF.tab === 'up', code = !up && WF.how === 'code';
-  return `<div class="wf-tabs" role="tablist"><button type="button" role="tab" aria-selected="${!up}" class="${up ? '' : 'on'}" data-act="wf-tab" data-v="in">${esc(t('wfIn'))}</button><button type="button" role="tab" aria-selected="${up}" class="${up ? 'on' : ''}" data-act="wf-tab" data-v="up">${esc(t('wfUp'))}</button></div>
-    <form class="wf" data-wform="${up ? 'signup' : code ? 'code_send' : 'login'}" novalidate>${wfMsg()}
-      ${up ? wfField('name', 'text', t('wfName'), 'name', 'maxlength="60"') : ''}
-      ${wfField('email', 'email', t('wfEmail'), code ? 'username' : 'email', 'inputmode="email"')}
-      ${code ? '' : wfField('pw', 'password', t('wfPw'), up ? 'new-password' : 'current-password', up ? 'minlength="8"' : '')}
-      ${up ? `<small class="wf-hint">${esc(t('wfPwHint'))}</small>` : code ? '' : `<div class="wf-forgot"><button type="button" class="linkish" data-act="wf-mode" data-v="forgot">${esc(t('wfForgot'))}</button></div>`}
-      ${wfBtn(up ? t('wfUp') : code ? t('wfCont') : t('wfIn'))}
-      ${up ? '' : `<div class="wf-switch"><button type="button" class="linkish" data-act="wf-how" data-v="${code ? 'pw' : 'code'}">${code ? WF_IC.pw : WF_IC.email}<span>${esc(code ? t('wfUsePw') : t('wfUseCode'))}</span></button></div>`}</form>`;
+  const up = WF.tab === 'up';
+  return `<div class="wf-tabs" role="tablist" style="--tab-i:${up ? 1 : 0}"><i class="wf-pill" aria-hidden="true"></i><button type="button" role="tab" aria-selected="${!up}" class="${up ? '' : 'on'}" data-act="wf-tab" data-v="in">${esc(t('wfIn'))}</button><button type="button" role="tab" aria-selected="${up}" class="${up ? 'on' : ''}" data-act="wf-tab" data-v="up">${esc(t('wfUp'))}</button></div>
+    <div id="wf-form-slot">${wfFormOnlyHtml()}</div>`;
 }
+
 function vLogin() {
   const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
-  const mark = '<img class="wl-logo" src="logo.webp" alt="" width="76" height="76" decoding="async">';
-  const go = WL.link
-    ? `<a class="btn primary wl-go" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go">${TG_PLANE}<span>${esc(t('wlBtn'))}</span></a>`
-    : `<button class="btn primary wl-go" disabled aria-busy="true"><i class="wl-spin"></i><span>${esc(t('wlBtn'))}</span></button>`;
-  const note = WL.denyMsg && WL.state === 'denied' ? WL.denyMsg : WL.state === 'expired' ? t('wlExp') : WL.state === 'denied' ? t('wlDen') : WL.err;
-  const browse = S.guest ? `<button class="linkish wl-browse" data-act="wl-browse">${esc(t('wlBrowse'))}</button>` : '';
-  if (WL.state === 'wait') {
-    return `<section class="wl"><div class="wl-card">
-      <div class="wl-pulse" aria-hidden="true"><span></span><span></span>${TG_PLANE}</div>
-      <h1>${esc(t('wlWait'))}</h1>${WL.pick ? `<p class="wl-pick-l">${esc(t('pickB'))}</p><div class="wl-pick" dir="ltr" aria-live="polite">${esc(String(WL.pick))}</div>` : `<p>${esc(t('wlWaitB'))}</p>`}
-      ${WL.link ? `<a class="btn ghost wl-again" href="${esc(WL.link)}" target="_blank" rel="noopener">${TG_PLANE}<span>${esc(t('wlAgain'))}</span></a>` : ''}
-      <button class="linkish wl-cancel" data-act="wl-cancel">${esc(t('wlCancel'))}</button>
-    </div></section>`;
-  }
   const more = AUTH.email || AUTH.google;
-  const head = `<div class="wl-brand"><span class="wl-mark"><img src="logo-mark.webp" alt="" width="84" height="75" decoding="async"></span><b>${brand}</b></div>`;
-  if (more && WF.mode !== 'home') return `<section class="wl wl2"><div class="wl-card wl-wide">${head}${vEmailBox()}</div></section>`;
-  const up = WF.tab === 'up';
-  return `<section class="wl wl2"><div class="wl-card${more ? ' wl-wide' : ''}">
-    ${head}
-    <h1>${esc(more ? (up ? t('wfHiUp') : t('wfHi')) : t('wlT'))}</h1><p>${esc(more ? (up ? t('wfHiUpB') : AUTH.email && WF.how === 'code' ? t('wfStepB') : t('wfHiB')) : t('wlB'))}</p>
-    ${AUTH.email ? vEmailBox() : ''}
-    ${more ? `<div class="wf-or"><span>${esc(t('wfOrCont'))}</span></div>` : ''}
-    ${note ? `<div class="wl-note" role="alert">${esc(note)}</div>` : ''}
-    <div class="wl-alt">${AUTH.google ? `<div class="g-wrap"><div id="g-btn" class="g-btn" aria-label="Google"></div></div>` : ''}${go}</div>
-    ${more ? '' : `<small class="wl-how">${ic.info}<span>${esc(t('wlHow'))}</span></small>`}
-    <div class="wl-foot">${browse}<button class="wl-lang" data-act="lang-open">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></button></div>
-  </div></section>`;
+  const p1 = isAr() ? ['تسليم فوري آلي 24/7', 'الأكواد والاشتراكات تصلك في ثوانٍ فور الشراء'] : ['24/7 Instant Delivery', 'Digital codes & seats delivered in seconds'];
+  const p2 = isAr() ? ['حساب موحّد في كل مكان', 'رصيدك وطلباتك متزامنة بين الموقع وتيليجرام'] : ['Unified Everywhere', 'One balance & order history across Web and Telegram'];
+  const p3 = isAr() ? ['تشفير وحماية فائقة', 'دخول ذكي بدون كلمة سر أو عبر تيليجرام وGoogle'] : ['Zero-Trust Security', 'Passwordless OTP, Google, or 1-tap Telegram sign-in'];
+  const heroTag = more ? t('wlBAll') : t('wlB');
+
+  return `<section class="wl wl3">
+    <div class="wl-cosmos" aria-hidden="true">
+      <span class="wl-orb o1"></span>
+      <span class="wl-orb o2"></span>
+      <span class="wl-grid"></span>
+    </div>
+    <div class="wl-shell">
+      <aside class="wl-hero" aria-hidden="true">
+        <div class="wl-pedestal">
+          <span class="wl-pedestal-beam"></span>
+          <div class="wl-pedestal-in">${brandMark()}</div>
+        </div>
+        <span class="wl-hero-badge">${brand}</span>
+        <h2 class="wl-hero-title">${esc(isAr() ? 'بوابتك الرقمية الفاخرة للأكواد والاشتراكات' : 'Your Executive Digital Storefront')}</h2>
+        <p class="wl-hero-sub">${esc(heroTag)}</p>
+        <div class="wl-pillars">
+          <div class="wl-pillar"><i>${WF_IC.spark}</i><div><b>${esc(p1[0])}</b><small>${esc(p1[1])}</small></div></div>
+          <div class="wl-pillar"><i>${WF_IC.sync}</i><div><b>${esc(p2[0])}</b><small>${esc(p2[1])}</small></div></div>
+          <div class="wl-pillar"><i>${WF_IC.shield}</i><div><b>${esc(p3[0])}</b><small>${esc(p3[1])}</small></div></div>
+        </div>
+      </aside>
+      <div class="wl-card wl-wide">
+        <div class="wl-stage" id="wl-stage">${wfStageHtml()}</div>
+      </div>
+    </div>
+  </section>`;
 }
+
 async function wfSubmit(kind) {
   if (WF.busy) return;
   const email = String(WF.email || '').trim().toLowerCase(), base = { email, lang: LANG, ref: webRef() };
   WF.err = ''; WF.ok = '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { WF.err = t('e_bad_email'); renderView(); return; }
-  if (kind === 'code_login' && WF.expAt && Date.now() > WF.expAt) { WF.err = t('wfExpired'); renderView(); return; }
-  if ((kind === 'signup' || kind === 'reset') && String(WF.pw || '').length < 8) { WF.err = t('e_weak_password'); renderView(); return; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { WF.err = t('e_bad_email'); renderView(); wfShakeCard(); return; }
+  if (kind === 'code_login' && WF.expAt && Date.now() > WF.expAt) { WF.err = t('wfExpired'); renderView(); wfShakeCard(); return; }
+  if ((kind === 'signup' || kind === 'reset') && String(WF.pw || '').length < 8) { WF.err = t('e_weak_password'); renderView(); wfShakeCard(); return; }
   const path = { login: 'web/email/login', signup: 'web/email/signup', verify: 'web/email/verify', forgot: 'web/email/forgot', reset: 'web/email/reset', code_send: 'web/email/code', code_login: 'web/email/code_login' }[kind];
   const body = kind === 'login' ? { ...base, password: WF.pw } : kind === 'signup' ? { ...base, password: WF.pw, name: WF.name }
     : (kind === 'forgot' || kind === 'code_send') ? base : (kind === 'verify' || kind === 'code_login') ? { ...base, code: WF.code } : { ...base, code: WF.code, password: WF.pw };
-  WF.busy = true; renderView();
+  WF.busy = true;
+  const stage = document.getElementById('wl-stage');
+  if (stage) { const btn = stage.querySelector('.wf-go'); if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.innerHTML = `<span class="wf-sheen" aria-hidden="true"></span><i class="wl-spin"></i><span>${esc(btn.textContent)}</span>`; } }
   const r = await api(path, body);
   WF.busy = false;
   if (r && r.ok && (kind === 'signup' || kind === 'forgot' || kind === 'code_send')) {
-    WF.mode = 'code'; WF.purpose = kind === 'forgot' ? 'reset' : kind === 'code_send' ? 'login' : 'signup'; WF.code = ''; if (kind !== 'signup') WF.pw = '';
-    WF.expAt = Date.now() + 600 * 1000;
-    WF.resendAt = Date.now() + (r.resend_in || 55) * 1000; wfTick(); renderView();
-    setTimeout(() => { const c = $('.wf-code'); if (c) c.focus(); }, 80); return;
+    wfTransition(() => {
+      WF.mode = 'code'; WF.purpose = kind === 'forgot' ? 'reset' : kind === 'code_send' ? 'login' : 'signup'; WF.code = ''; if (kind !== 'signup') WF.pw = '';
+      WF.expAt = Date.now() + 600 * 1000;
+      WF.resendAt = Date.now() + (r.resend_in || 55) * 1000;
+    }, 1, () => { const c = $('.wf-code'); if (c) c.focus(); syncOtpSlots(); });
+    return;
   }
   if (r && r.ok) { webSignedIn(); return; }
-  WF.err = errText(r); renderView();
+  WF.err = errText(r);
+  if (stage) { stage.innerHTML = wfStageHtml(); hydrate(stage); gRender(); wfTick(); syncOtpSlots(); } else renderView();
+  wfShakeCard();
 }
 let wfTimer = 0;
 function wfTick() {
@@ -3563,7 +4447,8 @@ async function wfResend() {
 }
 function webSignedIn() {
   Object.assign(WF, { mode: 'home', pw: '', code: '', err: '', ok: '' }); Object.assign(WL, { state: 'idle', link: '', poll: '' });
-  hap('ok'); S.guest = false; boot();
+  hap('ok'); S.guest = false;
+  screenMorph(() => { boot(); }, -1);
 }
 /* Google: الزر الرسمي من Google (يفتح نافذة اختيار الحساب) */
 const G = { loading: false, init: false };
@@ -3664,7 +4549,18 @@ if (WEB) {
     if (rf && /^\d{1,20}$/.test(rf)) { store.set('webRef', { v: rf, t: Date.now() }); q.delete('ref'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash); }
   } catch (e) {}
 }
-document.addEventListener('input', e => { const el = e.target.closest('[data-wf]'); if (el) { WF[el.dataset.wf] = el.dataset.wf === 'code' ? el.value.replace(/\D/g, '').slice(0, 6) : el.value; if (el.dataset.wf === 'code' && el.value !== WF.code) el.value = WF.code; if (el.dataset.wf === 'code' && WF.code.length === 6 && WF.purpose !== 'reset') wfSubmit('verify'); } });
+document.addEventListener('input', e => {
+  const el = e.target.closest('[data-wf]');
+  if (!el) return;
+  WF[el.dataset.wf] = el.dataset.wf === 'code' ? el.value.replace(/\D/g, '').slice(0, 6) : el.value;
+  if (el.dataset.wf === 'code') {
+    if (el.value !== WF.code) el.value = WF.code;
+    syncOtpSlots();
+    if (WF.code.length === 6 && WF.purpose !== 'reset') wfSubmit(WF.purpose === 'login' ? 'code_login' : 'verify');
+  }
+});
+document.addEventListener('focusin', e => { if (e.target && e.target.classList && e.target.classList.contains('wf-code')) syncOtpSlots(); });
+document.addEventListener('focusout', e => { if (e.target && e.target.classList && e.target.classList.contains('wf-code')) syncOtpSlots(); });
 document.addEventListener('submit', e => { const f = e.target.closest('[data-wform]'); if (!f) return; e.preventDefault(); wfSubmit(f.dataset.wform); });
 function vTgOnly() {
   const bot = S.store && S.store.bot;
@@ -3679,20 +4575,30 @@ async function wlPrepare(force) {
   WL.busy = false;
   if (r && r.ok && r.link) { WL.link = r.link; WL.poll = r.poll; WL.pick = r.pick || ''; WL.exp = Date.now() + (r.expires_in || 300) * 1000; }
   else { WL.err = errText(r); setTimeout(() => { if (S.screen === 'login' && !WL.link) wlPrepare(true); }, 8000); }
-  if (S.screen === 'login') renderView();
+  if (S.screen === 'login') {
+    const stage = document.getElementById('wl-stage');
+    if (stage && WL.state === 'idle') {
+      const oldBtn = stage.querySelector('.wl-tg-btn');
+      if (oldBtn && WL.link) {
+        oldBtn.outerHTML = `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go"><span class="wl-tg-ic">${TG_PLANE}</span><span>${esc(t('wlBtn'))}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`;
+      } else renderView();
+    } else renderView();
+  }
 }
 function wlGo() {
   if (!WL.link) return;
-  WL.state = 'wait';
-  store.set('wlPend', { p: WL.poll, l: WL.link, e: WL.exp, k: WL.pick });   // لو الصفحة انقفلت أو انعادت وأنت في تيليجرام، نكمّل الانتظار بعدين
-  setTimeout(() => { renderView(); wlPoll(); }, 60);      // the link opens first, then the waiting screen shows
+  store.set('wlPend', { p: WL.poll, l: WL.link, e: WL.exp, k: WL.pick });
+  setTimeout(() => {
+    wfTransition(() => { WL.state = 'wait'; }, 1);
+    wlPoll();
+  }, 60);
 }
 async function wlPoll() {
   clearTimeout(WL.timer);
   if (S.screen !== 'login' || WL.state !== 'wait' || !WL.poll) return;
   const r = await api('web/login/poll', { poll: WL.poll });
   if (S.screen !== 'login' || WL.state !== 'wait') return;
-  if (r && r.status === 'approved') { store.set('wlPend', null); Object.assign(WL, { state: 'idle', link: '', poll: '' }); hap('ok'); S.guest = false; boot(); return; }
+  if (r && r.status === 'approved') { store.set('wlPend', null); Object.assign(WL, { state: 'idle', link: '', poll: '' }); hap('ok'); S.guest = false; screenMorph(() => { boot(); }, -1); return; }
   if (r && (r.status === 'expired' || r.status === 'denied')) { store.set('wlPend', null); WL.state = r.status; WL.denyMsg = r.error === 'wrong_pick' ? t('e_wrong_pick') : ''; renderView(); wlPrepare(true); return; }
   WL.timer = setTimeout(wlPoll, document.hidden ? 4000 : 2000);
 }
@@ -6703,14 +7609,14 @@ document.addEventListener('click', async e => {
     case 'joined': { el.disabled = true; const r = await api('forced/check'); el.disabled = false; if (r.subscribed) { S.forced = null; boot(); } else toast(t('notYet'), 'bad'); break; }
     case 'retry': boot(); break;
     case 'wl-go': wlGo(); break;
-    case 'wl-cancel': clearTimeout(WL.timer); store.set('wlPend', null); WL.state = 'idle'; renderView(); break;
-    case 'wl-out': await api('web/logout'); clearTimeout(WL.timer); store.set('wlPend', null); Object.assign(WL, { state: 'idle', link: '', poll: '' }); closeAllSheets(); Object.assign(S, { user: null, account: null, guest: false, tab: 'store', api: null, apiDocs: null, cgpt: null, orders: null, wallet: null, refs: null, adm: null, admRes: null, openOrder: null, pending: null, locked: false, hist: { type: 'all', page: 1, data: null, loading: false, map: {} } }); if (S.apiUi) { S.apiUi.reveal = false; S.apiUi.useKey = false; } boot(); break;
+    case 'wl-cancel': clearTimeout(WL.timer); store.set('wlPend', null); hap('select'); wfTransition(() => { WL.state = 'idle'; }, -1); break;
+    case 'wl-out': await api('web/logout'); clearTimeout(WL.timer); store.set('wlPend', null); Object.assign(WL, { state: 'idle', link: '', poll: '' }); closeAllSheets(); screenMorph(() => { Object.assign(S, { user: null, account: null, guest: false, tab: 'store', api: null, apiDocs: null, cgpt: null, orders: null, wallet: null, refs: null, adm: null, admRes: null, openOrder: null, pending: null, locked: false, hist: { type: 'all', page: 1, data: null, loading: false, map: {} } }); if (S.apiUi) { S.apiUi.reveal = false; S.apiUi.useKey = false; } boot(); }, 1); break;
     case 'need-login': needLogin(); break;
-    case 'wl-browse': S.screen = 'app'; if (S.tab !== 'store') S.tab = 'store'; renderAll(); break;
-    case 'wf-tab': WF.tab = el.dataset.v === 'up' ? 'up' : 'in'; WF.err = ''; WF.ok = ''; renderView(); break;
-    case 'wf-mode': WF.mode = el.dataset.v; WF.err = ''; WF.ok = ''; WF.code = ''; renderView(); break;
-    case 'wf-how': WF.how = el.dataset.v === 'code' ? 'code' : 'pw'; WF.err = ''; WF.ok = ''; renderView(); break;
-    case 'wf-usepw': WF.how = 'pw'; WF.mode = 'home'; WF.tab = 'in'; WF.err = ''; WF.ok = ''; WF.code = ''; renderView(); setTimeout(() => { const i = $('[data-wf="pw"]'); if (i) i.focus(); }, 60); break;
+    case 'wl-browse': hap('select'); screenMorph(() => { S.screen = 'app'; if (S.tab !== 'store') S.tab = 'store'; renderAll(); }, -1); break;
+    case 'wf-tab': { const nextTab = el.dataset.v === 'up' ? 'up' : 'in'; if (WF.tab === nextTab) break; hap('select'); wfMorphForm(() => { WF.tab = nextTab; WF.err = ''; WF.ok = ''; }, nextTab === 'up' ? 1 : -1); break; }
+    case 'wf-mode': { const nextMode = el.dataset.v; if (WF.mode === nextMode) break; hap('select'); wfTransition(() => { WF.mode = nextMode; WF.err = ''; WF.ok = ''; WF.code = ''; }, nextMode === 'home' ? -1 : 1); break; }
+    case 'wf-how': { const nextHow = el.dataset.v === 'code' ? 'code' : 'pw'; if (WF.how === nextHow) break; hap('select'); wfMorphForm(() => { WF.how = nextHow; WF.err = ''; WF.ok = ''; }, nextHow === 'pw' ? 1 : -1, () => { const i = $(nextHow === 'pw' ? '[data-wf="pw"]' : '[data-wf="email"]'); if (i && WF.email) i.focus(); }); break; }
+    case 'wf-usepw': hap('select'); wfTransition(() => { WF.how = 'pw'; WF.mode = 'home'; WF.tab = 'in'; WF.err = ''; WF.ok = ''; WF.code = ''; }, -1, () => { const i = $('[data-wf="pw"]'); if (i) i.focus(); }); break;
     case 'wf-eye': { WF.eye = !WF.eye; const i = $('[data-wf="pw"]'); if (i) { i.type = WF.eye ? 'text' : 'password'; el.classList.toggle('on', WF.eye); el.setAttribute('aria-pressed', WF.eye); i.focus(); } } break;
     case 'wf-resend': wfResend(); break;
     case 'lk-go': { const w = $('#lk-wait'); if (w) w.hidden = false; LK.state = 'pending'; setTimeout(lkPoll, 1500); break; }
