@@ -25423,6 +25423,7 @@ def ad_texts_main_ui(call):
     markup.add(InlineKeyboardButton("👑 نصوص VIP", callback_data="ad_cms_vip"))
     markup.add(InlineKeyboardButton("👥 نصوص الإحالات", callback_data="ad_cms_refs"),
                InlineKeyboardButton("🌐 لغات البوت والترجمة", callback_data="ad_bxl"))
+    markup.add(InlineKeyboardButton("🎨 أزرار لغات الترجمة (ألوان وإيموجي)", callback_data="ad_bxl_btns"))
     markup.add(InlineKeyboardButton("🔎 البحث والمتوفر (أزرار ورسائل)", callback_data="ad_cms_shop"))
     markup.add(InlineKeyboardButton("📝 نصوص الرسائل", callback_data="ad_cms_msgs"),
                InlineKeyboardButton("🎛 أزرار البوت", callback_data="ad_cms_btns_cats"))
@@ -25532,7 +25533,8 @@ def _bxl_btn_view(chat_id, code, message_id=None):
                  for st, label in _BX_BTN_STYLES.items()])
     markup.add(InlineKeyboardButton(("✅ " if not c.get('style') else "") + "⚪ بدون لون", callback_data=f"ad_bxl_bs_{code}_none"))
     markup.add(InlineKeyboardButton("♻️ رجوع للشكل الافتراضي", callback_data="ad_bxl_br_" + code))
-    markup.add(InlineKeyboardButton("🔙 أزرار اللغات", callback_data="ad_bxl_btns"))
+    markup.add(InlineKeyboardButton("🔙 أزرار اللغات", callback_data="ad_bxl_btns"),
+               InlineKeyboardButton("🔙 أزرار البوت", callback_data="ad_cms_btns_cats"))
     txt = (f"🎨 <b>زر لغة: {html.escape(name)}</b>\n\n"
            f"الاسم: <b>{html.escape(str(c.get('text') or (flag + ' ' + name)))}</b>\n"
            f"إيموجي بريميوم: <b>{'موجود ✅' if c.get('emoji_id') else 'لا يوجد'}</b>\n"
@@ -25557,7 +25559,8 @@ def ad_bxl_btns_ui(call):
     if data == "ad_bxl_btns":
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(*[_bx_lang_button(c, "ad_bxl_b_" + c) for c in known])
-        markup.add(InlineKeyboardButton("🔙 لغات البوت", callback_data="ad_bxl"))
+        markup.add(InlineKeyboardButton("🔙 أزرار البوت", callback_data="ad_cms_btns_cats"),
+                   InlineKeyboardButton("🔙 التخصيص", callback_data="ad_texts_main"))
         bot.edit_message_text("🎨 <b>تخصيص أزرار اللغات</b>\nاختر الزر الذي تريد تعديله (الاسم، إيموجي بريميوم، اللون):",
                               call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
         return
@@ -25859,6 +25862,7 @@ def ad_cms_btns_cats_ui(call):
     markup.add(InlineKeyboardButton("💳 أزرار الشحن والدفع", callback_data="ad_cms_b_dep"))
     markup.add(InlineKeyboardButton("👤 أزرار الملف والمشتريات", callback_data="ad_cms_b_prof"))
     markup.add(InlineKeyboardButton("🛒 أزرار المتجر والتنقل", callback_data="ad_cms_b_shop"))
+    markup.add(InlineKeyboardButton("🌐 أزرار لغات الترجمة (ألوان وإيموجي)", callback_data="ad_bxl_btns"))
     if WWC_CMS_BUTTONS:
         markup.add(InlineKeyboardButton('🏪 أزرار المتاجر والاشتراك', callback_data='ad_cms_b_wwc'))
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="ad_texts_main"))
@@ -26604,7 +26608,18 @@ def ad_edit_btn_prompt(call):
     except: pass
 
     navigation = None
-    if key in WWC_CMS_BUTTONS:
+    if key == 'btn_lang':
+        navigation = InlineKeyboardMarkup()
+        navigation.add(InlineKeyboardButton('🎨 تخصيص أزرار لغات الترجمة (ألوان وإيموجي)', callback_data='ad_bxl_btns'))
+        navigation.add(InlineKeyboardButton('🔙 أزرار القائمة', callback_data='ad_cms_b_start'))
+        try:
+            bot.send_message(call.message.chat.id,
+                "💡 <b>ملاحظة:</b> هذا الخيار مخصص لتعديل زر «🌐 اللغة» في القائمة الرئيسية فقط.\n"
+                "لتعديل <b>أزرار قائمة اللغات نفسها</b> (العربية، الإنجليزية، الفارسية...) وتغيير ألوانها وإيموجي Premium، اضغط أدناه:",
+                parse_mode="HTML", reply_markup=navigation)
+        except Exception:
+            pass
+    elif key in WWC_CMS_BUTTONS:
         navigation = _cms_wwc_navigation(key, button=True)
         navigation.add(InlineKeyboardButton('🔄 استرجاع الزر الافتراضي', callback_data=f'rst_txt_{key}' + (':' + edit_lang if edit_lang else '')))
     msg = bot.send_message(
