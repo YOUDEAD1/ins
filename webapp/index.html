@@ -2248,18 +2248,21 @@ body {
 }
 /* Crystal-clear retina rendering for Telegram Premium Emojis (Lottie SVG, VP9 Video, WebP) */
 .ce {
-  display: inline-grid;
-  place-items: center;
-  position: relative;
   transform: translateZ(0);
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
 }
-.ce > svg, .ce > video, .ce > img, img.ae {
+.ce > svg, .ce > video, .ce > img {
   width: 100% !important;
   height: 100% !important;
   object-fit: contain;
   shape-rendering: geometricPrecision;
+  image-rendering: -webkit-optimize-contrast;
+  pointer-events: none;
+}
+img.ae {
+  flex: none;
+  object-fit: contain;
   image-rendering: -webkit-optimize-contrast;
   pointer-events: none;
 }
@@ -2279,6 +2282,16 @@ body {
   background: linear-gradient(120deg, color-mix(in srgb, var(--fg) 6%, transparent) 25%, color-mix(in srgb, var(--accent-2) 18%, transparent) 50%, color-mix(in srgb, var(--fg) 6%, transparent) 75%);
   background-size: 220% 100%;
   animation: skelSweep 1.25s ease-in-out infinite;
+}
+.vis > .ce > .ce-orb-skel {
+  position: absolute;
+  inset: 19%;
+  width: auto;
+  height: auto;
+}
+@keyframes skelSweep {
+  from { background-position: 100% 0; }
+  to   { background-position: -100% 0; }
 }
 /* Specular luxury glass cards, toolbar, header & floating dock */
 .top {
@@ -5025,7 +5038,7 @@ function vProfile() {
       <button class="mrow" data-act="lang-open"><span class="gl">${slotH('lang', ic.globe)}</span><span class="mlbl">${esc(t('language'))}</span><span class="val lang-val">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></span>${ic.chev}</button>
       ${S.store.support ? `<button class="mrow" data-act="support">${slot('support', 'speech')}<span class="mlbl">${esc(t('support'))}</span><span class="val" dir="ltr">@${esc(S.store.support)}</span>${ic.chev}</button>` : ''}
       <button class="mrow" data-act="terms">${slot('terms', 'memo')}<span class="mlbl">${esc(t('terms'))}</span>${ic.chev}</button>
-      ${S.store.bot ? `<button class="mrow" data-act="openchat">${ae('rocket')}<span class="mlbl">${esc(t('openChat'))}</span><span class="val" dir="ltr">@${esc(S.store.bot)}</span>${ic.chev}</button>` : ''}
+      ${S.store.bot ? `<button class="mrow" data-act="openchat"><span class="gl">${TG_PLANE}</span><span class="mlbl">${esc(t('openChat'))}</span><span class="val" dir="ltr">@${esc(S.store.bot)}</span>${ic.chev}</button>` : ''}
       ${acc.web_only ? `<button class="mrow" data-act="acc-inbox"><span class="gl">${ic.mail}</span><span class="mlbl">${esc(t('inboxT'))}</span>${acc.unread ? `<span class="po-n num">${acc.unread}</span>` : ''}${ic.chev}</button>` : ''}
       ${WEB ? `<button class="mrow" data-act="acc-dev"><span class="gl">${DEV_IC}</span><span class="mlbl">${esc(t('devT'))}</span>${acc.sessions ? `<span class="val num">${acc.sessions}</span>` : ''}${ic.chev}</button>` : ''}
       ${pwaCan() ? `<button class="mrow" data-act="pwa"><span class="gl">${ic.down}</span><span class="mlbl">${esc(t('pwaRow'))}</span>${ic.chev}</button>` : ''}
