@@ -2993,6 +2993,11 @@ class APIHandler(BaseHTTPRequestHandler):
                 'total_revenue': round(revenue, 2)
             })
 
+        # GET /hidden_products — قائمة المنتجات المخفية للمطور
+        if route == '/hidden_products':
+            hidden = [str(h.get('product_id')) for h in db.api_hidden.find({'api_user_id': uid})]
+            return _json_resp(self, 200, {'success': True, 'hidden_products': hidden})
+
         return _json_resp(self, 404, {'error': 'Not found'})
 
     @_api_http_guard
@@ -3558,6 +3563,46 @@ class APIHandler(BaseHTTPRequestHandler):
                 upsert=True
             )
             return _json_resp(self, 200, {'success': True, 'product_id': pid, 'updated': list(update.keys())})
+
+        # POST /hide_product or POST /toggle_hide — إخفاء أو إظهار منتج من API المطور
+        if route in ('/hide_product', '/toggle_hide'):
+            try:
+                body = _api_json_body(self)
+            except Exception:
+                return _json_resp(self, 400, {'error': 'Invalid JSON'})
+
+            product_id = str(body.get('product_id', '')).strip()
+            if not product_id:
+                return _json_resp(self, 400, {'error': 'product_id required'})
+
+            pr = find_product(product_id)
+            if not pr:
+                return _json_resp(self, 404, {'error': 'Product not found'})
+
+            pid = str(pr.get('id', str(pr.get('_id', ''))))
+            ex = db.api_hidden.find_one({'api_user_id': uid, 'product_id': pid})
+
+            if 'hidden' in body:
+                should_hide = bool(body['hidden'])
+                if should_hide and not ex:
+                    db.api_hidden.insert_one({'api_user_id': uid, 'product_id': pid})
+                elif not should_hide and ex:
+                    db.api_hidden.delete_one({'_id': ex['_id']})
+                is_hidden = should_hide
+            else:
+                if ex:
+                    db.api_hidden.delete_one({'_id': ex['_id']})
+                    is_hidden = False
+                else:
+                    db.api_hidden.insert_one({'api_user_id': uid, 'product_id': pid})
+                    is_hidden = True
+
+            return _json_resp(self, 200, {
+                'success': True,
+                'product_id': pid,
+                'hidden': is_hidden,
+                'status': 'hidden' if is_hidden else 'visible'
+            })
 
         return _json_resp(self, 404, {'error': 'Endpoint not found'})
 
@@ -31897,7 +31942,7 @@ def open_api(call):
 
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton("🔑 Show connection details" if l == 'en' else "🔑 عرض بيانات الربط", callback_data="api_creds"))
-        markup.add(InlineKeyboardButton("📦 Manage Products", callback_data="api_products"))
+        markup.add(InlineKeyboardButton("📦 Manage Products" if l == 'en' else "📦 إدارة ظهور المنتجات", callback_data="api_products"))
         markup.add(InlineKeyboardButton("🤖 برومبت جاهز للذكاء الاصطناعي" if get_lang(uid) == 'ar' else "🤖 AI Build Prompt", callback_data="api_ai_prompt"))
         markup.add(InlineKeyboardButton("📖 How to Connect", callback_data="api_docs"))
         markup.add(InlineKeyboardButton("📜 Recent Orders", callback_data="api_orders"))
@@ -32045,7 +32090,13 @@ Your custom prices (override the store defaults).
 {{"success": true, "prices": {{"1": 4.0, "2": 5.5}}}}
 ```
 
-### 7. `GET /stats`
+### 7. `GET /hidden_products`
+List of product IDs currently hidden from your API and sub-store.
+```json
+{{"success": true, "hidden_products": ["1", "5"]}}
+```
+
+### 8. `GET /stats`
 Your account statistics.
 ```json
 {{
@@ -32212,7 +32263,28 @@ Customize a product's name/description for your customers (does not affect the s
 ```
 All fields are optional. Send empty string to clear.
 
-### 13. `POST /set_webhook` 🔥
+### 13. `POST /hide_product`
+Hide or show a product in your API / sub-store.
+
+**Body:**
+```json
+{{
+  "product_id": "1",
+  "hidden": true               // true to hide, false to show, or omit to toggle
+}}
+```
+
+**Response:**
+```json
+{{
+  "success": true,
+  "product_id": "1",
+  "hidden": true,
+  "status": "hidden"
+}}
+```
+
+### 14. `POST /set_webhook` 🔥
 Register a URL to receive real-time events (sync).
 
 **Body:**
@@ -32687,6 +32759,7 @@ def api_products_manage(call):
     try: bot.answer_callback_query(call.id)
     except: pass
     uid = call.from_user.id
+    l = get_lang(uid)
     
     # جلب المنتجات المخفية لهذا المطوّر
     hidden_pids = set()
@@ -32696,32 +32769,44 @@ def api_products_manage(call):
     prods = list(db.products.find({'is_hidden': {'$ne': True}}))
     prods.sort(key=lambda p: clean_name(p.get('name_en', p.get('name_ar', ''))).lower())
     
-    txt  = "📦 <b>Manage Products</b>\n\n"
-    txt += "🟢 = Visible in your bot   🔴 = Hidden\n"
-    txt += "⚡ = Instant delivery        🤝 = Manual delivery\n\n"
-    txt += "<i>Tap to toggle visibility:</i>"
+    if l == 'ar':
+        txt  = "📦 <b>إدارة ظهور المنتجات في API المطورين</b>\n\n"
+        txt += "🟢 = <b>ظاهر</b> (متاح للبيع في متجرك والـ API)\n"
+        txt += "🔴 = <b>مخفي</b> (محجوب من الـ API)\n"
+        txt += "⚡ = تسليم فوري        🤝 = تسليم يدوي\n\n"
+        txt += f"📊 <i>إجمالي المنتجات: {len(prods)} | المخفية: {len(hidden_pids)}</i>\n\n"
+        txt += "<i>اضغط على أي منتج أدناه لتبديل حالته مباشرة (إظهار/إخفاء):</i>"
+    else:
+        txt  = "📦 <b>Developer API — Product Visibility Management</b>\n\n"
+        txt += "🟢 = <b>Visible</b> (available in bot & API)\n"
+        txt += "🔴 = <b>Hidden</b> (hidden from API)\n"
+        txt += "⚡ = Instant delivery        🤝 = Manual delivery\n\n"
+        txt += f"📊 <i>Total Products: {len(prods)} | Hidden: {len(hidden_pids)}</i>\n\n"
+        txt += "<i>Tap any product below to toggle visibility:</i>"
     
     markup = InlineKeyboardMarkup(row_width=1)
     for p in prods:
         pid = str(p.get('id', str(p.get('_id', ''))))
-        name = clean_name(p.get('name_en', p.get('name_ar', '')))[:24]
+        p_name = p.get('name_ar', p.get('name_en', '')) if l == 'ar' else p.get('name_en', p.get('name_ar', ''))
+        name = clean_name(p_name)[:24]
         is_hidden = pid in hidden_pids
         is_manual = p.get('is_manual', False)
         emoji_id = p.get('custom_emoji_id')
 
         vis_icon = "🔴" if is_hidden else "🟢"
+        status_lbl = ("مخفي" if is_hidden else "ظاهر") if l == 'ar' else ("Hidden" if is_hidden else "Visible")
         type_icon = "🤝" if is_manual else "⚡"
 
         btn_kwargs = {
-            'text': f"{vis_icon} {type_icon} {name}",
+            'text': f"{vis_icon} {type_icon} {name} ({status_lbl})",
             'callback_data': f"api_toggle_{pid}",
             'style': 'danger' if is_hidden else 'success'
         }
         if emoji_id:
-            btn_kwargs['icon_custom_emoji_id'] = emoji_id
+            btn_kwargs['icon_custom_emoji_id'] = str(emoji_id)
         markup.add(CustomInlineButton(**btn_kwargs))
     
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="open_api"))
+    markup.add(InlineKeyboardButton("🔙 رجوع إلى لوحة API" if l == 'ar' else "🔙 Back to API", callback_data="open_api"))
     try: bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
     except: pass
 
@@ -32730,15 +32815,20 @@ def api_products_manage(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("api_toggle_"))
 def api_toggle_product(call):
     uid = call.from_user.id
+    l = get_lang(uid)
     pid = call.data.replace("api_toggle_", "")
     
+    pr = find_product(pid)
+    p_name = (pr.get('name_ar', pr.get('name_en', '')) if l == 'ar' else pr.get('name_en', pr.get('name_ar', ''))) if pr else pid
+    p_name = clean_name(p_name)[:30]
+
     existing = db.api_hidden.find_one({'api_user_id': uid, 'product_id': pid})
     if existing:
         db.api_hidden.delete_one({'_id': existing['_id']})
-        bot.answer_callback_query(call.id, "🟢 Visible!", show_alert=False)
+        bot.answer_callback_query(call.id, f"🟢 تم إظهار «{p_name}» في الـ API" if l == 'ar' else f"🟢 «{p_name}» is now Visible!", show_alert=True)
     else:
         db.api_hidden.insert_one({'api_user_id': uid, 'product_id': pid})
-        bot.answer_callback_query(call.id, "🔴 Hidden!", show_alert=False)
+        bot.answer_callback_query(call.id, f"🔴 تم إخفاء «{p_name}» من الـ API" if l == 'ar' else f"🔴 «{p_name}» is now Hidden!", show_alert=True)
     
     # تحديث القائمة
     call.data = "api_products"
