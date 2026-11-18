@@ -264,15 +264,15 @@ class BotThemeAndMediaUpgrade:
         telebot_mod = ns['telebot']
         prev_make_request = telebot_mod.apihelper._make_request
         @functools.wraps(prev_make_request)
-        def resilient_make_request(token, method_name, method='get', params=None, files=None):
+        def resilient_make_request(token, method_name, method='get', params=None, files=None, **kwargs):
             try:
-                return prev_make_request(token, method_name, method=method, params=params, files=files)
+                return prev_make_request(token, method_name, method=method, params=params, files=files, **kwargs)
             except Exception as exc:
                 desc = str(exc).upper()
                 if params and any(err_k in desc for err_k in ('BUTTON_ICON_INVALID', 'CUSTOM_EMOJI', 'DOCUMENT_INVALID')):
                     theme._premium_supported = False
                     cleaned = _strip_custom_emoji_from_params(params)
-                    return prev_make_request(token, method_name, method=method, params=cleaned, files=files)
+                    return prev_make_request(token, method_name, method=method, params=cleaned, files=files, **kwargs)
                 raise
         telebot_mod.apihelper._make_request = resilient_make_request
 

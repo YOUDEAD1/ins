@@ -105,11 +105,18 @@ class SecurityHardening:
         if '_json_resp' in ns:
             orig_json_resp = ns['_json_resp']
             @functools.wraps(orig_json_resp)
-            def hardened_json_resp(h, code, data, extra_headers=None):
-                hdrs = list(extra_headers or [])
-                hdrs.append(('X-Content-Type-Options', 'nosniff'))
-                hdrs.append(('Referrer-Policy', 'strict-origin-when-cross-origin'))
-                return orig_json_resp(h, code, data, extra_headers=hdrs)
+            def hardened_json_resp(h, code, data):
+                try:
+                    existing = list(getattr(h, '_extra_headers', None) or ())
+                    existing_keys = {str(k).lower() for k, _ in existing}
+                    if not str(getattr(h, 'path', '')).startswith('/webapp/') and 'x-content-type-options' not in existing_keys:
+                        existing.append(('X-Content-Type-Options', 'nosniff'))
+                    if 'referrer-policy' not in existing_keys:
+                        existing.append(('Referrer-Policy', 'strict-origin-when-cross-origin'))
+                    h._extra_headers = existing
+                except Exception:
+                    pass
+                return orig_json_resp(h, code, data)
             ns['_json_resp'] = hardened_json_resp
 
         # 2. Clamp WEBAPP_AUTH_MAX_AGE ([MED-08])
