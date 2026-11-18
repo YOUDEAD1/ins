@@ -39873,10 +39873,181 @@ self.addEventListener('fetch', e => {
 """
 
 
+_WEB_LEGAL_DATE = '2026-11-18'
+
+_WEB_LEGAL = {
+    'privacy': {
+        'ar': ('سياسة الخصوصية', [
+            ('مقدمة', ['نحن في {store} نحترم خصوصيتك ونتعامل مع بياناتك بمسؤولية. توضّح هذه الصفحة بلغة بسيطة ما هي المعلومات التي نجمعها عندما تستخدم موقعنا أو بوت تيليجرام الخاص بنا، ولماذا نجمعها، وكيف نحميها، وما هي حقوقك.',
+                       'باستخدامك لخدماتنا فإنك توافق على ما ورد في هذه السياسة. إذا لم توافق على أي جزء منها، يُرجى عدم استخدام الخدمة.']),
+            ('المعلومات التي نجمعها', ['• معلومات الحساب: البريد الإلكتروني والاسم الذي تكتبه عند التسجيل، أو الاسم والبريد الإلكتروني اللذان يرسلهما Google إذا اخترت الدخول بحساب Google.',
+                                        '• حساب تيليجرام: رقم حسابك واسم المستخدم إذا استخدمت البوت أو ربطت حسابك به.',
+                                        '• سجل الاستخدام: الطلبات التي تشتريها، وعمليات شحن الرصيد، والرصيد المتوفر في حسابك.',
+                                        '• معلومات تقنية: عنوان IP ونوع الجهاز والمتصفح ووقت آخر دخول، وذلك لحماية حسابك وعرض الأجهزة المسجّلة فيه.',
+                                        '• رسائل الدعم: ما ترسله لنا عند التواصل معنا.']),
+            ('ما لا نجمعه', ['• لا نحفظ كلمة السر كما هي أبداً؛ نحفظ منها بصمة مشفّرة لا يمكن إرجاعها، فلا يستطيع أي شخص الاطلاع عليها، حتى نحن.',
+                              '• لا نطلب ولا نحفظ بيانات البطاقات البنكية. الدفع يتم عبر العملات الرقمية ووسائل الدفع المتاحة في المتجر، ونحتفظ فقط بما يلزم لتأكيد الدفع (مثل المبلغ ورقم العملية).',
+                              '• لا نصل إلى جهات اتصالك أو رسائلك أو صورك.']),
+            ('كيف نستخدم معلوماتك', ['• لإنشاء حسابك وتسجيل دخولك، وإرسال رموز التحقق إلى بريدك.',
+                                       '• لتسليم المنتجات الرقمية التي تشتريها وعرض سجل طلباتك ورصيدك.',
+                                       '• لإرسال إيصالات الشراء والتنبيهات المهمة المتعلقة بحسابك.',
+                                       '• لحماية المتجر والمستخدمين من الاحتيال وإساءة الاستخدام ومحاولات الدخول غير المصرّح بها.',
+                                       '• للرد على استفساراتك وطلبات الدعم.',
+                                       'لا نستخدم بياناتك للإعلانات، ولا نبيعها أو نؤجرها لأي طرف.']),
+            ('مشاركة المعلومات', ['لا نبيع معلوماتك الشخصية. قد تُعالَج بعض البيانات لدى مزوّدي خدمات تقنية موثوقين نعتمد عليهم لتشغيل المتجر (مثل الاستضافة وتخزين البيانات وإرسال البريد والحماية من الهجمات)، ويقتصر ذلك على ما يلزم لتقديم الخدمة.',
+                                   'قد نكشف عن معلومات إذا طلبها القانون أو جهة رسمية مختصة، أو إذا كان ذلك ضرورياً لحماية حقوقنا أو سلامة المستخدمين.']),
+            ('الكوكيز والتخزين في المتصفح', ['نستخدم كوكي واحداً ضرورياً لإبقائك مسجّلاً في حسابك، وهو محمي ولا يمكن قراءته من صفحات أخرى. كما يحفظ المتصفح بعض الإعدادات البسيطة مثل اللغة والمظهر.',
+                                              'لا نستخدم كوكيز إعلانية أو أدوات تتبّع من جهات خارجية.']),
+            ('حماية المعلومات', ['نستخدم اتصالاً مشفّراً (HTTPS) في كل صفحات الموقع، ونشفّر كلمات السر، ونقيّد محاولات الدخول المتكررة، ونراقب النشاط المشبوه. ومع ذلك لا يوجد نظام آمن بنسبة 100٪، لذلك ننصحك باستخدام كلمة سر قوية وعدم مشاركة رموز الدخول مع أي شخص.']),
+            ('مدة الاحتفاظ بالمعلومات', ['نحتفظ بمعلومات حسابك طالما حسابك موجود. ونحتفظ بسجل الطلبات والمدفوعات للمدة اللازمة لخدمة العملاء ومنع الاحتيال والالتزامات القانونية والمحاسبية. رموز الدخول المؤقتة تنتهي خلال دقائق وتُحذف.']),
+            ('حقوقك', ['• الاطلاع على بيانات حسابك من صفحة حسابي.',
+                        '• تعديل اسمك وتغيير كلمة السر في أي وقت.',
+                        '• تسجيل الخروج من جميع أجهزتك.',
+                        '• طلب حذف حسابك وبياناتك بمراسلتنا، وسننفّذ الطلب خلال مدة معقولة، مع الاحتفاظ فقط بما يلزمنا الاحتفاظ به قانونياً.']),
+            ('الأطفال', ['خدماتنا غير موجّهة لمن هم دون 13 عاماً، ولا نجمع معلوماتهم عن قصد. إذا علمت أن طفلاً أنشأ حساباً، راسلنا وسنحذفه.']),
+            ('التعديلات على هذه السياسة', ['قد نحدّث هذه السياسة من وقت لآخر، وسيظهر تاريخ آخر تحديث أعلى الصفحة. استمرارك في استخدام الخدمة بعد التحديث يعني موافقتك على النسخة الجديدة.']),
+            ('تواصل معنا', ['لأي سؤال عن الخصوصية أو لطلب حذف بياناتك: {contact}']),
+        ]),
+        'en': ('Privacy Policy', [
+            ('Introduction', ['At {store} we respect your privacy and handle your data responsibly. This page explains in plain language what information we collect when you use our website or our Telegram bot, why we collect it, how we protect it, and what your rights are.',
+                              'By using our services you agree to this policy. If you do not agree with any part of it, please do not use the service.']),
+            ('Information we collect', ['• Account details: the email address and name you enter when you sign up, or the name and email Google shares with us if you choose “Sign in with Google”.',
+                                        '• Telegram account: your Telegram ID and username if you use our bot or link your account to it.',
+                                        '• Usage history: the orders you buy, your balance top-ups and the balance in your account.',
+                                        '• Technical information: IP address, device and browser type, and last sign-in time, used to protect your account and show your signed-in devices.',
+                                        '• Support messages: what you send us when you contact us.']),
+            ('What we do not collect', ['• We never store your password itself — only a one-way encrypted fingerprint of it that cannot be reversed, so nobody can see it, including us.',
+                                        '• We do not ask for or store bank card details. Payments are made with cryptocurrencies and the payment methods offered in the store; we only keep what is needed to confirm a payment (such as the amount and transaction ID).',
+                                        '• We do not access your contacts, messages or photos.']),
+            ('How we use your information', ['• To create your account, sign you in and send verification codes to your email.',
+                                             '• To deliver the digital products you buy and show your order history and balance.',
+                                             '• To send purchase receipts and important account notices.',
+                                             '• To protect the store and its users from fraud, abuse and unauthorized sign-in attempts.',
+                                             '• To answer your questions and support requests.',
+                                             'We do not use your data for advertising, and we never sell or rent it.']),
+            ('Sharing information', ['We do not sell your personal information. Some data may be processed by trusted technical service providers we rely on to run the store (such as hosting, data storage, email delivery and attack protection), only as far as needed to provide the service.',
+                                     'We may disclose information if required by law or a competent authority, or when necessary to protect our rights or the safety of our users.']),
+            ('Cookies and browser storage', ['We use one essential cookie to keep you signed in; it is protected and cannot be read by other pages. Your browser also stores a few simple preferences such as language and theme.',
+                                             'We do not use advertising cookies or third-party trackers.']),
+            ('Protecting your information', ['Every page uses an encrypted connection (HTTPS), passwords are hashed, repeated sign-in attempts are limited and suspicious activity is monitored. No system is 100% secure, so please use a strong password and never share your sign-in codes with anyone.']),
+            ('How long we keep information', ['We keep your account information for as long as your account exists. Order and payment records are kept as long as needed for customer service, fraud prevention and legal or accounting obligations. Temporary sign-in codes expire within minutes and are deleted.']),
+            ('Your rights', ['• View your account data from the “My account” page.',
+                             '• Edit your name and change your password at any time.',
+                             '• Sign out of all your devices.',
+                             '• Ask us to delete your account and data by contacting us; we will do so within a reasonable time, keeping only what we are legally required to keep.']),
+            ('Children', ['Our services are not directed to children under 13, and we do not knowingly collect their information. If you learn that a child has created an account, contact us and we will delete it.']),
+            ('Changes to this policy', ['We may update this policy from time to time; the date of the latest update is shown at the top of this page. Continuing to use the service after an update means you accept the new version.']),
+            ('Contact us', ['For any privacy question or to request deletion of your data: {contact}']),
+        ]),
+    },
+    'terms': {
+        'ar': ('شروط الاستخدام', [
+            ('القبول بالشروط', ['تنظّم هذه الشروط استخدامك لمتجر {store} عبر الموقع أو بوت تيليجرام. باستخدامك للخدمة أو إنشاء حساب، فإنك توافق على هذه الشروط وعلى سياسة الخصوصية. إذا لم توافق، يُرجى عدم استخدام الخدمة.']),
+            ('الخدمة', ['{store} متجر لبيع المنتجات الرقمية مثل الأكواد والاشتراكات والبطاقات الرقمية. يتم تسليم أغلب المنتجات تلقائياً وفوراً بعد إتمام الدفع، وتظهر في سجل طلباتك ويمكنك نسخها في أي وقت.',
+                         'قد تتغيّر المنتجات المتوفرة وأسعارها والكميات في أي وقت دون إشعار مسبق. السعر المعتمد هو السعر الظاهر لحظة إتمام الشراء.']),
+            ('الحساب', ['• أنت مسؤول عن صحة المعلومات التي تقدّمها وعن حماية حسابك وكلمة السر ورموز الدخول.',
+                         '• لا تشارك رموز الدخول المرسلة إلى بريدك مع أي شخص؛ فريقنا لن يطلبها منك أبداً.',
+                         '• يمكن ربط حساب الموقع بحساب تيليجرام واحد فقط، ويتشارك الحسابان نفس الرصيد والطلبات.',
+                         '• أي نشاط يتم من خلال حسابك يُعتبر صادراً منك، لذا راسلنا فوراً إذا اشتبهت باستخدام غير مصرّح به.']),
+            ('الرصيد والدفع', ['• يتم شحن الرصيد عبر وسائل الدفع المتاحة في المتجر (مثل العملات الرقمية وBinance Pay)، ويُضاف للحساب بعد تأكيد العملية.',
+                               '• تأكد من إرسال المبلغ الصحيح بالشبكة والعنوان الصحيحين كما يظهران في صفحة الشحن؛ التحويلات الخاطئة قد لا يمكن استرجاعها.',
+                               '• الرصيد مخصص للشراء من المتجر فقط، ولا يُحوَّل إلى نقود ولا يُنقل إلى حسابات أخرى إلا بالطرق التي يوفّرها المتجر.',
+                               '• المكافآت ورصيد الإحالة تخضع لشروط برنامج الإحالة المعروضة في المتجر، ويمكن إلغاؤها إذا ثبت التلاعب.']),
+            ('التسليم والاستبدال والاسترجاع', ['• بسبب طبيعة المنتجات الرقمية، لا يمكن إلغاء الطلب أو إرجاعه بعد تسليم الكود إذا كان الكود يعمل بشكل صحيح.',
+                                                '• إذا لم يعمل الكود أو الاشتراك عند استلامه، تواصل معنا في أقرب وقت مع رقم الطلب وتوضيح المشكلة (ويُفضّل صورة للشاشة). بعد التحقق، نستبدل المنتج أو نُرجع المبلغ إلى رصيدك.',
+                                                '• لا يشمل الاستبدال المشاكل الناتجة عن سوء الاستخدام، أو مخالفة شروط الجهة المزوّدة للمنتج، أو تأخر استخدام الكود بعد انتهاء صلاحيته.',
+                                                '• في الحالات الخاصة، يكون القرار النهائي بعد مراجعة فريق الدعم.']),
+            ('الاستخدام المسموح', ['يُمنع:', '• الاحتيال أو استخدام وسائل دفع لا تملكها أو محاولة استرجاع مبالغ مدفوعة بطرق غير مشروعة.',
+                                    '• محاولة اختراق الموقع أو البوت أو تعطيلهما أو استخدام برامج آلية لإرهاق الخدمة.',
+                                    '• إنشاء حسابات متعددة للتلاعب بالعروض أو برنامج الإحالة.',
+                                    '• إعادة بيع المنتجات بطريقة تخالف شروط الجهات المزوّدة لها.',
+                                    'يحق لنا تعليق أو إغلاق أي حساب يخالف هذه الشروط، وإلغاء الرصيد أو الطلبات الناتجة عن المخالفة.']),
+            ('واجهة المطورين (API)', ['إذا استخدمت واجهة API الخاصة بالمتجر، فأنت مسؤول عن حماية مفتاحك وعن كل الطلبات التي تتم به. يحق لنا تحديد عدد الطلبات أو إيقاف المفتاح عند إساءة الاستخدام.']),
+            ('حدود المسؤولية', ['نبذل أقصى جهدنا لتكون الخدمة متاحة وتعمل بشكل صحيح، لكنها تُقدَّم "كما هي" وقد تتوقف أحياناً للصيانة أو لأسباب خارجة عن إرادتنا. لا نتحمّل مسؤولية الأضرار غير المباشرة، وتقتصر مسؤوليتنا في جميع الأحوال على قيمة الطلب المعني.',
+                                 'العلامات التجارية وأسماء المنتجات المعروضة تعود لأصحابها، ولا يعني عرضها وجود شراكة رسمية معهم.']),
+            ('التعديلات', ['قد نعدّل هذه الشروط من وقت لآخر، وسيظهر تاريخ آخر تحديث أعلى الصفحة. استمرارك في استخدام الخدمة بعد التعديل يعني موافقتك عليه.']),
+            ('تواصل معنا', ['لأي سؤال أو مشكلة في طلب: {contact}']),
+        ]),
+        'en': ('Terms of Service', [
+            ('Accepting the terms', ['These terms govern your use of the {store} store through the website or the Telegram bot. By using the service or creating an account, you agree to these terms and to our Privacy Policy. If you do not agree, please do not use the service.']),
+            ('The service', ['{store} is a store for digital products such as codes, subscriptions and digital cards. Most products are delivered automatically and instantly after payment; they appear in your order history and you can copy them at any time.',
+                             'Available products, prices and quantities may change at any time without notice. The price that applies is the one shown when you complete the purchase.']),
+            ('Your account', ['• You are responsible for the accuracy of the information you provide and for keeping your account, password and sign-in codes safe.',
+                              '• Never share the sign-in codes sent to your email; our team will never ask you for them.',
+                              '• A website account can be linked to one Telegram account only; both share the same balance and orders.',
+                              '• Any activity through your account is considered yours, so contact us immediately if you suspect unauthorized use.']),
+            ('Balance and payments', ['• Balance is topped up with the payment methods offered in the store (such as cryptocurrencies and Binance Pay) and is added after the transaction is confirmed.',
+                                      '• Make sure you send the correct amount on the correct network and address shown on the top-up page; mistaken transfers may not be recoverable.',
+                                      '• Balance can only be spent in the store; it cannot be cashed out or moved to other accounts except through the ways the store provides.',
+                                      '• Rewards and referral balance follow the referral program terms shown in the store and may be cancelled if abuse is detected.']),
+            ('Delivery, replacements and refunds', ['• Because products are digital, an order cannot be cancelled or returned after the code is delivered if the code works correctly.',
+                                                    '• If a code or subscription does not work when you receive it, contact us as soon as possible with the order number and a description of the problem (a screenshot helps). After checking, we will replace the product or refund the amount to your balance.',
+                                                    '• Replacements do not cover problems caused by misuse, breaking the product provider’s rules, or using a code after it has expired.',
+                                                    '• In special cases, the final decision is made after review by our support team.']),
+            ('Acceptable use', ['You must not:', '• Commit fraud, use payment methods you do not own, or try to reverse payments illegitimately.',
+                                '• Try to hack, disrupt or overload the website or bot, including with automated tools.',
+                                '• Create multiple accounts to abuse offers or the referral program.',
+                                '• Resell products in a way that breaks their providers’ terms.',
+                                'We may suspend or close any account that breaks these terms and cancel balance or orders resulting from the violation.']),
+            ('Developer API', ['If you use the store’s API, you are responsible for keeping your key secret and for all requests made with it. We may rate-limit or disable a key in case of abuse.']),
+            ('Limitation of liability', ['We do our best to keep the service available and working correctly, but it is provided “as is” and may occasionally stop for maintenance or reasons beyond our control. We are not liable for indirect damages, and our liability is in all cases limited to the value of the order concerned.',
+                                         'Trademarks and product names shown belong to their owners; showing them does not imply an official partnership.']),
+            ('Changes', ['We may change these terms from time to time; the date of the latest update is shown at the top of this page. Continuing to use the service after a change means you accept it.']),
+            ('Contact us', ['For any question or a problem with an order: {contact}']),
+        ]),
+    },
+}
+
+
+def _web_legal_page(kind):
+    """صفحتا سياسة الخصوصية وشروط الاستخدام (عامتان، عربي + إنجليزي) — مطلوبة لتسجيل الدخول بـ Google."""
+    e = html.escape
+    store = WEBAPP_STORE_NAME or 'LARA STOCK'
+    mail = (os.getenv('MAIL_FROM') or os.getenv('SMTP_USER') or '').strip()
+    bot_u = get_bot_username() or ''
+    def contact(lang):
+        bits = []
+        if mail:
+            bits.append(f'<a href="mailto:{e(mail)}" dir="ltr">{e(mail)}</a>')
+        if bot_u:
+            bits.append(f'<a href="https://t.me/{e(bot_u)}" dir="ltr">@{e(bot_u)}</a>')
+        return (' — ' if lang == 'en' else ' — ').join(bits) or e(store)
+    other = 'terms' if kind == 'privacy' else 'privacy'
+    secs = []
+    for lang in ('ar', 'en'):
+        title, parts = _WEB_LEGAL[kind][lang]
+        body = []
+        for h, paras in parts:
+            ps = ''.join(f'<p>{e(x).replace("{store}", e(store)).replace("{contact}", contact(lang))}</p>' for x in paras)
+            body.append(f'<h2>{e(h)}</h2>{ps}')
+        upd = 'آخر تحديث' if lang == 'ar' else 'Last updated'
+        oth = _WEB_LEGAL[other][lang][0]
+        secs.append(f'<section id="{lang}" lang="{lang}" dir="{"rtl" if lang == "ar" else "ltr"}"><h1>{e(title)}</h1>'
+                    f'<p class="m">{upd}: {_WEB_LEGAL_DATE}</p>{"".join(body)}'
+                    f'<p class="m"><a href="/{other}#{lang}">{e(oth)}</a> · <a href="/">{e(store)}</a></p></section>')
+    t_ar, t_en = _WEB_LEGAL[kind]['ar'][0], _WEB_LEGAL[kind]['en'][0]
+    return ('<!DOCTYPE html><html lang="ar"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{e(t_en)} | {e(t_ar)} — {e(store)}</title><meta name="robots" content="index,follow">'
+            '<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=4"><meta name="theme-color" content="#080b12">'
+            '<style>:root{color-scheme:dark}body{margin:0;background:#080b12;color:#dfe6f3;font:16px/1.75 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}'
+            'header{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 20px;background:rgba(8,11,18,.92);border-bottom:1px solid #1b2333;backdrop-filter:blur(8px)}'
+            'header a{color:#dfe6f3;text-decoration:none;font-weight:700;letter-spacing:.06em}header nav a{font-weight:600;letter-spacing:0;margin-inline-start:14px;color:#7fb7ff}'
+            'main{max-width:760px;margin:0 auto;padding:12px 20px 60px}section{scroll-margin-top:56px;padding:24px 0;border-bottom:1px solid #1b2333}'
+            'h1{font-size:28px;line-height:1.3;margin:8px 0 4px;color:#fff}h2{font-size:18px;margin:26px 0 6px;color:#fff}p{margin:6px 0}.m{color:#8995ab;font-size:14px}'
+            'a{color:#7fb7ff}</style></head><body>'
+            f'<header><a href="/">{e(store)}</a><nav><a href="#ar">العربية</a><a href="#en">English</a></nav></header>'
+            f'<main>{"".join(secs)}</main></body></html>')
+
+
+
 def _web_site_get(handler, raw):
     """ملفات الموقع على دومينك: التطبيق (PWA)، الأيقونات، صفحات المنتجات، وخريطة الموقع لـ Google."""
     base = (_web_public_url() or '/').rstrip('/')
     store = WEBAPP_STORE_NAME or 'LARA STOCK'
+    if raw in ('/privacy', '/terms'):
+        _wa_send(handler, 200, _web_legal_page(raw[1:]), 'text/html; charset=utf-8', 'public, max-age=600',
+                 {'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'"})
+        return True
     if raw == '/manifest.webmanifest':
         man = {'name': store, 'short_name': store[:12], 'start_url': '/?src=app', 'scope': '/', 'id': '/',
                'display': 'standalone', 'background_color': '#080b12', 'theme_color': '#080b12',
@@ -39924,7 +40095,8 @@ def _web_site_get(handler, raw):
                                    for c in _WEB_SEO_LANGS) + f'<xhtml:link rel="alternate" hreflang="x-default" href="{html.escape(base + pth)}"/>'
         locs = [(pth, '') for pth in paths] + [(pth, f'?hl={c}') for pth in paths for c in _WEB_SEO_LANGS]   # كل صفحة بكل لغة
         xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">'
-               + ''.join(f"<url><loc>{html.escape(base + pth + qq)}</loc>{alts(pth)}</url>" for pth, qq in locs[:45000]) + '</urlset>')
+               + ''.join(f"<url><loc>{html.escape(base + pth + qq)}</loc>{alts(pth)}</url>" for pth, qq in locs[:45000])
+               + ''.join(f"<url><loc>{html.escape(base + pth)}</loc></url>" for pth in ('/privacy', '/terms')) + '</urlset>')
         _wa_send(handler, 200, xml, 'application/xml', 'public, max-age=3600')
         return True
     if raw.startswith('/r/'):          # رابط الدعوة القصير ← المتجر مع حفظ صاحب الدعوة
