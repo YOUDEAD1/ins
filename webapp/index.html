@@ -783,9 +783,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 @keyframes skel{50%{opacity:.4}}
 @media (prefers-reduced-motion: reduce){.btile::after,.ce-skel{animation:none}}
 .art{position:absolute;inset:0;display:block;overflow:hidden;z-index:0}
-.art svg{width:100%;height:100%;display:block;transition:transform .45s cubic-bezier(.2,.8,.2,1)}
-.card:hover .art svg{transform:scale(1.045)}
-.art::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 38%,rgba(255,255,255,.2) 50%,transparent 62%);transform:translateX(-120%);animation:btShine 5.6s ease-in-out infinite;pointer-events:none}
+.art svg{width:100%;height:100%;display:block}
+
+.art::after{content:none}
 .card:nth-child(3n+1) .art::after{animation-delay:1.4s}.card:nth-child(3n+2) .art::after{animation-delay:2.9s}
 .art.mini::after,.hero-vis .art::after{display:none}
 .pv.is-oos .art{filter:grayscale(1) brightness(.55)}
@@ -3022,11 +3022,11 @@ html[data-page="login"] main {
 .feat-w{position:relative;margin:4px 0 22px}
 .feat-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;gap:12px;overscroll-behavior-x:contain;padding-bottom:14px;margin-bottom:-14px}
 .feat-track::-webkit-scrollbar{display:none}
-.feat{position:relative;flex:0 0 88%;scroll-snap-align:start;box-shadow:0 16px 30px -18px var(--c1,#2f8cff);min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
+.feat{position:relative;flex:0 0 88%;scroll-snap-align:start;min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
   -webkit-mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat;
   mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat}
 .feat-art{position:absolute;inset:0;z-index:-1}.feat-art svg{width:100%;height:100%;display:block;transition:transform .6s cubic-bezier(.2,.8,.2,1)}
-.feat:hover .feat-art svg{transform:scale(1.04)}
+
 .feat::after{content:"";position:absolute;inset:0;z-index:-1;background:linear-gradient(90deg,rgba(0,0,0,.30),transparent 55%)}
 :root[dir="rtl"] .feat::after,[dir="rtl"] .feat::after{background:linear-gradient(270deg,rgba(0,0,0,.30),transparent 55%)}
 .feat-in{display:flex;align-items:stretch;justify-content:space-between;gap:14px;height:100%;min-height:178px;padding:20px 20px 18px}
@@ -3109,6 +3109,27 @@ html[data-page="login"] main {
   .tab .ico,.tab .ico img,.tab .ce{width:24px!important;height:24px!important}
   body{padding-bottom:24px}
 }
+
+.art-logo{position:absolute;left:50%;top:17%;width:30%;aspect-ratio:1;transform:translateX(-50%);display:grid;place-items:center;pointer-events:none}
+.art-logo img{width:100%;height:100%;object-fit:contain;display:block}
+.art.mini .art-logo{top:14%;width:72%}
+.feat-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.feat-logo{display:inline-grid;width:1.25em;height:1.25em;flex:none}.feat-logo img{width:100%;height:100%;object-fit:contain;display:block}
+.section-row.all-row{margin-top:8px;padding-top:18px;border-top:1.5px dashed color-mix(in srgb,var(--fg) 12%,transparent)}
+.card .body .name{overflow-wrap:anywhere}
+.art{display:block!important}
+.art>svg{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;position:static!important}
+.thumb>.art,.cart-thumb>.art,.apl-ic>.art{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;margin:0!important;border-radius:inherit}
+.apl-ic{position:relative;overflow:hidden}
+.art{contain:strict}.card .pv{contain:paint}
+
+/* covers as images */
+.art{contain:paint}
+.art-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;opacity:0;transition:opacity .25s}
+.art-img.on{opacity:1}
+
+.grid>.card{content-visibility:auto;contain-intrinsic-size:auto 300px}
+@media (prefers-reduced-motion: reduce){.art-img{transition:none}}
 </style>
 </head>
 <body>
@@ -3814,8 +3835,42 @@ async function ceMount(el) {
     }
   } catch (e) { if (el.dataset.tile && el.isConnected) el.innerHTML = el.dataset.tile; }
 }
+
+/* product logos on covers: one still frame each (no running animations — keeps iPhone Safari light) */
+const LOGO = { snap: new Map(), io: null };
+function logoSnap(id) {
+  if (!LOGO.snap.has(id)) LOGO.snap.set(id, (async () => {
+    const d = await ceFetch(id); const S = 128;
+    const cv = document.createElement('canvas'); cv.width = S; cv.height = S; const cx = cv.getContext('2d');
+    if (d.kind === 'lottie') {
+      await loadLottie(); const box = document.createElement('div'); box.style.cssText = 'position:fixed;left:-9999px;top:0;width:128px;height:128px';
+      document.body.appendChild(box);
+      const a = window.lottie.loadAnimation({ container: box, renderer: 'svg', loop: false, autoplay: false, animationData: JSON.parse(d.json) });
+      a.goToAndStop(0, true); const svg = box.querySelector('svg'); const xml = new XMLSerializer().serializeToString(svg);
+      a.destroy(); box.remove();
+      const img = new Image(); img.decoding = 'async'; img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+      await img.decode(); cx.drawImage(img, 0, 0, S, S);
+    } else if (d.kind === 'video') {
+      const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = d.url;
+      await new Promise((ok, no) => { v.onloadeddata = ok; v.onerror = no; setTimeout(no, 6000); });
+      cx.drawImage(v, 0, 0, S, S); v.removeAttribute('src'); v.load();
+    } else {
+      const img = new Image(); img.decoding = 'async'; img.src = d.url; await img.decode(); cx.drawImage(img, 0, 0, S, S);
+    }
+    return cv.toDataURL('image/png');
+  })());
+  return LOGO.snap.get(id);
+}
+function mountLogos(root) {
+  const els = (root || document).querySelectorAll('[data-logo]:not([data-logo-done])'); if (!els.length) return;
+  const go = el => { el.dataset.logoDone = '1'; logoSnap(el.dataset.logo).then(src => { if (!el.isConnected) return; const im = new Image(); im.alt = ''; im.src = src; el.appendChild(im); }).catch(() => {}); };
+  if (!('IntersectionObserver' in window)) { els.forEach(go); return; }
+  if (!LOGO.io) LOGO.io = new IntersectionObserver(es => { for (const en of es) if (en.isIntersecting) { LOGO.io.unobserve(en.target); go(en.target); } }, { rootMargin: '200px' });
+  els.forEach(el => LOGO.io.observe(el));
+}
 function hydrate(root) {
   root = root || document;
+  mountLogos(root); mountArt(root);
   pruneMedia();
   if (!CE.io && 'IntersectionObserver' in window) {
     CE.io = new IntersectionObserver(entries => {
@@ -3951,7 +4006,7 @@ function artStars(R, n, W, H) {
   const r = v => Math.round(v * 10) / 10;
   return Array.from({ length: n }, () => { const x = r(16 + R() * (W - 32)), y = r(12 + R() * H), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .55)}"/>`; }).join('');
 }
-function artSVG(p, mini) {
+function artSVG(p, mini, logo) {
   const L = artLook(p), { brand, tier, dur } = L;
   const id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;
   const defs = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${L.col[0]}"/><stop offset="1" stop-color="${L.col[1]}"/></linearGradient>` +
@@ -3961,16 +4016,18 @@ function artSVG(p, mini) {
   const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>` +
     `<circle cx="276" cy="164" r="126" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2.4"/><circle cx="276" cy="164" r="84" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2.4"/>`;
   const ch = [...brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
+  if (mini && logo) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}</svg>`;
   if (mini) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<text x="150" y="134" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></svg>`;
   const Ln = Math.max(2, [...brand].length), ar = AR_RE.test(brand);
-  const fs = Math.min(60, Math.max(26, 250 / (Ln * (ar ? .52 : .66))));
-  const fit = Ln * fs * (ar ? .52 : .66) > 252 ? ` textLength="252" lengthAdjust="spacingAndGlyphs"` : '';
-  const wy = 104;
-  const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(240, tl * 9.2 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 20)})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl > 24 ? ' textLength="222" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
+  const k = ar ? .62 : .8, cap = logo ? 36 : 58;
+  const fs = Math.min(cap, Math.max(20, 246 / (Ln * k)));
+  const fit = Ln * fs * k > 246 ? ` textLength="246" lengthAdjust="spacingAndGlyphs"` : '';
+  const wy = logo ? (tier ? 158 : 172) : 104;
+  const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(250, tl * 9.6 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + (logo ? 16 : 20))})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl * 9.6 + 30 > 250 ? ' textLength="226" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
     `<text x="150" y="244" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .96 : .6}" font-size="${dur ? 14 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.4}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
   return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect width="300" height="264" fill="url(#${id}v)"/>` +
-    `<text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display);filter:drop-shadow(0 4px 14px rgba(0,0,0,.32))"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
+    `<text x="150" y="${wy + 3}" text-anchor="middle" dominant-baseline="central" fill="#000" fill-opacity=".22" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text><text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
 }
 /* wide cover for the «most wanted» banner: background + motif + big echo; text is real HTML on top */
 function artBannerSVG(p) {
@@ -3982,7 +4039,79 @@ function artBannerSVG(p) {
     `<text x="130" y="165" text-anchor="middle" dominant-baseline="central" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="2.4" font-size="380" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text>` +
     `<path d="M-20 255 C 190 180, 320 290, 660 30" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="1.6" stroke-dasharray="3 9" stroke-linecap="round"/></svg>`;
 }
-function artTile(p, mini) { return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini)}</span>`; }
+function artTile(p, mini) {
+  const L = artLook(p), lg = !!(p.emoji_id && ceOK(p.emoji_id));
+  const key = [mini ? 'm' : 'f', L.brand, L.tier, L.dur, L.col.join(','), lg ? p.emoji_id : '', LANG].join('|');
+  const done = ARTC.url.get(key);
+  ARTC.spec.set(key, { L, mini: !!mini, logo: lg ? p.emoji_id : '' });
+  return `<span class="art${mini ? ' mini' : ''}" style="background:linear-gradient(135deg,${L.col[0]},${L.col[1]})"><img class="art-img${done ? ' on' : ''}" alt="" decoding="async" data-art="${esc(key)}"${done ? ` src="${done}"` : ''}></span>`;
+}
+/* ── covers are painted once on a canvas and shown as plain images (light on phones, cached) ── */
+const ARTC = { url: new Map(), spec: new Map(), job: new Map(), io: null, q: [], busy: 0, fontOk: null };
+function artFonts() { if (!ARTC.fontOk) ARTC.fontOk = (document.fonts && document.fonts.load ? Promise.all(['800 40px Unbounded', '700 20px Unbounded', '800 40px Rubik', '700 20px Rubik'].map(f => document.fonts.load(f).catch(() => {}))) : Promise.resolve()).then(() => {}); return ARTC.fontOk; }
+function artRR(cx, x, y, w, h, r) { cx.beginPath(); cx.moveTo(x + r, y); cx.arcTo(x + w, y, x + w, y + h, r); cx.arcTo(x + w, y + h, x, y + h, r); cx.arcTo(x, y + h, x, y, r); cx.arcTo(x, y, x + w, y, r); cx.closePath(); }
+async function artPaint(key) {
+  if (ARTC.url.has(key)) return ARTC.url.get(key);
+  if (ARTC.job.has(key)) return ARTC.job.get(key);
+  const job = (async () => {
+    const sp = ARTC.spec.get(key); if (!sp) return '';
+    await artFonts();
+    const { L, mini } = sp, K = mini ? 0.8 : 1.6, W = Math.round(300 * K), H = Math.round(264 * K);
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const cx = cv.getContext('2d');
+    cx.scale(K, K);
+    let g = cx.createLinearGradient(0, 0, 300, 264); g.addColorStop(0, L.col[0]); g.addColorStop(1, L.col[1]); cx.fillStyle = g; cx.fillRect(0, 0, 300, 264);
+    cx.fillStyle = 'rgba(255,255,255,.14)'; for (let y = 2; y < 264; y += 14) for (let x = 2; x < 300; x += 14) { cx.beginPath(); cx.arc(x, y, 1.1, 0, 6.283); cx.fill(); }
+    g = cx.createRadialGradient(66, 0, 0, 66, 0, 300); g.addColorStop(0, 'rgba(255,255,255,.34)'); g.addColorStop(.6, 'rgba(255,255,255,0)'); cx.fillStyle = g; cx.fillRect(0, 0, 300, 264);
+    cx.lineWidth = 2.4; cx.strokeStyle = 'rgba(255,255,255,.12)'; cx.beginPath(); cx.arc(276, 164, 126, 0, 6.283); cx.stroke(); cx.strokeStyle = 'rgba(255,255,255,.08)'; cx.beginPath(); cx.arc(276, 164, 84, 0, 6.283); cx.stroke();
+    g = cx.createLinearGradient(0, 0, 0, 264); g.addColorStop(.55, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.36)'); cx.fillStyle = g; cx.fillRect(0, 0, 300, 264);
+    let logo = null;
+    if (sp.logo) { try { const src = await logoSnap(sp.logo); logo = new Image(); logo.src = src; await logo.decode(); } catch (e) { logo = null; } }
+    const font = (wt, px) => `${wt} ${px}px Unbounded, Rubik, system-ui, sans-serif`;
+    cx.textAlign = 'center'; cx.textBaseline = 'middle';
+    if (mini) {
+      if (logo) cx.drawImage(logo, 60, 42, 180, 180);
+      else { const ch = [...L.brand][0] || '?'; cx.font = font(800, 150); cx.fillStyle = '#fff'; cx.fillText(AR_RE.test(ch) ? ch : ch.toUpperCase(), 150, 140); }
+    } else {
+      if (logo) cx.drawImage(logo, 105, 26, 90, 90);
+      const wy = logo ? (L.tier ? 150 : 162) : 104, cap = logo ? 36 : 58;
+      let fs = cap; cx.font = font(800, fs); const mw = 216; let tw = cx.measureText(L.brand).width;
+      if (tw > mw) { fs = Math.max(16, fs * mw / tw); cx.font = font(800, fs); }
+      cx.fillStyle = 'rgba(0,0,0,.22)'; cx.fillText(L.brand, 150, wy + 3); cx.fillStyle = '#fff'; cx.fillText(L.brand, 150, wy);
+      if (L.tier) {
+        const ta = AR_RE.test(L.tier), txt = ta ? L.tier : L.tier.toUpperCase(); let ts = 12.5; cx.font = font(700, ts);
+        if ('letterSpacing' in cx) cx.letterSpacing = ta ? '0px' : '1.6px';
+        let w = cx.measureText(txt).width; if (w > 190) { ts = ts * 190 / w; cx.font = font(700, ts); w = 190; }
+        const py = wy + fs * .5 + (logo ? 18 : 22), pw = w + 30;
+        artRR(cx, 150 - pw / 2, py - 14, pw, 28, 14); cx.fillStyle = 'rgba(255,255,255,.18)'; cx.fill(); cx.strokeStyle = 'rgba(255,255,255,.34)'; cx.lineWidth = 1; cx.stroke();
+        cx.fillStyle = '#fff'; cx.fillText(txt, 150, py + 1); if ('letterSpacing' in cx) cx.letterSpacing = '0px';
+      }
+      cx.setLineDash([6, 6]); cx.strokeStyle = 'rgba(255,255,255,.42)'; cx.lineWidth = 1.6; cx.beginPath(); cx.moveTo(30, 222); cx.lineTo(270, 222); cx.stroke(); cx.setLineDash([]);
+      cx.font = font(700, L.dur ? 14 : 10.5); cx.fillStyle = L.dur ? 'rgba(255,255,255,.96)' : 'rgba(255,255,255,.6)';
+      if ('letterSpacing' in cx) cx.letterSpacing = L.dur && AR_RE.test(L.dur) ? '0px' : '2.4px';
+      cx.fillText(L.dur || 'LARA STOCK', 150, 244); if ('letterSpacing' in cx) cx.letterSpacing = '0px';
+    }
+    const blob = await new Promise(ok => cv.toBlob(ok, 'image/webp', .9)) || await new Promise(ok => cv.toBlob(ok, 'image/png'));
+    cv.width = cv.height = 0;
+    const url = blob ? URL.createObjectURL(blob) : '';
+    if (url) ARTC.url.set(key, url);
+    return url;
+  })();
+  ARTC.job.set(key, job); job.finally(() => ARTC.job.delete(key));
+  return job;
+}
+function artPump() {
+  while (ARTC.busy < 2 && ARTC.q.length) {
+    const el = ARTC.q.shift(); if (!el.isConnected || el.src) continue;
+    ARTC.busy++;
+    artPaint(el.dataset.art).then(u => { if (u && el.isConnected) { el.src = u; el.onload = () => el.classList.add('on'); } }).catch(() => {}).finally(() => { ARTC.busy--; artPump(); });
+  }
+}
+function mountArt(root) {
+  const els = (root || document).querySelectorAll('img[data-art]:not([src])'); if (!els.length) return;
+  if (!('IntersectionObserver' in window)) { els.forEach(e => ARTC.q.push(e)); artPump(); return; }
+  if (!ARTC.io) ARTC.io = new IntersectionObserver(es => { for (const en of es) if (en.isIntersecting) { ARTC.io.unobserve(en.target); ARTC.q.push(en.target); } artPump(); }, { rootMargin: '300px' });
+  els.forEach(e => ARTC.io.observe(e));
+}
 function artOn(p) { return !p.image; }
 
 /* ───────────────────────── «most wanted» banner (top sellers, auto art) ───────────────────────── */
@@ -4013,7 +4142,7 @@ function featHtml() {
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${esc(name)}</b>
+          <b class="feat-name" dir="auto">${p.emoji_id && ceOK(p.emoji_id) ? `<span class="feat-logo" data-logo="${esc(p.emoji_id)}"></span>` : ''}${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>
@@ -5177,10 +5306,11 @@ function chipsHtml() {
 }
 
 /* ───────── store grouped by folder (tidy shelves) ───────── */
-Object.assign(I.ar, { seeAll: 'عرض الكل' }); Object.assign(I.en, { seeAll: 'See all' });
+Object.assign(I.ar, { seeAll: 'عرض الكل', allProducts: 'كل المنتجات' }); Object.assign(I.en, { seeAll: 'See all', allProducts: 'All products' });
+function shelfN() { const w = window.innerWidth || 390; return w < 700 ? 4 : w < 1100 ? 6 : 10; }
 function sectionsHtml(list) {
   const { cats } = catList(); const out = []; const seen = new Set();
-  const shelf = (key, icon, title, items) => `<section class="psec"><div class="psec-h"><h2><span class="psec-ic">${icon}</span><span>${esc(title)}</span><i class="psec-n num">${items.length}</i></h2>${key ? `<button class="psec-all" data-act="cat" data-v="${esc(key)}">${esc(t('seeAll'))}${ic.chev}</button>` : ''}</div><div class="grid psec-grid">${items.slice(0, 10).map((p, i) => card(p, i)).join('')}</div></section>`;
+  const shelf = (key, icon, title, items) => `<section class="psec"><div class="psec-h"><h2><span class="psec-ic">${icon}</span><span>${esc(title)}</span><i class="psec-n num">${items.length}</i></h2>${key ? `<button class="psec-all" data-act="cat" data-v="${esc(key)}">${esc(t('seeAll'))}${ic.chev}</button>` : ''}</div><div class="grid psec-grid">${items.slice(0, shelfN()).map((p, i) => card(p, i)).join('')}</div></section>`;
   const sorted = cats.slice().sort((a, b) => b.n - a.n);
   for (const c of sorted) {
     const items = list.filter(p => (p.cats || []).includes(c.id)); if (!items.length) continue;
@@ -5202,11 +5332,8 @@ function resultsHtml() {
   const R = S.sr;
   const note = R && R.corrected && list.length ? `<div class="sr-note">${ic.search}<span>${esc(t('srFixed', { q: S.q.trim(), c: R.corrected }))}</span></div>` : '';
   const sug = R && !list.length && (R.suggest || []).length ? `<div class="sr-dym"><span>${esc(t('srDym'))}</span>${R.suggest.map(w => `<button class="chip" data-act="sq" data-v="${esc(w)}" dir="auto">${esc(w)}</button>`).join('')}</div>` : '';
-  if (S.cat === 'all' && !S.q.trim() && S.sort === 'rec' && list.length > 6) {
-    const secs = sectionsHtml(list);
-    if (secs) { StoreRender.items = []; StoreRender.shown = 0; return `${featHtml()}${secs}`; }
-  }
-  return `${featHtml()}<div class="section-row"><h2>${esc(title)}</h2><span class="count">${esc(t('products', { n: list.length }))} · ${esc(sortLbl)}</span></div>
+  const secs = (S.cat === 'all' && !S.q.trim() && list.length > 6) ? sectionsHtml(list.filter(p => p.in_stock)) : '';
+  return `${featHtml()}${secs}<div class="section-row${secs ? ' all-row' : ''}"><h2>${esc(secs ? t('allProducts') : title)}</h2><span class="count">${esc(t('products', { n: list.length }))} · ${esc(sortLbl)}</span></div>
     ${note}${list.length ? `<div class="grid" id="grid">${list.slice(0, StoreRender.shown).map((p, i) => card(p, i)).join('')}</div>${StoreRender.shown < list.length ? `<div class="products-next" id="products-more"><button class="btn ghost sm" data-act="products-more">${esc(moreProductsLabel())}</button></div>` : ''}` :
       `<div class="empty">${ae('search')}<h3>${esc(t('noMatch'))}</h3><p>${esc(t(S.onlyStock && S.q.trim() ? 'srNoStock' : 'noMatchBody'))}</p>${sug}<button class="btn ghost sm" data-act="clear">${esc(t('clear'))}</button></div>`}`;
 }
