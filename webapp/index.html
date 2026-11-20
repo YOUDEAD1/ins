@@ -782,6 +782,15 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .ce-skel{width:62%;height:62%;border-radius:50%;background:color-mix(in srgb,var(--fg) 10%,transparent);animation:skel 1.4s ease-in-out infinite}
 @keyframes skel{50%{opacity:.4}}
 @media (prefers-reduced-motion: reduce){.btile::after,.ce-skel{animation:none}}
+.art{position:absolute;inset:0;display:block;overflow:hidden;z-index:0}
+.art svg{width:100%;height:100%;display:block;transition:transform .45s cubic-bezier(.2,.8,.2,1)}
+.card:hover .art svg{transform:scale(1.045)}
+.art::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 38%,rgba(255,255,255,.2) 50%,transparent 62%);transform:translateX(-120%);animation:btShine 5.6s ease-in-out infinite;pointer-events:none}
+.card:nth-child(3n+1) .art::after{animation-delay:1.4s}.card:nth-child(3n+2) .art::after{animation-delay:2.9s}
+.art.mini::after,.hero-vis .art::after{display:none}
+.pv.is-oos .art{filter:grayscale(1) brightness(.55)}
+@media (prefers-reduced-motion: reduce){.art::after{animation:none;display:none}.art svg{transition:none}}
+:root[data-perf="lite"] .art::after{display:none}
 .mono-tile{font:700 clamp(30px,10vw,46px)/1 var(--f-display);color:#fff;text-shadow:0 4px 20px hsl(var(--h,215) 90% 40% / .7);letter-spacing:-.02em}
 .pill{position:absolute;top:9px;display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:999px;font-size:11.5px;font-weight:600;color:#fff;
   background:rgba(7,10,18,.52);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
@@ -3760,8 +3769,7 @@ function visualInner(p, small) {
   if (p.emoji_id) return ceOK(p.emoji_id) ? ceH(p.emoji_id, '<span class="ce-skel"></span>', '', brandTile(p, small)) : brandTile(p, small);
   if (p.ae) return ae(p.ae);
   if (p.emoji) return `<span class="ce"><span class="fb" style="font-size:.9em">${esc(p.emoji)}</span></span>`;
-  const a = autoEmoji(p);
-  return a ? ae(a) : monogram(p);
+  return artTile(p, true);
 }
 function imgSrc(p) {
   const im = window.LARA_DATA && window.LARA_DATA.images && window.LARA_DATA.images[p.id];
@@ -3770,11 +3778,93 @@ function imgSrc(p) {
 }
 function visual(p) {
   if (p.image) {
-    const fb = `<span class="vis">${visualInner(p)}</span>`;
+    const fb = (p.emoji_id || p.ae || p.emoji) ? `<span class="vis">${visualInner(p)}</span>` : artTile(p);
     return `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy" decoding="async" data-fb="${esc(fb)}">`;
   }
+  if (artOn(p)) return artTile(p);
   return `<span class="vis">${visualInner(p)}</span>`;
 }
+/* ───────────────────────── LARA ART: auto product cover, drawn in code from the product name (no images, no API) ───────────────────────── */
+const ART_C = { chatgpt: ['#19C37D', '#0A5C47'], openai: ['#19C37D', '#0A5C47'], claude: ['#E07A5A', '#7A2F1B'], gemini: ['#4C8DF6', '#7B4FD6'], midjourney: ['#3B3F9E', '#12142E'], grok: ['#3A3D45', '#0B0C10'], perplexity: ['#22A3B0', '#0C3F46'], copilot: ['#2F7BEA', '#7A3FD8'], deepseek: ['#4D6BFE', '#1A2A8F'],
+  netflix: ['#E50914', '#4A0206'], spotify: ['#1ED760', '#0B4F26'], youtube: ['#FF1F3D', '#6E0012'], shahid: ['#14C17A', '#06402A'], osn: ['#F59A2C', '#7A3A00'], disney: ['#1A47E0', '#0A1B5E'], prime: ['#1AA8E0', '#0B3A5E'], amazon: ['#FF9F1A', '#7A4300'], crunchyroll: ['#F47521', '#6E2A05'], anghami: ['#A33CFF', '#3E0E70'], apple: ['#4A4A52', '#141418'], hbo: ['#7B2CFF', '#22074F'], 'tod': ['#6C2BD9', '#1E0A4A'],
+  canva: ['#00C4CC', '#7D2AE8'], adobe: ['#FF2D20', '#5E0703'], figma: ['#A259FF', '#F24E1E'], capcut: ['#2B2B30', '#060608'], framer: ['#2F6BFF', '#001F66'], notion: ['#3A3A3A', '#0A0A0A'], photoshop: ['#31A8FF', '#001E36'], picsart: ['#C209C1', '#4B0080'],
+  nordvpn: ['#4687FF', '#0D2C6B'], expressvpn: ['#DA3940', '#5E1215'], surfshark: ['#1EBFBF', '#0A4D4D'], proton: ['#6D4AFF', '#24155E'],
+  xbox: ['#16A116', '#053D05'], playstation: ['#0A7BE0', '#002B5C'], psn: ['#0A7BE0', '#002B5C'], steam: ['#2A475E', '#0B141D'], discord: ['#5865F2', '#232A8A'], nitro: ['#5865F2', '#232A8A'], pubg: ['#F2A900', '#5E3D00'], fortnite: ['#8F4BFF', '#1F0B5E'],
+  duolingo: ['#58CC02', '#235C00'], coursera: ['#2A73E8', '#00265E'], grammarly: ['#15C39A', '#06574A'], quillbot: ['#4AA35A', '#1E4F27'], udemy: ['#A435F0', '#3B0A63'],
+  cursor: ['#3A3A44', '#0B0B0F'], github: ['#3B434C', '#0D1117'], replit: ['#F26207', '#6B2B02'], lovable: ['#FF4F81', '#7A1FA2'], bolt: ['#1389FD', '#0A2A6B'], supabase: ['#3ECF8E', '#0F5235'], railway: ['#8A5CF6', '#26105E'], vercel: ['#3A3A3A', '#000000'],
+  telegram: ['#2AABEE', '#0B4F80'], elevenlabs: ['#4A4A55', '#0C0C10'], heygen: ['#7559FF', '#2B1A80'], kling: ['#14C9A8', '#0B3B5E'], runway: ['#4A4A55', '#0C0C10'], linkedin: ['#0A66C2', '#003366'], tiktok: ['#FE2C55', '#111114'], snapchat: ['#FFD400', '#B38F00'], instagram: ['#E1306C', '#5B2AC0'], x: ['#3A3A3A', '#000000'], twitter: ['#1D9BF0', '#0B3E66'] };
+const ART_M = [
+  [/gpt|claude|gemini|midjourney|grok|copilot|perplexity|deepseek|\bai\b|ذكاء|leonardo|kling|heygen|eleven|runway|suno|manus|higgs/i, 'ai'],
+  [/netflix|shahid|osn|prime|disney|youtube|hulu|crunchy|hbo|stc tv|tod|starz|\btv\b|movie|cinema|iptv|بث|أفلام|افلام|مسلسل/i, 'play'],
+  [/spotify|music|anghami|deezer|tidal|sound|موسيق|اغاني|أغاني/i, 'wave'],
+  [/canva|adobe|figma|capcut|photoshop|design|framer|picsart|lightroom|illustrator|تصميم/i, 'shapes'],
+  [/vpn|nord|surfshark|proton|express|security|antivirus|kaspersky|حماية/i, 'shield'],
+  [/xbox|playstation|psn|steam|game|nitro|discord|pubg|fortnite|roblox|ea play|العاب|ألعاب|شدات/i, 'game'],
+  [/duolingo|coursera|udemy|course|language|grammarly|quillbot|learn|تعلم|كورس|دورة/i, 'learn'],
+  [/cursor|github|replit|code|bolt|lovable|railway|supabase|vercel|dev|hosting|server|برمج/i, 'code'],
+  [/telegram|instagram|tiktok|snap|twitter|linkedin|\bx\b|social|followers|متابع/i, 'plane']];
+const ART_G = {
+  ai: '<g fill="none" stroke="#fff" stroke-width="3"><path d="M40 60 120 30 200 70 250 20M40 60 90 140 200 70 170 170 250 140M120 30 90 140 170 170M200 70 250 140"/></g><g fill="#fff"><circle cx="40" cy="60" r="9"/><circle cx="120" cy="30" r="7"/><circle cx="200" cy="70" r="12"/><circle cx="250" cy="20" r="6"/><circle cx="90" cy="140" r="8"/><circle cx="170" cy="170" r="10"/><circle cx="250" cy="140" r="7"/></g>',
+  play: '<path d="M70 30c0-14 15-22 27-15l130 78c12 7 12 24 0 31L97 202c-12 7-27-1-27-15z" fill="#fff"/><g fill="#fff"><rect x="10" y="0" width="24" height="14" rx="3"/><rect x="10" y="40" width="24" height="14" rx="3"/><rect x="10" y="80" width="24" height="14" rx="3"/><rect x="10" y="120" width="24" height="14" rx="3"/><rect x="10" y="160" width="24" height="14" rx="3"/><rect x="10" y="200" width="24" height="14" rx="3"/></g>',
+  wave: '<g fill="#fff"><rect x="10" y="90" width="22" height="60" rx="11"/><rect x="50" y="40" width="22" height="160" rx="11"/><rect x="90" y="70" width="22" height="100" rx="11"/><rect x="130" y="10" width="22" height="220" rx="11"/><rect x="170" y="60" width="22" height="120" rx="11"/><rect x="210" y="30" width="22" height="180" rx="11"/><rect x="250" y="95" width="22" height="50" rx="11"/></g>',
+  shapes: '<g fill="none" stroke="#fff" stroke-width="10"><circle cx="90" cy="90" r="70"/><rect x="120" y="80" width="130" height="130" rx="22"/><path d="M60 230 130 110 200 230z" stroke-linejoin="round"/></g>',
+  shield: '<path d="M140 10 40 50v70c0 62 42 112 100 132 58-20 100-70 100-132V50z" fill="none" stroke="#fff" stroke-width="12" stroke-linejoin="round"/><path d="M95 130l32 32 60-62" fill="none" stroke="#fff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>',
+  game: '<path d="M70 60h140c40 0 62 34 70 90 6 42-30 60-52 32l-24-30H76l-24 30c-22 28-58 10-52-32 8-56 30-90 70-90z" fill="none" stroke="#fff" stroke-width="11" stroke-linejoin="round"/><path d="M80 105v42M59 126h42" stroke="#fff" stroke-width="11" stroke-linecap="round"/><g fill="#fff"><circle cx="196" cy="110" r="10"/><circle cx="222" cy="136" r="10"/></g>',
+  learn: '<path d="M20 40h160a20 20 0 0 1 20 20v90a20 20 0 0 1-20 20H90l-45 40v-40H20A20 20 0 0 1 0 150V60a20 20 0 0 1 20-20z" fill="none" stroke="#fff" stroke-width="11" stroke-linejoin="round"/><g fill="#fff"><circle cx="60" cy="105" r="10"/><circle cx="100" cy="105" r="10"/><circle cx="140" cy="105" r="10"/></g><path d="M215 90h45a20 20 0 0 1 20 20v70a20 20 0 0 1-20 20h-10v30l-34-30" fill="none" stroke="#fff" stroke-width="9" stroke-linejoin="round"/>',
+  code: '<path d="M90 50 20 125l70 75M190 50l70 75-70 75M160 30l-40 190" fill="none" stroke="#fff" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>',
+  plane: '<path d="M270 10 10 115l90 34 26 96 50-62 72 44z" fill="none" stroke="#fff" stroke-width="11" stroke-linejoin="round"/><path d="M100 149 270 10 126 245" fill="none" stroke="#fff" stroke-width="8" stroke-linejoin="round"/>',
+  orbit: '<g fill="none" stroke="#fff" stroke-width="6"><ellipse cx="140" cy="120" rx="130" ry="50" transform="rotate(-20 140 120)"/><ellipse cx="140" cy="120" rx="130" ry="50" transform="rotate(40 140 120)"/></g><circle cx="140" cy="120" r="34" fill="#fff"/>' };
+const ART_AR = [['نتفليكس', 'netflix'], ['نيتفليكس', 'netflix'], ['شاهد', 'shahid'], ['سبوتيفاي', 'spotify'], ['يوتيوب', 'youtube'], ['كانفا', 'canva'], ['تيليجرام', 'telegram'], ['تلجرام', 'telegram'], ['تيليقرام', 'telegram'], ['ديسكورد', 'discord'], ['شات جي بي تي', 'chatgpt'], ['جي بي تي', 'chatgpt'], ['جيميناي', 'gemini'], ['جيمناي', 'gemini'], ['كلود', 'claude'], ['ببجي', 'pubg'], ['بلايستيشن', 'playstation'], ['بلاي ستيشن', 'playstation'], ['اكس بوكس', 'xbox'], ['إكس بوكس', 'xbox'], ['ستيم', 'steam'], ['دولينجو', 'duolingo'], ['اوسن', 'osn'], ['أنغامي', 'anghami'], ['انغامي', 'anghami'], ['كاب كات', 'capcut'], ['ادوبي', 'adobe'], ['أدوبي', 'adobe'], ['فيجما', 'figma'], ['نورد', 'nordvpn'], ['ديزني', 'disney'], ['امازون', 'amazon'], ['أمازون', 'amazon'], ['انستقرام', 'instagram'], ['تيك توك', 'tiktok'], ['سناب', 'snapchat']];
+let ART_N = 0;
+function artSeed(s) { let h = 2166136261; for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 10000) / 10000; }; }
+function artParse(p) {
+  let raw = String((isAr() ? (p.name_ar || p.name_en) : (p.name_en || p.name_ar)) || p.name || '').trim();
+  const lat = String(p.name_en || '').trim(); if (lat && /[a-z]/i.test(lat)) raw = lat;
+  let dur = '';
+  const m = raw.match(/(\d+)\s*(months?|mo\b|m\b|شهر|شهور|أشهر|اشهر|days?|d\b|يوم|أيام|ايام|years?|yr|y\b|سنة|سنه|سنوات)/i);
+  if (m) {
+    const n = +m[1], u = m[2].toLowerCase(); const ar = isAr();
+    const k = /^(d|day|يوم|أيام|ايام)/.test(u) ? 'd' : /^(y|yr|year|سن)/.test(u) ? 'y' : 'm';
+    dur = ar ? `${n} ${k === 'd' ? (n > 2 && n < 11 ? 'أيام' : 'يوم') : k === 'y' ? (n > 2 && n < 11 ? 'سنوات' : 'سنة') : (n > 2 && n < 11 ? 'أشهر' : 'شهر')}` : `${n} ${k === 'd' ? 'DAY' : k === 'y' ? 'YEAR' : 'MONTH'}${n > 1 ? 'S' : ''}`;
+    raw = raw.replace(m[0], ' ');
+  } else if (/(?:^|\s|—|-)(شهر|month)(?:\s|$)/i.test(raw)) { dur = isAr() ? '1 شهر' : '1 MONTH'; raw = raw.replace(/(شهر|month)/i, ' '); }
+  raw = raw.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ').replace(/[—–\-|·•:]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const w = raw.split(' ').filter(Boolean);
+  let brand = w[0] || '?', rest = w.slice(1);
+  if ([...brand].length <= 2 && rest.length) { brand += ' ' + rest[0]; rest = rest.slice(1); }
+  let tier = rest.join(' '); if ([...tier].length > 22) tier = rest.slice(0, 2).join(' ');
+  return { brand, tier, dur };
+}
+function artSVG(p, mini) {
+  const { brand, tier, dur } = artParse(p);
+  const key = brand.toLowerCase().replace(/[^a-z0-9؀-ۿ]/g, '');
+  let full = ((p.name_en || '') + ' ' + (p.name_ar || '')).toLowerCase();
+  for (const [a, b] of ART_AR) if (full.includes(a)) full += ' ' + b;
+  let col = ART_C[key];
+  if (!col) for (const k in ART_C) if (k.length > 2 && full.includes(k)) { col = ART_C[k]; break; }
+  if (!col) { const h = brandHue(p); col = [`hsl(${h} 82% 55%)`, `hsl(${(h + 32) % 360} 72% 24%)`]; }
+  let mot = 'orbit'; for (const [re, k] of ART_M) if (re.test(full)) { mot = k; break; }
+  const R = artSeed(full || brand), id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;
+  const ang = r(R() * 40 - 20), gx = r(20 + R() * 60), gy = r(R() * 30);
+  const stars = mini ? '' : Array.from({ length: 4 }, () => { const x = r(20 + R() * 260), y = r(14 + R() * 70), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .5)}"/>`; }).join('');
+  const defs = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(${ang} .5 .5)"><stop offset="0" stop-color="${col[0]}"/><stop offset="1" stop-color="${col[1]}"/></linearGradient><radialGradient id="${id}r" cx="${gx}%" cy="${gy}%" r="75%"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></radialGradient><pattern id="${id}d" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="#fff" opacity=".16"/></pattern><linearGradient id="${id}v" x1="0" y1="0" x2="0" y2="1"><stop offset=".45" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".38"/></linearGradient></defs>`;
+  const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>`;
+  if (mini) {
+    const ch = [...brand][0] || '?';
+    return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<g class="mot" opacity=".2" transform="translate(120 100) scale(.75)">${ART_G[mot]}</g><text x="150" y="132" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(ch.toUpperCase())}</text></svg>`;
+  }
+  const L = Math.max(2, [...brand].length), ar = /[؀-ۿ]/.test(brand);
+  let fs = Math.min(66, Math.max(26, 236 / (L * (ar ? .52 : .74))));
+  const fit = L * fs * (ar ? .52 : .74) > 246 ? ` textLength="246" lengthAdjust="spacingAndGlyphs"` : '';
+  const wy = tier ? 112 : 124;
+  const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(250, tl * 9.4 + 34); return `<g transform="translate(150 ${wy + fs * .5 + 22})"><rect x="${-tw / 2}" y="-15" width="${tw}" height="30" rx="15" fill="#fff" fill-opacity=".16" stroke="#fff" stroke-opacity=".32"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="13.5" font-weight="700" letter-spacing="${/[؀-ۿ]/.test(tier) ? 0 : 1.6}" style="font-family:var(--f-display)"${tl > 24 ? ' textLength="230" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(/[؀-ۿ]/.test(tier) ? tier : tier.toUpperCase())}</text></g>`; })() : '';
+  const stub = `<line x1="16" y1="222" x2="284" y2="222" stroke="#fff" stroke-opacity=".38" stroke-width="1.6" stroke-dasharray="6 6"/><circle cx="0" cy="222" r="9" fill="#000" fill-opacity=".28"/><circle cx="300" cy="222" r="9" fill="#000" fill-opacity=".28"/>` +
+    `<text x="150" y="245" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .95 : .55}" font-size="${dur ? 13 : 10.5}" font-weight="700" letter-spacing="${dur && /[؀-ۿ]/.test(dur) ? 0 : 2.2}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
+  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<g class="mot" opacity=".15" transform="translate(${r(150 + R() * 40)} ${r(40 + R() * 30)}) rotate(${r(R() * 24 - 12)}) scale(${r(.85 + R() * .3)})">${ART_G[mot]}</g>${stars}<rect width="300" height="264" fill="url(#${id}v)"/>` +
+    `<text class="wm" x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1}" style="font-family:var(--f-display);filter:drop-shadow(0 4px 14px rgba(0,0,0,.35))"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
+}
+function artTile(p, mini) { return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini)}</span>`; }
+function artOn(p) { return !p.image && !p.emoji_id && !p.ae && !p.emoji; }
 
 /* ───────────────────────── rich text (Telegram HTML subset) ───────────────────────── */
 function botText(k) { const T = S.texts || {}; const a = T[isAr() ? 'ar' : 'en'] || {}, b = T.en || {}, c = T.ar || {}; return a[k] || b[k] || c[k] || (typeof T[k] === 'string' ? T[k] : ''); }
