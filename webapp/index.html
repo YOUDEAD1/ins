@@ -3056,6 +3056,25 @@ html[data-page="login"] main {
 :root[data-perf="lite"] .feat{box-shadow:none}
 @media (min-width:700px){.feat{flex-basis:72%}}
 @media (min-width:1100px){.feat{flex-basis:58%}}
+
+/* ═════════ boarding-pass details on wallet, API, profile, sign-in ═════════ */
+.tk-perf{position:relative;height:0;margin:18px -22px 16px;border-top:1.6px dashed color-mix(in srgb,currentColor 30%,transparent);opacity:.9}
+.tk-perf::before,.tk-perf::after{content:"";position:absolute;top:-12px;width:22px;height:22px;border-radius:50%;background:var(--bg);box-shadow:inset 0 0 0 1px var(--line)}
+.tk-perf::before{left:-11px}.tk-perf::after{right:-11px}
+.wal-hero .tk-perf{color:#fff;margin:20px -20px 14px}
+.wal-stub{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 4px}
+.wal-bc{flex:0 0 46%;height:26px;opacity:.85;background:repeating-linear-gradient(90deg,#fff 0 2px,transparent 2px 4px,#fff 4px 5px,transparent 5px 8px,#fff 8px 11px,transparent 11px 12px,#fff 12px 13px,transparent 13px 16px)}
+.wal-pass{display:flex;flex-direction:column;align-items:flex-end;gap:3px;text-align:end}
+.wal-pass b{font:700 10px/1 var(--f-display);letter-spacing:.32em;opacity:.75}
+.wal-pass i{font:600 12px/1 var(--f-mono,ui-monospace,monospace);font-style:normal;letter-spacing:.06em}
+.api-hero .tk-perf{margin:22px -20px 18px;color:var(--fg)}
+.phero .avatar{box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 14%,transparent),0 14px 40px -8px color-mix(in srgb,var(--accent) 70%,transparent)}
+.phero .avatar::after{content:"";position:absolute;inset:-14px;border-radius:50%;border:1.4px dashed color-mix(in srgb,var(--accent-2) 45%,transparent);animation:tkSpin 26s linear infinite;pointer-events:none}
+@keyframes tkSpin{to{transform:rotate(360deg)}}
+.stats3 .stat b{background:linear-gradient(135deg,var(--fg),color-mix(in srgb,var(--accent-2) 80%,var(--fg)));-webkit-background-clip:text;background-clip:text;color:transparent}
+.wl-card{position:relative}
+@media (prefers-reduced-motion: reduce){.phero .avatar::after{animation:none}}
+.wl-card .wf-or::before,.wl-card .wf-or::after{height:1.6px;background:repeating-linear-gradient(90deg,color-mix(in srgb,var(--fg) 22%,transparent) 0 6px,transparent 6px 12px)}
 </style>
 </head>
 <body>
@@ -5723,6 +5742,8 @@ function vWallet() {
         <button class="wact" data-act="hist-jump"><span class="wact-ic">${S.nav.history ? ceH(S.nav.history, ic.list) : ic.list}</span><span>${esc(t('history'))}</span></button>
         <button class="wact" data-act="wallet-refresh"><span class="wact-ic">${slotH('refresh', ic.refresh)}</span><span>${esc(t('refresh'))}</span></button>
       </div>
+      <div class="tk-perf" aria-hidden="true"></div>
+      <div class="wal-stub" aria-hidden="true"><span class="wal-bc"></span><span class="wal-pass"><b>LARA PASS</b><i dir="ltr">${esc(String(u.id || '').replace(/^(\d{4})\d+(\d{4})$/, '$1 •••• $2'))}</i></span></div>
     </section>
     <div class="wal-sums">
       <div><small><i class="dot ok"></i>${esc(t('deposited'))}</small><b class="num">${usd(sums.deposits != null ? sums.deposits : u.deposited || 0)}</b></div>
@@ -6421,6 +6442,7 @@ function vApi() {
       <div class="api-orb">${slot('api', 'key')}</div>
       <h1>${esc(at('title'))}</h1><p>${esc(at('sub'))}</p>
       <div class="api-feats">${[['f1', 'bolt'], ['f2', 'rocket'], ['f3', 'gem'], ['f4', 'sparkles']].map(([k, e]) => `<div class="api-feat">${ae(e)}<span>${esc(at(k))}</span></div>`).join('')}</div>
+      <div class="tk-perf" aria-hidden="true"></div>
       <button class="btn primary full api-cta" data-act="api-gen">${bem('api', ae('key'))}${esc(at('gen'))}</button>
       <p class="api-note">${esc(at('genNote'))}</p>
     </section>
