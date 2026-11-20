@@ -3017,6 +3017,43 @@ html[data-page="login"] main {
   }
   .wl3 .wf-pill, .wl3 .wf-mpill { transition: none !important; }
 }
+
+/* ═════════ store v2: ticket cards + «most wanted» banner ═════════ */
+.feat-w{position:relative;margin:4px 0 22px}
+.feat-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;gap:0;border-radius:28px;filter:drop-shadow(0 18px 34px color-mix(in srgb,var(--c1,#2f8cff) 30%,transparent))}
+.feat-track::-webkit-scrollbar{display:none}
+.feat{position:relative;flex:0 0 100%;scroll-snap-align:center;min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
+  -webkit-mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat;
+  mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat}
+.feat-art{position:absolute;inset:0;z-index:-1}.feat-art svg{width:100%;height:100%;display:block;transition:transform .6s cubic-bezier(.2,.8,.2,1)}
+.feat:hover .feat-art svg{transform:scale(1.04)}
+.feat::after{content:"";position:absolute;inset:0;z-index:-1;background:linear-gradient(90deg,rgba(0,0,0,.30),transparent 55%)}
+:root[dir="rtl"] .feat::after,[dir="rtl"] .feat::after{background:linear-gradient(270deg,rgba(0,0,0,.30),transparent 55%)}
+.feat-in{display:flex;align-items:stretch;justify-content:space-between;gap:14px;height:100%;min-height:178px;padding:20px 20px 18px}
+.feat-main{display:flex;flex-direction:column;align-items:flex-start;gap:7px;min-width:0;flex:1}
+.feat-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 10px 5px 11px;border-radius:99px;background:rgba(255,255,255,.2);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);box-shadow:inset 0 0 0 1px rgba(255,255,255,.28);font-size:11.5px;font-weight:700}
+.feat-badge svg{width:13px;height:13px;color:#FFD66B}
+.feat-name{font:800 clamp(21px,6.3vw,30px)/1.12 var(--f-display);letter-spacing:-.02em;text-shadow:0 3px 18px rgba(0,0,0,.3);overflow-wrap:anywhere}
+.feat-sub{font-size:12.5px;opacity:.92}
+.feat-perks{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:auto;font-size:11.5px;font-weight:600}
+.feat-perks i{display:inline-flex;align-items:center;gap:4px;font-style:normal;opacity:.95}.feat-perks svg{width:13px;height:13px}
+.feat-buy{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;flex:none;padding-inline-start:16px;border-inline-start:1.5px dashed rgba(255,255,255,.4)}
+.feat-buy small{font-size:10.5px;opacity:.8}
+.feat-price{display:flex;flex-direction:column;align-items:center;font:800 26px/1.05 var(--f-display);letter-spacing:-.02em}
+.feat-price s{font:600 12px/1 var(--f-display);opacity:.7}
+.feat-cta{margin-top:9px;padding:10px 16px;border-radius:14px;background:#fff;color:var(--c2,#0f2e8a);font-size:13px;font-weight:800;white-space:nowrap;box-shadow:0 8px 20px -8px rgba(0,0,0,.45);transition:transform .2s}
+.feat:active .feat-cta{transform:scale(.95)}
+.feat-dots{display:flex;justify-content:center;gap:6px;margin-top:12px}
+.feat-dots i{width:6px;height:6px;border-radius:9px;background:color-mix(in srgb,var(--fg) 22%,transparent);transition:width .3s,background .3s}
+.feat-dots i.on{width:20px;background:var(--accent)}
+@media (min-width:700px){.feat,.feat-in{min-height:210px}.feat-in{padding:26px 30px}.feat-price{font-size:32px}}
+/* ticket cards */
+.grid .card .body{position:relative}
+.grid .card .body::before{content:"";position:absolute;top:-1px;left:14px;right:14px;border-top:1.5px dashed color-mix(in srgb,var(--fg) 16%,transparent);pointer-events:none}
+.grid .card .pv{-webkit-mask:radial-gradient(circle 9px at 0 100%,#0000 98%,#000) left/51% 100% no-repeat,radial-gradient(circle 9px at 100% 100%,#0000 98%,#000) right/51% 100% no-repeat;mask:radial-gradient(circle 9px at 0 100%,#0000 98%,#000) left/51% 100% no-repeat,radial-gradient(circle 9px at 100% 100%,#0000 98%,#000) right/51% 100% no-repeat}
+.grid .card .art .art-x{display:none}
+@media (prefers-reduced-motion: reduce){.feat-art svg,.feat-dots i{transition:none}}
+:root[data-perf="lite"] .feat-track{filter:none}
 </style>
 </head>
 <body>
@@ -3766,10 +3803,7 @@ function brandTile(p, small) {
   return `<span class="btile" style="--bh:${h};--len:${Math.max(3, [...word].length)}"><span>${esc(word)}</span></span>`;
 }
 function visualInner(p, small) {
-  if (p.emoji_id) return ceOK(p.emoji_id) ? ceH(p.emoji_id, '<span class="ce-skel"></span>', '', brandTile(p, small)) : brandTile(p, small);
-  if (p.ae) return ae(p.ae);
-  if (p.emoji) return `<span class="ce"><span class="fb" style="font-size:.9em">${esc(p.emoji)}</span></span>`;
-  return artTile(p, true);
+  return artTile(p, !!small);
 }
 function imgSrc(p) {
   const im = window.LARA_DATA && window.LARA_DATA.images && window.LARA_DATA.images[p.id];
@@ -3778,7 +3812,7 @@ function imgSrc(p) {
 }
 function visual(p) {
   if (p.image) {
-    const fb = (p.emoji_id || p.ae || p.emoji) ? `<span class="vis">${visualInner(p)}</span>` : artTile(p);
+    const fb = artTile(p);
     return `<img class="photo" src="${esc(imgSrc(p))}" alt="" loading="lazy" decoding="async" data-fb="${esc(fb)}">`;
   }
   if (artOn(p)) return artTile(p);
@@ -3835,36 +3869,115 @@ function artParse(p) {
   let tier = rest.join(' '); if ([...tier].length > 22) tier = rest.slice(0, 2).join(' ');
   return { brand, tier, dur };
 }
-function artSVG(p, mini) {
-  const { brand, tier, dur } = artParse(p);
-  const key = brand.toLowerCase().replace(/[^a-z0-9؀-ۿ]/g, '');
-  let full = ((p.name_en || '') + ' ' + (p.name_ar || '')).toLowerCase();
+function artLook(p) {
+  const pr = artParse(p);
+  const key = pr.brand.toLowerCase().replace(/[^a-z0-9؀-ۿ]/g, '');
+  let full = ((p.name_en || '') + ' ' + (p.name_ar || '') + ' ' + (p.name || '')).toLowerCase();
   for (const [a, b] of ART_AR) if (full.includes(a)) full += ' ' + b;
   let col = ART_C[key];
   if (!col) for (const k in ART_C) if (k.length > 2 && full.includes(k)) { col = ART_C[k]; break; }
   if (!col) { const h = brandHue(p); col = [`hsl(${h} 82% 55%)`, `hsl(${(h + 32) % 360} 72% 24%)`]; }
   let mot = 'orbit'; for (const [re, k] of ART_M) if (re.test(full)) { mot = k; break; }
-  const R = artSeed(full || brand), id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;
-  const ang = r(R() * 40 - 20), gx = r(20 + R() * 60), gy = r(R() * 30);
-  const stars = mini ? '' : Array.from({ length: 4 }, () => { const x = r(20 + R() * 260), y = r(14 + R() * 70), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .5)}"/>`; }).join('');
-  const defs = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(${ang} .5 .5)"><stop offset="0" stop-color="${col[0]}"/><stop offset="1" stop-color="${col[1]}"/></linearGradient><radialGradient id="${id}r" cx="${gx}%" cy="${gy}%" r="75%"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></radialGradient><pattern id="${id}d" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="#fff" opacity=".16"/></pattern><linearGradient id="${id}v" x1="0" y1="0" x2="0" y2="1"><stop offset=".45" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".38"/></linearGradient></defs>`;
-  const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>`;
+  return Object.assign(pr, { col, mot, full });
+}
+const AR_RE = /[؀-ۿ]/;
+function artBg(id, L, R, W, H, rich) {
+  const r = n => Math.round(n * 10) / 10;
+  const ang = r(R() * 40 - 20), gx = r(15 + R() * 70), gy = r(R() * 30), bx = r(55 + R() * 40), by = r(60 + R() * 40);
+  return { defs: `<linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(${ang} .5 .5)"><stop offset="0" stop-color="${L.col[0]}"/><stop offset="1" stop-color="${L.col[1]}"/></linearGradient>` +
+    `<radialGradient id="${id}r" cx="${gx}%" cy="${gy}%" r="75%"><stop offset="0" stop-color="#fff" stop-opacity=".45"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></radialGradient>` +
+    `<radialGradient id="${id}b" cx="${bx}%" cy="${by}%" r="60%"><stop offset="0" stop-color="${L.col[0]}" stop-opacity=".9"/><stop offset="1" stop-color="${L.col[0]}" stop-opacity="0"/></radialGradient>` +
+    `<linearGradient id="${id}f" x1="0" y1="0" x2="1" y2="0" gradientTransform="rotate(35 .5 .5)"><stop offset=".3" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#9ff" stop-opacity=".13"/><stop offset=".56" stop-color="#f9f" stop-opacity=".1"/><stop offset=".72" stop-color="#fff" stop-opacity="0"/></linearGradient>` +
+    `<pattern id="${id}d" width="12" height="12" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="#fff" opacity=".15"/></pattern>` +
+    `<linearGradient id="${id}v" x1="0" y1="0" x2="0" y2="1"><stop offset=".45" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".4"/></linearGradient>`,
+    body: `<rect width="${W}" height="${H}" fill="url(#${id}g)"/><rect width="${W}" height="${H}" fill="url(#${id}b)" opacity=".55"/><rect width="${W}" height="${H}" fill="url(#${id}d)"/><rect width="${W}" height="${H}" fill="url(#${id}r)"/>` + (rich ? `<rect width="${W}" height="${H}" fill="url(#${id}f)"/>` : '') };
+}
+function artStars(R, n, W, H) {
+  const r = v => Math.round(v * 10) / 10;
+  return Array.from({ length: n }, () => { const x = r(16 + R() * (W - 32)), y = r(12 + R() * H), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .55)}"/>`; }).join('');
+}
+function artSVG(p, mini) {
+  const L = artLook(p), { brand, tier, dur } = L;
+  const R = artSeed(L.full || brand), id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;
+  const B = artBg(id, L, R, 300, 264, !mini);
+  const ch = [...brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
   if (mini) {
-    const ch = [...brand][0] || '?';
-    return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<g class="mot" opacity=".2" transform="translate(120 100) scale(.75)">${ART_G[mot]}</g><text x="150" y="132" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(ch.toUpperCase())}</text></svg>`;
+    return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs>${B.defs}</defs>${B.body}<g opacity=".2" transform="translate(120 100) scale(.75)">${ART_G[L.mot]}</g><text x="150" y="132" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></svg>`;
   }
-  const L = Math.max(2, [...brand].length), ar = /[؀-ۿ]/.test(brand);
-  let fs = Math.min(66, Math.max(26, 236 / (L * (ar ? .52 : .74))));
-  const fit = L * fs * (ar ? .52 : .74) > 246 ? ` textLength="246" lengthAdjust="spacingAndGlyphs"` : '';
-  const wy = tier ? 112 : 124;
-  const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(250, tl * 9.4 + 34); return `<g transform="translate(150 ${wy + fs * .5 + 22})"><rect x="${-tw / 2}" y="-15" width="${tw}" height="30" rx="15" fill="#fff" fill-opacity=".16" stroke="#fff" stroke-opacity=".32"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="13.5" font-weight="700" letter-spacing="${/[؀-ۿ]/.test(tier) ? 0 : 1.6}" style="font-family:var(--f-display)"${tl > 24 ? ' textLength="230" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(/[؀-ۿ]/.test(tier) ? tier : tier.toUpperCase())}</text></g>`; })() : '';
-  const stub = `<line x1="16" y1="222" x2="284" y2="222" stroke="#fff" stroke-opacity=".38" stroke-width="1.6" stroke-dasharray="6 6"/><circle cx="0" cy="222" r="9" fill="#000" fill-opacity=".28"/><circle cx="300" cy="222" r="9" fill="#000" fill-opacity=".28"/>` +
-    `<text x="150" y="245" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .95 : .55}" font-size="${dur ? 13 : 10.5}" font-weight="700" letter-spacing="${dur && /[؀-ۿ]/.test(dur) ? 0 : 2.2}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
-  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<g class="mot" opacity=".15" transform="translate(${r(150 + R() * 40)} ${r(40 + R() * 30)}) rotate(${r(R() * 24 - 12)}) scale(${r(.85 + R() * .3)})">${ART_G[mot]}</g>${stars}<rect width="300" height="264" fill="url(#${id}v)"/>` +
-    `<text class="wm" x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1}" style="font-family:var(--f-display);filter:drop-shadow(0 4px 14px rgba(0,0,0,.35))"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
+  const echo = `<text x="${r(205 + R() * 40)}" y="${r(150 + R() * 30)}" text-anchor="middle" dominant-baseline="central" fill="none" stroke="#fff" stroke-opacity=".13" stroke-width="2" font-size="300" font-weight="800" transform="rotate(${r(R() * 16 - 8)} 220 160)" style="font-family:var(--f-display)">${esc(chU)}</text>`;
+  const Ln = Math.max(2, [...brand].length), ar = AR_RE.test(brand);
+  const fs = Math.min(66, Math.max(26, 236 / (Ln * (ar ? .52 : .74))));
+  const fit = Ln * fs * (ar ? .52 : .74) > 246 ? ` textLength="246" lengthAdjust="spacingAndGlyphs"` : '';
+  const wy = tier ? 110 : 122;
+  const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(250, tl * 9.4 + 34), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 22)})"><rect x="${-tw / 2}" y="-15" width="${tw}" height="30" rx="15" fill="#fff" fill-opacity=".16" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="13.5" font-weight="700" letter-spacing="${ta ? 0 : 1.6}" style="font-family:var(--f-display)"${tl > 24 ? ' textLength="230" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
+  const stub = `<line x1="16" y1="222" x2="284" y2="222" stroke="#fff" stroke-opacity=".38" stroke-width="1.6" stroke-dasharray="6 6"/>` +
+    `<text x="150" y="245" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .95 : .6}" font-size="${dur ? 13 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.2}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
+  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs>${B.defs}</defs>${B.body}${echo}<g opacity=".14" transform="translate(${r(150 + R() * 40)} ${r(40 + R() * 30)}) rotate(${r(R() * 24 - 12)}) scale(${r(.85 + R() * .3)})">${ART_G[L.mot]}</g>${artStars(R, 4, 300, 80)}<rect width="300" height="264" fill="url(#${id}v)"/>` +
+    `<text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1}" style="font-family:var(--f-display);filter:drop-shadow(0 4px 14px rgba(0,0,0,.35))"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
+}
+/* wide cover for the «most wanted» banner: background + motif + big echo; text is real HTML on top */
+function artBannerSVG(p) {
+  const L = artLook(p), R = artSeed('banner' + (L.full || L.brand)), id = 'lb' + (++ART_N), r = n => Math.round(n * 10) / 10;
+  const B = artBg(id, L, R, 640, 300, true);
+  const ch = [...L.brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
+  return `<svg viewBox="0 0 640 300" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs>${B.defs}</defs>${B.body}` +
+    `<text x="${r(90 + R() * 60)}" y="170" text-anchor="middle" dominant-baseline="central" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="2.4" font-size="360" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text>` +
+    `<g opacity=".16" transform="translate(${r(20 + R() * 40)} ${r(30 + R() * 30)}) rotate(${r(R() * 20 - 10)}) scale(1.05)">${ART_G[L.mot]}</g>${artStars(R, 7, 640, 300)}` +
+    `<path d="M-20 260 C 160 200, 300 120, 660 40" fill="none" stroke="#fff" stroke-opacity=".28" stroke-width="1.6" stroke-dasharray="5 8"/></svg>`;
 }
 function artTile(p, mini) { return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini)}</span>`; }
-function artOn(p) { return !p.image && !p.emoji_id && !p.ae && !p.emoji; }
+function artOn(p) { return !p.image; }
+
+/* ───────────────────────── «most wanted» banner (top sellers, auto art) ───────────────────────── */
+Object.assign(I.ar, { featTop: 'الأكثر طلباً', featPick: 'مختار لك', featBuy: 'اشترِ الآن', featAuto: 'تسليم آلي', featSafe: 'ضمان استبدال', featInstant: 'يوصلك فوراً', featFrom: 'السعر' });
+Object.assign(I.en, { featTop: 'Most wanted', featPick: 'Picked for you', featBuy: 'Buy now', featAuto: 'Auto delivery', featSafe: 'Replacement guarantee', featInstant: 'Delivered instantly', featFrom: 'Price' });
+const FEAT_IC = {
+  star: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>',
+  bolt: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 3 5 13.5h6L10 21l9-11h-6z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>' };
+function featList() {
+  const ok = p => p && p.in_stock && !p.hidden;
+  let top = true, list = (S.top || []).map(id => findP(id)).filter(ok);
+  if (!list.length) { top = false; list = S.products.filter(ok).slice().sort((a, b) => b.price - a.price).slice(0, 3); }
+  return { list: list.slice(0, 5), top };
+}
+function featHtml() {
+  if (S.cat !== 'all' || S.q.trim()) return '';
+  const { list, top } = featList(); if (!list.length) return '';
+  const slides = list.map((p, i) => {
+    const L = artLook(p), name = L.brand + (L.tier ? ' ' + L.tier : '');
+    const price = vipUnit(p, p.price);
+    return `<button class="feat" data-act="product" data-v="${esc(p.id)}" style="--c1:${L.col[0]};--c2:${L.col[1]}" aria-label="${esc(nm(p))}">
+      <span class="feat-art" aria-hidden="true">${artBannerSVG(p)}</span>
+      <span class="feat-in">
+        <span class="feat-main">
+          <span class="feat-badge">${FEAT_IC.star}${esc(t(top ? 'featTop' : 'featPick'))}${top && i === 0 ? ' #1' : ''}</span>
+          <b class="feat-name" dir="auto">${esc(name)}</b>
+          <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
+          <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
+        </span>
+        <span class="feat-buy"><small>${esc(t('featFrom'))}</small><span class="feat-price num">${price < p.price ? `<s>${usd(p.price)}</s>` : ''}${usd(price)}</span><span class="feat-cta">${esc(t('featBuy'))}</span></span>
+      </span></button>`;
+  }).join('');
+  const dots = list.length > 1 ? `<div class="feat-dots">${list.map((_, i) => `<i class="${i ? '' : 'on'}"></i>`).join('')}</div>` : '';
+  return `<div class="feat-w"><div class="feat-track" id="feat">${slides}</div>${dots}</div>`;
+}
+(function featWire() {
+  let timer = null, idle = 0;
+  const step = () => {
+    const tr = document.getElementById('feat'); if (!tr || document.hidden) return;
+    if (Date.now() - idle < 7000 || tr.children.length < 2) return;
+    const w = tr.clientWidth, n = tr.children.length, cur = Math.round(Math.abs(tr.scrollLeft) / w);
+    const next = (cur + 1) % n; tr.scrollTo({ left: (isRtl(LANG) ? -1 : 1) * next * w, behavior: 'smooth' });
+  };
+  document.addEventListener('scroll', e => {
+    const tr = e.target; if (!tr || tr.id !== 'feat') return;
+    const i = Math.round(Math.abs(tr.scrollLeft) / Math.max(1, tr.clientWidth));
+    tr.parentElement.querySelectorAll('.feat-dots i').forEach((d, k) => d.classList.toggle('on', k === i));
+  }, true);
+  ['pointerdown', 'touchstart', 'wheel'].forEach(ev => document.addEventListener(ev, e => { if (e.target.closest && e.target.closest('#feat')) idle = Date.now(); }, { passive: true, capture: true }));
+  if (!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) timer = setInterval(step, 5200);
+})();
 
 /* ───────────────────────── rich text (Telegram HTML subset) ───────────────────────── */
 function botText(k) { const T = S.texts || {}; const a = T[isAr() ? 'ar' : 'en'] || {}, b = T.en || {}, c = T.ar || {}; return a[k] || b[k] || c[k] || (typeof T[k] === 'string' ? T[k] : ''); }
@@ -5008,7 +5121,7 @@ function resultsHtml() {
   const R = S.sr;
   const note = R && R.corrected && list.length ? `<div class="sr-note">${ic.search}<span>${esc(t('srFixed', { q: S.q.trim(), c: R.corrected }))}</span></div>` : '';
   const sug = R && !list.length && (R.suggest || []).length ? `<div class="sr-dym"><span>${esc(t('srDym'))}</span>${R.suggest.map(w => `<button class="chip" data-act="sq" data-v="${esc(w)}" dir="auto">${esc(w)}</button>`).join('')}</div>` : '';
-  return `<div class="section-row"><h2>${esc(title)}</h2><span class="count">${esc(t('products', { n: list.length }))} · ${esc(sortLbl)}</span></div>
+  return `${featHtml()}<div class="section-row"><h2>${esc(title)}</h2><span class="count">${esc(t('products', { n: list.length }))} · ${esc(sortLbl)}</span></div>
     ${note}${list.length ? `<div class="grid" id="grid">${list.slice(0, StoreRender.shown).map((p, i) => card(p, i)).join('')}</div>${StoreRender.shown < list.length ? `<div class="products-next" id="products-more"><button class="btn ghost sm" data-act="products-more">${esc(moreProductsLabel())}</button></div>` : ''}` :
       `<div class="empty">${ae('search')}<h3>${esc(t('noMatch'))}</h3><p>${esc(t(S.onlyStock && S.q.trim() ? 'srNoStock' : 'noMatchBody'))}</p>${sug}<button class="btn ghost sm" data-act="clear">${esc(t('clear'))}</button></div>`}`;
 }
@@ -5074,7 +5187,7 @@ function card(p, i) {
   const oos = !p.in_stock;
   const kindIc = p.kind === 'cgpt' || p.kind === 'seat' ? ic.mail : p.manual ? ic.hand : ic.bolt;
   return `<button class="card ${oos ? 'oos' : ''}" data-act="product" data-v="${esc(p.id)}" style="--h:${brandHue(p)};animation-delay:${Math.min(i, 10) * 35}ms" aria-label="${esc(nm(p))}">
-    <span class="pv ${oos ? 'is-oos' : ''}${p.image ? '' : ecCls(p.emoji_id)}"${p.image ? '' : ecAttrs(p.emoji_id)}>${p.image || !p.emoji_id ? '' : '<span class="pv-bg" aria-hidden="true"></span>'}${visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
+    <span class="pv ${oos ? 'is-oos' : ''}">${visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
       ${oos ? `<span class="xmark" aria-hidden="true"><i></i></span><span class="oos-tag">${esc(t('outOfStock'))}</span>` : ''}
       ${p.hidden ? `<span class="pill hid">${esc(t('hiddenTag'))}</span>` : ''}</span>
     <span class="body"><span class="name">${esc(nm(p))}</span>
@@ -5173,7 +5286,7 @@ function renderProduct(sh, p, st, onlyDyn) {
 
   if (!onlyDyn) {
     sh.title(nm(p)).body(`
-      <div class="pv hero-vis ${oos ? 'is-oos' : ''}${p.image ? '' : ecCls(p.emoji_id)}"${p.image ? ` style="--h:${brandHue(p)}"` : ecAttrs(p.emoji_id, `--h:${brandHue(p)}`)}>${p.image || !p.emoji_id ? '' : '<span class="pv-bg" aria-hidden="true"></span>'}${visual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
+      <div class="pv hero-vis ${oos ? 'is-oos' : ''}" style="--h:${brandHue(p)}">${visual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
       <div class="tags">${tags.join('')}${WEB ? `<button class="tag p-share" data-act="p-share" aria-label="${esc(t('shareProd'))}">${ic.share}${esc(t('shareProd'))}</button>` : ''}</div>
       ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : ''}` : ''}
       ${durs}${email}
@@ -6474,7 +6587,7 @@ async function openApiProducts() {
     if (!items) { sh.body(`<div class="list">${'<div class="skel" style="height:58px"></div>'.repeat(5)}</div>`); return; }
     const list = items.filter(p => !q || p.name.toLowerCase().includes(q));
     const box = sh.el.querySelector('#apl');
-    const html = list.map(p => `<button class="apl-row ${p.hidden ? 'off' : ''}" data-act="api-tg" data-v="${esc(p.id)}"><span class="apl-ic">${p.emoji_id ? ceH(p.emoji_id, brandTile({ name_en: p.name }, true), '', brandTile({ name_en: p.name }, true)) : brandTile({ name_en: p.name }, true)}</span><span class="meta"><b dir="auto">${esc(p.name)}</b><small>${usd(p.price)} · ${esc(p.manual ? at('manual') : at('instant'))}</small></span><span class="sw ${p.hidden ? '' : 'on'}" aria-label="${esc(p.hidden ? at('hidden') : at('visible'))}"></span></button>`).join('');
+    const html = list.map(p => `<button class="apl-row ${p.hidden ? 'off' : ''}" data-act="api-tg" data-v="${esc(p.id)}"><span class="apl-ic">${artTile({ name_en: p.name }, true)}</span><span class="meta"><b dir="auto">${esc(p.name)}</b><small>${usd(p.price)} · ${esc(p.manual ? at('manual') : at('instant'))}</small></span><span class="sw ${p.hidden ? '' : 'on'}" aria-label="${esc(p.hidden ? at('hidden') : at('visible'))}"></span></button>`).join('');
     if (box) { box.innerHTML = html; hydrate(box); return; }
     sh.body(`<label class="search">${ic.search}<input type="search" placeholder="${esc(at('search'))}" data-in="apq" value="${esc(q)}"></label><div class="apl" id="apl">${html}</div>`);
   };
@@ -7910,7 +8023,7 @@ function refreshCatalog() {
     const r = await api('catalog', {catalog_version: S.catalogVersion || ''});
     if (r.ok) {
       S.catalogVersion = r.catalog_version || '';
-      if (!r.not_modified) { S.products = r.products || []; S.catalogs = r.catalogs || []; }
+      if (!r.not_modified) { S.products = r.products || []; S.catalogs = r.catalogs || []; S.top = r.top || []; }
       if (S.tab === 'store' && (!r.not_modified || previousVip !== JSON.stringify(S.vip || null))) updateStore(true);
     }
     return r;
@@ -8120,7 +8233,7 @@ async function boot() {
   if (S.user && r.user && S.user.id !== r.user.id) Object.assign(S, { api: null, apiDocs: null, cgpt: null, orders: null, wallet: null, refs: null, adm: null, admRes: null, openOrder: null });
   S.user = r.user; S.cartEnabled = r.cart_enabled !== false; cartLoad(); S.vip = r.vip || null; S.store = r.store || {}; S.deposit = r.deposit || { methods: [] }; S.nav = r.nav || {}; S.texts = r.texts || {}; S.forced = r.forced;
   adminFastReset(r);
-  S.catalogVersion = r.catalog_version || ''; S.catalogs = r.catalogs || []; S.products = r.products || []; S.pending = r.pending; S.locked = r.locked;
+  S.catalogVersion = r.catalog_version || ''; S.catalogs = r.catalogs || []; S.products = r.products || []; S.top = r.top || []; S.pending = r.pending; S.locked = r.locked;
   S.offset = r.server_time ? r.server_time - Date.now() / 1000 : 0;
   lastCat = Date.now();
   const saved = store.get('lang', null);

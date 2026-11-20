@@ -2527,6 +2527,9 @@ def _api_purchase_external(uid, product_id, qty, buyer_info='', idempotency_key=
     store = db.ext_stores.find_one({'_id': store['_id']}) or store
     unit = float(ep.get('sell_price', ep.get('base_price', 0)) or 0)
     total = round(unit * qty, 2)
+    if math.isfinite(total) and unit > 0:
+        _ext_vq = vip_quote(uid, f"ext_{ep.get('_id')}", unit, qty)   # 👑 خصم VIP للمطورين أيضاً
+        unit, total = _ext_vq['unit'], _ext_vq['total']
     if not math.isfinite(total) or unit < 0:
         return 503, {'error': 'Product price is invalid', 'charged': False}
     order = {'_id': reference, 'order_id': reference, 'api_user_id': uid,
@@ -3101,7 +3104,8 @@ class APIHandler(BaseHTTPRequestHandler):
                         'message': 'This is a ChatGPT Business seat. Send the buyer email in the "email" field so we can invite them.',
                         'example': {'product_id': product_id, 'email': 'buyer@example.com'}
                     })
-                cg_price = float(dur.get('price', 0))
+                _cg_vq = vip_quote(uid, f"cgpt_{_cgid}", float(dur.get('price', 0)))
+                cg_price = _cg_vq['total']
                 cg_minutes = int(dur.get('minutes', 0))
                 # نفحص المقاعd المتاحة
                 try:
@@ -3195,7 +3199,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 if qty >= t.get('min_qty', 0):
                     purchase_unit = float(t.get('price', store_price))
                     break
-            total = round(purchase_unit * qty, 2)
+            # 👑 خصم VIP يشمل مشتريات المطورين عبر الـ API (نفس منطق المتجر)
+            _api_vq = vip_quote(uid, pid, purchase_unit, qty)
+            total = _api_vq['total']
+            purchase_unit = _api_vq['unit']
             # sell_price المقفول للـ response فقط (ما يؤثر على الخصم من رصيده)
             unit = float(cp_doc.get('sell_price', store_price))
 
@@ -3210,6 +3217,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 )
                 if not updated:
                     return _json_resp(self, 402, {'error': 'Insufficient balance', 'required': total})
+                vip_log_discount(uid, pid, _api_vq, 'api', order_id)
                 db.api_orders.insert_one({'order_id': order_id, 'api_user_id': uid, 'product_id': pid, 'product_name': pr.get('name_en', pr.get('name_ar', '')), 'qty': qty, 'total_price': total, 'codes': [], 'buyer_info': buyer_info, 'status': 'pending_manual'})
                 db.orders.insert_one({'user_id': uid, 'product_id': pid, 'code_delivered': f"API: {order_id}", 'qty': qty, 'total_price': total, 'via_api': True, **_order_cost(pid, qty)})
                 # 📢 لوق القناة
@@ -3259,6 +3267,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     'qty': qty,
                     'unit_price': unit,
                     'total_price': total,
+                    'vip_level': _api_vq['level'], 'vip_discount_pct': _api_vq['pct'], 'vip_saved': _api_vq['saved'],
                     'new_balance': round(updated.get('balance', 0), 2),
                     'note': 'Manual product — admin will deliver soon'
                 })
@@ -3285,6 +3294,7 @@ class APIHandler(BaseHTTPRequestHandler):
             if not updated:
                 db.product_stock.update_many({'reservation_id': res_id}, {'$set': {'is_sold': False}, '$unset': {'reservation_id': ''}})
                 return _json_resp(self, 402, {'error': 'Insufficient balance'})
+            vip_log_discount(uid, pid, _api_vq, 'api', order_id)
 
             codes = []
             try:
@@ -3385,6 +3395,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 'qty': qty,
                 'unit_price': unit,
                 'total_price': total,
+                'vip_level': _api_vq['level'], 'vip_discount_pct': _api_vq['pct'], 'vip_saved': _api_vq['saved'],
                 'codes': codes,
                 'codes_count': len(codes),
                 'new_balance': round(updated.get('balance', 0), 2)
@@ -34841,7 +34852,33 @@ def _wa_build_catalog_uncached(include_hidden):
         cat_out = [c for c in cat_out if not c['hidden'] and c['count'] > 0]
     # المتوفر أولاً ثم غير المتوفر — وكل قسم أبجدي A → Z
     items.sort(key=lambda x: (not x.get('in_stock'), (x.get('name_en') or x.get('name_ar') or '').strip().lower()))
-    return {'catalogs': cat_out, 'products': items, 'cgpt_seats': seats}
+    return {'catalogs': cat_out, 'products': items, 'cgpt_seats': seats, 'top': _wa_top_sellers(items)}
+
+
+def _wa_top_sellers(items, limit=6):
+    """🔥 الأكثر طلباً: أكثر المنتجات مبيعاً في آخر الطلبات (للبانر في المتجر)."""
+    try:
+        ids = {str(p['id']): p for p in items if p.get('in_stock') and not p.get('hidden')}
+        if not ids:
+            return []
+        out = []
+        for row in db.orders.aggregate([
+                {'$sort': {'_id': -1}}, {'$limit': 4000},
+                {'$group': {'_id': '$product_id', 'n': {'$sum': {'$ifNull': ['$qty', 1]}}}},
+                {'$sort': {'n': -1}}, {'$limit': 40}]):
+            raw = row.get('_id')
+            if raw is None:
+                continue
+            for k in (str(raw), _wa_norm_id(raw)):
+                if k in ids and k not in out:
+                    out.append(k)
+                    break
+            if len(out) >= limit:
+                break
+        return out
+    except Exception as e:
+        logger.debug(f"top sellers err: {e}")
+        return []
 
 
 # ─────────────────────────── المستخدم والإعدادات ───────────────────────────
@@ -35044,7 +35081,7 @@ def _wa_bootstrap(identity, body):
         'deposit': {'methods': methods, 'protection': bool(is_amount_protection_enabled())},
         'nav': nav, 'texts': _wa_texts(), 'vip': _wa_vip_view(uid, u),
         'forced': _wa_forced_info(uid),
-        'catalogs': cat['catalogs'], 'products': cat['products'],
+        'catalogs': cat['catalogs'], 'products': cat['products'], 'top': cat.get('top') or [],
         'catalog_version': _net_catalog_version(cat),
         'pending': _wa_pending_view(uid), 'locked': bool(locked),
         'verify': ref_dv_pending_for(uid),
@@ -35060,7 +35097,7 @@ def _wa_catalog_ep(identity, body):
     if body.get('catalog_version') == version:
         data['not_modified'] = True
     else:
-        data.update(catalogs=cat['catalogs'], products=cat['products'])
+        data.update(catalogs=cat['catalogs'], products=cat['products'], top=cat.get('top') or [])
     return 200, data
 
 
@@ -39019,7 +39056,7 @@ def _web_guest(handler, body):
     return 200, {'ok': True, 'guest': True, 'web': True, 'langs': site_langs,
                  'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(), 'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
                  'deposit': {'methods': [], 'protection': False}, 'nav': nav, 'texts': _wa_texts(), 'vip': {'enabled': False},
-                 'forced': None, 'catalogs': cat['catalogs'], 'products': cat['products'],
+                 'forced': None, 'catalogs': cat['catalogs'], 'products': cat['products'], 'top': cat.get('top') or [],
                  'catalog_version': _net_catalog_version(cat), 'pending': None, 'locked': False, 'verify': False,
                  'server_time': int(time.time()), 'cart_enabled': _cart_enabled(), 'auth': _web_auth_options()}
 
@@ -44329,9 +44366,36 @@ def _net_products_put(uid, data, generation):
         entries[uid] = {'data': data, 'expires': now + 30, 'bytes': size}
 
 
+def _api_with_vip(uid, result):
+    """👑 يضيف سعر VIP لكل منتج في رد /products — المطوّر يشوف السعر اللي بيندفع فعلاً."""
+    try:
+        u = get_user_data_full(uid) or {}
+        st = vip_state(uid, u)
+        if not (st.get('enabled') and st.get('level', 0) > 0 and not st.get('banned')):
+            return result
+        out = []
+        for p in result.get('products') or []:
+            p = dict(p)
+            pid = str(p.get('id', ''))
+            key = ('cgpt_' + pid[5:].partition('_')[0]) if pid.startswith('cgpt_') else pid
+            try:
+                q = vip_quote(uid, key, float(p.get('store_price') or 0), 1, u)
+            except Exception:
+                q = None
+            if q and q.get('bp'):
+                p['vip_price'] = q['unit']
+                p['vip_discount_pct'] = q['pct']
+            out.append(p)
+        return dict(result, products=out, vip_level=st['level'])
+    except Exception as e:
+        logger.debug(f"api vip decorate failed: {e}")
+        return result
+
+
 def _net_api_products_response(handler, uid):
     handler._net_origin = 'api_products:customer_' + str(int(uid)) + ':200'
     result = _net_api_products_payload(uid)
+    result = _api_with_vip(uid, result)
     encoded = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()
     tag = 'W/"' + hashlib.sha256(str(uid).encode() + b':' + encoded).hexdigest()[:40] + '"'
     handler._net_etag = tag
