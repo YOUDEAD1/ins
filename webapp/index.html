@@ -783,9 +783,9 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 @keyframes skel{50%{opacity:.4}}
 @media (prefers-reduced-motion: reduce){.btile::after,.ce-skel{animation:none}}
 .art{position:absolute;inset:0;display:block;overflow:hidden;z-index:0}
-.art svg{width:100%;height:100%;display:block;transition:transform .45s cubic-bezier(.2,.8,.2,1)}
-.card:hover .art svg{transform:scale(1.045)}
-.art::after{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 38%,rgba(255,255,255,.2) 50%,transparent 62%);transform:translateX(-120%);animation:btShine 5.6s ease-in-out infinite;pointer-events:none}
+.art svg{width:100%;height:100%;display:block}
+
+.art::after{content:none}
 .card:nth-child(3n+1) .art::after{animation-delay:1.4s}.card:nth-child(3n+2) .art::after{animation-delay:2.9s}
 .art.mini::after,.hero-vis .art::after{display:none}
 .pv.is-oos .art{filter:grayscale(1) brightness(.55)}
@@ -3022,11 +3022,11 @@ html[data-page="login"] main {
 .feat-w{position:relative;margin:4px 0 22px}
 .feat-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;gap:12px;overscroll-behavior-x:contain;padding-bottom:14px;margin-bottom:-14px}
 .feat-track::-webkit-scrollbar{display:none}
-.feat{position:relative;flex:0 0 88%;scroll-snap-align:start;box-shadow:0 16px 30px -18px var(--c1,#2f8cff);min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
+.feat{position:relative;flex:0 0 88%;scroll-snap-align:start;min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
   -webkit-mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat;
   mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat}
 .feat-art{position:absolute;inset:0;z-index:-1}.feat-art svg{width:100%;height:100%;display:block;transition:transform .6s cubic-bezier(.2,.8,.2,1)}
-.feat:hover .feat-art svg{transform:scale(1.04)}
+
 .feat::after{content:"";position:absolute;inset:0;z-index:-1;background:linear-gradient(90deg,rgba(0,0,0,.30),transparent 55%)}
 :root[dir="rtl"] .feat::after,[dir="rtl"] .feat::after{background:linear-gradient(270deg,rgba(0,0,0,.30),transparent 55%)}
 .feat-in{display:flex;align-items:stretch;justify-content:space-between;gap:14px;height:100%;min-height:178px;padding:20px 20px 18px}
@@ -3110,17 +3110,18 @@ html[data-page="login"] main {
   body{padding-bottom:24px}
 }
 
-.art-logo{position:absolute;left:50%;top:17%;width:30%;aspect-ratio:1;transform:translateX(-50%);display:grid;place-items:center;filter:drop-shadow(0 8px 18px rgba(0,0,0,.35));pointer-events:none}
+.art-logo{position:absolute;left:50%;top:17%;width:30%;aspect-ratio:1;transform:translateX(-50%);display:grid;place-items:center;pointer-events:none}
 .art-logo .ce,.art-logo .ce>*{width:100%!important;height:100%!important}
 .art.mini .art-logo{top:14%;width:72%}
 .feat-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.feat-logo{display:inline-grid;width:1.25em;height:1.25em;flex:none;filter:drop-shadow(0 4px 10px rgba(0,0,0,.3))}.feat-logo .ce,.feat-logo .ce>*{width:100%!important;height:100%!important}
+.feat-logo{display:inline-grid;width:1.25em;height:1.25em;flex:none}.feat-logo .ce,.feat-logo .ce>*{width:100%!important;height:100%!important}
 .section-row.all-row{margin-top:8px;padding-top:18px;border-top:1.5px dashed color-mix(in srgb,var(--fg) 12%,transparent)}
 .card .body .name{overflow-wrap:anywhere}
 .art{display:block!important}
 .art>svg{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;position:static!important}
 .thumb>.art,.cart-thumb>.art,.apl-ic>.art{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;margin:0!important;border-radius:inherit}
 .apl-ic{position:relative;overflow:hidden}
+.art{contain:strict}.card .pv{contain:paint}
 </style>
 </head>
 <body>
@@ -3984,7 +3985,7 @@ function artSVG(p, mini, logo) {
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
     `<text x="150" y="244" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .96 : .6}" font-size="${dur ? 14 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.4}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
   return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect width="300" height="264" fill="url(#${id}v)"/>` +
-    `<text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display);filter:drop-shadow(0 4px 14px rgba(0,0,0,.32))"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
+    `<text x="150" y="${wy + 3}" text-anchor="middle" dominant-baseline="central" fill="#000" fill-opacity=".22" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text><text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
 }
 /* wide cover for the «most wanted» banner: background + motif + big echo; text is real HTML on top */
 function artBannerSVG(p) {
@@ -5192,9 +5193,10 @@ function chipsHtml() {
 
 /* ───────── store grouped by folder (tidy shelves) ───────── */
 Object.assign(I.ar, { seeAll: 'عرض الكل', allProducts: 'كل المنتجات' }); Object.assign(I.en, { seeAll: 'See all', allProducts: 'All products' });
+function shelfN() { const w = window.innerWidth || 390; return w < 700 ? 4 : w < 1100 ? 6 : 10; }
 function sectionsHtml(list) {
   const { cats } = catList(); const out = []; const seen = new Set();
-  const shelf = (key, icon, title, items) => `<section class="psec"><div class="psec-h"><h2><span class="psec-ic">${icon}</span><span>${esc(title)}</span><i class="psec-n num">${items.length}</i></h2>${key ? `<button class="psec-all" data-act="cat" data-v="${esc(key)}">${esc(t('seeAll'))}${ic.chev}</button>` : ''}</div><div class="grid psec-grid">${items.slice(0, 10).map((p, i) => card(p, i)).join('')}</div></section>`;
+  const shelf = (key, icon, title, items) => `<section class="psec"><div class="psec-h"><h2><span class="psec-ic">${icon}</span><span>${esc(title)}</span><i class="psec-n num">${items.length}</i></h2>${key ? `<button class="psec-all" data-act="cat" data-v="${esc(key)}">${esc(t('seeAll'))}${ic.chev}</button>` : ''}</div><div class="grid psec-grid">${items.slice(0, shelfN()).map((p, i) => card(p, i)).join('')}</div></section>`;
   const sorted = cats.slice().sort((a, b) => b.n - a.n);
   for (const c of sorted) {
     const items = list.filter(p => (p.cats || []).includes(c.id)); if (!items.length) continue;
