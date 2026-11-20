@@ -3020,9 +3020,9 @@ html[data-page="login"] main {
 
 /* ═════════ store v2: ticket cards + «most wanted» banner ═════════ */
 .feat-w{position:relative;margin:4px 0 22px}
-.feat-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;gap:0;border-radius:28px;filter:drop-shadow(0 18px 34px color-mix(in srgb,var(--c1,#2f8cff) 30%,transparent))}
+.feat-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;gap:12px;overscroll-behavior-x:contain;padding-bottom:14px;margin-bottom:-14px}
 .feat-track::-webkit-scrollbar{display:none}
-.feat{position:relative;flex:0 0 100%;scroll-snap-align:center;min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
+.feat{position:relative;flex:0 0 88%;scroll-snap-align:start;box-shadow:0 16px 30px -18px var(--c1,#2f8cff);min-height:178px;border:0;padding:0;border-radius:28px;overflow:hidden;isolation:isolate;color:#fff;text-align:start;cursor:pointer;
   -webkit-mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat;
   mask:radial-gradient(circle 11px at 50% 0,#0000 98%,#000) top/100% 51% no-repeat,radial-gradient(circle 11px at 50% 100%,#0000 98%,#000) bottom/100% 51% no-repeat}
 .feat-art{position:absolute;inset:0;z-index:-1}.feat-art svg{width:100%;height:100%;display:block;transition:transform .6s cubic-bezier(.2,.8,.2,1)}
@@ -3044,7 +3044,7 @@ html[data-page="login"] main {
 .feat-cta{margin-top:9px;padding:10px 16px;border-radius:14px;background:#fff;color:var(--c2,#0f2e8a);font-size:13px;font-weight:800;white-space:nowrap;box-shadow:0 8px 20px -8px rgba(0,0,0,.45);transition:transform .2s}
 .feat:active .feat-cta{transform:scale(.95)}
 .feat-dots{display:flex;justify-content:center;gap:6px;margin-top:12px}
-.feat-dots i{width:6px;height:6px;border-radius:9px;background:color-mix(in srgb,var(--fg) 22%,transparent);transition:width .3s,background .3s}
+.feat-dots i{cursor:pointer;width:6px;height:6px;border-radius:9px;background:color-mix(in srgb,var(--fg) 22%,transparent);transition:width .3s,background .3s}
 .feat-dots i.on{width:20px;background:var(--accent)}
 @media (min-width:700px){.feat,.feat-in{min-height:210px}.feat-in{padding:26px 30px}.feat-price{font-size:32px}}
 /* ticket cards */
@@ -3053,7 +3053,9 @@ html[data-page="login"] main {
 .grid .card .pv{-webkit-mask:radial-gradient(circle 9px at 0 100%,#0000 98%,#000) left/51% 100% no-repeat,radial-gradient(circle 9px at 100% 100%,#0000 98%,#000) right/51% 100% no-repeat;mask:radial-gradient(circle 9px at 0 100%,#0000 98%,#000) left/51% 100% no-repeat,radial-gradient(circle 9px at 100% 100%,#0000 98%,#000) right/51% 100% no-repeat}
 .grid .card .art .art-x{display:none}
 @media (prefers-reduced-motion: reduce){.feat-art svg,.feat-dots i{transition:none}}
-:root[data-perf="lite"] .feat-track{filter:none}
+:root[data-perf="lite"] .feat{box-shadow:none}
+@media (min-width:700px){.feat{flex-basis:72%}}
+@media (min-width:1100px){.feat{flex-basis:58%}}
 </style>
 </head>
 <body>
@@ -3936,14 +3938,18 @@ const FEAT_IC = {
   bolt: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 3 5 13.5h6L10 21l9-11h-6z"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>' };
 function featList() {
-  const ok = p => p && p.in_stock && !p.hidden;
-  let top = true, list = (S.top || []).map(id => findP(id)).filter(ok);
-  if (!list.length) { top = false; list = S.products.filter(ok).slice().sort((a, b) => b.price - a.price).slice(0, 3); }
-  return { list: list.slice(0, 5), top };
+  const ok = p => p && p.in_stock && !p.hidden, seen = new Set(), list = [];
+  for (const id of (S.top || [])) { const p = findP(id); if (ok(p) && !seen.has(p.id)) { seen.add(p.id); list.push(Object.assign({ _top: list.length + 1 }, p)); } if (list.length >= 5) break; }
+  if (list.length < 6) {
+    const rest = S.products.filter(p => ok(p) && !seen.has(p.id));
+    const by = new Map(); for (const p of rest.sort((a, b) => b.price - a.price)) { const k = artLook(p).brand.toLowerCase(); if (!by.has(k)) by.set(k, p); }
+    for (const p of [...by.values(), ...rest]) { if (list.length >= 6) break; if (!seen.has(p.id)) { seen.add(p.id); list.push(p); } }
+  }
+  return list;
 }
 function featHtml() {
   if (S.cat !== 'all' || S.q.trim()) return '';
-  const { list, top } = featList(); if (!list.length) return '';
+  const list = featList(); if (!list.length) return '';
   const slides = list.map((p, i) => {
     const L = artLook(p), name = L.brand + (L.tier ? ' ' + L.tier : '');
     const price = vipUnit(p, p.price);
@@ -3951,7 +3957,7 @@ function featHtml() {
       <span class="feat-art" aria-hidden="true">${artBannerSVG(p)}</span>
       <span class="feat-in">
         <span class="feat-main">
-          <span class="feat-badge">${FEAT_IC.star}${esc(t(top ? 'featTop' : 'featPick'))}${top && i === 0 ? ' #1' : ''}</span>
+          <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
           <b class="feat-name" dir="auto">${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
@@ -3963,20 +3969,24 @@ function featHtml() {
   return `<div class="feat-w"><div class="feat-track" id="feat">${slides}</div>${dots}</div>`;
 }
 (function featWire() {
-  let timer = null, idle = 0;
+  let idle = 0;
+  const startEdge = (el, rtl) => { const r = el.getBoundingClientRect(); return rtl ? r.right : r.left; };
+  const curIdx = tr => { const rtl = isRtl(LANG), e0 = startEdge(tr, rtl); let best = 0, bd = 1e9; [...tr.children].forEach((c, i) => { const d = Math.abs(startEdge(c, rtl) - e0); if (d < bd) { bd = d; best = i; } }); return best; };
+  const go = (tr, i) => { const rtl = isRtl(LANG), c = tr.children[i]; if (!c) return; tr.scrollBy({ left: startEdge(c, rtl) - startEdge(tr, rtl), behavior: 'smooth' }); };
   const step = () => {
-    const tr = document.getElementById('feat'); if (!tr || document.hidden) return;
-    if (Date.now() - idle < 7000 || tr.children.length < 2) return;
-    const w = tr.clientWidth, n = tr.children.length, cur = Math.round(Math.abs(tr.scrollLeft) / w);
-    const next = (cur + 1) % n; tr.scrollTo({ left: (isRtl(LANG) ? -1 : 1) * next * w, behavior: 'smooth' });
+    const tr = document.getElementById('feat'); if (!tr || document.hidden || tr.children.length < 2) return;
+    if (Date.now() - idle < 6000) return;
+    const r = tr.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) return;
+    go(tr, (curIdx(tr) + 1) % tr.children.length);
   };
+  let raf = 0;
   document.addEventListener('scroll', e => {
-    const tr = e.target; if (!tr || tr.id !== 'feat') return;
-    const i = Math.round(Math.abs(tr.scrollLeft) / Math.max(1, tr.clientWidth));
-    tr.parentElement.querySelectorAll('.feat-dots i').forEach((d, k) => d.classList.toggle('on', k === i));
+    const tr = e.target; if (!tr || tr.id !== 'feat' || raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; const i = curIdx(tr); tr.parentElement.querySelectorAll('.feat-dots i').forEach((d, k) => d.classList.toggle('on', k === i)); });
   }, true);
+  document.addEventListener('click', e => { const d = e.target.closest && e.target.closest('.feat-dots i'); if (!d) return; const tr = document.getElementById('feat'); idle = Date.now(); go(tr, [...d.parentElement.children].indexOf(d)); });
   ['pointerdown', 'touchstart', 'wheel'].forEach(ev => document.addEventListener(ev, e => { if (e.target.closest && e.target.closest('#feat')) idle = Date.now(); }, { passive: true, capture: true }));
-  if (!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) timer = setInterval(step, 5200);
+  if (!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) setInterval(step, 4200);
 })();
 
 /* ───────────────────────── rich text (Telegram HTML subset) ───────────────────────── */
