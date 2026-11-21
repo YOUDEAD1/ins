@@ -5406,6 +5406,28 @@ def _ms_send_admins(txt, markup):
             pass
 
 
+def _ms_auto_or_ask(rid, batch_no):
+    """🤖 دفعة إحالات اكتملت: إذا كل إحالاتها سليمة → تنصرف المكافأة تلقائياً بدون موافقة الأدمن (والأدمن يوصله إشعار بس).
+    إذا فيها إحالة مشبوهة (جهاز مكرر) → تنتظر مراجعة الأدمن مثل قبل."""
+    try:
+        ms = _ms_doc(rid, batch_no) or {}
+        mem = [int(x) for x in (ms.get('members') or [])]
+        recs = list(db.referrals_v2.find({'referrer_id': int(rid), 'invited_id': {'$in': mem}})) if mem else []
+        # كل إحالة لازم تكون تحققت من الموقع (شخص حقيقي) وما عليها علامة جهاز مشبوه
+        clean = len(recs) >= len(mem) > 0 and all(_ref_web_verified(r) and r.get('dv') != 'flag' for r in recs)
+        if str(get_setting('ref_auto_pay', 'on')) != 'off' and clean:
+            st, info = _ms_grant(rid, batch_no, 'auto')
+            if st == 'paid':
+                txt, _mk = _ms_summary_view(rid, batch_no)
+                _ms_send_admins(txt + f"\n🤖 <b>انصرفت المكافأة تلقائياً (${float(info):.2f})</b>",
+                                InlineKeyboardMarkup().row(InlineKeyboardButton("🔎 الإحالات", callback_data=f"rfs_{rid}_{batch_no}")))
+                return
+    except Exception as ex:
+        logger.warning(f"auto referral grant {rid}#{batch_no}: {ex}")
+    txt, markup = _ms_summary_view(rid, batch_no)
+    _ms_send_admins(txt, markup)
+
+
 def _notify_admin_referral_milestone(referrer_id):
     """لما تكتمل دفعة جديدة (العدد المطلوب من إحالات ما انحسبت قبل) → رسالة وحدة للأدمن فيها الفحص و«قائمة الفحص».
     كل دفعة تحفظ حجمها ومكافأتها لحظة اكتمالها: تغيير «كل كم إحالة» أو «كم المكافأة» يطبق على الدفعات الجاية بس."""
@@ -5440,8 +5462,7 @@ def _notify_admin_referral_milestone(referrer_id):
             db.referral_milestones.update_one({'_id': reo['_id'], 'status': 'reopened'},
                                               {'$set': {'status': 'pending', 'members': members, 'renotified_at': now,
                                                         'active_count': db.referrals_v2.count_documents(dict(_ref_verified_query(), referrer_id=rid, status='active'))}})
-            txt, markup = _ms_summary_view(rid, reo['batch_no'])
-            _ms_send_admins(txt, markup)
+            _ms_auto_or_ask(rid, reo['batch_no'])
             return
         # دفعات جديدة كاملة (ممكن أكثر من وحدة لو العتبة نزلت)
         for _ in range(20):
@@ -5461,8 +5482,7 @@ def _notify_admin_referral_milestone(referrer_id):
                 logger.warning(f"milestone save {rid}#{batch_no}: {e}")
                 return
             db.referrals_v2.update_many({'invited_id': {'$in': ids}, 'referrer_id': rid}, {'$set': {'ms_batch': batch_no}})
-            txt, markup = _ms_summary_view(rid, batch_no)
-            _ms_send_admins(txt, markup)
+            _ms_auto_or_ask(rid, batch_no)
 
 
 def _ref_batches_migrate():
@@ -5973,6 +5993,70 @@ def send_progress_log_notification(referrer_id):
         logger.error(f"send_progress_log_notification error: {e}")
 
 
+def _ms_grant(referrer_id, batch_no, by):
+    """💰 صرف مكافأة دفعة إحالات (يدوي من الأدمن أو تلقائي) — يرجع (الحالة, رسالة/المبلغ)."""
+    referrer_id = int(referrer_id); batch_no = int(batch_no)
+    with _get_referrer_lock(referrer_id):
+        milestone = db.referral_milestones.find_one({
+            'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}})
+        _any = _ms_doc(referrer_id, batch_no) or {}
+        _th, _rw = _ms_snap(_any)
+        if not milestone and _any.get('status') == 'reopened':
+            return 'reopened', f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما تكمل {_th} إحالة."
+        referrer = db.users.find_one({'user_id': referrer_id}) or {}
+        if milestone and not milestone.get('members'):
+            # Old aggregate totals cannot establish which referrals were paid. Pin only
+            # verified members of this batch or unassigned referrals, never a paid batch.
+            members = _ms_members(referrer_id, batch_no, _th)
+            if len(members) >= _th:
+                ids = [int(r['invited_id']) for r in members]
+                db.referral_milestones.update_one({'_id': milestone['_id']}, {'$set': {'members': ids}})
+                db.referrals_v2.update_many({'referrer_id': referrer_id, 'invited_id': {'$in': ids}},
+                                           {'$set': {'ms_batch': batch_no}})
+                milestone['members'] = ids
+        if milestone and milestone.get('members'):
+            _valid = _ms_active_members(milestone) >= _th
+        else:
+            _valid = False
+        if not milestone or not referrer or referrer.get('is_banned') == 1 or not _valid:
+            return 'invalid', '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.'
+
+        # Save a resumable payment intent; mark paid only after the wallet receipt exists.
+        res = db.referral_milestones.find_one_and_update(
+            {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}},
+            {'$set': {'status': 'paying', 'paid_by': by, 'paid_at': int(time.time())}},
+            return_document=False
+        )
+        if res is None:
+            return 'done', "⚠️ هذه الدفعة مصروفة سابقاً أو غير موجودة."
+
+        reward = _rw     # 💰 سعر الدفعة لحظة اكتمالها — تغيير الإعداد بعدها ما يأثر عليها
+        credited = _ref_money(referrer_id, reward, 'ref_reward',
+            f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", event_key=f'milestone:{referrer_id}:{batch_no}')
+        if not credited:
+            return 'retry', '⏳ لم يكتمل الصرف؛ الطلب محفوظ لإعادة المحاولة دون تكرار المكافأة.'
+        db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {
+            'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
+        # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
+        try:
+            _mem = [int(x) for x in (milestone.get('members') or [])]
+            if _mem:
+                db.referrals_v2.update_many({'invited_id': {'$in': _mem}, 'dv': 'flag'},
+                                            {'$set': {'dv': 'ok_admin', 'dv_by': by}})
+        except Exception:
+            pass
+        # إشعار المستخدم
+        try:
+            receipt = credited['_ref_receipt']
+            msg = _notification_text(referrer_id, 'ref_milestone_dm', _th, f"{reward:.2f}", f"{receipt['balance_after']:.2f}")
+            if receipt['debt_delta'] < 0:
+                msg += _notification_text(referrer_id, 'ref_settled_dm', -receipt['debt_delta'], receipt['balance_delta'])
+            bot.send_message(referrer_id, msg, parse_mode="HTML")
+        except Exception:
+            pass
+        return 'paid', reward
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("refwd_ok_"))
 @admin_required
 @_ref_lock_guard
@@ -5987,68 +6071,11 @@ def ref_milestone_approve(call):
         bot.send_message(call.message.chat.id, "❌ بيانات غير صالحة.")
         return
 
-    milestone = db.referral_milestones.find_one({
-        'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}})
-    _any = _ms_doc(referrer_id, batch_no) or {}
-    _th, _rw = _ms_snap(_any)
-    if not milestone and _any.get('status') == 'reopened':
-        bot.send_message(call.message.chat.id, f"⏳ رفضت إحالات من هذي الدفعة — بيوصلك تنبيه جديد لما تكمل {_th} إحالة.")
+    st, info = _ms_grant(referrer_id, batch_no, call.from_user.id)
+    if st != 'paid':
+        bot.send_message(call.message.chat.id, info)
         return
-    referrer = db.users.find_one({'user_id': referrer_id}) or {}
-    if milestone and not milestone.get('members'):
-        # Old aggregate totals cannot establish which referrals were paid. Pin only
-        # verified members of this batch or unassigned referrals, never a paid batch.
-        members = _ms_members(referrer_id, batch_no, _th)
-        if len(members) >= _th:
-            ids = [int(r['invited_id']) for r in members]
-            db.referral_milestones.update_one({'_id': milestone['_id']}, {'$set': {'members': ids}})
-            db.referrals_v2.update_many({'referrer_id': referrer_id, 'invited_id': {'$in': ids}},
-                                       {'$set': {'ms_batch': batch_no}})
-            milestone['members'] = ids
-    if milestone and milestone.get('members'):
-        _valid = _ms_active_members(milestone) >= _th
-    else:
-        _valid = False
-    if not milestone or not referrer or referrer.get('is_banned') == 1 or not _valid:
-        bot.send_message(call.message.chat.id, '⚠️ الطلب لم يعد صالحاً؛ راجع حالة المحيل والإحالات.')
-        return
-
-    # Save a resumable payment intent; mark paid only after the wallet receipt exists.
-    res = db.referral_milestones.find_one_and_update(
-        {'referrer_id': referrer_id, 'batch_no': batch_no, 'status': {'$in': ['pending', 'paying']}},
-        {'$set': {'status': 'paying', 'paid_by': call.from_user.id, 'paid_at': int(time.time())}},
-        return_document=False
-    )
-    if res is None:
-        bot.send_message(call.message.chat.id, "⚠️ هذه الدفعة مصروفة سابقاً أو غير موجودة.")
-        return
-
-    reward = _rw     # 💰 سعر الدفعة لحظة اكتمالها — تغيير الإعداد بعدها ما يأثر عليها
-    credited = _ref_money(referrer_id, reward, 'ref_reward',
-        f"مكافأة إحالات · الدفعة #{batch_no} ({_th} إحالة)", event_key=f'milestone:{referrer_id}:{batch_no}')
-    if not credited:
-        bot.send_message(call.message.chat.id, '⏳ لم يكتمل الصرف؛ الطلب محفوظ لإعادة المحاولة دون تكرار المكافأة.')
-        return
-    db.referral_milestones.update_one({'referrer_id': referrer_id, 'batch_no': batch_no}, {'$set': {
-        'status': 'paid', 'paid_amount': reward, 'money_event': credited['_ref_event_id']}})
-    # منح المكافأة = قبول الإحالات المشكوك فيها اللي ما انقرر فيها في هذي الدفعة
-    try:
-        _mem = [int(x) for x in (milestone.get('members') or [])]
-        if _mem:
-            db.referrals_v2.update_many({'invited_id': {'$in': _mem}, 'dv': 'flag'},
-                                        {'$set': {'dv': 'ok_admin', 'dv_by': call.from_user.id}})
-    except Exception:
-        pass
-    # إشعار المستخدم
-    try:
-        receipt = credited['_ref_receipt']
-        msg = _notification_text(referrer_id, 'ref_milestone_dm', _th, f"{reward:.2f}", f"{receipt['balance_after']:.2f}")
-        if receipt['debt_delta'] < 0:
-            msg += _notification_text(referrer_id, 'ref_settled_dm', -receipt['debt_delta'], receipt['balance_delta'])
-        bot.send_message(referrer_id, msg, parse_mode="HTML")
-    except Exception:
-        pass
-
+    reward = info
     try:
         _t, _mk = _ms_summary_view(referrer_id, batch_no)
         bot.edit_message_text(
