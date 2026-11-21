@@ -85,6 +85,9 @@ GITHUB_BASE_URL = os.getenv('GITHUB_BASE_URL', 'https://api.ahsanlabs.online').s
 
 try: STARS_RATE = int(os.getenv('STARS_RATE', '120').strip())
 except ValueError: STARS_RATE = 120
+# ⭐ تيليجرام يرفض فاتورة النجوم إذا تعدّت حد معيّن (CURRENCY_TOTAL_AMOUNT_INVALID)
+try: STARS_MAX_INVOICE = int(os.getenv('STARS_MAX_INVOICE', '10000').strip())
+except ValueError: STARS_MAX_INVOICE = 10000
 
 # ============================================================
 # 🛡️ 2. نظام البروكسي البسيط والخفيف (يوفر RAM)
@@ -14723,6 +14726,15 @@ def process_stars_amount(message, lang):
         
     stars_amount = int(usd_amount * STARS_RATE)
     
+    _stars_max_usd = int(STARS_MAX_INVOICE / max(1, STARS_RATE) * 100) / 100
+    if stars_amount > STARS_MAX_INVOICE:
+        bot.send_message(uid, bil(uid,
+            f"❌ <b>أعلى مبلغ للشحن بالنجوم في المرة الوحدة هو ${_stars_max_usd:.2f}</b>\n\n"
+            f"💡 أرسل مبلغ ${_stars_max_usd:.2f} أو أقل، وتقدر تشحن أكثر من مرة.",
+            f"❌ <b>The maximum Stars deposit per payment is ${_stars_max_usd:.2f}</b>\n\n"
+            f"💡 Send ${_stars_max_usd:.2f} or less — you can top up more than once."), parse_mode="HTML")
+        return
+
     # 🛡 stars_amount يجب يكون >= 1 (Telegram يرفض 0)
     if stars_amount < 1:
         err = "❌ المبلغ صغير جداً. زده قليلاً." if lang == 'ar' else "❌ Amount too small. Please increase."
@@ -14746,13 +14758,12 @@ def process_stars_amount(message, lang):
     except Exception as e:
         err_str = str(e).lower()
         if 'currency_total_amount_invalid' in err_str:
-            msg = (
-                "❌ <b>المبلغ غير صحيح!</b>\n\n"
-                "💡 جرّب مبلغ أكبر أو تحقق من معدل التحويل."
-            ) if lang == 'ar' else (
-                "❌ <b>Invalid amount!</b>\n\n"
-                "💡 Try a larger amount or check the conversion rate."
-            )
+            msg = bil(uid,
+                f"❌ <b>المبلغ أكبر من المسموح للدفع بالنجوم في المرة الوحدة.</b>\n\n💡 جرّب مبلغ أقل (مثلاً ${_stars_max_usd / 2:.2f}) واشحن على أكثر من مرة.",
+                f"❌ <b>This amount is above the Stars limit for one payment.</b>\n\n💡 Try a smaller amount (e.g. ${_stars_max_usd / 2:.2f}) and top up in parts.")
+            bot.send_message(uid, msg, parse_mode="HTML")
+            logger.info(f"stars invoice over Telegram limit: user={uid} usd={usd_amount} stars={stars_amount}")
+            return
         else:
             msg = (
                 "❌ <b>حدث خطأ في إنشاء فاتورة الدفع.</b>\n\n"
@@ -35096,7 +35107,8 @@ def _wa_methods(lang):
     out = []
     try:
         if not is_coin_hidden('stars') and not getattr(_WEB_CTX, 'on', False):     # الموقع الخارجي: بدون نجوم
-            out.append({'id': 'stars', 'name': 'Telegram Stars', 'net': 'Stars', 'min': 0.1, 'max': 1000,
+            out.append({'id': 'stars', 'name': 'Telegram Stars', 'net': 'Stars', 'min': 0.1,
+                        'max': min(1000, int(STARS_MAX_INVOICE / max(1, STARS_RATE) * 100) / 100),
                         'rate': STARS_RATE, 'emoji_id': _wa_btn_emoji(lang, 'btn_stars')})
     except Exception:
         pass
@@ -45766,11 +45778,22 @@ def run_bot():
     try: bot.delete_webhook(drop_pending_updates=False); time.sleep(1)
     except: pass
     time.sleep(5)
+    _net_fails = []
     while True:
         try: bot.polling(non_stop=True, skip_pending=False,
                          timeout=60, long_polling_timeout=60, allowed_updates=_ref_allowed_updates())
         except Exception as e:
             err = str(e)
+            # 🌐 انقطاع لحظي مع سيرفر تيليجرام (Connection reset / Max retries): البوت يعيد الاتصال لحاله —
+            # ما نرسل تنبيه خطأ إلا لو تكرر كثير (أكثر من 5 مرات خلال 10 دقائق)
+            if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                now_t = time.time()
+                _net_fails[:] = [t for t in _net_fails if now_t - t < 600] + [now_t]
+                if len(_net_fails) <= 5:
+                    logger.warning(f"Polling network blip (retrying): {err[:160]}")
+                    time.sleep(3)
+                    continue
+                _net_fails.clear()
             logger.error(f"Polling Error Critical: {err}")
             # تشخيص: نسجّل الـ traceback الكامل لمعرفة مصدر الخطأ بالضبط
             try:
