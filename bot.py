@@ -6653,6 +6653,84 @@ def background_referral_checker_v2():
 from lara_core import referral_auto_rewards as _ref_auto_module
 _REF_AUTO_REWARDS = _ref_auto_module.install(globals())
 
+
+def _ref_fill_holes(rid, limit=20):
+    """🧩 إحالة طلعت من دفعة انصرفت (وانخصم ثمنها) ثم جاب المحيل إحالة جديدة:
+    الجديدة تسدّ مكان اللي طلع في نفس الدفعة ويرجع له المبلغ المخصوم — وما تنحسب بداية دفعة جديدة.
+    كذا 10 إحالات = مكافأة وحدة، مهما طلع ناس ودخل بدالهم."""
+    rid = int(rid)
+    filled = 0
+    with _get_referrer_lock(rid):
+        holes = list(db.ref_clawbacks.find({'referrer_id': rid, 'kind': 'clawback', 'open': True,
+                                            'batch_no': {'$ne': None}}).sort('at', 1).limit(limit))
+        if not holes:
+            return 0
+        cands = [r for r in db.referrals_v2.find({'referrer_id': rid, 'status': 'active', 'ms_batch': {'$exists': False},
+                                                  'cb_amount': {'$exists': False}}).sort('_id', 1).limit(200)
+                 if _ref_countable(r) and r.get('dv') != 'flag']
+        for hole in holes:
+            if not cands:
+                break
+            gone = db.referrals_v2.find_one({'invited_id': int(hole['invited_id'])}) or {}
+            if gone.get('cb_status') != 'applied' or gone.get('status') == 'active':
+                continue                                   # الخصم ما اكتمل، أو اللي طلع رجع (يسترجع مبلغه بنفسه)
+            batch = int(hole['batch_no'])
+            ms = db.referral_milestones.find_one({'referrer_id': rid, 'batch_no': batch, 'status': 'paid'})
+            if not ms:
+                continue
+            new = cands.pop(0)
+            nid, oid, amount = int(new['invited_id']), int(hole['invited_id']), float(hole.get('amount') or 0)
+            if amount <= 0:
+                continue
+            # 1) الجديد ينضم للدفعة المصروفة مكان اللي طلع
+            if not db.referrals_v2.find_one_and_update({'invited_id': nid, 'ms_batch': {'$exists': False}},
+                    {'$set': {'ms_batch': batch, 'auto_reward_pending': False, 'fills_for': oid}}):
+                continue
+            mem = [int(x) for x in (ms.get('members') or [])]
+            mem = [nid if x == oid else x for x in mem] if oid in mem else mem + [nid]
+            db.referral_milestones.update_one({'_id': ms['_id']}, {'$set': {'members': mem}})
+            # 2) يرجع للمحيل المبلغ اللي انخصم
+            user = _ref_money(rid, amount, 'ref_refund', f'إحالة جديدة ({nid}) مكان اللي طلع ({oid}) · الدفعة #{batch}',
+                              event_key='fill:' + str(hole['_id']))
+            if not user:
+                db.referrals_v2.update_one({'invited_id': nid, 'ms_batch': batch, 'fills_for': oid},
+                                           {'$unset': {'ms_batch': '', 'fills_for': ''}})
+                db.referral_milestones.update_one({'_id': ms['_id']}, {'$set': {'members': ms.get('members') or []}})
+                break
+            db.ref_clawbacks.update_one({'_id': hole['_id']}, {'$set': {'open': False, 'replaced_by': nid,
+                                                                        'replaced_at': int(time.time())}})
+            # 3) اللي طلع صار برة الدفعة: لو رجع بعدين ينحسب إحالة جديدة عادية (بدون استرجاع ثاني)
+            db.referrals_v2.update_one({'invited_id': oid}, {'$unset': {
+                'ms_batch': '', 'cb_amount': '', 'cb_at': '', 'cb_token': '', 'cb_status': '', 'cb_event_id': '',
+                'cb_refund_pending': ''}, '$set': {'replaced_by': nid}})
+            filled += 1
+    return filled
+
+
+_ref_notify_before_fill = _notify_admin_referral_milestone
+
+
+def _notify_admin_referral_milestone(referrer_id):
+    try:
+        _ref_fill_holes(referrer_id)
+    except Exception:
+        logger.exception('referral hole fill failed')
+    return _ref_notify_before_fill(referrer_id)
+
+
+_ref_auto_process_before_fill = _REF_AUTO_REWARDS.process
+
+
+def _ref_auto_process_with_fill(rid, *a, **k):
+    try:
+        _ref_fill_holes(rid)
+    except Exception:
+        logger.exception('referral hole fill failed')
+    return _ref_auto_process_before_fill(rid, *a, **k)
+
+
+_REF_AUTO_REWARDS.process = _ref_auto_process_with_fill
+
 threading.Thread(target=background_referral_checker_v2, daemon=True).start()
 
 # ============================================================
