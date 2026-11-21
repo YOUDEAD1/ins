@@ -4103,7 +4103,11 @@ function brandIcon(p) {
   BRAND_HIT.set(full, best); return best;
 }
 function brandSrc(b) { return 'brands/' + b.slug + '.svg'; }
-function autoLogo(p) { const n = String(p.name_en || p.name || p.name_ar || '').trim(); return n && API && !DEMO ? API + '/webapp/blogo?q=' + encodeURIComponent(n.toLowerCase().slice(0, 120)) : ''; }
+function autoLogo(p) {
+  const n = String(p.name_en || p.name || p.name_ar || '').trim(); if (!n || !API || DEMO) return '';
+  let c = ''; try { const L = artLook(p), x = String(L.col[0] || ''); if (/^#[0-9a-f]{6}$/i.test(x)) c = x.slice(1); } catch (e) {}
+  return API + '/webapp/blogo?v=3&q=' + encodeURIComponent(n.toLowerCase().slice(0, 120)) + (c ? '&c=' + c : '');
+}
 function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
 function hasLogo(p) { return !!(p && p.emoji_id && API && !DEMO); }
 function artTile(p, mini) { const u = autoLogo(p) || (hasLogo(p) ? logoUrl(p.emoji_id) : ''); return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, mini ? u : (u || true))}</span>`; }

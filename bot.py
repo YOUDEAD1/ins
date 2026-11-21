@@ -39695,10 +39695,12 @@ _BRAND_ALIAS = {'chatgpt': 'openaichatgpt', 'gpt': 'openaichatgpt', 'primevideo'
                 'disneyplus': 'disneyplus', 'disney': 'disneyplus', 'gamepass': 'xboxgamepass', 'gemini': 'googlegemini'}
 
 
-def _brand_logo_svg(q):
+def _brand_logo_svg(q, tint=''):
     q = str(q or '').strip().lower()[:160]
-    if q in _BRAND_LOGO_CACHE:
-        return _BRAND_LOGO_CACHE[q]
+    tint = tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else ''
+    ck = q + '|' + tint
+    if ck in _BRAND_LOGO_CACHE:
+        return _BRAND_LOGO_CACHE[ck]
     pool = _brand_pool()
     full = q
     for a, b in _BRAND_AR.items():
@@ -39730,23 +39732,25 @@ def _brand_logo_svg(q):
         if tag == 'lg':     # شعار بألوانه الأصلية
             svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 4}" height="{h * 4}">{body}</svg>'
         else:               # شعار بلون واحد: نلوّنه بلون البراند الرسمي
-            col = '#' + hx if hx and hx.upper() not in ('FFFFFF', 'FFFFFE') else '#0B1033'
+            col = '#' + hx if hx and hx.upper() not in ('FFFFFF', 'FFFFFE', '000000') else ('#' + tint if tint else '#0B1033')
             svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 8}" height="{h * 8}" '
                    f'color="{col}" fill="{col}">{body}</svg>')
     else:
         svg = None
     if len(_BRAND_LOGO_CACHE) > 4000:
         _BRAND_LOGO_CACHE.clear()
-    _BRAND_LOGO_CACHE[q] = svg
+    _BRAND_LOGO_CACHE[ck] = svg
     return svg
 
 
 def _wa_brand_logo_get(handler, parsed):
     try:
-        q = (urllib.parse.parse_qs(parsed.query or '').get('q') or [''])[0]
+        qs = urllib.parse.parse_qs(parsed.query or '')
+        q = (qs.get('q') or [''])[0]
+        tint = (qs.get('c') or [''])[0]
     except Exception:
-        q = ''
-    svg = _brand_logo_svg(q)
+        q, tint = '', ''
+    svg = _brand_logo_svg(q, tint)
     if not svg:   # ما لقينا شعار: مربع زجاجي فيه أول حرف (نفس شكل الموقع)
         ch = (str(q).strip()[:1] or '?').upper()
         ch = ch.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
