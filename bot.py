@@ -39651,6 +39651,7 @@ def _wa_emoji_webp(eid):
 _BRAND_POOL = None
 _BRAND_POOL_LOCK = threading.Lock()
 _BRAND_LOGO_CACHE = {}
+_BRAND_PICK = {}
 _BRAND_POOL_ORDER = {'lg': 0, 'si': 1, 'cib': 2, 'bxl': 3, 'tabler': 4, 'arc': 5}
 
 
@@ -39699,16 +39700,12 @@ _BRAND_AR = {'نتفليكس': 'netflix', 'نيتفليكس': 'netflix', 'شاه
              'كرانشي': 'crunchyroll', 'او اس ان': 'osn', 'اوه اس ان': 'osn', 'ستارز': 'starz', 'برايم': 'primevideo', 'ديزني بلس': 'disneyplus',
              'نورد': 'nordvpn', 'اكسبريس في بي ان': 'expressvpn', 'سيرف شارك': 'surfshark', 'تليجرام': 'telegram', 'تيليقرام': 'telegram'}
 _BRAND_ALIAS = {'chatgpt': 'openaichatgpt', 'gpt': 'openaichatgpt', 'primevideo': 'amazonprimevideo',
-                'disneyplus': 'disneyplus', 'disney': 'disneyplus', 'gamepass': 'xboxgamepass', 'gemini': 'googlegemini'}
+                'disneyplus': 'disneyplus', 'disney': 'disneyplus', 'gamepass': 'xboxgamepass', 'gemini': 'googlegemini',
+                'hotmail': 'microsoftoutlook', 'outlook': 'microsoftoutlook'}
 
 
-def _brand_logo_svg(q, tint=''):
-    q = str(q or '').strip().lower()[:160]
-    tint = tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else ''
-    ck = q + '|' + tint
-    if ck in _BRAND_LOGO_CACHE:
-        return _BRAND_LOGO_CACHE[ck]
-    pool = _brand_pool()
+def _brand_cands(q):
+    """كلمات الاسم + تركيباتها (لمطابقة الماركة)."""
     full = q
     for a, b in _BRAND_AR.items():
         if a in full:
@@ -39728,6 +39725,17 @@ def _brand_logo_svg(q, tint=''):
             if j - i == 1 and (k in stop or k.isdigit()):
                 continue
             cands.append(k)
+    return toks, comp, cands
+
+
+def _brand_logo_svg(q, tint=''):
+    q = str(q or '').strip().lower()[:160]
+    tint = tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else ''
+    ck = q + '|' + tint
+    if ck in _BRAND_LOGO_CACHE:
+        return _BRAND_LOGO_CACHE[ck]
+    pool = _brand_pool()
+    toks, comp, cands = _brand_cands(q)
     best, bl = None, 0
     for k in set(cands):
         if k in pool and len(k) > bl and (len(k) >= 3 or (toks and toks[0] == k)):
@@ -39740,6 +39748,7 @@ def _brand_logo_svg(q, tint=''):
                 cl, cll = k, len(k)
         if cl:
             best = cl
+    _BRAND_PICK[q] = (best, pool[best][0]) if best else (None, None)
     if best:
         ent = pool[best]
         tag, w, h, body = ent[:4]
@@ -39800,6 +39809,217 @@ def _brand_gen_logo(q, tint=''):
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 74" width="296" height="296">{g}{body}</svg>'
 
 
+# ═════════ 🌐 الشعار الرسمي من موقع الشركة نفسه (أيقونة التطبيق: apple-touch-icon / icon / manifest) ═════════
+_BRAND_SITE = {
+    'osn': 'osnplus.com', 'osnplus': 'osnplus.com', 'pangram': 'pangram.com', 'seedance': 'seed.bytedance.com',
+    'boltnew': 'bolt.new', 'granola': 'granola.ai', 'hama': 'hidemyass.com', 'hma': 'hidemyass.com',
+    'hidemyass': 'hidemyass.com', 'joinsecret': 'joinsecret.com', 'kling': 'klingai.com', 'klingai': 'klingai.com',
+    'muse': 'muse.ai', 'mobbin': 'mobbin.com', 'magicpattern': 'magicpatterns.com', 'magicpatterns': 'magicpatterns.com',
+    'capcut': 'capcut.com', 'adobeexpress': 'adobe.com', 'cursor': 'cursor.com', 'perplexity': 'perplexity.ai',
+    'midjourney': 'midjourney.com', 'leonardo': 'leonardo.ai', 'runway': 'runwayml.com', 'runwayml': 'runwayml.com',
+    'elevenlabs': 'elevenlabs.io', 'suno': 'suno.com', 'heygen': 'heygen.com', 'higgsfield': 'higgsfield.ai',
+    'manus': 'manus.im', 'windsurf': 'windsurf.com', 'v0': 'v0.app', 'gamma': 'gamma.app', 'grammarly': 'grammarly.com',
+    'quillbot': 'quillbot.com', 'grok': 'grok.com', 'deepseek': 'deepseek.com', 'poe': 'poe.com', 'shahid': 'shahid.mbc.net',
+    'stctv': 'stctv.com', 'starzplay': 'starzplay.com', 'starz': 'starzplay.com', 'tod': 'tod.tv', 'dreamina': 'dreamina.capcut.com',
+    'pika': 'pika.art', 'krea': 'krea.ai', 'ideogram': 'ideogram.ai', 'freepik': 'freepik.com', 'envato': 'envato.com',
+    'picsart': 'picsart.com', 'remini': 'remini.ai', 'hailuo': 'hailuoai.video', 'vidu': 'vidu.com', 'opusclip': 'opus.pro',
+    'descript': 'descript.com', 'jasper': 'jasper.ai', 'otter': 'otter.ai', 'fireflies': 'fireflies.ai', 'warp': 'warp.dev',
+    'relume': 'relume.io', 'spline': 'spline.design', 'scribd': 'scribd.com', 'coursera': 'coursera.org', 'lovable': 'lovable.dev',
+    'intercom': 'intercom.com', 'ilovepdf': 'ilovepdf.com', 'zain': 'zain.com', 'stc': 'stc.com.sa', 'anghami': 'anghami.com',
+    'expressvpn': 'expressvpn.com', 'surfshark': 'surfshark.com', 'nordvpn': 'nordvpn.com', 'protonvpn': 'protonvpn.com',
+    'cyberghost': 'cyberghostvpn.com', 'ipvanish': 'ipvanish.com', 'tunnelbear': 'tunnelbear.com', 'tradingview': 'tradingview.com',
+    'chatpdf': 'chatpdf.com', 'blackbox': 'blackbox.ai', 'abacus': 'abacus.ai', 'monica': 'monica.im', 'merlin': 'getmerlin.in',
+    'turnitin': 'turnitin.com', 'chegg': 'chegg.com', 'bartleby': 'bartleby.com', 'studocu': 'studocu.com', 'brainly': 'brainly.com',
+    'skillshare': 'skillshare.com', 'masterclass': 'masterclass.com', 'linkedinlearning': 'linkedin.com', 'datacamp': 'datacamp.com',
+    'codecademy': 'codecademy.com', 'storytel': 'storytel.com', 'audible': 'audible.com', 'kindle': 'amazon.com', 'osnplus+': 'osnplus.com',
+    'jawwy': 'jawwy.tv', 'watchit': 'watchit.com', 'viu': 'viu.com', 'weyyak': 'weyyak.com', 'yango': 'yango.com', 'iptv': '',
+}
+_BRAND_SITE_MEM = {}
+_BRAND_SITE_LOCK = threading.Lock()
+_BRAND_SITE_LOCKS = {}
+_BRAND_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 '
+             '(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1')
+
+
+def _brand_site_domain(q):
+    """الموقع الرسمي للماركة من اسم المنتج (أطول تطابق)."""
+    toks, comp, cands = _brand_cands(str(q or '').strip().lower()[:160])
+    best, bl = None, 0
+    for k in set(cands):
+        d = _BRAND_SITE.get(k)
+        if d and len(k) > bl:
+            best, bl = (k, d), len(k)
+    return best
+
+
+def _brand_img_ok(data, ctype):
+    """نقبل الصورة إذا كانت أيقونة حقيقية (SVG أو صورة ≥ 64px)، ونصغّرها لـ 192px PNG خفيفة."""
+    if not data or len(data) < 60:
+        return None
+    head = data[:600].lstrip().lower()
+    if b'<svg' in head or 'svg' in (ctype or ''):
+        if len(data) > 120000 or b'<script' in data.lower():
+            return None
+        return ('image/svg+xml', data)
+    try:
+        from PIL import Image as _PI
+        im = _PI.open(io.BytesIO(data))
+        try:
+            n = getattr(im, 'n_frames', 1)
+            if im.format == 'ICO':
+                sizes = sorted(im.info.get('sizes') or [im.size], key=lambda z: z[0] * z[1])
+                im.size = sizes[-1]
+        except Exception:
+            pass
+        im.load()
+        w, h = im.size
+        if min(w, h) < 64:
+            return None
+        im = im.convert('RGBA')
+        if max(w, h) > 192:
+            im.thumbnail((192, 192))
+        out = io.BytesIO()
+        im.save(out, 'PNG', optimize=True)
+        return ('image/png', out.getvalue())
+    except Exception:
+        return None
+
+
+def _brand_fetch(url, limit=600000, timeout=6):
+    try:
+        r = requests.get(url, headers={'User-Agent': _BRAND_UA, 'Accept': '*/*'}, timeout=timeout,
+                         stream=True, allow_redirects=True)
+        if r.status_code != 200:
+            r.close()
+            return None, '', ''
+        buf = b''
+        for ch in r.iter_content(16384):
+            buf += ch
+            if len(buf) > limit:
+                break
+        ct = r.headers.get('Content-Type', '')
+        fin = r.url
+        r.close()
+        return buf, ct, fin
+    except Exception:
+        return None, '', ''
+
+
+def _brand_site_icon_fetch(domain):
+    """يجيب أيقونة التطبيق الرسمية من موقع الشركة: apple-touch-icon ثم أكبر icon ثم manifest ثم خدمة favicon."""
+    base = 'https://' + domain
+    html_b, _ct, fin = _brand_fetch(base + '/', limit=500000)
+    cands = []
+    if html_b:
+        txt = html_b.decode('utf-8', 'ignore')
+        page = fin or base + '/'
+        for m in re.finditer(r'<link\b[^>]*>', txt, re.I):
+            tag = m.group(0)
+            rel = (re.search(r'rel\s*=\s*["\']?([^"\'>]+)', tag, re.I) or [None, ''])[1].lower()
+            href = (re.search(r'href\s*=\s*["\']?([^"\'\s>]+)', tag, re.I) or [None, ''])[1]
+            if not href or href.startswith('data:'):
+                continue
+            url = urllib.parse.urljoin(page, html.unescape(href))
+            sz = re.search(r'sizes\s*=\s*["\']?(\d+)', tag, re.I)
+            sz = int(sz.group(1)) if sz else 0
+            if 'apple-touch-icon' in rel:
+                cands.append((3000 + sz, url))
+            elif 'manifest' in rel:
+                try:
+                    mb, _, mfin = _brand_fetch(url, limit=200000, timeout=5)
+                    mj = json.loads(mb.decode('utf-8', 'ignore')) if mb else {}
+                    for ic in (mj.get('icons') or []):
+                        s0 = str(ic.get('sizes') or '0').split('x')[0]
+                        s0 = int(s0) if s0.isdigit() else 0
+                        if ic.get('src') and 'maskable' not in str(ic.get('purpose') or ''):
+                            cands.append((2000 + min(s0, 512), urllib.parse.urljoin(mfin or url, ic['src'])))
+                except Exception:
+                    pass
+            elif 'icon' in rel and 'mask-icon' not in rel:
+                svg = '.svg' in url.lower() or 'svg' in tag.lower()
+                cands.append(((2600 if svg else 1000) + sz, url))
+    cands.sort(key=lambda x: -x[0])
+    cands += [(0, base + '/apple-touch-icon.png'),
+              (0, 'https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&size=256&url=' + urllib.parse.quote(base, safe='')),
+              (0, 'https://icons.duckduckgo.com/ip3/' + domain + '.ico')]
+    seen = set()
+    for _sc, u in cands[:10]:
+        if u in seen:
+            continue
+        seen.add(u)
+        b, ct, _ = _brand_fetch(u, limit=400000, timeout=5)
+        ok = _brand_img_ok(b, ct)
+        if ok:
+            return ok
+    return None
+
+
+def _brand_site_icon(domain):
+    """أيقونة الموقع مع كاش (ذاكرة + MongoDB) — تنجلب مرة وحدة لكل موقع."""
+    if not domain:
+        return None
+    hit = _BRAND_SITE_MEM.get(domain)
+    if hit is not None:
+        return hit or None
+    try:
+        doc = db.brand_site_icons.find_one({'_id': domain})
+    except Exception:
+        doc = None
+    now = time.time()
+    if doc and (doc.get('ok') or now - float(doc.get('ts') or 0) < 6 * 3600):
+        val = (doc.get('mime'), bytes(doc.get('data'))) if doc.get('ok') else False
+        _BRAND_SITE_MEM[domain] = val
+        return val or None
+    with _BRAND_SITE_LOCK:
+        lk = _BRAND_SITE_LOCKS.setdefault(domain, threading.Lock())
+    with lk:
+        hit = _BRAND_SITE_MEM.get(domain)
+        if hit is not None:
+            return hit or None
+        res = _brand_site_icon_fetch(domain)
+        _BRAND_SITE_MEM[domain] = res or False
+        try:
+            from bson.binary import Binary as _Bin
+            db.brand_site_icons.update_one({'_id': domain}, {'$set': {
+                'ok': bool(res), 'mime': res[0] if res else '', 'data': _Bin(res[1]) if res else b'', 'ts': now}}, upsert=True)
+        except Exception as e:
+            logger.debug(f"brand icon save {domain}: {e}")
+        return res
+
+
+def _brand_guess_domain(q):
+    """ماركة مو معروفة: نجرب موقعها (.com/.ai/.io/.app) ونتأكد إن عنوان الصفحة فيه اسمها."""
+    toks, comp, cands = _brand_cands(str(q or '').strip().lower()[:160])
+    stop = {'premium', 'pro', 'plus', 'month', 'months', 'year', 'years', 'account', 'subscription', 'the'}
+    words = [t for t in toks if len(t) >= 3 and not t.isdigit() and t not in stop]
+    if not words:
+        return None
+    w = words[0]
+    key = 'guess:' + w
+    try:
+        doc = db.brand_site_icons.find_one({'_id': key})
+        if doc and (doc.get('dom') or time.time() - float(doc.get('ts') or 0) < 24 * 3600):
+            return doc.get('dom') or None
+    except Exception:
+        pass
+    found = ''
+    for tld in ('.com', '.ai', '.io', '.app', '.co', '.so', '.dev'):
+        b, _ct, fin = _brand_fetch('https://' + w + tld + '/', limit=120000, timeout=4)
+        if not b:
+            continue
+        t = re.search(rb'<title[^>]*>(.*?)</title>', b, re.I | re.S)
+        title = re.sub(r'[^a-z0-9]', '', (t.group(1).decode('utf-8', 'ignore').lower() if t else ''))
+        host = urllib.parse.urlparse(fin or '').netloc.lower()
+        if w in title and w in host.replace('-', ''):
+            found = w + tld
+            break
+    try:
+        db.brand_site_icons.update_one({'_id': key}, {'$set': {'dom': found, 'ts': time.time()}}, upsert=True)
+    except Exception:
+        pass
+    return found or None
+
+
 def _wa_brand_logo_get(handler, parsed):
     try:
         qs = urllib.parse.parse_qs(parsed.query or '')
@@ -39807,9 +40027,28 @@ def _wa_brand_logo_get(handler, parsed):
         tint = (qs.get('c') or [''])[0]
     except Exception:
         q, tint = '', ''
-    svg = _brand_logo_svg(q, tint)
-    if not svg:   # ما لقينا شعار في أي مكتبة: نصمّم له شعار أصلي من اسمه
-        svg = _brand_gen_logo(str(q or '').strip().lower(), tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else '')
+    ql = str(q or '').strip().lower()[:160]
+    svg = _brand_logo_svg(ql, tint)
+    pkey, ptag = _BRAND_PICK.get(ql, (None, None))
+    site = _brand_site_domain(ql)          # (key, domain)
+    # الشعار الملوّن الأصلي من المكتبة يكفي — إلا إذا اسم الموقع أدق (مثل bolt.new بدل Bolt)
+    use_lib = svg and ptag == 'lg' and (not site or len(pkey or '') >= len(site[0]))
+    if not use_lib:
+        dom = site[1] if site else None
+        if not dom and not (svg and ptag == 'si'):
+            dom = _brand_guess_domain(ql)
+        if dom:
+            ic = _brand_site_icon(dom)
+            if ic:
+                if ic[0] == 'image/png':   # أيقونة التطبيق بزوايا دائرية مثل الجوال
+                    b64 = base64.b64encode(ic[1]).decode('ascii')
+                    out = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 192 192" width="192" height="192">'
+                           '<defs><clipPath id="r"><rect width="192" height="192" rx="42"/></clipPath></defs>'
+                           f'<image clip-path="url(#r)" width="192" height="192" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,{b64}" xlink:href="data:image/png;base64,{b64}"/></svg>')
+                    return _wa_send(handler, 200, out.encode('ascii'), 'image/svg+xml', cache='public, max-age=86400')
+                return _wa_send(handler, 200, ic[1], ic[0], cache='public, max-age=86400')
+    if not svg:   # آخر حل فقط: شعار مرسوم من الاسم
+        svg = _brand_gen_logo(ql, tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else '')
     return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
 
 
