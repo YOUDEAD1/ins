@@ -39690,7 +39690,14 @@ _BRAND_AR = {'نتفليكس': 'netflix', 'نيتفليكس': 'netflix', 'شاه
              'جيميناي': 'gemini', 'كلود': 'claude', 'ببجي': 'pubg', 'بلايستيشن': 'playstation', 'اكس بوكس': 'xbox',
              'إكس بوكس': 'xbox', 'ستيم': 'steam', 'دولينجو': 'duolingo', 'انغامي': 'anghami', 'أنغامي': 'anghami',
              'كاب كات': 'capcut', 'ادوبي': 'adobe', 'أدوبي': 'adobe', 'فيجما': 'figma', 'ديزني': 'disney',
-             'امازون': 'amazon', 'أمازون': 'amazon', 'انستقرام': 'instagram', 'تيك توك': 'tiktok', 'سناب': 'snapchat'}
+             'امازون': 'amazon', 'أمازون': 'amazon', 'انستقرام': 'instagram', 'تيك توك': 'tiktok', 'سناب': 'snapchat',
+             'جوجل': 'google', 'قوقل': 'google', 'يوتيوب بريميوم': 'youtube', 'ابل': 'apple', 'آبل': 'apple', 'ايكلاود': 'icloud',
+             'مايكروسوفت': 'microsoft', 'اوفيس': 'microsoftoffice', 'ويندوز': 'windows', 'فري فاير': 'freefire', 'روبلوكس': 'roblox',
+             'فورتنايت': 'fortnite', 'ماين كرافت': 'minecraft', 'واتساب': 'whatsapp', 'فيسبوك': 'facebook', 'تويتر': 'x', 'لينكد': 'linkedin',
+             'زوم': 'zoom', 'نوشن': 'notion', 'جيت هب': 'github', 'كورسيرا': 'coursera', 'يوديمي': 'udemy', 'جرامرلي': 'grammarly',
+             'بيربلكستي': 'perplexity', 'ميدجورني': 'midjourney', 'كيرسر': 'cursor', 'ديب سيك': 'deepseek', 'جروك': 'grok',
+             'كرانشي': 'crunchyroll', 'او اس ان': 'osn', 'اوه اس ان': 'osn', 'ستارز': 'starz', 'برايم': 'primevideo', 'ديزني بلس': 'disneyplus',
+             'نورد': 'nordvpn', 'اكسبريس في بي ان': 'expressvpn', 'سيرف شارك': 'surfshark', 'تليجرام': 'telegram', 'تيليقرام': 'telegram'}
 _BRAND_ALIAS = {'chatgpt': 'openaichatgpt', 'gpt': 'openaichatgpt', 'primevideo': 'amazonprimevideo',
                 'disneyplus': 'disneyplus', 'disney': 'disneyplus', 'gamepass': 'xboxgamepass', 'gemini': 'googlegemini'}
 
@@ -39743,6 +39750,48 @@ def _brand_logo_svg(q, tint=''):
     return svg
 
 
+
+def _brand_gen_logo(q, tint=''):
+    """🎨 شعار أصلي يتولّد تلقائياً من اسم المنتج (لما ما يكون له شعار في أي مكتبة): شكل هندسي بألوان البراند."""
+    import hashlib as _hl
+    import colorsys as _cs
+    seed = int(_hl.sha256(q.encode('utf-8')).hexdigest(), 16)
+    rnd = lambda n: (seed // (7 ** n)) % 1000 / 1000.0
+    if tint:
+        r0, g0, b0 = (int(tint[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        h0 = _cs.rgb_to_hls(r0, g0, b0)[0]
+    else:
+        h0 = rnd(1)
+    def hexc(h, l, s):
+        r, g, b = _cs.hls_to_rgb(h % 1, l, s)
+        return '#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255))
+    c1, c2, c3 = hexc(h0, .52, .85), hexc(h0 + .08, .40, .80), hexc(h0 - .10, .62, .90)
+    kind = seed % 6
+    g = f'<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{c3}"/><stop offset="1" stop-color="{c2}"/></linearGradient></defs>'
+    if kind == 0:      # three rings
+        body = (f'<circle cx="28" cy="30" r="15" fill="{c1}" fill-opacity=".9"/><circle cx="46" cy="30" r="15" fill="{c3}" fill-opacity=".85"/>'
+                f'<circle cx="37" cy="45" r="15" fill="{c2}" fill-opacity=".85"/>')
+    elif kind == 1:    # rotated squares
+        body = (f'<rect x="19" y="19" width="36" height="36" rx="9" fill="url(#g)" transform="rotate(45 37 37)"/>'
+                f'<rect x="28" y="28" width="18" height="18" rx="5" fill="#fff" transform="rotate(45 37 37)"/>')
+    elif kind == 2:    # four petals
+        body = ''.join(f'<ellipse cx="37" cy="24" rx="9" ry="14" fill="{c}" transform="rotate({a} 37 37)"/>'
+                       for a, c in ((0, c1), (90, c3), (180, c2), (270, c1)))
+        body += '<circle cx="37" cy="37" r="6" fill="#fff"/>'
+    elif kind == 3:    # stacked chevrons
+        body = (f'<path d="M18 30 37 16 56 30" fill="none" stroke="{c3}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>'
+                f'<path d="M18 44 37 30 56 44" fill="none" stroke="{c1}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>'
+                f'<path d="M18 58 37 44 56 58" fill="none" stroke="{c2}" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>')
+    elif kind == 4:    # hexagon + spark
+        body = (f'<path d="M37 12 59 24.5v25L37 62 15 49.5v-25z" fill="url(#g)"/>'
+                f'<path d="M37 25l3.5 8.5L49 37l-8.5 3.5L37 49l-3.5-8.5L25 37l8.5-3.5z" fill="#fff"/>')
+    else:              # orbit
+        body = (f'<circle cx="37" cy="37" r="12" fill="url(#g)"/>'
+                f'<ellipse cx="37" cy="37" rx="24" ry="10" fill="none" stroke="{c1}" stroke-width="4" transform="rotate(-28 37 37)"/>'
+                f'<circle cx="57" cy="27" r="4.5" fill="{c3}"/>')
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 74" width="296" height="296">{g}{body}</svg>'
+
+
 def _wa_brand_logo_get(handler, parsed):
     try:
         qs = urllib.parse.parse_qs(parsed.query or '')
@@ -39751,14 +39800,8 @@ def _wa_brand_logo_get(handler, parsed):
     except Exception:
         q, tint = '', ''
     svg = _brand_logo_svg(q, tint)
-    if not svg:   # ما لقينا شعار: مربع زجاجي فيه أول حرف (نفس شكل الموقع)
-        ch = (str(q).strip()[:1] or '?').upper()
-        ch = ch.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 74" width="296" height="296">'
-               
-               f'<text x="37" y="39" text-anchor="middle" dominant-baseline="central" fill="#2340FF" font-size="34" font-weight="800" '
-               f'font-family="Unbounded, Rubik, Arial, sans-serif">{ch}</text></svg>')
-        return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
+    if not svg:   # ما لقينا شعار في أي مكتبة: نصمّم له شعار أصلي من اسمه
+        svg = _brand_gen_logo(str(q or '').strip().lower(), tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else '')
     return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=2592000')
 
 

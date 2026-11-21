@@ -4104,9 +4104,9 @@ function brandIcon(p) {
 }
 function brandSrc(b) { return 'brands/' + b.slug + '.svg'; }
 function autoLogo(p) {
-  const n = String(p.name_en || p.name || p.name_ar || '').trim(); if (!n || !API || DEMO) return '';
+  const n = [p.name_en, p.name, p.name_ar].filter(Boolean).join(' ').trim(); if (!n || !API || DEMO) return '';
   let c = ''; try { const L = artLook(p), x = String(L.col[0] || ''); if (/^#[0-9a-f]{6}$/i.test(x)) c = x.slice(1); } catch (e) {}
-  return API + '/webapp/blogo?v=3&q=' + encodeURIComponent(n.toLowerCase().slice(0, 120)) + (c ? '&c=' + c : '');
+  return API + '/webapp/blogo?v=4&q=' + encodeURIComponent(n.toLowerCase().slice(0, 160)) + (c ? '&c=' + c : '');
 }
 function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
 function hasLogo(p) { return !!(p && p.emoji_id && API && !DEMO); }
