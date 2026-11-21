@@ -39646,6 +39646,42 @@ def _wa_emoji_webp(eid):
     return out
 
 
+def _wa_emoji_still(eid):
+    """🖼 صورة ثابتة صغيرة (128px) لشعار المنتج — خفيفة على الجوالات (بدون أنيميشن)."""
+    key = f"ces_{eid}"
+    hit = _wa_cache_get(key)
+    if hit:
+        return hit
+    out = None
+    try:
+        st = bot.get_custom_emoji_stickers([str(eid)])
+        th = st and (getattr(st[0], 'thumbnail', None) or getattr(st[0], 'thumb', None))
+        if th:
+            data = bot.download_file(bot.get_file(th.file_id).file_path)
+            if data:
+                out = ('image/webp', data)
+    except Exception as e:
+        logger.debug(f"emoji still thumb {eid}: {e}")
+    if not out:
+        src = _wa_custom_emoji(eid)
+        if src and str(src[0]).startswith('image/'):
+            try:
+                from PIL import Image as _PI
+                import io as _io
+                im = _PI.open(_io.BytesIO(src[1]))
+                im.seek(0)
+                im = im.convert('RGBA')
+                im.thumbnail((128, 128))
+                buf = _io.BytesIO()
+                im.save(buf, 'PNG', optimize=True)
+                out = ('image/png', buf.getvalue())
+            except Exception as e:
+                logger.debug(f"emoji still pil {eid}: {e}")
+    if out:
+        _wa_cache_put(key, out[0], out[1])
+    return out
+
+
 def _wa_public_emoji(eid):
     """احتياطي: رابط تيليجرام العام للإيموجي المميز (نفس الملف، بدون Bot API)."""
     try:
@@ -40388,16 +40424,17 @@ def _wa_maybe_handle_get(handler):
         # آخر IP في X-Forwarded-For هو اللي أضافه بروكسي المنصة (الأول يقدر العميل يزوّره)
         ip = (handler.headers.get('X-Forwarded-For', '').split(',')[-1].strip() or handler.client_address[0])
         want_webp = 'fmt=webp' in (parsed.query or '')
+        want_still = 'fmt=still' in (parsed.query or '')
         if not re.fullmatch(r'\d{5,25}', eid):
             _json_resp(handler, 404, {'error': 'Not found'})
-        elif _WA_CE_MISS.get(eid, 0) > time.time():
+        elif _WA_CE_MISS.get(eid + ('s' if want_still else ''), 0) > time.time():
             _json_resp(handler, 404, {'error': 'Not found'})
         elif not _wa_rate_ok(f"ce:{ip}", 400):
             _json_resp(handler, 429, {'error': 'rate_limited'})
         else:
-            res = _wa_custom_emoji(eid)
+            res = _wa_emoji_still(eid) if want_still else _wa_custom_emoji(eid)
             if not res:
-                _WA_CE_MISS[eid] = time.time() + 600
+                _WA_CE_MISS[eid + ('s' if want_still else '')] = time.time() + 600
                 if len(_WA_CE_MISS) > 5000:
                     _WA_CE_MISS.clear()
             elif want_webp and res[0] == 'video/webm':

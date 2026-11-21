@@ -3114,6 +3114,10 @@ html[data-page="login"] main {
 .art>svg{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;position:static!important}
 .thumb>.art,.cart-thumb>.art,.apl-ic>.art{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;margin:0!important;border-radius:inherit}
 .apl-ic{position:relative;overflow:hidden}
+.art-logo{position:absolute;left:50%;top:15%;width:32%;aspect-ratio:1;transform:translateX(-50%);object-fit:contain;pointer-events:none}
+.art.mini .art-logo{top:14%;width:72%}
+.feat-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.feat-logo{width:1.2em;height:1.2em;object-fit:contain;flex:none}
 </style>
 </head>
 <body>
@@ -3956,7 +3960,7 @@ function artStars(R, n, W, H) {
   const r = v => Math.round(v * 10) / 10;
   return Array.from({ length: n }, () => { const x = r(16 + R() * (W - 32)), y = r(12 + R() * H), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .55)}"/>`; }).join('');
 }
-function artSVG(p, mini) {
+function artSVG(p, mini, logo) {
   const L = artLook(p), { brand, tier, dur } = L;
   const id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;
   const defs = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${L.col[0]}"/><stop offset="1" stop-color="${L.col[1]}"/></linearGradient>` +
@@ -3966,11 +3970,12 @@ function artSVG(p, mini) {
   const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>` +
     `<circle cx="276" cy="164" r="126" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2.4"/><circle cx="276" cy="164" r="84" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2.4"/>`;
   const ch = [...brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
+  if (mini && logo) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}</svg>`;
   if (mini) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<text x="150" y="134" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></svg>`;
   const Ln = Math.max(2, [...brand].length), ar = AR_RE.test(brand);
-  const fs = Math.min(56, Math.max(18, 216 / (Ln * (ar ? .62 : .8))));
+  const fs = Math.min(logo ? 36 : 56, Math.max(18, 216 / (Ln * (ar ? .62 : .8))));
   const fit = Ln * fs * (ar ? .62 : .8) > 216 ? ` textLength="216" lengthAdjust="spacingAndGlyphs"` : '';
-  const wy = 104;
+  const wy = logo ? (tier ? 156 : 168) : 104;
   const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(240, tl * 9.2 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 20)})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl * 9.2 + 30 > 220 ? ' textLength="190" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
     `<text x="150" y="244" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .96 : .6}" font-size="${dur ? 14 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.4}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
@@ -3987,7 +3992,11 @@ function artBannerSVG(p) {
     `<text x="130" y="165" text-anchor="middle" dominant-baseline="central" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="2.4" font-size="380" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text>` +
     `<path d="M-20 255 C 190 180, 320 290, 660 30" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="1.6" stroke-dasharray="3 9" stroke-linecap="round"/></svg>`;
 }
-function artTile(p, mini) { return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini)}</span>`; }
+function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
+function artTile(p, mini) {
+  const lg = !!(p.emoji_id && API && !DEMO);
+  return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, lg)}${lg ? `<img class="art-logo" src="${esc(logoUrl(p.emoji_id))}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : ''}</span>`;
+}
 function artOn(p) { return !p.image; }
 
 /* ───────────────────────── «most wanted» banner (top sellers, auto art) ───────────────────────── */
@@ -4018,7 +4027,7 @@ function featHtml() {
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${esc(name)}</b>
+          <b class="feat-name" dir="auto">${p.emoji_id && API && !DEMO ? `<img class="feat-logo" src="${esc(logoUrl(p.emoji_id))}" alt="" decoding="async" onerror="this.remove()">` : ''}${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>
