@@ -3069,7 +3069,7 @@ html[data-page="login"] main {
 .wal-pass i{font:600 12px/1 var(--f-mono,ui-monospace,monospace);font-style:normal;letter-spacing:.06em}
 .api-hero .tk-perf{margin:22px -20px 18px;color:var(--fg)}
 .phero .avatar{box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 14%,transparent),0 14px 40px -8px color-mix(in srgb,var(--accent) 70%,transparent)}
-.phero .avatar::after{content:"";position:absolute;inset:-14px;border-radius:50%;border:1.4px dashed color-mix(in srgb,var(--accent-2) 45%,transparent);animation:tkSpin 26s linear infinite;pointer-events:none}
+.phero .avatar::after{content:none}
 @keyframes tkSpin{to{transform:rotate(360deg)}}
 .stats3 .stat b{background:linear-gradient(135deg,var(--fg),color-mix(in srgb,var(--accent-2) 80%,var(--fg)));-webkit-background-clip:text;background-clip:text;color:transparent}
 .wl-card{position:relative}
@@ -3118,6 +3118,62 @@ html[data-page="login"] main {
 .art.mini .art-logo{top:14%;width:72%}
 .feat-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .feat-logo{width:1.2em;height:1.2em;object-fit:contain;flex:none}
+
+/* ═════════ v4 screens (Figma): passport · metal wallet · boarding pass · control tower — static, iPhone-light ═════════ */
+/* passport */
+.phero.passport{position:relative;display:block;text-align:start;margin:10px 0 16px;padding:0;border-radius:26px;background:var(--surface,#fff);border:1px solid var(--line);overflow:hidden;box-shadow:0 18px 40px -24px rgba(5,10,40,.45)}
+
+.pp-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px 6px;font:700 10.5px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.12em;color:var(--accent-2)}
+.pp-plane svg{width:16px;height:16px;color:var(--accent-2);fill:currentColor}
+.pp-main{display:flex;gap:16px;align-items:flex-start;padding:6px 18px 14px}
+.passport .avatar{flex:none;width:92px;height:112px;border-radius:18px;padding:0;background:linear-gradient(160deg,color-mix(in srgb,var(--accent) 22%,#fff),color-mix(in srgb,var(--accent) 45%,#fff));box-shadow:none!important}
+.passport .avatar>img,.passport .avatar>span{width:100%;height:100%;border-radius:18px;display:grid;place-items:center;object-fit:cover;font:800 34px/1 var(--f-display);color:var(--accent);background:transparent}
+.passport .avatar::after{content:none!important}
+.pp-fields{flex:1;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:3px}
+.pp-k{font:600 9.5px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.08em;color:var(--fg-3);margin-top:6px}
+.passport h2{margin:0;font-size:19px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;overflow-wrap:anywhere}
+.passport .idchip{margin:0;padding:0;background:none;border:0;font:600 13px/1.3 var(--f-mono,ui-monospace,monospace);letter-spacing:.06em;color:var(--fg)}
+.passport .un{font-size:12.5px}
+.passport .linked-chip{margin:0 18px 12px}
+.pp-mrz{display:flex;flex-direction:column;gap:2px;padding:10px 18px 12px;background:color-mix(in srgb,var(--fg) 5%,transparent);font:500 10.5px/1.35 var(--f-mono,ui-monospace,monospace);letter-spacing:.14em;color:var(--fg-3);overflow:hidden;white-space:nowrap}
+.pp-stamp{position:absolute;inset-inline-end:16px;bottom:30px;width:84px;height:84px;border-radius:50%;border:3px solid #ff4d6d;outline:1.2px dashed rgba(255,77,109,.6);outline-offset:-9px;display:flex;flex-direction:column;align-items:center;justify-content:center;transform:rotate(-14deg);color:#ff4d6d;opacity:.9;pointer-events:none}
+.pp-stamp b{font:800 18px/1 var(--f-display)}.pp-stamp small{font-size:10.5px;font-weight:700;margin-top:3px}
+/* metal wallet card */
+.wal-hero{background:linear-gradient(135deg,#1a2050 0%,#0b1033 50%,#20286a 100%)!important;color:#fff}
+.wal-hero .wal-glow{background:radial-gradient(circle at 85% 0%,rgba(47,91,255,.45),transparent 60%)!important;filter:none!important;animation:none!important}
+.wal-chip{position:absolute;top:22px;inset-inline-end:22px;width:42px;height:30px;border-radius:7px;background:linear-gradient(135deg,#ffe27a,#e0a800);box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.wal-vip{position:absolute;top:24px;inset-inline-start:22px;padding:4px 10px;border-radius:99px;background:#ff4d6d;color:#fff;font:700 11px/1 var(--f-display)}
+.wal-hero .wal-amt{color:#ffd43b}
+.wal-hero .wal-lbl{color:#a9b1e0}
+/* boarding pass summary on product page */
+.summary.bpass{position:relative;padding-top:0;overflow:visible}
+.bp-route{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 4px 12px}
+.bp-route>span{display:flex;flex-direction:column;gap:2px}
+.bp-route>span:last-child{align-items:flex-end}
+.bp-route small{font:600 10px/1 var(--f-mono,ui-monospace,monospace);color:var(--fg-3);letter-spacing:.08em}
+.bp-route b{font:800 19px/1.1 var(--f-display)}
+.bp-line{flex:1;position:relative;height:18px;display:flex;align-items:center;justify-content:center;font-style:normal}
+.bp-line::before{content:"";position:absolute;left:4px;right:4px;top:50%;border-top:1.6px dashed color-mix(in srgb,var(--accent) 55%,transparent)}
+.bp-line span{position:relative;display:grid;place-items:center;padding:0 6px;background:inherit}
+.bp-line svg{width:18px;height:18px;fill:var(--accent);color:var(--accent)}
+[dir="rtl"] .bp-line svg{transform:scaleX(-1)}
+.bp-perf{position:relative;height:0;margin:0 -14px 10px;border-top:1.6px dashed var(--line)}
+.bp-perf::before,.bp-perf::after{content:"";position:absolute;top:-11px;width:20px;height:20px;border-radius:50%;background:var(--bg)}
+.bp-perf::before{left:-10px}.bp-perf::after{right:-10px}
+/* control tower */
+.ct-eye{display:block;font:700 11px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.32em;color:#ffd43b;margin:0 0 6px;position:relative}
+.api-hero .ct-eye{margin-top:12px}
+.vip-api{position:relative;display:flex;align-items:center;gap:12px;margin:14px 0 4px;padding:12px 14px;border-radius:18px;background:rgba(255,212,59,.10);border:1px solid rgba(255,212,59,.35);text-align:start}
+.vip-api-ic{flex:none;display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:#ffd43b;color:#0b1033}
+.vip-api-ic svg{width:20px;height:20px}
+.vip-api b{display:block;font-size:14px;color:#e0a800}.vip-api small{display:block;font-size:11.5px;color:var(--fg-2);margin-top:2px}
+/* sign-in as a ticket: perforated divider with notches */
+.wl-card .wf-or{position:relative}
+.passport .acc-mail{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.pp-stamp{bottom:6px!important;width:74px!important;height:74px!important}.pp-stamp b{font-size:16px!important}
+.pp-mrz{padding-inline-end:96px!important}
+:root[data-theme="light"] .ct-eye{color:#b07800}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]) .ct-eye{color:#b07800}}
 </style>
 </head>
 <body>
@@ -5372,7 +5428,7 @@ function renderProduct(sh, p, st, onlyDyn) {
       <span class="faint num">${p.unlimited || p.manual ? '' : esc(t('stockN', { n: p.stock }))}</span></div>
       ${mq >= 5 ? `<div class="quick">${[1, 2, 5, 10, 25].filter(n => n <= mq).slice(0, 5).map(n => `<button class="${st.qty === n ? 'on' : ''}" data-act="qtyset" data-v="${n}">×${n}</button>`).join('')}</div>` : ''}` : '';
   const discounted = p.kind !== 'cgpt' && unit < p.price;
-  const summary = oos ? '' : `<div class="summary">
+  const summary = oos ? '' : `<div class="summary bpass"><div class="bp-route" aria-hidden="true"><span><small dir="ltr">FROM</small><b dir="ltr">LARA</b></span><i class="bp-line"><span>${TG_PLANE}</span></i><span><small dir="ltr">TO</small><b>${esc(t('bpYou'))}</b></span></div><div class="bp-perf" aria-hidden="true"></div>
       ${p.kind !== 'cgpt' ? `<div class="kv"><span>${esc(t('unit'))}</span><b class="num">${discounted ? `<span class="strike">${usd(p.price)}</span>` : ''}${usd(unit)}</b></div><div class="kv"><span>${esc(t('qty'))}</span><b class="num">×${st.qty}</b></div>` : ''}
       ${vipBp(p) ? `<div class="kv vip"><span>👑 ${esc(t('vipSave', { n: S.vip.level, p: vipBp(p) / 100 }))}</span><b class="num">−${usd(Math.max(0, Math.round(((p.kind === 'cgpt' ? (((p.durations || []).find(x => x.id === st.dur) || {}).price || p.price) : unitFor(p, st.qty)) * (p.kind === 'cgpt' ? 1 : st.qty) - total) * 100) / 100))}</b></div>` : ''}
       ${S.guest ? '' : `<div class="kv"><span>${esc(t('yourBal'))}</span><b class="num">${usd(bal)}</b></div>
@@ -5800,7 +5856,7 @@ function vWallet() {
   const u = S.user || {}, h = S.hist, sums = (h.data && h.data.sums) || {};
   const [whole, cents] = money2(u.balance);
   return `<section class="wal-hero">
-      <span class="wal-glow" aria-hidden="true"></span>
+      <span class="wal-glow" aria-hidden="true"></span><span class="wal-chip" aria-hidden="true"></span>${S.vip && S.vip.enabled && S.vip.level ? `<span class="wal-vip">VIP ${S.vip.level}</span>` : ''}
       <span class="wal-ic">${slot('balance', 'purse')}</span>
       <span class="wal-lbl">${esc(t('available'))}</span>
       <div class="wal-amt num" dir="ltr"><span class="cur">$</span>${whole}<span class="cts">.${cents}</span></div>
@@ -6275,13 +6331,28 @@ function vProfile() {
       <div class="hint">${esc(t('toNext', { n: r.threshold - r.progress, r: usd(r.reward) }))}</div>
       <div class="mini"><div><b class="num">${r.clicks}</b><span>${esc(t('clicks'))}</span></div><div><b class="num">${r.active}</b><span>${esc(t('active'))}</span></div><div><b class="num">${r.pending}</b><span>${esc(t('pendingR'))}</span></div><div><b class="num">${usd(r.earned_refs + r.earned_buys)}</b><span>${esc(t('earned'))}</span></div></div>
     </div>` : `<div class="skel" style="height:220px"></div>`;
-  return `<div class="phero">
+  const ppName = [u.first_name, u.last_name].filter(Boolean).join(' ') || '?';
+  const ppMrz = s => String(s || '').normalize('NFKD').replace(/[^A-Za-z0-9]+/g, '<').toUpperCase();
+  const ppL1 = ('P<LARA<<' + ppMrz(u.username || ppName) + '<'.repeat(44)).slice(0, 44);
+  const ppSince = (() => { const d = new Date(u.joined_at || u.created_at || Date.now()); return isNaN(d) ? '' : String(d.getUTCFullYear()).slice(2) + String(d.getUTCMonth() + 1).padStart(2, '0'); })();
+  const ppL2 = (String(u.id || '') + '<<' + (S.vip && S.vip.level ? 'VIP' + S.vip.level : 'LARA') + '<<' + ppSince + '<'.repeat(44)).slice(0, 44);
+  const ppVip = S.vip && S.vip.enabled && S.vip.level;
+  return `<div class="phero passport">
+      <div class="pp-head"><b>PASSPORT · ${esc(isAr() ? 'جواز LARA' : 'LARA')}</b><span class="pp-plane" aria-hidden="true">${TG_PLANE}</span></div>
+      <div class="pp-main">
       <div class="avatar">${u.photo_url ? `<img src="${esc(u.photo_url)}" alt="" referrerpolicy="no-referrer" data-initials="${esc(initials)}">` : `<span>${esc(initials)}</span>`}</div>
+      <div class="pp-fields">
+      <small class="pp-k">NAME · ${esc(isAr() ? 'الاسم' : 'Name')}</small>
       <h2>${esc([u.first_name, u.last_name].filter(Boolean).join(' '))}${S.vip && S.vip.enabled && S.vip.level ? `<span class="vip-chip">VIP ${S.vip.level}</span>` : ''}${u.is_admin ? `<span class="badge-admin">${esc(t('admin'))}</span>` : ''}</h2>
       ${u.username ? `<span class="un" dir="ltr">@${esc(u.username)}</span>` : ''}
+      <small class="pp-k">ID · ${esc(isAr() ? 'رقم الحساب' : 'Account')}</small>
       <button class="idchip" data-act="copy" data-v="${esc(u.id)}">ID ${esc(u.id)} ${ic.copy}</button>
       ${acc.email ? `<span class="un acc-mail" dir="ltr">${esc(acc.email)}</span>` : ''}
-      ${DEMO ? `<button class="linked-chip pvm" data-act="pv-how">${ic.info}${esc(t('notLinked'))}</button>` : acc.web_only ? `<button class="linked-chip pvm" data-act="acc-link">${ic.link}${esc(t('lkChip'))}</button>` : S.store.bot ? `<span class="linked-chip"><i class="live-dot"></i>${esc(t('linked'))} <bdi dir="ltr">@${esc(S.store.bot)}</bdi></span>` : ''}</div>
+      </div></div>
+      ${DEMO ? `<button class="linked-chip pvm" data-act="pv-how">${ic.info}${esc(t('notLinked'))}</button>` : acc.web_only ? `<button class="linked-chip pvm" data-act="acc-link">${ic.link}${esc(t('lkChip'))}</button>` : S.store.bot ? `<span class="linked-chip"><i class="live-dot"></i>${esc(t('linked'))} <bdi dir="ltr">@${esc(S.store.bot)}</bdi></span>` : ''}
+      <div class="pp-mrz" dir="ltr" aria-hidden="true"><span>${esc(ppL1)}</span><span>${esc(ppL2)}</span></div>
+      ${ppVip ? `<div class="pp-stamp" aria-hidden="true"><b>VIP ${S.vip.level}</b><small>${esc((() => { const tr = (S.vip.tiers || []).find(x => x.level === S.vip.level); return tr ? (isAr() ? 'خصم ' : 'Save ') + (tr.lo === tr.hi ? tr.hi : tr.lo + '–' + tr.hi) + '%' : 'LARA'; })())}</small></div>` : ''}
+    </div>
     ${acc.web_only && S.store.bot ? `<div class="lk-card"><div class="lk-ic">${TG_PLANE}</div><div><b>${esc(t('lkT'))}</b><p>${esc(t('lkCard'))}</p></div><button class="btn primary sm" data-act="acc-link">${esc(t('lkShort'))}</button></div>` : ''}
     <div class="stats3"><div class="stat"><span>${esc(t('balance'))}</span><b class="num">${usd(u.balance)}</b></div><div class="stat"><span>${esc(t('purchases'))}</span><b class="num">${u.purchases || 0}</b></div><div class="stat"><span>${esc(t('deposited'))}</span><b class="num">${usd(u.deposited || 0)}</b></div></div>
     ${refDebt > 0 ? `<div class="hint" role="note">${esc(LANG === 'ar' ? 'مستحق استرجاع إحالات: ' : 'Pending referral reversal: ')}<b dir="ltr">${usd(refDebt)}</b>. ${esc(LANG === 'ar' ? 'يُسوّى من مكافآت الإحالات القادمة. الرصيد أعلاه هو المتاح للشراء.' : 'Settled from future referral rewards. The balance above is available for purchases.')}</div>` : ''}
@@ -6500,6 +6571,10 @@ async function loadApi(force) {
   if (r.ok && r.has_key) prefetchApiDocs();
 }
 async function prefetchApiDocs() { const r = await api('api/docs', { lang: LANG }); if (r.ok) { r.lang = LANG; S.apiDocs = r; } }
+
+Object.assign(I.ar, { bpFrom: 'من', bpTo: 'إلى', bpYou: 'إيميلك', ctTower: 'برج المراقبة', vipApiT: 'خصم VIP يشمل الـ API', vipApiB: 'أنت VIP {n} — نفس خصمك في المتجر يطبّق على طلبات الـ API' });
+Object.assign(I.en, { bpFrom: 'From', bpTo: 'To', bpYou: 'You', ctTower: 'Control tower', vipApiT: 'VIP discount works on the API', vipApiB: 'You are VIP {n} — your store discount also applies to API orders' });
+function vipApiNote() { return S.vip && S.vip.enabled && S.vip.level ? `<div class="vip-api"><span class="vip-api-ic">${ic.crownSvg || '👑'}</span><div><b>${esc(t('vipApiT'))}</b><small>${esc(t('vipApiB', { n: S.vip.level }))}</small></div></div>` : ''; }
 function vApi() {
   const A = S.api;
   if (!A) { loadApi(); return `<div class="api-wrap"><div class="skel" style="height:180px"></div><div class="skel" style="height:140px;margin-top:12px"></div></div>`; }
@@ -6508,7 +6583,7 @@ function vApi() {
   if (!A.has_key) return `<div class="api-wrap">
     <section class="api-hero">
       <div class="api-orb">${slot('api', 'key')}</div>
-      <h1>${esc(at('title'))}</h1><p>${esc(at('sub'))}</p>
+      <span class="ct-eye" dir="ltr">CONTROL TOWER</span><h1>${esc(at('title'))}</h1><p>${esc(at('sub'))}</p>${vipApiNote()}
       <div class="api-feats">${[['f1', 'bolt'], ['f2', 'rocket'], ['f3', 'gem'], ['f4', 'sparkles']].map(([k, e]) => `<div class="api-feat">${ae(e)}<span>${esc(at(k))}</span></div>`).join('')}</div>
       <div class="tk-perf" aria-hidden="true"></div>
       <button class="btn primary full api-cta" data-act="api-gen">${bem('api', ae('key'))}${esc(at('gen'))}</button>
@@ -6520,8 +6595,10 @@ function vApi() {
   const ep0 = EP[0];
   return `<div class="api-wrap">
     <section class="api-top">
+      <span class="ct-eye" dir="ltr">CONTROL TOWER</span>
       <div class="api-head"><div class="api-ttl"><span class="api-orb sm">${slot('api', 'key')}</span><div><h1>${esc(at('title'))}</h1>${DEMO ? `<span class="api-pill pvm">${ic.info}${esc(at('preview'))} · v1</span>` : `<span class="api-pill"><i class="live-dot"></i>${esc(at('active'))} · v1</span>`}</div></div>
         <button class="api-bal" data-act="funds"><small>${esc(t('yourBal'))}</small><b class="num">${usd(A.balance)}</b></button></div>
+      ${vipApiNote()}
       <div class="api-stats">
         <div><b class="num">${st.orders || 0}</b><span>${esc(at('s_orders'))}</span></div>
         <div><b class="num">${st.completed || 0}</b><span>${esc(at('s_done'))}</span></div>
