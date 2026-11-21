@@ -3193,8 +3193,21 @@ html[data-page="login"] main {
 
 /* drawn emblem: floats only on the product page and the banner (one or two elements — light) */
 .emb{transform-box:fill-box;transform-origin:center}
-.hero-vis .emb{animation:embF 3.6s ease-in-out infinite}
-@keyframes embF{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+.hero-vis .emb{animation:embIn .7s cubic-bezier(.34,1.56,.64,1) both,embF 4s ease-in-out .7s infinite}
+@keyframes embF{0%,100%{transform:translateY(0) rotate(0)}25%{transform:translateY(-4px) rotate(-3deg)}50%{transform:translateY(-7px) rotate(0) scale(1.04)}75%{transform:translateY(-4px) rotate(3deg)}}
+@keyframes embIn{0%{transform:scale(.4) rotate(-14deg);opacity:0}100%{transform:scale(1) rotate(0);opacity:1}}
+/* product page only: the cover background breathes (dots drift, rings turn, light glides, one shine sweep) */
+.a-dt,.a-gl,.a-rg,.a-sh{transform-box:fill-box;transform-origin:center}
+.hero-vis .a-dt{animation:aDt 6s linear infinite}
+@keyframes aDt{to{transform:translate(14px,14px)}}
+.hero-vis .a-rg{animation:aRg 26s linear infinite}
+.hero-vis .a-rg2{animation-duration:18s;animation-direction:reverse}
+@keyframes aRg{to{transform:rotate(360deg)}}
+.hero-vis .a-gl{transform-origin:0 0;animation:aGl 6s ease-in-out infinite alternate}
+@keyframes aGl{0%{transform:scale(1);opacity:1}100%{transform:scale(1.45);opacity:.6}}
+.hero-vis .a-sh{transform-box:view-box;animation:aSh 5.5s ease-in-out .5s infinite}
+@keyframes aSh{0%{transform:rotate(18deg) translateX(0);opacity:0}8%{opacity:1}40%{transform:rotate(18deg) translateX(520px);opacity:1}41%,100%{transform:rotate(18deg) translateX(520px);opacity:0}}
+@media (prefers-reduced-motion: reduce){.hero-vis .a-dt,.hero-vis .a-rg,.hero-vis .a-gl,.hero-vis .a-sh{animation:none}}
 .feat-emb{display:inline-grid;place-items:center;flex:none;width:1.45em;height:1.45em;border-radius:.42em;background:rgba(255,255,255,.2);box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.5);font:800 .8em/1 var(--f-display);color:#fff;animation:embF 3.6s ease-in-out infinite}
 @media (prefers-reduced-motion: reduce){.hero-vis .emb,.feat-emb{animation:none}}
 .hero-vis.pv:has(>.art){height:auto!important;aspect-ratio:300/264!important;max-height:360px;max-width:410px;margin-inline:auto;width:100%}
@@ -4056,8 +4069,8 @@ function artSVG(p, mini, logo) {
     `<radialGradient id="${id}r" cx="22%" cy="0%" r="80%"><stop offset="0" stop-color="#fff" stop-opacity=".34"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></radialGradient>` +
     `<pattern id="${id}d" width="14" height="14" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.1" fill="#fff" fill-opacity=".14"/></pattern>` +
     `<linearGradient id="${id}v" x1="0" y1="0" x2="0" y2="1"><stop offset=".55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".36"/></linearGradient></defs>`;
-  const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>` +
-    `<circle cx="276" cy="164" r="126" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2.4"/><circle cx="276" cy="164" r="84" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2.4"/>`;
+  const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect class="a-dt" x="-14" y="-14" width="328" height="292" fill="url(#${id}d)"/><rect class="a-gl" width="300" height="264" fill="url(#${id}r)"/>` +
+    `<circle class="a-rg" cx="276" cy="164" r="126" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2.4" stroke-dasharray="${mini ? '0' : '18 10'}"/><circle class="a-rg a-rg2" cx="276" cy="164" r="84" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2.4" stroke-dasharray="${mini ? '0' : '6 9'}"/>`;
   const ch = [...brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
   if (mini && typeof logo === 'string' && logo) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect x="62" y="44" width="176" height="176" rx="50" fill="#fff"/><image href="${esc(logo)}" x="98" y="80" width="104" height="104" preserveAspectRatio="xMidYMid meet"/></svg>`;
   if (mini) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<text x="150" y="134" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></svg>`;
@@ -4071,7 +4084,7 @@ function artSVG(p, mini, logo) {
   const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(240, tl * 9.2 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 20)})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl * 9.2 + 30 > 220 ? ' textLength="190" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
     `<text x="150" y="244" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .96 : .6}" font-size="${dur ? 14 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.4}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
-  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect width="300" height="264" fill="url(#${id}v)"/>${emb}` +
+  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs.replace('</defs>', `<linearGradient id="${id}s" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>`)}${bg}<rect width="300" height="264" fill="url(#${id}v)"/><rect class="a-sh" x="-120" y="-40" width="90" height="344" fill="url(#${id}s)" transform="rotate(18 150 132)" opacity="0"/>${emb}` +
     `<text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
 }
 /* wide cover for the «most wanted» banner: background + motif + big echo; text is real HTML on top */
