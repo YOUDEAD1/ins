@@ -39732,6 +39732,14 @@ def _brand_logo_svg(q, tint=''):
     for k in set(cands):
         if k in pool and len(k) > bl and (len(k) >= 3 or (toks and toks[0] == k)):
             best, bl = k, len(k)
+    # إذا الاسم يبدأ بماركة لها شعار ملوّن (مثل Microsoft Office) نفضّل الشعار الملوّن على أيقونة بلون واحد
+    if best and pool[best][0] != 'lg':
+        cl, cll = None, 0
+        for k in set(cands):
+            if k in pool and pool[k][0] == 'lg' and len(k) >= 4 and comp.startswith(k) and len(k) > cll:
+                cl, cll = k, len(k)
+        if cl:
+            best = cl
     if best:
         ent = pool[best]
         tag, w, h, body = ent[:4]
@@ -39802,7 +39810,7 @@ def _wa_brand_logo_get(handler, parsed):
     svg = _brand_logo_svg(q, tint)
     if not svg:   # ما لقينا شعار في أي مكتبة: نصمّم له شعار أصلي من اسمه
         svg = _brand_gen_logo(str(q or '').strip().lower(), tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else '')
-    return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=2592000')
+    return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
 
 
 
