@@ -39651,7 +39651,7 @@ def _wa_emoji_webp(eid):
 _BRAND_POOL = None
 _BRAND_POOL_LOCK = threading.Lock()
 _BRAND_LOGO_CACHE = {}
-_BRAND_POOL_ORDER = {'si': 0, 'cib': 1, 'bxl': 2, 'tabler': 3, 'arc': 4}
+_BRAND_POOL_ORDER = {'lg': 0, 'si': 1, 'cib': 2, 'bxl': 3, 'tabler': 4, 'arc': 5}
 
 
 def _brand_pool():
@@ -39665,12 +39665,20 @@ def _brand_pool():
                     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lara_core', 'brandpool.json.gz')
                     with _gz.open(path, 'rt', encoding='utf-8') as f:
                         rows = json.load(f)
-                    for tag, key, w, h, body in rows:
+                    hexes = {}
+                    for row in rows:
+                        tag, key, w, h, body = row[:5]
+                        hx = row[5] if len(row) > 5 else ''
                         if not key:
                             continue
+                        if hx and key not in hexes:
+                            hexes[key] = hx
                         old = idx.get(key)
                         if old is None or _BRAND_POOL_ORDER.get(tag, 9) < _BRAND_POOL_ORDER.get(old[0], 9):
                             idx[key] = (tag, w, h, body)
+                    for k, hx in hexes.items():
+                        if k in idx:
+                            idx[k] = idx[k] + (hx,)
                 except Exception as e:
                     logger.warning(f"brand pool load failed: {e}")
                 _BRAND_POOL = idx
@@ -39716,9 +39724,15 @@ def _brand_logo_svg(q):
         if k in pool and len(k) > bl and (len(k) >= 3 or (toks and toks[0] == k)):
             best, bl = k, len(k)
     if best:
-        tag, w, h, body = pool[best]
-        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 8}" height="{h * 8}" '
-               f'color="#ffffff" fill="#ffffff">{body}</svg>')
+        ent = pool[best]
+        tag, w, h, body = ent[:4]
+        hx = ent[4] if len(ent) > 4 else ''
+        if tag == 'lg':     # شعار بألوانه الأصلية
+            svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 4}" height="{h * 4}">{body}</svg>'
+        else:               # شعار بلون واحد: نلوّنه بلون البراند الرسمي
+            col = '#' + hx if hx and hx.upper() not in ('FFFFFF', 'FFFFFE') else '#0B1033'
+            svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 8}" height="{h * 8}" '
+                   f'color="{col}" fill="{col}">{body}</svg>')
     else:
         svg = None
     if len(_BRAND_LOGO_CACHE) > 4000:
@@ -39737,9 +39751,8 @@ def _wa_brand_logo_get(handler, parsed):
         ch = (str(q).strip()[:1] or '?').upper()
         ch = ch.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 74" width="296" height="296">'
-               '<rect x="6" y="6" width="62" height="62" rx="19" fill="#fff" fill-opacity=".2" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/>'
-               '<rect x="10" y="10" width="54" height="26" rx="15" fill="#fff" fill-opacity=".14"/>'
-               f'<text x="37" y="39" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="34" font-weight="800" '
+               
+               f'<text x="37" y="39" text-anchor="middle" dominant-baseline="central" fill="#2340FF" font-size="34" font-weight="800" '
                f'font-family="Unbounded, Rubik, Arial, sans-serif">{ch}</text></svg>')
         return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
     return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=2592000')

@@ -3200,7 +3200,7 @@ html[data-page="login"] main {
 .hero-vis.pv:has(>.art){height:auto!important;aspect-ratio:300/264!important;max-height:360px;max-width:410px;margin-inline:auto;width:100%}
 .art-anim{position:absolute;left:36%;top:12.9%;width:28%;aspect-ratio:1;display:grid;place-items:center;pointer-events:none;animation:embF 3.6s ease-in-out infinite}
 .art-anim .ce,.art-anim .ce>*,.art-anim img{width:100%!important;height:100%!important;object-fit:contain}
-.feat-logo{width:1.3em;height:1.3em;object-fit:contain;flex:none;animation:embF 3.6s ease-in-out infinite}
+.feat-logo{width:1.45em;height:1.45em;object-fit:contain;flex:none;padding:.22em;border-radius:.42em;background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.25);animation:embF 3.6s ease-in-out infinite}
 @media (prefers-reduced-motion: reduce){.art-anim,.feat-logo{animation:none}}
 </style>
 </head>
@@ -4059,14 +4059,14 @@ function artSVG(p, mini, logo) {
   const bg = `<rect width="300" height="264" fill="url(#${id}g)"/><rect width="300" height="264" fill="url(#${id}d)"/><rect width="300" height="264" fill="url(#${id}r)"/>` +
     `<circle cx="276" cy="164" r="126" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2.4"/><circle cx="276" cy="164" r="84" fill="none" stroke="#fff" stroke-opacity=".08" stroke-width="2.4"/>`;
   const ch = [...brand][0] || '?', chU = AR_RE.test(ch) ? ch : ch.toUpperCase();
-  if (mini && typeof logo === 'string' && logo) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<image href="${esc(logo)}" x="66" y="48" width="168" height="168" preserveAspectRatio="xMidYMid meet"/></svg>`;
+  if (mini && typeof logo === 'string' && logo) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect x="62" y="44" width="176" height="176" rx="50" fill="#fff"/><image href="${esc(logo)}" x="98" y="80" width="104" height="104" preserveAspectRatio="xMidYMid meet"/></svg>`;
   if (mini) return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<text x="150" y="134" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="150" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></svg>`;
   const Ln = Math.max(2, [...brand].length), ar = AR_RE.test(brand);
   const fs = Math.min(logo ? 36 : 56, Math.max(18, 216 / (Ln * (ar ? .62 : .8))));
   const fit = Ln * fs * (ar ? .62 : .8) > 216 ? ` textLength="216" lengthAdjust="spacingAndGlyphs"` : '';
   const wy = logo ? (tier ? 146 : 158) : 104;
   const emb = !logo ? '' : (typeof logo === 'string' && logo !== 'slot')
-    ? `<g class="emb"><image href="${esc(logo)}" x="113" y="38" width="74" height="74" preserveAspectRatio="xMidYMid meet"/></g>`
+    ? `<g class="emb"><rect x="111" y="40" width="78" height="78" rx="23" fill="#000" fill-opacity=".22"/><rect x="111" y="36" width="78" height="78" rx="23" fill="#fff"/><rect x="111.8" y="36.8" width="76.4" height="76.4" rx="22.2" fill="none" stroke="#000" stroke-opacity=".06"/><image href="${esc(logo)}" x="125" y="50" width="50" height="50" preserveAspectRatio="xMidYMid meet"/></g>`
     : logo === 'slot' ? '' : `<g class="emb"><rect x="119" y="46" width="62" height="62" rx="19" fill="#fff" fill-opacity=".2" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/><rect x="123" y="50" width="54" height="26" rx="15" fill="#fff" fill-opacity=".14"/><text x="150" y="79" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="34" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></g>`;
   const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(240, tl * 9.2 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 20)})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl * 9.2 + 30 > 220 ? ' textLength="190" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
@@ -4106,7 +4106,7 @@ function brandSrc(b) { return 'brands/' + b.slug + '.svg'; }
 function autoLogo(p) { const n = String(p.name_en || p.name || p.name_ar || '').trim(); return n && API && !DEMO ? API + '/webapp/blogo?q=' + encodeURIComponent(n.toLowerCase().slice(0, 120)) : ''; }
 function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
 function hasLogo(p) { return !!(p && p.emoji_id && API && !DEMO); }
-function artTile(p, mini) { const bi = brandIcon(p); const u = bi ? brandSrc(bi) : autoLogo(p) || (hasLogo(p) ? logoUrl(p.emoji_id) : ''); return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, mini ? u : (u || true))}</span>`; }
+function artTile(p, mini) { const u = autoLogo(p) || (hasLogo(p) ? logoUrl(p.emoji_id) : ''); return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, mini ? u : (u || true))}</span>`; }
 /* product page: the real (animated) app logo sits in the emblem slot — only one animation on screen */
 function heroVisual(p) {
   if (p.image || brandIcon(p) || autoLogo(p) || !hasLogo(p)) return visual(p);
@@ -4142,7 +4142,7 @@ function featHtml() {
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${brandIcon(p) || autoLogo(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(brandIcon(p) ? brandSrc(brandIcon(p)) : autoLogo(p) || logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}${esc(name)}</b>
+          <b class="feat-name" dir="auto">${brandIcon(p) || autoLogo(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(autoLogo(p) || logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>

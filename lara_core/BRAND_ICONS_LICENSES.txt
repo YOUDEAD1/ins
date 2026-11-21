@@ -1,4 +1,5 @@
 brandpool.json.gz bundles brand icons from open icon sets (via Iconify):
+- SVG Logos (gilbarbara/logos, via Iconify) — CC0 1.0 — https://github.com/gilbarbara/logos
 - Simple Icons — CC0 1.0 — https://simpleicons.org
 - CoreUI Brands (cib) — CC0 1.0 — https://github.com/coreui/coreui-icons
 - Boxicons logos (bxl) — MIT — https://boxicons.com
