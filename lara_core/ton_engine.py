@@ -85,6 +85,17 @@ def ton_extract_hash(raw_input):
     return ''
 
 
+def _alt_hashes(*vals):
+    """Other hashes the customer may paste for the same transfer: the message hash, or the
+    sender-side trace/event hash that Tonkeeper and Tonviewer show."""
+    out = set()
+    for v in vals:
+        h = ton_extract_hash(v) if v else ''
+        if h:
+            out.add(h)
+    return out
+
+
 class TonAndCheckEngine:
     def __init__(self, ns):
         self.ns = ns
@@ -174,6 +185,7 @@ class TonAndCheckEngine:
             'source_addr': src_raw,
             'comment': comment,
             'provider': 'tonapi_v2',
+            'alt': _alt_hashes(in_msg.get('hash'), tx.get('trace_id')),
         }
 
     def _parse_toncenter_v3_tx(self, tx, wallet_canon):
@@ -215,6 +227,7 @@ class TonAndCheckEngine:
             'source_addr': src_raw,
             'comment': '',
             'provider': 'toncenter_v3',
+            'alt': _alt_hashes(in_msg.get('hash'), in_msg.get('hash_norm'), tx.get('trace_id')),
         }
 
     def _parse_toncenter_v2_tx(self, tx, wallet_canon):
@@ -249,6 +262,7 @@ class TonAndCheckEngine:
             'source_addr': src_raw,
             'comment': str(in_msg.get('message') or ''),
             'provider': 'toncenter_v2',
+            'alt': _alt_hashes(in_msg.get('hash'), in_msg.get('msg_hash')),
         }
 
     def fetch_wallet_txs(self, wallet_address, limit=40):
@@ -358,17 +372,52 @@ class TonAndCheckEngine:
             except Exception as exc:
                 self.logger.debug('TONCenter v3 direct tx lookup fallback: %s', exc)
 
-        # 3) Account recent history scan (handles partial suffix searches too)
+            # 3) The customer pasted the SENDER-side hash (Tonkeeper / Tonviewer show the sender's
+            #    transaction or event) or the message hash: follow the trace to OUR incoming transaction.
+            try:
+                r = req.get(f"https://tonapi.io/v2/traces/{canon_hex}", headers=_HTTP_HEADERS, timeout=10)
+                if r.status_code == 200:
+                    stack = [r.json() or {}]
+                    while stack:
+                        node = stack.pop()
+                        if not isinstance(node, dict):
+                            continue
+                        tx = node.get('transaction') or {}
+                        acct = (tx.get('account') or {}).get('address', '') if isinstance(tx.get('account'), dict) else ''
+                        if acct and ton_canon_addr(acct) == wallet_canon:
+                            parsed = self._parse_tonapi_tx(tx, wallet_canon)
+                            if parsed:
+                                return parsed
+                        stack.extend(node.get('children') or [])
+            except Exception as exc:
+                self.logger.debug('TonAPI trace lookup fallback: %s', exc)
+            try:
+                r = req.get('https://toncenter.com/api/v3/transactionsByMessage',
+                            params={'msg_hash': canon_hex, 'limit': 10}, headers=hdrs, timeout=10)
+                if r.status_code == 200:
+                    for tx in r.json().get('transactions', []) or []:
+                        if ton_canon_addr(tx.get('account', '')) == wallet_canon:
+                            parsed = self._parse_toncenter_v3_tx(tx, wallet_canon)
+                            if parsed:
+                                return parsed
+            except Exception as exc:
+                self.logger.debug('TONCenter v3 message lookup fallback: %s', exc)
+
+        # 4) Account recent history scan: our tx hash, its message hash, or the sender trace id
         q_clean = str(query_or_hash or '').strip().lower()
-        for provider_fn in (
-            lambda: req.get(
+        for kind, provider_fn in (
+            ('tonapi', lambda: req.get(
                 f"https://tonapi.io/v2/blockchain/accounts/{wallet_address}/transactions",
                 params={'limit': 100}, headers=_HTTP_HEADERS, timeout=12
-            ),
-            lambda: req.get(
+            )),
+            ('v3', lambda: req.get(
+                'https://toncenter.com/api/v3/transactions',
+                params={'account': wallet_address, 'limit': 100, 'sort': 'desc'}, headers=hdrs, timeout=12
+            )),
+            ('v2', lambda: req.get(
                 'https://toncenter.com/api/v2/getTransactions',
                 params={'address': wallet_address, 'limit': 60}, headers=hdrs, timeout=12
-            ),
+            )),
         ):
             try:
                 r = provider_fn()
@@ -376,13 +425,15 @@ class TonAndCheckEngine:
                     continue
                 body = r.json()
                 tx_list = body.get('transactions') if 'transactions' in body else (body.get('result') or [])
-                is_v2 = 'result' in body
-                for tx in tx_list:
-                    parsed = self._parse_toncenter_v2_tx(tx, wallet_canon) if is_v2 else self._parse_tonapi_tx(tx, wallet_canon)
+                for tx in tx_list or []:
+                    parsed = (self._parse_toncenter_v2_tx(tx, wallet_canon) if kind == 'v2' else
+                              self._parse_toncenter_v3_tx(tx, wallet_canon) if kind == 'v3' else
+                              self._parse_tonapi_tx(tx, wallet_canon))
                     if not parsed:
                         continue
                     h = parsed['hash']
-                    if (canon_hex and h == canon_hex) or (not canon_hex and len(q_clean) >= 12 and q_clean in h):
+                    if (canon_hex and (h == canon_hex or canon_hex in (parsed.get('alt') or ()))) or \
+                            (not canon_hex and len(q_clean) >= 12 and q_clean in h):
                         return parsed
             except Exception:
                 continue
@@ -702,6 +753,27 @@ class TonAndCheckEngine:
                 self.db.claimed_hashes.delete_one({'transaction_id': tx_track_key, 'user_id': uid})
                 self.bot.send_message(uid, '❌ <b>مرفوض:</b> هذه معاملة صادرة وليست إيداعاً.', parse_mode='HTML')
                 return
+            our_hex = found.get('hash') or canon_hex
+            if our_hex != canon_hex:
+                # Found through the sender/message hash: record the transfer under OUR transaction hash,
+                # so the same transfer can never be credited twice through a different hash.
+                new_key = 'ton' + our_hex
+                with ns['tx_lock']:
+                    if self.db.used_transactions.find_one({'transaction_id': {'$in': list(ns['_ton_tx_keys'](our_hex))}}, {'_id': 1}) \
+                            or new_key in ns['PROCESSING_TXS']:
+                        self.db.claimed_hashes.delete_one({'transaction_id': tx_track_key, 'user_id': uid})
+                        self.bot.reply_to(message, ns['get_text'](uid, 'tx_used'))
+                        return
+                    ns['PROCESSING_TXS'].add(new_key)
+                st2 = ns['claim_tx_hash'](new_key, uid)
+                if st2 in ('stolen_attempt', 'already_used'):
+                    ns['PROCESSING_TXS'].discard(new_key)
+                    self.db.claimed_hashes.delete_one({'transaction_id': tx_track_key, 'user_id': uid})
+                    self.bot.reply_to(message, ns['get_text'](uid, 'tx_used'))
+                    return
+                self.db.claimed_hashes.delete_one({'transaction_id': tx_track_key, 'user_id': uid})
+                ns['PROCESSING_TXS'].discard(tx_track_key)
+                tx_track_key = new_key
             utime = int(found.get('utime') or 0)
             if utime > 0 and (int(time.time()) - utime) > 24 * 3600:
                 self.db.claimed_hashes.delete_one({'transaction_id': tx_track_key, 'user_id': uid})
