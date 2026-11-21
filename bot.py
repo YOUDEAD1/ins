@@ -7547,6 +7547,47 @@ def get_translated_product_name(p, lang, is_cgpt=False):
             n = "بدون اسم"
         return n
 
+_DESC_URL_RE = re.compile(r'(?:https?://|www\.)[^\s<>"\']+', re.I)
+
+
+def _desc_box(d):
+    """📝 وصف المنتج داخل إطار (blockquote) — والروابط تصير قابلة للنسخ بلمسة (code)."""
+    d = str(d or '').strip()
+    if not d:
+        return ''
+    # <a href="X">نص</a> ← النص + الرابط قابل للنسخ
+    def _a(m):
+        href = html.unescape(m.group(1))
+        txt = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+        code = f'<code>{html.escape(href, quote=False)}</code>'
+        return code if (not txt or txt.rstrip('/') == href.rstrip('/')) else f'{m.group(2)}: {code}'
+    d = re.sub(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', _a, d, flags=re.I | re.S)
+    # روابط مكتوبة كنص (خارج الوسوم وخارج <code>/<pre>)
+    out, pos, in_code = [], 0, 0
+    for m in re.finditer(r'<[^>]+>', d):
+        seg = d[pos:m.start()]
+        if not in_code:
+            seg = _DESC_URL_RE.sub(lambda u: (lambda v, tail: f'<code>{v}</code>{tail}')(
+                u.group(0).rstrip(').,!?؟،'), u.group(0)[len(u.group(0).rstrip(').,!?؟،')):]), seg)
+        out.append(seg)
+        tag = m.group(0).lower()
+        if re.match(r'<(code|pre)\b', tag):
+            in_code += 1
+        elif re.match(r'</(code|pre)>', tag):
+            in_code = max(0, in_code - 1)
+        out.append(m.group(0))
+        pos = m.end()
+    seg = d[pos:]
+    if not in_code:
+        seg = _DESC_URL_RE.sub(lambda u: (lambda v, tail: f'<code>{v}</code>{tail}')(
+            u.group(0).rstrip(').,!?؟،'), u.group(0)[len(u.group(0).rstrip(').,!?؟،')):]), seg)
+    out.append(seg)
+    d = ''.join(out)
+    # إطار واحد فقط (تيليجرام ما يقبل إطار داخل إطار)
+    d = re.sub(r'</?blockquote[^>]*>', '', d, flags=re.I).strip()
+    return f'<blockquote>{d}</blockquote>'
+
+
 def get_translated_product_desc(p, lang, is_cgpt=False):
     if not p:
         return ""
@@ -10211,7 +10252,7 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                 stock_ar = f"{_seats} مقعد"
                 stock_en = f"{_seats} seats"
 
-            text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, stock_en if lang == 'en' else stock_ar)
+            text = get_text(uid, 'cg_page', icon_html, p_name, _desc_box(p_desc), stock_en if lang == 'en' else stock_ar)
 
             back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
             markup = InlineKeyboardMarkup(row_width=1)
@@ -10295,9 +10336,9 @@ def shop_detail_ui_helper(chat_id, uid, pid, lang, message_id_to_edit=None, cat_
                     discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
 
         if lang == 'en':
-            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> {vip_price_html(uid, p.get('id', pid_actual), p.get('price', 0), 'en')}\n📊 <b>Stock:</b> {st_text}{discount_text}"
+            text = f"{icon_html} <b>{n}</b>\n\n{_desc_box(d)}\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> {vip_price_html(uid, p.get('id', pid_actual), p.get('price', 0), 'en')}\n📊 <b>Stock:</b> {st_text}{discount_text}"
         else:
-            text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> {vip_price_html(uid, p.get('id', pid_actual), p.get('price', 0))}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
+            text = f"{icon_html} <b>{n}</b>\n\n{_desc_box(d)}\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> {vip_price_html(uid, p.get('id', pid_actual), p.get('price', 0))}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
 
         back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
         markup = InlineKeyboardMarkup()
@@ -13171,7 +13212,7 @@ def shop_detail_ui(call):
         _seats = _cgpt_display_seats()
         _seats = _seats if _seats is not None else "…"
 
-        text = get_text(uid, 'cg_page', icon_html, p_name, p_desc, _seats)
+        text = get_text(uid, 'cg_page', icon_html, p_name, _desc_box(p_desc), _seats)
 
         back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
         markup = InlineKeyboardMarkup(row_width=1)
@@ -13249,9 +13290,9 @@ def shop_detail_ui(call):
                 discount_text += f"  • {t.get('min_qty')}+ units = <b>${t_price:.2f}</b>/unit\n"
 
     if l == 'en':
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> {vip_price_html(uid, p.get('id', pid), p.get('price', 0), 'en')}\n📊 <b>Stock:</b> {st_text}{discount_text}"
+        text = f"{icon_html} <b>{n}</b>\n\n{_desc_box(d)}\n🚚 <b>Delivery:</b> {delivery_type}\n💰 <b>Price:</b> {vip_price_html(uid, p.get('id', pid), p.get('price', 0), 'en')}\n📊 <b>Stock:</b> {st_text}{discount_text}"
     else:
-        text = f"{icon_html} <b>{n}</b>\n\n📝 {d}\n\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> {vip_price_html(uid, p.get('id', pid), p.get('price', 0))}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
+        text = f"{icon_html} <b>{n}</b>\n\n{_desc_box(d)}\n🚚 <b>نوع التسليم:</b> {delivery_type}\n💰 <b>السعر:</b> {vip_price_html(uid, p.get('id', pid), p.get('price', 0))}\n📊 <b>المتوفر:</b> {st_text}{discount_text}"
 
     back_cb = f"cat_{cat_id_back}" if cat_id_back else "open_shop"
     markup = InlineKeyboardMarkup()
@@ -25210,7 +25251,7 @@ def ad_csv_products(call):
 
 
 
-CGPT_CMS_TEXTS = {'cg_page': ('صفحة المنتج', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ التسليم: تلقائي فوري\n📦 المقاعد المتاحة: {3}\n\n🗓 اختر المدة:', '{0} <b>{1}</b>\n\n📝 {2}\n\n⚡ Delivery: Instant\n📦 Available seats: {3}\n\n🗓 Choose duration:'), 'cg_email_prompt': ('طلب إيميل الشراء', '✅ <b>المدة المختارة: {0} — ${1}</b>\n\n📧 أرسل إيميل حساب ChatGPT الخاص بك:', '✅ <b>Selected: {0} — ${1}</b>\n\n📧 Send your ChatGPT account email:'), 'cg_email_confirm': ('تأكيد الإيميل', '📧 <b>الإيميل:</b> <code>{0}</code>\n\nهل هذا الإيميل صحيح؟', '📧 <b>Email:</b> <code>{0}</code>\n\nIs this email correct?'), 'cg_success': ('رسالة نجاح الشراء', '✅ <b>تم الشراء وإرسال الدعوة بنجاح!</b>\n\n📧 <code>{0}</code>\n⏱ المدة: {1}\n📅 الانتهاء: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nتفقد بريدك واقبل الدعوة.\nاشتراكاتك: /my_chatgpt', '✅ <b>Purchase complete — invitation sent!</b>\n\n📧 <code>{0}</code>\n⏱ Duration: {1}\n📅 Expires: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nCheck your email and accept the invitation.\nYour subscriptions: /my_chatgpt'), 'cg_details': ('تفاصيل الاشتراك', '⚙️ <b>تفاصيل الاشتراك</b>\n\n📧 <code>{0}</code>\n⏳ المتبقي: {1} يوم و{2} ساعة\n📅 الانتهاء: {3}\n\nاختر التجديد أو الترقية:', '⚙️ <b>Subscription details</b>\n\n📧 <code>{0}</code>\n⏳ Remaining: {1} days, {2} hours\n📅 Expires: {3}\n\nChoose renewal or upgrade:'), 'cg_notice_5': ('❌ المنتج غير موجود.', '❌ المنتج غير موجود.', '❌ Product not found.'), 'cg_notice_6': ('❌ المدة غير موجودة.', '❌ المدة غير موجودة.', '❌ Duration not found.'), 'cg_notice_7': ('❌ تم إلغاء عملية الشراء.', '❌ تم إلغاء عملية الشراء.', '❌ Purchase cancelled.'), 'cg_notice_8': ('❌ لا توجد عملية شراء جارية.', '❌ لا توجد عملية شراء جارية.', '❌ No active purchase in progress.'), 'cg_notice_9': ('❌ إيميل غير صحيح، أرسله مجدداً.', '❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>', '❌ <b>Invalid email, please send again.</b>'), 'cg_notice_10': ('📧 أرسل إيميل حساب ChatGPT:', '📧 <b>أرسل إيميل حساب ChatGPT:</b>', '📧 <b>Send your ChatGPT email:</b>'), 'cg_notice_11': ('📧 أرسل الإيميل الصحيح:', '📧 <b>أرسل الإيميل الصحيح:</b>', '📧 <b>Send the correct email:</b>'), 'cg_notice_12': ('⏳ جاري إرسال الدعوة...', '⏳ <b>جاري إرسال الدعوة...</b>', '⏳ <b>Sending invite...</b>'), 'cg_notice_13': ('❌ انتهت الجلسة.', '❌ انتهت الجلسة.', '❌ Session expired.'), 'cg_notice_14': ('❌ عذراً، نفدت المقاعd المتاحة حالياً.', '❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً.', '❌ Sorry, no seats available right now. Try later.'), 'cg_notice_15': ('❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ No seats available. Your balance was refunded.'), 'cg_notice_16': ('📭 لا اشتراكات ChatGPT نشطة لديك.', '📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\nاشترِ باقة من المتجر!', '📭 <b>You have no active ChatGPT subscriptions.</b>'), 'cg_reminder': ('تذكير قرب انتهاء الاشتراك', '⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n📧 <code>{0}</code>\n⏰ يتبقى حوالي {1} ساعة.\nجدد الآن؛ يُلغى الوصول تلقائياً عند الانتهاء.', '⏳ <b>Your ChatGPT subscription expires soon!</b>\n📧 <code>{0}</code>\n⏰ About {1} hours left.\nRenew now; access ends automatically at expiry.'), 'cg_renew_prompt': ('اختيار باقة التجديد', '🔄 <b>تجديد اشتراك ChatGPT</b>\n📧 <code>{0}</code>\nاختر باقة التجديد بالسعر الحالي. يمكنك استخدام الإيميل نفسه أو تغييره.', '🔄 <b>Renew ChatGPT subscription</b>\n📧 <code>{0}</code>\nChoose a package at its current price. You can use the same email or change it.'), 'cg_subs_title': ('عنوان اشتراكاتي', '🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n', '🤖 <b>Your ChatGPT subscriptions</b>\n'), 'cg_refund_cancel': ('إلغاء الشراء وإرجاع الرصيد', '❌ تم إلغاء الشراء وإرجاع <b>${0}</b> إلى رصيدك.', '❌ Purchase cancelled. <b>${0}</b> was refunded to your balance.'), 'cg_invite_failed': ('فشل الدعوة وإرجاع الرصيد', '❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{0}</code>', '❌ <b>Invitation failed. Your balance was refunded.</b>\n<code>{0}</code>'), 'cg_kicked': ('إشعار العميل بعد الطرد', '🚫 ألغت الإدارة وصولك إلى ChatGPT Business.\n📧 {0}', '🚫 Your ChatGPT Business access was removed by the administrator.\n📧 {0}'), 'cg_admin_purchase': ('إشعار شراء للأدمن', '🤖 <b>ChatGPT Business — شراء</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>', '🤖 <b>ChatGPT Business — purchase</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>')}
+CGPT_CMS_TEXTS = {'cg_page': ('صفحة المنتج', '{0} <b>{1}</b>\n\n{2}\n⚡ التسليم: تلقائي فوري\n📦 المقاعد المتاحة: {3}\n\n🗓 اختر المدة:', '{0} <b>{1}</b>\n\n{2}\n⚡ Delivery: Instant\n📦 Available seats: {3}\n\n🗓 Choose duration:'), 'cg_email_prompt': ('طلب إيميل الشراء', '✅ <b>المدة المختارة: {0} — ${1}</b>\n\n📧 أرسل إيميل حساب ChatGPT الخاص بك:', '✅ <b>Selected: {0} — ${1}</b>\n\n📧 Send your ChatGPT account email:'), 'cg_email_confirm': ('تأكيد الإيميل', '📧 <b>الإيميل:</b> <code>{0}</code>\n\nهل هذا الإيميل صحيح؟', '📧 <b>Email:</b> <code>{0}</code>\n\nIs this email correct?'), 'cg_success': ('رسالة نجاح الشراء', '✅ <b>تم الشراء وإرسال الدعوة بنجاح!</b>\n\n📧 <code>{0}</code>\n⏱ المدة: {1}\n📅 الانتهاء: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nتفقد بريدك واقبل الدعوة.\nاشتراكاتك: /my_chatgpt', '✅ <b>Purchase complete — invitation sent!</b>\n\n📧 <code>{0}</code>\n⏱ Duration: {1}\n📅 Expires: {2}\n💰 ${3}\n🆔 <code>{4}</code>\n\nCheck your email and accept the invitation.\nYour subscriptions: /my_chatgpt'), 'cg_details': ('تفاصيل الاشتراك', '⚙️ <b>تفاصيل الاشتراك</b>\n\n📧 <code>{0}</code>\n⏳ المتبقي: {1} يوم و{2} ساعة\n📅 الانتهاء: {3}\n\nاختر التجديد أو الترقية:', '⚙️ <b>Subscription details</b>\n\n📧 <code>{0}</code>\n⏳ Remaining: {1} days, {2} hours\n📅 Expires: {3}\n\nChoose renewal or upgrade:'), 'cg_notice_5': ('❌ المنتج غير موجود.', '❌ المنتج غير موجود.', '❌ Product not found.'), 'cg_notice_6': ('❌ المدة غير موجودة.', '❌ المدة غير موجودة.', '❌ Duration not found.'), 'cg_notice_7': ('❌ تم إلغاء عملية الشراء.', '❌ تم إلغاء عملية الشراء.', '❌ Purchase cancelled.'), 'cg_notice_8': ('❌ لا توجد عملية شراء جارية.', '❌ لا توجد عملية شراء جارية.', '❌ No active purchase in progress.'), 'cg_notice_9': ('❌ إيميل غير صحيح، أرسله مجدداً.', '❌ <b>إيميل غير صحيح، أرسله مجدداً.</b>', '❌ <b>Invalid email, please send again.</b>'), 'cg_notice_10': ('📧 أرسل إيميل حساب ChatGPT:', '📧 <b>أرسل إيميل حساب ChatGPT:</b>', '📧 <b>Send your ChatGPT email:</b>'), 'cg_notice_11': ('📧 أرسل الإيميل الصحيح:', '📧 <b>أرسل الإيميل الصحيح:</b>', '📧 <b>Send the correct email:</b>'), 'cg_notice_12': ('⏳ جاري إرسال الدعوة...', '⏳ <b>جاري إرسال الدعوة...</b>', '⏳ <b>Sending invite...</b>'), 'cg_notice_13': ('❌ انتهت الجلسة.', '❌ انتهت الجلسة.', '❌ Session expired.'), 'cg_notice_14': ('❌ عذراً، نفدت المقاعd المتاحة حالياً.', '❌ عذراً، نفدت المقاعd المتاحة حالياً.\nحاول لاحقاً.', '❌ Sorry, no seats available right now. Try later.'), 'cg_notice_15': ('❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ عذراً، لا مقاعd متاحة حالياً. أُعيد رصيدك.', '❌ No seats available. Your balance was refunded.'), 'cg_notice_16': ('📭 لا اشتراكات ChatGPT نشطة لديك.', '📭 <b>لا اشتراكات ChatGPT نشطة لديك.</b>\n\nاشترِ باقة من المتجر!', '📭 <b>You have no active ChatGPT subscriptions.</b>'), 'cg_reminder': ('تذكير قرب انتهاء الاشتراك', '⏳ <b>اشتراك ChatGPT قارب على الانتهاء!</b>\n📧 <code>{0}</code>\n⏰ يتبقى حوالي {1} ساعة.\nجدد الآن؛ يُلغى الوصول تلقائياً عند الانتهاء.', '⏳ <b>Your ChatGPT subscription expires soon!</b>\n📧 <code>{0}</code>\n⏰ About {1} hours left.\nRenew now; access ends automatically at expiry.'), 'cg_renew_prompt': ('اختيار باقة التجديد', '🔄 <b>تجديد اشتراك ChatGPT</b>\n📧 <code>{0}</code>\nاختر باقة التجديد بالسعر الحالي. يمكنك استخدام الإيميل نفسه أو تغييره.', '🔄 <b>Renew ChatGPT subscription</b>\n📧 <code>{0}</code>\nChoose a package at its current price. You can use the same email or change it.'), 'cg_subs_title': ('عنوان اشتراكاتي', '🤖 <b>اشتراكات ChatGPT الخاصة بك</b>\n', '🤖 <b>Your ChatGPT subscriptions</b>\n'), 'cg_refund_cancel': ('إلغاء الشراء وإرجاع الرصيد', '❌ تم إلغاء الشراء وإرجاع <b>${0}</b> إلى رصيدك.', '❌ Purchase cancelled. <b>${0}</b> was refunded to your balance.'), 'cg_invite_failed': ('فشل الدعوة وإرجاع الرصيد', '❌ <b>فشل إرسال الدعوة. تم إرجاع رصيدك.</b>\n<code>{0}</code>', '❌ <b>Invitation failed. Your balance was refunded.</b>\n<code>{0}</code>'), 'cg_kicked': ('إشعار العميل بعد الطرد', '🚫 ألغت الإدارة وصولك إلى ChatGPT Business.\n📧 {0}', '🚫 Your ChatGPT Business access was removed by the administrator.\n📧 {0}'), 'cg_admin_purchase': ('إشعار شراء للأدمن', '🤖 <b>ChatGPT Business — شراء</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>', '🤖 <b>ChatGPT Business — purchase</b>\n👤 <code>{0}</code>\n📧 <code>{1}</code>\n⏱ {2}\n💰 ${3}\n🆔 <code>{4}</code>')}
 CGPT_CMS_BUTTONS = {'cg_buy': ('زر الشراء والمدة', '🛒 شراء', '🛒 Buy'), 'cg_cancel': ('زر إلغاء الشراء', '❌ إلغاء', '❌ Cancel'), 'cg_confirm': ('زر تأكيد الإيميل', '✅ نعم، صحيح', '✅ Yes, correct'), 'cg_change': ('زر تغيير الإيميل', '✏️ تغييره', '✏️ Change it'), 'cg_back': ('زر الرجوع', '🔙 رجوع', '🔙 Back'), 'cg_upgrade': ('زر تجديد / ترقية', '⬆️ تجديد / ترقية', '⬆️ Renew / upgrade'), 'cg_renew': ('زر التجديد', '🔄 تجديد الاشتراك', '🔄 Renew subscription'), 'cg_sub_item': ('زر فتح الاشتراك', '⚙️ الاشتراك', '⚙️ Subscription')}
 CGPT_CMS_TEXTS['cg_expired_removed'] = ('انتهاء الاشتراك وإلغاء الوصول', LANG['ar']['cg_expired_removed'], LANG['en']['cg_expired_removed'])
 CGPT_CMS_TEXTS['cg_api_debit'] = (

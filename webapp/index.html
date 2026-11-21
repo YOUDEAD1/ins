@@ -1098,6 +1098,12 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .desc a{color:var(--accent-2)}
 .desc code,.desc pre{font-family:var(--f-mono);font-size:13px;background:var(--surface-2);padding:1px 6px;border-radius:6px}
 .desc pre{display:block;padding:10px;white-space:pre-wrap}
+.desc.boxed{margin:4px 0 6px;padding:12px 16px;border-inline-start:3px solid var(--accent);background:var(--surface-2);border-radius:16px}
+.desc.boxed blockquote{margin:4px 0;padding:0;border:0;background:none;border-radius:0}
+.desc .lk{display:inline-flex;align-items:center;gap:6px;max-width:100%;vertical-align:middle;padding:2px 4px 2px 10px;margin:2px 0;border-radius:10px;background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.desc .lk a{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.desc .lk-c{flex:none;display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:var(--surface);color:var(--fg-2)}
+.desc .lk-c svg{width:15px;height:15px}
 .desc blockquote{margin:8px 0;padding:10px 14px;border-inline-start:3px solid var(--accent);background:var(--surface-2);border-radius:12px}
 .desc .ce{width:1.25em;height:1.25em;margin:0 1px}
 .desc .spoiler{background:var(--fg-3);color:transparent;border-radius:4px;cursor:pointer}
@@ -4225,14 +4231,32 @@ function bidiLines(box) {
   if (line.childNodes.length) flush();
   while (box.lastChild && box.lastChild.classList && box.lastChild.classList.contains('blank')) box.lastChild.remove();
 }
-function rich(src, rows) {
+const URL_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+function linkCopy(a, href) {   /* link + copy button, kept together on one line */
+  const w = document.createElement('span'); w.className = 'lk'; w.setAttribute('dir', 'ltr'); w.appendChild(a);
+  const b = document.createElement('button'); b.className = 'lk-c'; b.type = 'button'; b.dataset.act = 'copy'; b.dataset.v = href; b.setAttribute('aria-label', 'copy');
+  b.innerHTML = ic.copy; w.appendChild(b); return w;
+}
+function rich(src, rows, links) {
   const raw = String(src || '').replace(/\r\n?/g, '\n');
   const doc = new DOMParser().parseFromString('<div>' + raw.replace(/\n/g, '<br>') + '</div>', 'text/html');
   const out = document.createElement('div');
   const allow = { B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u', INS: 'u', S: 's', STRIKE: 's', DEL: 's', CODE: 'code', PRE: 'pre', BLOCKQUOTE: 'blockquote', BR: 'br' };
   const walk = (node, parent) => {
     node.childNodes.forEach(n => {
-      if (n.nodeType === 3) { parent.appendChild(document.createTextNode(n.textContent)); return; }
+      if (n.nodeType === 3) {
+        const tx = n.textContent;
+        if (!links || !URL_RE.test(tx)) { parent.appendChild(document.createTextNode(tx)); return; }
+        URL_RE.lastIndex = 0; let last = 0, m;
+        while ((m = URL_RE.exec(tx))) {
+          let u = m[0].replace(/[).,!?؟،]+$/, '');
+          if (m.index > last) parent.appendChild(document.createTextNode(tx.slice(last, m.index)));
+          const a = document.createElement('a'); a.href = /^www\./i.test(u) ? 'https://' + u : u; a.dataset.act = 'link'; a.rel = 'noopener'; a.textContent = u;
+          parent.appendChild(linkCopy(a, a.href)); last = m.index + u.length; URL_RE.lastIndex = last;
+        }
+        if (last < tx.length) parent.appendChild(document.createTextNode(tx.slice(last)));
+        URL_RE.lastIndex = 0; return;
+      }
       if (n.nodeType !== 1) return;
       const tag = n.tagName;
       if (tag === 'TG-EMOJI') {
@@ -4250,7 +4274,7 @@ function rich(src, rows) {
       }
       if (tag === 'A') {
         const href = n.getAttribute('href') || '';
-        if (/^(https?:|tg:)/i.test(href)) { const a = document.createElement('a'); a.href = href; a.dataset.act = 'link'; a.rel = 'noopener'; walk(n, a); parent.appendChild(a); }
+        if (/^(https?:|tg:)/i.test(href)) { const a = document.createElement('a'); a.href = href; a.dataset.act = 'link'; a.rel = 'noopener'; walk(n, a); parent.appendChild(links ? linkCopy(a, href) : a); }
         else walk(n, parent);
         return;
       }
@@ -5494,7 +5518,7 @@ function renderProduct(sh, p, st, onlyDyn) {
 
   const desc = ds(p);
   const hasTr = st.tr && st.tr !== '…';
-  const descHtml = st.showTr && hasTr ? rich(st.tr, true) : rich(desc, true);
+  const descHtml = st.showTr && hasTr ? rich(st.tr, true, true) : rich(desc, true, true);
   const tiers = (p.tiers || []).length && p.kind !== 'cgpt' ? `<div class="lbl">${esc(t('tiers'))}</div><div class="tiers">
       <div class="tier ${!p.tiers.some(x => st.qty >= x.min) ? 'on' : ''}"><span>1+ ${esc(t('pcs'))}</span><b class="num">${usd(p.price)}${esc(t('perPc'))}</b></div>
       ${p.tiers.map(x => `<div class="tier ${unitFor(p, st.qty) === x.price && st.qty >= x.min ? 'on' : ''}"><span>${esc(t('tierRow', { n: x.min }))}</span><b class="num">${usd(x.price)}${esc(t('perPc'))}</b></div>`).join('')}</div>` : '';
@@ -5520,7 +5544,7 @@ function renderProduct(sh, p, st, onlyDyn) {
     sh.title(nm(p)).body(`
       <div class="pv hero-vis ${oos ? 'is-oos' : ''}" style="--h:${brandHue(p)}">${heroVisual(p)}${oos ? '<span class="xmark"><i></i></span>' : ''}${DEMO && p.emoji_id && !ceOK(p.emoji_id) ? `<span class="ce-id" title="custom_emoji_id">${esc(t('premiumId'))} <b dir="ltr">${esc(p.emoji_id)}</b></span>` : ''}</div>
       <div class="tags">${tags.join('')}${WEB ? `<button class="tag p-share" data-act="p-share" aria-label="${esc(t('shareProd'))}">${ic.share}${esc(t('shareProd'))}</button>` : ''}</div>
-      ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : ''}` : ''}
+      ${plain(desc) || desc.includes('tg-emoji') ? `<div class="lbl">${esc(t('about'))}</div><div class="desc boxed" id="pdesc">${descHtml}</div>${st.tr === '…' ? `<div class="tr-chip">${esc(t('translating'))}</div>` : ''}` : ''}
       ${durs}${email}
       <div id="ptiers">${tiers}</div><div id="pqtyw">${qty}</div><div id="psum">${summary}</div>${admin}`);
   } else {
