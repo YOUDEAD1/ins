@@ -1,0 +1,7 @@
+brandpool.json.gz bundles brand icons from open icon sets (via Iconify):
+- Simple Icons — CC0 1.0 — https://simpleicons.org
+- CoreUI Brands (cib) — CC0 1.0 — https://github.com/coreui/coreui-icons
+- Boxicons logos (bxl) — MIT — https://boxicons.com
+- Tabler Icons (brand-*) — MIT — https://tabler.io/icons
+- Arcticons — CC BY-SA 4.0 — https://github.com/Arcticons-Team/Arcticons (Donnnno and contributors)
+All brand names and logos are trademarks of their respective owners and are shown only to identify the products sold.

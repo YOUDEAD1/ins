@@ -39646,6 +39646,106 @@ def _wa_emoji_webp(eid):
     return out
 
 
+
+# ═════════ 🏷 شعار التطبيق تلقائياً من اسم المنتج (مكتبات أيقونات مفتوحة: Simple Icons · CoreUI · Boxicons · Tabler · Arcticons) ═════════
+_BRAND_POOL = None
+_BRAND_POOL_LOCK = threading.Lock()
+_BRAND_LOGO_CACHE = {}
+_BRAND_POOL_ORDER = {'si': 0, 'cib': 1, 'bxl': 2, 'tabler': 3, 'arc': 4}
+
+
+def _brand_pool():
+    global _BRAND_POOL
+    if _BRAND_POOL is None:
+        with _BRAND_POOL_LOCK:
+            if _BRAND_POOL is None:
+                import gzip as _gz
+                idx = {}
+                try:
+                    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lara_core', 'brandpool.json.gz')
+                    with _gz.open(path, 'rt', encoding='utf-8') as f:
+                        rows = json.load(f)
+                    for tag, key, w, h, body in rows:
+                        if not key:
+                            continue
+                        old = idx.get(key)
+                        if old is None or _BRAND_POOL_ORDER.get(tag, 9) < _BRAND_POOL_ORDER.get(old[0], 9):
+                            idx[key] = (tag, w, h, body)
+                except Exception as e:
+                    logger.warning(f"brand pool load failed: {e}")
+                _BRAND_POOL = idx
+    return _BRAND_POOL
+
+
+_BRAND_AR = {'نتفليكس': 'netflix', 'نيتفليكس': 'netflix', 'شاهد': 'shahid', 'سبوتيفاي': 'spotify', 'يوتيوب': 'youtube',
+             'كانفا': 'canva', 'تيليجرام': 'telegram', 'تلجرام': 'telegram', 'ديسكورد': 'discord', 'شات جي بي تي': 'chatgpt',
+             'جيميناي': 'gemini', 'كلود': 'claude', 'ببجي': 'pubg', 'بلايستيشن': 'playstation', 'اكس بوكس': 'xbox',
+             'إكس بوكس': 'xbox', 'ستيم': 'steam', 'دولينجو': 'duolingo', 'انغامي': 'anghami', 'أنغامي': 'anghami',
+             'كاب كات': 'capcut', 'ادوبي': 'adobe', 'أدوبي': 'adobe', 'فيجما': 'figma', 'ديزني': 'disney',
+             'امازون': 'amazon', 'أمازون': 'amazon', 'انستقرام': 'instagram', 'تيك توك': 'tiktok', 'سناب': 'snapchat'}
+_BRAND_ALIAS = {'chatgpt': 'openaichatgpt', 'gpt': 'openaichatgpt', 'primevideo': 'amazonprimevideo',
+                'disneyplus': 'disneyplus', 'disney': 'disneyplus', 'gamepass': 'xboxgamepass', 'gemini': 'googlegemini'}
+
+
+def _brand_logo_svg(q):
+    q = str(q or '').strip().lower()[:160]
+    if q in _BRAND_LOGO_CACHE:
+        return _BRAND_LOGO_CACHE[q]
+    pool = _brand_pool()
+    full = q
+    for a, b in _BRAND_AR.items():
+        if a in full:
+            full += ' ' + b
+    toks = [re.sub(r'[^a-z0-9]', '', w) for w in re.split(r'[^a-z0-9+.]+', full)]
+    toks = [w for w in toks if w]
+    comp = ''.join(toks)
+    stop = {'premium', 'pro', 'plus', 'month', 'months', 'year', 'years', 'gift', 'card', 'free', 'super', 'basic',
+            'ultimate', 'vip', 'max', 'one', 'day', 'days', 'account', 'edu', 'annual', 'subscription', 'express',
+            'family', 'individual', 'standard', 'advanced', 'team', 'business', 'personal', 'lifetime', 'key', 'code',
+            'global', 'uc', 'diamonds', 'new', 'shared', 'private', 'full', 'access', 'mega', 'fan', 'tv', 'app',
+            'ai', 'the', 'and', 'for', 'with', 'top', 'up', 'link', 'invite', 'seat', 'license', 'credits'}
+    cands = [a2 for a1, a2 in _BRAND_ALIAS.items() if a1 in comp]
+    for i in range(len(toks)):
+        for j in range(i + 1, min(len(toks), i + 4) + 1):
+            k = ''.join(toks[i:j])
+            if j - i == 1 and (k in stop or k.isdigit()):
+                continue
+            cands.append(k)
+    best, bl = None, 0
+    for k in set(cands):
+        if k in pool and len(k) > bl and (len(k) >= 3 or (toks and toks[0] == k)):
+            best, bl = k, len(k)
+    if best:
+        tag, w, h, body = pool[best]
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w * 8}" height="{h * 8}" '
+               f'color="#ffffff" fill="#ffffff">{body}</svg>')
+    else:
+        svg = None
+    if len(_BRAND_LOGO_CACHE) > 4000:
+        _BRAND_LOGO_CACHE.clear()
+    _BRAND_LOGO_CACHE[q] = svg
+    return svg
+
+
+def _wa_brand_logo_get(handler, parsed):
+    try:
+        q = (urllib.parse.parse_qs(parsed.query or '').get('q') or [''])[0]
+    except Exception:
+        q = ''
+    svg = _brand_logo_svg(q)
+    if not svg:   # ما لقينا شعار: مربع زجاجي فيه أول حرف (نفس شكل الموقع)
+        ch = (str(q).strip()[:1] or '?').upper()
+        ch = ch.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 74 74" width="296" height="296">'
+               '<rect x="6" y="6" width="62" height="62" rx="19" fill="#fff" fill-opacity=".2" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/>'
+               '<rect x="10" y="10" width="54" height="26" rx="15" fill="#fff" fill-opacity=".14"/>'
+               f'<text x="37" y="39" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="34" font-weight="800" '
+               f'font-family="Unbounded, Rubik, Arial, sans-serif">{ch}</text></svg>')
+        return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
+    return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=2592000')
+
+
+
 def _wa_emoji_still(eid):
     """🖼 صورة ثابتة صغيرة (128px) لشعار المنتج — خفيفة على الجوالات (بدون أنيميشن)."""
     key = f"ces_{eid}"
@@ -40418,6 +40518,9 @@ def _wa_maybe_handle_get(handler):
         return True
     if raw.startswith('/webapp/dl/'):
         _wa_dl_get(handler, raw)
+        return True
+    if raw == '/webapp/blogo':
+        _wa_brand_logo_get(handler, parsed)
         return True
     if raw.startswith('/webapp/ce/'):
         eid = raw[len('/webapp/ce/'):].strip('/')

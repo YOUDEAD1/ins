@@ -4103,12 +4103,13 @@ function brandIcon(p) {
   BRAND_HIT.set(full, best); return best;
 }
 function brandSrc(b) { return 'brands/' + b.slug + '.svg'; }
+function autoLogo(p) { const n = String(p.name_en || p.name || p.name_ar || '').trim(); return n && API && !DEMO ? API + '/webapp/blogo?q=' + encodeURIComponent(n.toLowerCase().slice(0, 120)) : ''; }
 function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
 function hasLogo(p) { return !!(p && p.emoji_id && API && !DEMO); }
-function artTile(p, mini) { const bi = brandIcon(p); const u = bi ? brandSrc(bi) : hasLogo(p) ? logoUrl(p.emoji_id) : ''; return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, mini ? u : (u || true))}</span>`; }
+function artTile(p, mini) { const bi = brandIcon(p); const u = bi ? brandSrc(bi) : autoLogo(p) || (hasLogo(p) ? logoUrl(p.emoji_id) : ''); return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, mini ? u : (u || true))}</span>`; }
 /* product page: the real (animated) app logo sits in the emblem slot — only one animation on screen */
 function heroVisual(p) {
-  if (p.image || brandIcon(p) || !hasLogo(p)) return visual(p);
+  if (p.image || brandIcon(p) || autoLogo(p) || !hasLogo(p)) return visual(p);
   return `<span class="art">${artSVG(p, false, 'slot')}<span class="art-anim">${ceH(p.emoji_id, `<img src="${esc(logoUrl(p.emoji_id))}" alt="">`)}</span></span>`;
 }
 function artOn(p) { return !p.image; }
@@ -4141,7 +4142,7 @@ function featHtml() {
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${brandIcon(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(brandIcon(p) ? brandSrc(brandIcon(p)) : logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}${esc(name)}</b>
+          <b class="feat-name" dir="auto">${brandIcon(p) || autoLogo(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(brandIcon(p) ? brandSrc(brandIcon(p)) : autoLogo(p) || logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>
