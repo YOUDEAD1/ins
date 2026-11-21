@@ -3175,6 +3175,68 @@ html[data-page="login"] main {
 .vip-api b{display:block;font-size:14px;color:#e0a800}.vip-api small{display:block;font-size:11.5px;color:var(--fg-2);margin-top:2px}
 /* sign-in as a ticket: perforated divider with notches */
 .wl-card .wf-or{position:relative}
+
+/* ═══ Sign in — boarding pass (Figma "Sign in") ═══ */
+html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp) body{background:linear-gradient(180deg,#2c4cff 0%,#2340ff 45%,#1a30d6 100%)!important;min-height:100%}
+.wl-bp{position:relative;isolation:isolate;min-height:100vh;min-height:100dvh;margin:-20px 0 0;box-sizing:border-box;padding:0 0 28px;display:block;background:none;color:#fff}
+.wl-bp .wl-cosmos,.wl-bp .wl-hero{display:none!important}
+.bp-sky{position:absolute;top:0;bottom:0;left:50%;width:100vw;transform:translateX(-50%);z-index:-1;pointer-events:none;overflow:hidden}
+.bp-c{position:absolute;border-radius:50%;background:rgba(255,255,255,.08)}
+.bp-c.c1{width:340px;height:340px;inset-inline-end:-150px;top:-130px}
+.bp-c.c2{width:300px;height:300px;inset-inline-start:-150px;top:260px;background:rgba(255,255,255,.07)}
+.bp-st{position:absolute;left:var(--x);top:var(--y);width:4px;height:4px;border-radius:50%;background:#fff;opacity:.9}
+.bp-sky svg.bp-path{position:absolute;left:0;top:70px;width:100%!important;height:300px!important;max-width:none!important}
+.bp-sky svg.bp-plane{position:absolute;left:50%;top:128px;width:96px!important;height:96px!important;max-width:none!important;margin-left:-20px;filter:drop-shadow(0 18px 22px rgba(8,16,90,.45));animation:bpFly 5s ease-in-out infinite}
+@keyframes bpFly{0%,100%{transform:translate(0,0) rotate(-6deg)}50%{transform:translate(6px,-9px) rotate(2deg)}}
+.bp-col{position:relative;max-width:420px;margin:0 auto;padding-top:270px}
+.bp-hello{text-align:start;padding:0 6px 18px}
+.bp-hello span{display:block;font-size:16px;color:rgba(255,255,255,.82);margin-bottom:6px}
+.bp-hello b{display:block;font:800 40px/1 var(--f-display);letter-spacing:-.01em;color:#fff}
+.wl-bp .wl-card.bp-ticket{--fg:#0b1033;--fg-2:#4a5384;--fg-3:#8189b3;--line:#e3e7fb;--surface:#f3f5ff;--surface-2:#f3f5ff;--accent:#2340ff;
+  background:#fff!important;color:#0b1033;border:0!important;border-radius:24px!important;padding:20px 20px 18px!important;max-width:none;text-align:start;
+  box-shadow:0 30px 60px -20px rgba(6,14,90,.55)!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;overflow:visible!important}
+.wl-bp .wl-card.bp-ticket::before,.wl-bp .wl-card.bp-ticket::after{display:none!important}
+.bp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+.bp-head h2{margin:0;font:800 21px/1.2 var(--f-display);color:#0b1033}
+.bp-head span{font:700 10px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.12em;color:#2340ff;white-space:nowrap}
+.wl-bp .wl-head-emblem,.wl-bp .wl-titles,.wl-bp .wl-how{display:none!important}
+.wl-bp .wf-tabs{background:#eef1ff!important;border:0!important;margin-bottom:12px}
+.wl-bp .wf-tabs button{color:#5a6290!important}.wl-bp .wf-tabs button.on{color:#0b1033!important}
+.wl-bp .wf-pill{background:#fff!important;box-shadow:0 2px 8px rgba(35,64,255,.15)!important}
+.wl-bp .wf-l,.wl-bp label{color:#4a5384}
+.wl-bp .wf-in{background:#f3f5ff!important;border:1.5px solid #2340ff!important;border-radius:14px!important;box-shadow:none!important}
+.wl-bp .wf-in input{color:#0b1033!important;background:transparent!important}
+.wl-bp .wf-in input::placeholder{color:#9aa1c7}
+.wl-bp .wf-in svg{color:#2340ff}
+.wl-bp .btn.primary.wf-go{background:#0b1033!important;color:#fff!important;border-radius:14px!important;box-shadow:0 10px 22px -10px rgba(11,16,51,.7)!important;font-weight:800}
+.wl-bp .btn.primary.wf-go::before{content:"";width:18px;height:18px;flex:none;background:#ffd43b;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M22 2 2 9.5l7 2.3 2.4 7.7 3.6-5.2 5.6 3.4z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M22 2 2 9.5l7 2.3 2.4 7.7 3.6-5.2 5.6 3.4z'/%3E%3C/svg%3E") center/contain no-repeat}
+.wl-bp .wf-sheen{display:none}
+.wl-bp .wf-mode-btn,.wl-bp .linkish{color:#2340ff!important;font-weight:700}
+.wl-bp .wf-hint,.wl-bp .wf-b,.wl-bp p.wl-sub{color:#5a6290!important}
+/* perforation + notches like a ticket */
+.wl-bp .wf-or{margin:18px -20px 14px!important;padding:0 20px;font-size:0!important;height:20px;gap:0}
+.wl-bp .wf-or::before{content:""!important;flex:1;height:0!important;background:none!important;border-top:2px dashed #dde2fa}
+.wl-bp .wf-or::after{content:""!important;position:absolute;inset:0;height:auto!important;flex:none;pointer-events:none;
+  background:radial-gradient(circle at 0 50%,#2340ff 10px,transparent 10.5px),radial-gradient(circle at 100% 50%,#2340ff 10px,transparent 10.5px)!important}
+.wl-bp .wf-or span{display:none}
+.wl-bp .wl-alt{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wl-bp .wl-alt>:only-child{grid-column:1/-1}
+.wl-bp .wl-tg-btn{background:#fff!important;color:#0b1033!important;border:1.5px solid #e3e7fb!important;border-radius:14px!important;box-shadow:none!important;min-height:52px}
+.wl-bp .wl-tg-btn .wl-tg-ic{color:#fff;background:#2aa3e0;border-radius:50%;width:26px;height:26px;display:grid;place-items:center}
+.wl-bp .wl-tg-btn .wl-tg-ic svg{width:15px;height:15px}
+.wl-bp .g-wrap{border:1.5px solid #e3e7fb;border-radius:14px;overflow:hidden;min-height:52px;display:grid;place-items:center;background:#fff}
+.wl-bp .wl-note{background:#fff1f1;color:#b42318}
+.wl-bp .wl-foot{justify-content:center;margin-top:14px}
+.wl-bp .wl-foot-btn{color:#2340ff!important}
+.wl-bp .wl-lang{background:#f3f5ff!important;color:#0b1033!important;border-color:#e3e7fb!important}
+.bp-terms{margin:18px 0 0;text-align:center;font-size:12px;color:rgba(255,255,255,.72)}
+.wl-bp .wf-slot{background:#f3f5ff!important;color:#0b1033!important;border-color:#dfe4fb!important}
+.wl-bp .wf-slot.active{border-color:#2340ff!important}
+.wl-bp .wf-mailic{color:#2340ff;background:#eef1ff!important}
+.wl-bp .wl-wait-scene h1{color:#0b1033}
+.wl-bp .wl-sonar i{border-color:rgba(35,64,255,.35)!important}
+@media (min-width:900px){.bp-col{padding-top:300px}.bp-sky svg.bp-plane{top:120px;width:120px!important;height:120px!important}.bp-sky svg.bp-path{height:360px!important}}
+@media (prefers-reduced-motion:reduce){.bp-plane{animation:none}}
 .passport .acc-mail{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .pp-stamp{bottom:6px!important;width:74px!important;height:74px!important}.pp-stamp b{font-size:16px!important}
 .pp-mrz{padding-inline-end:96px!important}
@@ -4853,6 +4915,17 @@ function vEmailBox() {
     <div id="wf-form-slot">${wfFormOnlyHtml()}</div>`;
 }
 
+function bpTitle() {
+  if (WL.state === 'wait') return 'Telegram';
+  if (WF.mode === 'code') return isAr() ? 'كود الدخول' : 'Sign-in code';
+  if (WF.mode === 'forgot') return isAr() ? 'نسيت كلمة السر' : 'Reset password';
+  return WF.tab === 'up' ? (isAr() ? 'إنشاء حساب' : 'Create account') : (isAr() ? 'تسجيل الدخول' : 'Sign in');
+}
+/* keep the ticket title in step when only the inner form changes (tabs, code step) */
+try {
+  new MutationObserver(() => { const h = document.querySelector('.bp-head h2'); if (h) { const v = bpTitle(); if (h.textContent !== v) h.textContent = v; } })
+    .observe(document.documentElement, { childList: true, subtree: true });
+} catch (e) {}
 function vLogin() {
   const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
   const more = AUTH.email || AUTH.google;
@@ -4861,30 +4934,21 @@ function vLogin() {
   const p3 = isAr() ? ['تشفير وحماية فائقة', 'دخول ذكي بدون كلمة سر أو عبر تيليجرام وGoogle'] : ['Zero-Trust Security', 'Passwordless OTP, Google, or 1-tap Telegram sign-in'];
   const heroTag = more ? t('wlBAll') : t('wlB');
 
-  return `<section class="wl wl3">
-    <div class="wl-cosmos" aria-hidden="true">
-      <span class="wl-orb o1"></span>
-      <span class="wl-orb o2"></span>
-      <span class="wl-grid"></span>
+  const tTitle = bpTitle();
+  return `<section class="wl wl3 wl-bp">
+    <div class="bp-sky" aria-hidden="true">
+      <span class="bp-c c1"></span><span class="bp-c c2"></span>
+      <i class="bp-st" style="--x:18%;--y:14%"></i><i class="bp-st" style="--x:46%;--y:10%"></i><i class="bp-st" style="--x:77%;--y:27%"></i><i class="bp-st" style="--x:9%;--y:44%"></i>
+      <svg class="bp-path" viewBox="0 0 390 300" preserveAspectRatio="none"><path d="M-10 290 C 90 250, 170 280, 240 190 S 350 150, 400 140" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/></svg>
+      <svg class="bp-plane" viewBox="0 0 80 80"><path d="M74 10 8 36l24 7 6 26 11-18 18 9z" fill="#fff"/><path d="M32 43 74 10 38 69z" fill="#dfe5ff"/></svg>
     </div>
-    <div class="wl-shell">
-      <aside class="wl-hero" aria-hidden="true">
-        <div class="wl-pedestal">
-          <span class="wl-pedestal-beam"></span>
-          <div class="wl-pedestal-in">${WL_MARK_IMG}</div>
-        </div>
-        <span class="wl-hero-badge">${brand}</span>
-        <h2 class="wl-hero-title">${esc(isAr() ? 'بوابتك الرقمية الفاخرة للأكواد والاشتراكات' : 'Your Executive Digital Storefront')}</h2>
-        <p class="wl-hero-sub">${esc(heroTag)}</p>
-        <div class="wl-pillars">
-          <div class="wl-pillar"><i>${WF_IC.spark}</i><div><b>${esc(p1[0])}</b><small>${esc(p1[1])}</small></div></div>
-          <div class="wl-pillar"><i>${WF_IC.sync}</i><div><b>${esc(p2[0])}</b><small>${esc(p2[1])}</small></div></div>
-          <div class="wl-pillar"><i>${WF_IC.shield}</i><div><b>${esc(p3[0])}</b><small>${esc(p3[1])}</small></div></div>
-        </div>
-      </aside>
-      <div class="wl-card wl-wide">
+    <div class="bp-col">
+      <div class="bp-hello"><span>${esc(isAr() ? 'أهلاً فيك على متن' : 'Welcome aboard')}</span><b>${brand}</b></div>
+      <div class="wl-card wl-wide bp-ticket">
+        <div class="bp-head"><h2>${esc(tTitle)}</h2><span dir="ltr">BOARDING · 10 MIN</span></div>
         <div class="wl-stage" id="wl-stage">${wfStageHtml()}</div>
       </div>
+      <p class="bp-terms">${esc(isAr() ? 'بالمتابعة توافق على الشروط وسياسة الخصوصية' : 'By continuing you agree to the Terms and Privacy Policy')}</p>
     </div>
   </section>`;
 }
