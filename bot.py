@@ -28823,14 +28823,16 @@ def ep_setcat_handler(call):
         
         cats = list(db.catalogs.find().sort('order', 1))
         markup = InlineKeyboardMarkup(row_width=1)
-        for cat in cats:
-            cat_id = str(cat['_id'])
+        # بيانات الزر لازم تكون ≤ 64 بايت: نرسل ترتيب المجلد بدل الـ ID، والرجوع ينحفظ عندنا
+        _EP_CAT_BACK[(call.from_user.id, str(pid))] = cat_id_back
+        _EP_CAT_LIST[(call.from_user.id, str(pid))] = [str(c['_id']) for c in cats]
+        for i, cat in enumerate(cats):
             cat_name = cat.get('name_ar', cat.get('name', ''))
             markup.add(InlineKeyboardButton(
                 f"📁 {cat_name}",
-                callback_data=f"ep_dosetcat_{pid}_{cat_id}{c_sfx}"
+                callback_data=f"ep_dosetcat_{pid}_i{i}"
             ))
-        markup.add(InlineKeyboardButton("❌ Without Catalog (بدون مجلد)", callback_data=f"ep_dosetcat_{pid}_none{c_sfx}"))
+        markup.add(InlineKeyboardButton("❌ Without Catalog (بدون مجلد)", callback_data=f"ep_dosetcat_{pid}_none"))
         markup.add(InlineKeyboardButton("🔙 Back", callback_data=f"edit_p_{pid}{c_sfx}"))
         
         txt = f"📁 <b>Choose a folder for product:</b>\n{clean_name(p.get('name_ar', p.get('name_en', '')))}"
@@ -28839,6 +28841,10 @@ def ep_setcat_handler(call):
         logger.exception("Error in ep_setcat_handler:")
         try: bot.send_message(call.message.chat.id, f"❌ Error: {e}")
         except: pass
+
+
+_EP_CAT_BACK = {}
+_EP_CAT_LIST = {}
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ep_dosetcat_"))
@@ -28857,6 +28863,17 @@ def ep_dosetcat_handler(call):
         parts = parts_raw.rsplit("_", 1)
         pid = parts[0]
         cat_id = parts[1] if len(parts) > 1 else "none"
+        if cat_id_back is None:
+            cat_id_back = _EP_CAT_BACK.get((call.from_user.id, str(pid)))
+        if re.fullmatch(r'i\d+', cat_id or ''):
+            _lst = _EP_CAT_LIST.get((call.from_user.id, str(pid)))
+            if _lst is None:
+                _lst = [str(c['_id']) for c in db.catalogs.find({}, {'_id': 1}).sort('order', 1)]
+            _ix = int(cat_id[1:])
+            if _ix >= len(_lst):
+                bot.answer_callback_query(call.id, "⚠️ القائمة تغيّرت، افتحها من جديد.", show_alert=True)
+                return
+            cat_id = _lst[_ix]
         
         p = find_product(pid)
         if not p: return
