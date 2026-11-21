@@ -3174,6 +3174,30 @@ html[data-page="login"] main {
 .pp-mrz{padding-inline-end:96px!important}
 :root[data-theme="light"] .ct-eye{color:#b07800}
 @media (prefers-color-scheme: light){:root:not([data-theme="dark"]) .ct-eye{color:#b07800}}
+
+/* list view: one row per product (tidy, like the Figma list) */
+.view-list .grid{grid-template-columns:1fr!important;gap:10px!important}
+.view-list .grid>.card{display:flex!important;flex-direction:row;align-items:center;gap:12px;padding:10px 12px!important;min-height:0;contain-intrinsic-size:auto 92px;animation:none!important}
+.view-list .grid>.card .pv{flex:none;width:68px!important;height:68px!important;aspect-ratio:1!important;border-radius:18px!important;-webkit-mask:none!important;mask:none!important;margin:0!important}
+.view-list .grid>.card .pv>.pill,.view-list .grid>.card .pv>.oos-tag,.view-list .grid>.card .pv>.xmark{display:none!important}
+.view-list .grid>.card .body{flex:1;min-width:0;padding:0!important;display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+.view-list .grid>.card .body::before,.view-list .card .body::before{content:none!important;display:none!important;border:0!important}
+.view-list .grid>.card .name{font-size:15px;-webkit-line-clamp:2;margin:0!important}
+.view-list .grid>.card .row{flex:none;margin:0!important;gap:10px}
+.view-list .grid>.card.oos{opacity:.62}
+.lst{display:none}.view-list .grid>.card .lst{display:block;font-size:11.5px;font-weight:600;margin-top:3px}
+.view-list .grid>.card .lst.ok{color:var(--ok)}.view-list .grid>.card .lst.lo{color:var(--warn)}.view-list .grid>.card .lst.no{color:var(--bad)}
+.view-list .grid>.card .nm-w{display:flex;flex-direction:column;min-width:0}
+.view-btn svg{width:20px;height:20px}
+.view-list .grid>.card .body::after,.view-list .grid>.card .pv::after,.view-list .grid>.card .pv::before{display:none!important}
+
+/* drawn emblem: floats only on the product page and the banner (one or two elements — light) */
+.emb{transform-box:fill-box;transform-origin:center}
+.hero-vis .emb{animation:embF 3.6s ease-in-out infinite}
+@keyframes embF{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+.feat-emb{display:inline-grid;place-items:center;flex:none;width:1.45em;height:1.45em;border-radius:.42em;background:rgba(255,255,255,.2);box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.5);font:800 .8em/1 var(--f-display);color:#fff;animation:embF 3.6s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){.hero-vis .emb,.feat-emb{animation:none}}
+.hero-vis.pv:has(>.art){height:auto!important;aspect-ratio:300/264!important;max-height:360px;max-width:410px;margin-inline:auto;width:100%}
 </style>
 </head>
 <body>
@@ -3298,6 +3322,8 @@ const LIBS = {
   qr: 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js'
 };
 const $ = (s, r = document) => r.querySelector(s);
+const VIEW0 = (() => { try { return JSON.parse(localStorage.getItem('lara:view') || '"grid"') === 'list' ? 'list' : 'grid'; } catch (e) { return 'grid'; } })();
+if (VIEW0 === 'list') document.documentElement.classList.add('view-list');
 const store = {
   get(k, d) { try { const v = localStorage.getItem('lara:' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem('lara:' + k, JSON.stringify(v)); } catch (e) {} }
@@ -3454,6 +3480,7 @@ const ic = {
   qr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v.01M17 21h4v-4M14 21v-3"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>',
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v14"/></svg>',
+  gridV: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linejoin="round"><rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/></svg>',
   list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
   chevL: '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
@@ -3494,6 +3521,7 @@ function loadScript(src) {
 
 /* ───────────────────────── state ───────────────────────── */
 const S = {
+  view: VIEW0,
   cart: [], cartPending: null, cartLast: null, cartEnabled: true, cartUid: null,
   ready: false, screen: 'loading', tab: 'store', user: null, store: {}, deposit: { methods: [] }, nav: {}, forced: null,
   catalogs: [], products: [], pending: null, locked: false, offset: 0,
@@ -4031,11 +4059,12 @@ function artSVG(p, mini, logo) {
   const Ln = Math.max(2, [...brand].length), ar = AR_RE.test(brand);
   const fs = Math.min(logo ? 36 : 56, Math.max(18, 216 / (Ln * (ar ? .62 : .8))));
   const fit = Ln * fs * (ar ? .62 : .8) > 216 ? ` textLength="216" lengthAdjust="spacingAndGlyphs"` : '';
-  const wy = logo ? (tier ? 156 : 168) : 104;
+  const wy = logo ? (tier ? 146 : 158) : 104;
+  const emb = logo ? `<g class="emb"><rect x="119" y="46" width="62" height="62" rx="19" fill="#fff" fill-opacity=".2" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/><rect x="123" y="50" width="54" height="26" rx="15" fill="#fff" fill-opacity=".14"/><text x="150" y="79" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="34" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text></g>` : '';
   const tierEl = tier ? (() => { const tl = [...tier].length, tw = Math.min(240, tl * 9.2 + 30), ta = AR_RE.test(tier); return `<g transform="translate(150 ${r(wy + fs * .5 + 20)})"><rect x="${-tw / 2}" y="-14" width="${tw}" height="28" rx="14" fill="#fff" fill-opacity=".18" stroke="#fff" stroke-opacity=".34"/><text y="1" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="12.5" font-weight="700" letter-spacing="${ta ? 0 : 1.8}" style="font-family:var(--f-display)"${tl * 9.2 + 30 > 220 ? ' textLength="190" lengthAdjust="spacingAndGlyphs"' : ''}>${esc(ta ? tier : tier.toUpperCase())}</text></g>`; })() : '';
   const stub = `<line x1="18" y1="222" x2="282" y2="222" stroke="#fff" stroke-opacity=".42" stroke-width="1.6" stroke-dasharray="6 6"/>` +
     `<text x="150" y="244" text-anchor="middle" dominant-baseline="central" fill="#fff" fill-opacity="${dur ? .96 : .6}" font-size="${dur ? 14 : 10.5}" font-weight="700" letter-spacing="${dur && AR_RE.test(dur) ? 0 : 2.4}" style="font-family:var(--f-display)">${esc(dur || 'LARA STOCK')}</text>`;
-  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect width="300" height="264" fill="url(#${id}v)"/>` +
+  return `<svg viewBox="0 0 300 264" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${defs}${bg}<rect width="300" height="264" fill="url(#${id}v)"/>${emb}` +
     `<text x="150" y="${wy}" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="${r(fs)}" font-weight="800" letter-spacing="${ar ? 0 : -1.2}" style="font-family:var(--f-display)"${fit}>${esc(brand)}</text>${tierEl}${stub}</svg>`;
 }
 /* wide cover for the «most wanted» banner: background + motif + big echo; text is real HTML on top */
@@ -4048,11 +4077,7 @@ function artBannerSVG(p) {
     `<text x="130" y="165" text-anchor="middle" dominant-baseline="central" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="2.4" font-size="380" font-weight="800" style="font-family:var(--f-display)">${esc(chU)}</text>` +
     `<path d="M-20 255 C 190 180, 320 290, 660 30" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="1.6" stroke-dasharray="3 9" stroke-linecap="round"/></svg>`;
 }
-function logoUrl(id) { return API + '/webapp/ce/' + encodeURIComponent(id) + '?fmt=still'; }
-function artTile(p, mini) {
-  const lg = !!(p.emoji_id && API && !DEMO);
-  return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, lg)}${lg ? `<img class="art-logo" src="${esc(logoUrl(p.emoji_id))}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : ''}</span>`;
-}
+function artTile(p, mini) { return `<span class="art${mini ? ' mini' : ''}">${artSVG(p, mini, !mini)}</span>`; }
 function artOn(p) { return !p.image; }
 
 /* ───────────────────────── «most wanted» banner (top sellers, auto art) ───────────────────────── */
@@ -4083,7 +4108,7 @@ function featHtml() {
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${p.emoji_id && API && !DEMO ? `<img class="feat-logo" src="${esc(logoUrl(p.emoji_id))}" alt="" decoding="async" onerror="this.remove()">` : ''}${esc(name)}</b>
+          <b class="feat-name" dir="auto"><span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>${esc(name)}</b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>
@@ -5249,6 +5274,8 @@ function chipsHtml() {
 /* ───────── store grouped by folder (tidy shelves) ───────── */
 Object.assign(I.ar, { seeAll: 'عرض الكل', allProducts: 'كل المنتجات' }); Object.assign(I.en, { seeAll: 'See all', allProducts: 'All products' });
 function shelfN() { const w = window.innerWidth || 390; return w < 700 ? 4 : w < 1100 ? 6 : 10; }
+
+Object.assign(I.ar, { viewList: 'عرض كقائمة', viewGrid: 'عرض كشبكة' }); Object.assign(I.en, { viewList: 'List view', viewGrid: 'Grid view' });
 function sectionsHtml(list) {
   const { cats } = catList(); const out = []; const seen = new Set();
   const shelf = (key, icon, title, items) => `<section class="psec"><div class="psec-h"><h2><span class="psec-ic">${icon}</span><span>${esc(title)}</span><i class="psec-n num">${items.length}</i></h2>${key ? `<button class="psec-all" data-act="cat" data-v="${esc(key)}">${esc(t('seeAll'))}${ic.chev}</button>` : ''}</div><div class="grid psec-grid">${items.slice(0, shelfN()).map((p, i) => card(p, i)).join('')}</div></section>`;
@@ -5287,6 +5314,7 @@ function vStore() {
       <label class="search">${navIc('search', ic.search)}<input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="${esc(t('search'))}" value="${esc(S.q)}" data-in="q" aria-label="${esc(t('search'))}"></label>
       <button class="tool-btn ${S.onlyStock ? 'on' : ''}" id="stockbtn" data-act="stockonly" aria-pressed="${S.onlyStock}">${navIc('avail', ic.box)}<span>${esc(t('inStock'))}</span></button>
       <button class="tool-btn" data-act="sort" aria-label="${esc(sortLbl)}" title="${esc(sortLbl)}">${ic.sort}</button>
+      <button class="tool-btn view-btn" data-act="view" aria-label="${esc(t(S.view === 'list' ? 'viewGrid' : 'viewList'))}" title="${esc(t(S.view === 'list' ? 'viewGrid' : 'viewList'))}">${S.view === 'list' ? ic.gridV : ic.list}</button>
     </div>
     <div class="chips-w"><button class="chip-nav prev" data-act="chips-nav" data-v="-1" aria-label="‹">${ic.chev}</button><div class="chips" id="chips">${chipsHtml()}</div><button class="chip-nav next" data-act="chips-nav" data-v="1" aria-label="›">${ic.chev}</button></div>
     <div id="results">${resultsHtml()}</div><div id="cart-teaser">${cartTeaser()}</div>`;
@@ -5340,10 +5368,10 @@ function card(p, i) {
   const oos = !p.in_stock;
   const kindIc = p.kind === 'cgpt' || p.kind === 'seat' ? ic.mail : p.manual ? ic.hand : ic.bolt;
   return `<button class="card ${oos ? 'oos' : ''}" data-act="product" data-v="${esc(p.id)}" style="--h:${brandHue(p)};animation-delay:${Math.min(i, 10) * 35}ms" aria-label="${esc(nm(p))}">
-    <span class="pv ${oos ? 'is-oos' : ''}">${visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
+    <span class="pv ${oos ? 'is-oos' : ''}">${S.view === 'list' && !p.image ? artTile(p, true) : visual(p)}${stockPill(p)}<span class="pill kind" aria-hidden="true">${kindIc}</span>
       ${oos ? `<span class="xmark" aria-hidden="true"><i></i></span><span class="oos-tag">${esc(t('outOfStock'))}</span>` : ''}
       ${p.hidden ? `<span class="pill hid">${esc(t('hiddenTag'))}</span>` : ''}</span>
-    <span class="body"><span class="name">${esc(nm(p))}</span>
+    <span class="body"><span class="nm-w"><span class="name">${esc(nm(p))}</span><span class="lst ${oos ? 'no' : (!p.unlimited && !p.manual && p.stock <= 3) ? 'lo' : 'ok'}">${esc(oos ? t('outOfStock') : (!p.unlimited && !p.manual && p.stock <= 3) ? t('stockN', { n: p.stock }) : (isAr() ? 'متوفر' : 'In stock'))}</span></span>
       <span class="row"><span class="pcol"><small class="plbl">${esc(t('featFrom'))}</small><span class="price num">${vipBp(p) ? `<s class="was">${usd(p.price)}</s>` : ''}${p.kind === 'cgpt' && (p.durations || []).length > 1 ? `<small>${esc(t('from'))}</small>` : ''}${usd(vipUnit(p, p.price))}${vipBp(p) ? `<i class="vcr" aria-label="VIP">${ic.crownSvg}</i>` : ''}</span></span><span class="add" aria-hidden="true">${oos ? ic.x : ic.plus}</span></span></span>
   </button>`;
 }
@@ -8019,6 +8047,7 @@ document.addEventListener('click', async e => {
     case 'cg-subs': openCgpt(); break;
     case 'codes-chat': codesTxt(el, true); break;
     case 'sq': S.q = el.dataset.v || ''; { const qi = $('#q'); if (qi) qi.value = S.q; } hap('select'); updateStore(); break;
+    case 'view': { S.view = S.view === 'list' ? 'grid' : 'list'; store.set('view', S.view); document.documentElement.classList.toggle('view-list', S.view === 'list'); hap('select'); el.innerHTML = S.view === 'list' ? ic.gridV : ic.list; const vl = t(S.view === 'list' ? 'viewGrid' : 'viewList'); el.title = vl; el.setAttribute('aria-label', vl); updateStore(); break; }
     case 'sort': { S.sort = { rec: 'low', low: 'high', high: 'rec' }[S.sort]; hap('select'); updateStore(); const b = el; const l = { rec: t('sortRec'), low: t('sortLow'), high: t('sortHigh') }[S.sort]; b.title = l; b.setAttribute('aria-label', l); toast(l); break; }
     case 'clear': S.q = ''; S.cat = 'all'; S.onlyStock = false; updateStore(); break;
     case 'order': S.openOrder = S.openOrder === el.dataset.v ? null : el.dataset.v; hap('select'); renderView(); break;
