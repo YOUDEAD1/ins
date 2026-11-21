@@ -39528,6 +39528,10 @@ def _wa_maybe_handle_post(handler):
         return True
     _WEB_CTX.on = bool(identity.get('_web'))
     handler._lara_web = _WEB_CTX.on
+    try:
+        _WEB_CTX.ip = _web_ip(handler)
+    except Exception:
+        _WEB_CTX.ip = ''
     uid = identity['id']
     rk = f"g{_web_ip(handler)}" if identity.get('_guest') else uid      # الزوار: الحد لكل جهاز، مو للكل
     if p in _WA_HEAVY:
@@ -41756,10 +41760,14 @@ def _dv_analyze(uid, fp, ch):
         reasons.append('ضغط أسرع من الإنسان')
     if ch.get('trusted') is False:
         reasons.append('ضغطة مو حقيقية (برمجية)')
-    keys = ['fp:' + fph] + (['did:' + did] if did else [])
+    # نفس موديل الجوال ونفس نسخة النظام يطلع نفس البصمة عند ناس ما بينهم علاقة (نشر في قناة كبيرة = عشرات آيفونات متطابقة)،
+    # فالبصمة وحدها ما تكفي: «نفس الجهاز» = نفس معرّف الجهاز، أو نفس البصمة + نفس الإنترنت (IP) بنفس الوقت تقريباً.
+    ip = str(getattr(_WEB_CTX, 'ip', '') or '')
+    ipk = hashlib.sha256(('lara-dvip|' + (TOKEN or '')[-10:] + '|' + fph + '|' + ip).encode('utf-8')).hexdigest()[:40] if ip else ''
+    keys = ['fp:' + fph] + (['did:' + did] if did else []) + (['fpip:' + ipk] if ipk else [])
     strong, weak = set(), set()
     try:
-        for m in db.device_marks.find({'k': {'$in': keys}}, {'k': 1, 'users': 1}):
+        for m in db.device_marks.find({'k': {'$in': [k for k in keys if not k.startswith('fp:')]}}, {'k': 1, 'users': 1}):
             others = {int(x) for x in (m.get('users') or []) if int(x) != int(uid)}
             (strong if m['k'].startswith('did:') else weak).update(others)
     except Exception as e:
