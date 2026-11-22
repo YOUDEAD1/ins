@@ -29566,10 +29566,14 @@ def admin_del_exec(call):
         admin_main_ui(call)
     except: bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
 
-@bot.callback_query_handler(func=lambda call: call.data == "ad_s_list")
+@bot.callback_query_handler(func=lambda call: call.data == "ad_s_list" or call.data.startswith("ad_s_list_p"))
 @admin_required
 def admin_stock_list_ui(call):
     bot.answer_callback_query(call.id)
+    try:
+        page = max(0, int(call.data[len("ad_s_list_p"):])) if call.data.startswith("ad_s_list_p") else 0
+    except ValueError:
+        page = 0
     l = get_lang(call.from_user.id)
     prods = list(db.products.find({'is_manual': {'$ne': True}}))
     
@@ -29585,7 +29589,11 @@ def admin_stock_list_ui(call):
         bot.edit_message_text("📭 لا توجد منتجات تلقائية حالياً.", call.message.chat.id, call.message.message_id, parse_mode="HTML")
         return
     
-    for p in prods:
+    # Telegram rejects very long keyboards ("reply markup is too long"): show the list in pages
+    per = 30
+    pages = max(1, (len(prods) + per - 1) // per)
+    page = min(page, pages - 1)
+    for p in prods[page * per:(page + 1) * per]:
         pid = p.get('id', str(p.get('_id', '')))
         stk_count = get_product_stock_count(pid)
         
@@ -29603,6 +29611,14 @@ def admin_stock_list_ui(call):
         
         markup.add(CustomInlineButton(**btn_kwargs))
     
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"ad_s_list_p{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"ad_s_list_p{page + 1}"))
+        markup.row(*nav)
     markup.add(InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel_main"))
     bot.edit_message_text("📦 <b>اختر المنتج لإدارة الستوك الخاص به:</b>", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
 
