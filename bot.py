@@ -7785,7 +7785,30 @@ def _tg_html_safe(d):
         res.append(m.group(0))
         pos = m.end()
     res.append(d[pos:].replace('<', '&lt;').replace('>', '&gt;'))
-    return ''.join(res).replace('\x00lt', '&lt;').replace('\x00gt', '&gt;')
+    return _tg_balance(''.join(res).replace('\x00lt', '&lt;').replace('\x00gt', '&gt;'))
+
+
+def _tg_balance(d):
+    """Telegram needs properly nested tags: drop a closing tag with no matching opener,
+    close inner tags before an outer one closes, and close whatever is still open at the end."""
+    out, stack, pos = [], [], 0
+    for m in re.finditer(r'<(/?)([a-zA-Z-]+)[^<>]*>', d):
+        out.append(d[pos:m.start()])
+        pos = m.end()
+        closing, name = m.group(1) == '/', m.group(2).lower()
+        if not closing:
+            stack.append(name)
+            out.append(m.group(0))
+        elif name in stack:
+            while stack:
+                top = stack.pop()
+                out.append(f'</{top}>')
+                if top == name:
+                    break
+        # else: stray closing tag → dropped
+    out.append(d[pos:])
+    out.extend(f'</{t}>' for t in reversed(stack))
+    return ''.join(out)
 
 
 def _desc_box(d):
