@@ -40437,7 +40437,7 @@ def _web_head_html(page=None, hl=None):
         desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:200] or f"{store} — digital codes and subscriptions with instant delivery."
         desc = f"{desc} {A[0]}: {A[1]} — {A[3]}."
     q = f"?hl={hl}" if hl else ''
-    og_img = f"{base}/og.png?v=4"
+    og_img = f"{base}/og.png?v=5"
     image, url, wide = og_img, f"{base}/", True
     products = _wa_build_catalog(include_hidden=False)['products']
     plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}" + q

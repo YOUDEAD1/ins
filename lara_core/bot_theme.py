@@ -495,6 +495,16 @@ class BotThemeAndMediaUpgrade:
                 hit = ns['_WEB_ICON_CACHE'].get('og')
                 if hit:
                     return hit
+                try:   # designed cover (Figma) shipped with the site wins over the generated one
+                    cover = os.path.join(ns['WEBAPP_DIR'], 'og-cover.png')
+                    if os.path.exists(cover):
+                        with open(cover, 'rb') as f:
+                            data = f.read()
+                        if data:
+                            ns['_WEB_ICON_CACHE']['og'] = data
+                            return data
+                except Exception:
+                    pass
                 try:
                     from PIL import Image, ImageDraw, ImageFilter, ImageFont
                     W, H = 1200, 630
