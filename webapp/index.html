@@ -3328,6 +3328,83 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
   .bp-c.c1{width:620px;height:620px;top:-300px;inset-inline-end:-200px}
 }
 
+
+/* ═══ Motion v1 (Figma "Motion v1") ═══ */
+/* A · site background: behind every page; only transform/opacity animate; a handful of elements */
+.site-sky{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;color:#9fb0ff;
+  background-image:radial-gradient(color-mix(in srgb,#7f95ff 22%,transparent) 1.1px,transparent 1.3px);background-size:22px 22px}
+#view{position:relative;z-index:1}
+.sk-au{position:absolute;border-radius:50%;opacity:.55;will-change:transform}
+.sk-au.a1{width:70vmax;height:70vmax;left:-30vmax;top:-32vmax;background:radial-gradient(closest-side,rgba(35,64,255,.55),transparent);animation:skA 38s ease-in-out infinite alternate}
+.sk-au.a2{width:60vmax;height:60vmax;right:-28vmax;top:30vh;background:radial-gradient(closest-side,rgba(106,59,255,.38),transparent);animation:skA 46s ease-in-out -12s infinite alternate-reverse}
+.sk-au.a3{width:55vmax;height:55vmax;left:-24vmax;bottom:-30vmax;background:radial-gradient(closest-side,rgba(0,179,255,.26),transparent);animation:skA 52s ease-in-out -20s infinite alternate}
+@keyframes skA{from{transform:translate3d(0,0,0)}to{transform:translate3d(8vmax,6vmax,0)}}
+.sk-svg{position:absolute;inset:0;width:100%;height:100%}
+.sk-d{display:none}
+@media (min-width:820px){.sk-m{display:none}.sk-d{display:block}}
+.sk-route{fill:none;stroke:currentColor;stroke-opacity:.32;stroke-width:1.6;stroke-dasharray:4 9;stroke-linecap:round}
+.sk-route.r2{stroke-opacity:.2}
+@keyframes skDash{to{stroke-dashoffset:-26}}
+.sk-plane{color:#fff}
+.sk-st{position:absolute;left:var(--x);top:var(--y);width:9px;height:9px;background:#fff;opacity:.15;
+  clip-path:polygon(50% 0,60% 40%,100% 50%,60% 60%,50% 100%,40% 60%,0 50%,40% 40%);animation:skTw 3.6s ease-in-out var(--d) infinite}
+@keyframes skTw{0%,100%{opacity:.12;transform:scale(.7)}50%{opacity:.85;transform:scale(1.15)}}
+:root[data-theme="light"] .site-sky{color:#2340ff}
+:root[data-theme="light"] .sk-au{opacity:.22}
+:root[data-theme="light"] .sk-st{background:#2340ff}
+:root[data-theme="light"] .sk-plane{color:#2340ff}
+html:has(.wl-bp) .site-sky,html[data-page="login"] .site-sky{display:none}
+@media (prefers-reduced-motion:reduce){.sk-au,.sk-route,.sk-st{animation:none}.sk-plane{display:none}}
+
+/* E · login: the plane flies along the dashed route and draws its trail; stars drift and twinkle */
+.wl-bp .bp-sky svg.bp-plane{display:none!important}
+.bp-trail{fill:none;stroke:#fff;stroke-opacity:.9;stroke-width:2.2;stroke-linecap:round}
+.bp-fly{color:#fff}
+.wl-bp .bp-st{animation:bpTw 3.2s ease-in-out infinite alternate,bpDrift 14s ease-in-out infinite alternate}
+.wl-bp .bp-st:nth-child(3n){animation-delay:-1.1s,-4s}.wl-bp .bp-st:nth-child(2n){animation-delay:-2s,-8s}
+@keyframes bpDrift{from{translate:0 0}to{translate:14px -10px}}
+.wl-bp.bp-takeoff .bp-ticket{transition:transform .38s cubic-bezier(.5,0,.75,0),opacity .3s ease-in;transform:translateY(-40px) scale(.96);opacity:0}
+.wl-bp.bp-takeoff .bp-hello{transition:opacity .25s;opacity:0}
+.bp-boost{position:absolute;left:50%;top:60%;width:64px;height:64px;color:#fff;animation:bpBoost .55s cubic-bezier(.5,0,.75,0) forwards;pointer-events:none;z-index:5}
+@keyframes bpBoost{from{transform:translate(-50%,0) rotate(-35deg) scale(.8);opacity:1}to{transform:translate(120%,-120vh) rotate(-35deg) scale(1.4);opacity:.9}}
+
+/* B · balance: holo sweep, chip glint, barcode scan, count-up */
+.wal-holo{position:absolute;inset:-40% -60%;z-index:0;pointer-events:none;background:linear-gradient(105deg,transparent 42%,rgba(255,255,255,.16) 48%,rgba(160,200,255,.22) 50%,rgba(255,255,255,.12) 52%,transparent 58%);animation:walHolo 5.5s ease-in-out infinite}
+@keyframes walHolo{0%,55%{transform:translateX(-40%)}100%{transform:translateX(40%)}}
+.wal-hero>*{position:relative;z-index:1}
+.wal-hero>.wal-chip,.wal-hero>.wal-vip,.wal-hero>.wal-glow{position:absolute}
+.wal-chip{overflow:hidden}
+.wal-chip::after{content:"";position:absolute;inset:0;background:linear-gradient(120deg,transparent 30%,rgba(255,255,255,.85) 50%,transparent 70%);transform:translateX(-120%);animation:walGlint 4s ease-in-out 1s infinite}
+@keyframes walGlint{0%,70%{transform:translateX(-120%)}100%{transform:translateX(120%)}}
+.wal-stub{position:relative;overflow:hidden}
+.wal-scan{position:absolute;top:0;bottom:0;width:2px;left:0;background:#5bffb0;box-shadow:0 0 10px 2px rgba(91,255,176,.7);animation:walScan 4.5s ease-in-out 1.2s infinite;opacity:0}
+@keyframes walScan{0%{transform:translateX(0);opacity:0}8%{opacity:1}40%{transform:translateX(170px);opacity:1}48%,100%{transform:translateX(170px);opacity:0}}
+.wal-coin{position:absolute;left:50%;top:40px;font-size:20px;pointer-events:none;z-index:3;animation:walCoin 1.1s cubic-bezier(.2,.7,.3,1) forwards}
+@keyframes walCoin{from{transform:translate(var(--cx,0),10px) scale(.6);opacity:0}25%{opacity:1}to{transform:translate(calc(var(--cx,0) * 2.2),-70px) scale(1.1);opacity:0}}
+
+/* C · API: radar around the key, runway lights */
+.api-orb{overflow:visible}
+.api-radar{position:absolute;inset:-14px;border-radius:50%;pointer-events:none;background:conic-gradient(from 0deg,rgba(255,212,59,.38),rgba(255,212,59,0) 70deg,transparent 360deg);-webkit-mask:radial-gradient(closest-side,transparent 62%,#000 63%);mask:radial-gradient(closest-side,transparent 62%,#000 63%);animation:apiRadar 3.2s linear infinite}
+.api-radar::after{content:"";position:absolute;inset:0;border-radius:50%;border:1px dashed rgba(255,212,59,.45)}
+@keyframes apiRadar{to{transform:rotate(360deg)}}
+.ct-lights{display:flex;justify-content:center;gap:7px;margin:2px 0 8px}
+.ct-lights i{width:6px;height:6px;border-radius:50%;background:#ffd43b;opacity:.2;animation:ctLight 1.6s ease-in-out infinite}
+.ct-lights i:nth-child(2){animation-delay:.2s}.ct-lights i:nth-child(3){animation-delay:.4s}.ct-lights i:nth-child(4){animation-delay:.6s}.ct-lights i:nth-child(5){animation-delay:.8s}
+@keyframes ctLight{0%,100%{opacity:.18;transform:scale(.8)}20%{opacity:1;transform:scale(1.15)}}
+
+/* D · profile passport: MRZ scan line, VIP stamp lands once, holo on the photo */
+.pp-mrz{position:relative}
+.pp-scan{position:absolute;left:0;right:0;top:0;height:2px;background:#5bffb0;box-shadow:0 0 12px 2px rgba(91,255,176,.65);opacity:0;animation:ppScan 6s ease-in-out .6s infinite}
+@keyframes ppScan{0%{transform:translateY(0);opacity:0}6%{opacity:1}22%{transform:translateY(40px);opacity:1}28%,100%{transform:translateY(40px);opacity:0}}
+.pp-stamp{animation:ppStamp .6s cubic-bezier(.2,1.6,.4,1) .45s both}
+@keyframes ppStamp{from{transform:rotate(-30deg) scale(2.1);opacity:0}to{opacity:1}}
+.passport .avatar{position:relative;overflow:hidden}
+.passport .avatar::before{content:"";position:absolute;inset:-30%;z-index:1;pointer-events:none;background:linear-gradient(115deg,transparent 40%,rgba(255,255,255,.45) 50%,transparent 60%);animation:ppHolo 5s ease-in-out 1.5s infinite;transform:translateX(-60%)}
+@keyframes ppHolo{0%,60%{transform:translateX(-60%)}100%{transform:translateX(60%)}}
+.pp-plane{display:inline-flex;animation:ppPlane 4s ease-in-out infinite}
+@keyframes ppPlane{0%,100%{transform:translate(0,0) rotate(0)}50%{transform:translate(3px,-3px) rotate(-6deg)}}
+@media (prefers-reduced-motion:reduce){.wal-holo,.wal-chip::after,.wal-scan,.api-radar,.ct-lights i,.pp-scan,.pp-stamp,.passport .avatar::before,.pp-plane,.wl-bp .bp-st{animation:none!important}}
+
 /* sign-up: the ticket is "printed", a check-in stamp lands, the plane takes off along the path */
 .bp-ticket{position:relative}
 .bp-stamp{position:absolute;inset-inline-end:-6px;top:-46px;width:76px;height:76px;box-shadow:0 8px 18px -6px rgba(6,14,90,.5);border-radius:50%;border:2.5px dashed #2340ff;outline:4px solid #fff;color:#2340ff;
@@ -3480,6 +3557,20 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
   if (q && q.length && wv && wv.receiveEvent) { var items = q.splice(0); for (var i = 0; i < items.length; i++) { try { wv.receiveEvent.apply(wv, items[i]); } catch (e) {} } }
 })();
 </script>
+<div class="site-sky" aria-hidden="true">
+  <i class="sk-au a1"></i><i class="sk-au a2"></i><i class="sk-au a3"></i>
+  <svg class="sk-svg sk-m" viewBox="0 0 390 844" preserveAspectRatio="xMidYMid slice">
+    <path id="skm1" class="sk-route" d="M-20 260 C 80 200, 180 300, 260 210 S 380 120, 420 150"/>
+    <path class="sk-route r2" d="M-20 640 C 120 560, 200 700, 300 600 S 380 520, 420 540"/>
+    <g class="sk-plane" opacity="0"><path d="M12 0 -9 -8 -4 0 -9 8z" fill="currentColor"/><path d="M12 0 -4 0 -9 8z" fill="currentColor" opacity=".55"/><animateMotion dur="16s" repeatCount="indefinite" rotate="auto" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear"><mpath href="#skm1"/></animateMotion><animate attributeName="opacity" values="0;.9;.9;0;0" keyTimes="0;.06;.52;.6;1" dur="16s" repeatCount="indefinite"/></g>
+  </svg>
+  <svg class="sk-svg sk-d" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMid slice">
+    <path id="skd1" class="sk-route" d="M-40 360 C 260 220, 520 420, 820 260 S 1260 120, 1500 170"/>
+    <path class="sk-route r2" d="M-40 760 C 300 640, 640 820, 980 680 S 1320 600, 1500 640"/>
+    <g class="sk-plane" opacity="0" transform="scale(1.4)"><path d="M12 0 -9 -8 -4 0 -9 8z" fill="currentColor"/><path d="M12 0 -4 0 -9 8z" fill="currentColor" opacity=".55"/><animateMotion dur="22s" repeatCount="indefinite" rotate="auto" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear"><mpath href="#skd1"/></animateMotion><animate attributeName="opacity" values="0;.9;.9;0;0" keyTimes="0;.05;.54;.6;1" dur="22s" repeatCount="indefinite"/></g>
+  </svg>
+  <i class="sk-st" style="--x:10%;--y:14%;--d:0s"></i><i class="sk-st" style="--x:78%;--y:11%;--d:1.4s"></i><i class="sk-st" style="--x:52%;--y:44%;--d:2.6s"></i><i class="sk-st" style="--x:18%;--y:62%;--d:.8s"></i><i class="sk-st" style="--x:86%;--y:82%;--d:2s"></i><i class="sk-st" style="--x:40%;--y:92%;--d:3.1s"></i>
+</div>
 <header class="top" id="top" hidden></header>
 <main id="view" aria-live="polite"></main>
 <nav class="dock" id="dock" hidden></nav>
@@ -5072,7 +5163,9 @@ function vLogin() {
     <div class="bp-sky" aria-hidden="true">
       <span class="bp-c c1"></span><span class="bp-c c2"></span>
       <i class="bp-st" style="--x:15%;--y:12%"></i><i class="bp-st" style="--x:45%;--y:9%"></i><i class="bp-st" style="--x:78%;--y:19%"></i><i class="bp-st" style="--x:8%;--y:24%"></i>
-      <svg class="bp-path" viewBox="0 0 390 160" preserveAspectRatio="none"><path d="M-10 150 C 90 120, 160 140, 220 90 S 330 60, 400 56" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/></svg>
+      <svg class="bp-path" viewBox="0 0 390 160" preserveAspectRatio="xMidYMid slice"><path id="bpRoute" d="M-10 150 C 90 120, 160 140, 220 90 S 330 60, 400 56" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/>
+        <path class="bp-trail" d="M-10 150 C 90 120, 160 140, 220 90 S 330 60, 400 56" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"><animate attributeName="stroke-dashoffset" values="100;0;0;100" keyTimes="0;.62;.86;1" dur="8s" repeatCount="indefinite"/><animate attributeName="stroke-opacity" values=".9;.9;0;0" keyTimes="0;.62;.86;1" dur="8s" repeatCount="indefinite"/></path>
+        <g class="bp-fly"><g transform="scale(1.25)"><path d="M12 0 -9 -8 -4 0 -9 8z" fill="currentColor"/><path d="M12 0 -4 0 -9 8z" fill="currentColor" opacity=".55"/></g><animateMotion dur="8s" repeatCount="indefinite" rotate="auto" keyPoints="0;1;1" keyTimes="0;.62;1" calcMode="spline" keySplines=".45 0 .55 1;0 0 1 1"><mpath href="#bpRoute"/></animateMotion><animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.05;.6;.68;1" dur="8s" repeatCount="indefinite"/></g></svg>
       <svg class="bp-plane" viewBox="0 0 80 80"><path d="M74 10 8 36l24 7 6 26 11-18 18 9z" fill="#fff"/><path d="M32 43 74 10 38 69z" fill="#dfe5ff"/></svg>
     </div>
     <div class="bp-bar">
@@ -5141,6 +5234,15 @@ async function wfResend() {
 function webSignedIn() {
   Object.assign(WF, { mode: 'home', pw: '', code: '', err: '', ok: '' }); Object.assign(WL, { state: 'idle', link: '', poll: '' });
   hap('ok'); S.guest = false;
+  const sec = document.querySelector('.wl-bp');
+  if (sec && !noMotion()) {          // الطيارة تقلع قبل ما يفتح المتجر
+    sec.classList.add('bp-takeoff');
+    const b = document.createElement('div'); b.className = 'bp-boost'; b.setAttribute('aria-hidden', 'true');
+    b.innerHTML = '<svg viewBox="0 0 80 80" width="64" height="64"><path d="M74 10 8 36l24 7 6 26 11-18 18 9z" fill="#fff"/><path d="M32 43 74 10 38 69z" fill="#dfe5ff"/></svg>';
+    sec.appendChild(b);
+    setTimeout(() => screenMorph(() => { boot(); }, -1), 420);
+    return;
+  }
   screenMorph(() => { boot(); }, -1);
 }
 /* Google: الزر الرسمي من Google (يفتح نافذة اختيار الحساب) */
@@ -6176,14 +6278,29 @@ function pendCard() {
   return `<button class="pendcard" data-act="pending">${slot('pending', 'hourglass')}<span class="meta"><b>${esc(t('pendingPay'))}</b><small class="num">${usd(p.base)} · ${esc(methodName(p.method))}</small></span><span class="status st-warn">${esc(t('open'))}</span></button>`;
 }
 function money2(n) { const v = (Math.round((+n || 0) * 100) / 100).toFixed(2).split('.'); return [Number(v[0]).toLocaleString('en-US'), v[1]]; }
+let WAL_COUNTED = false;
+function walCount() {          // الرقم يعدّ من 0 للرصيد أول مرة تفتح الصفحة
+  const el = document.querySelector('.wal-amt[data-count] .wal-whole'); if (!el || WAL_COUNTED || noMotion()) return;
+  WAL_COUNTED = true;
+  const target = Math.floor(Number(el.parentElement.dataset.count) || 0); if (target < 2) return;
+  const t0 = performance.now(), dur = Math.min(1100, 500 + String(target).length * 90), fmt = n => n.toLocaleString('en-US');
+  const step = now => { if (!el.isConnected) return; const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(Math.round(target * e)); if (k < 1) requestAnimationFrame(step); else el.textContent = fmt(target); };
+  el.textContent = '0'; requestAnimationFrame(step);
+}
+function walCoins() {
+  const hero = document.querySelector('.wal-hero'); if (!hero || noMotion()) return;
+  [-34, 0, 34].forEach((x, i) => { const c = document.createElement('span'); c.className = 'wal-coin'; c.textContent = '🪙'; c.style.setProperty('--cx', x + 'px'); c.style.animationDelay = (i * 90) + 'ms'; hero.appendChild(c); setTimeout(() => c.remove(), 1400); });
+}
 function vWallet() {
+  setTimeout(walCount, 30);
   const u = S.user || {}, h = S.hist, sums = (h.data && h.data.sums) || {};
   const [whole, cents] = money2(u.balance);
   return `<section class="wal-hero">
-      <span class="wal-glow" aria-hidden="true"></span><span class="wal-chip" aria-hidden="true"></span>${S.vip && S.vip.enabled && S.vip.level ? `<span class="wal-vip">VIP ${S.vip.level}</span>` : ''}
+      <i class="wal-holo" aria-hidden="true"></i><span class="wal-glow" aria-hidden="true"></span><span class="wal-chip" aria-hidden="true"></span>${S.vip && S.vip.enabled && S.vip.level ? `<span class="wal-vip">VIP ${S.vip.level}</span>` : ''}
       <span class="wal-ic">${slot('balance', 'purse')}</span>
       <span class="wal-lbl">${esc(t('available'))}</span>
-      <div class="wal-amt num" dir="ltr"><span class="cur">$</span>${whole}<span class="cts">.${cents}</span></div>
+      <div class="wal-amt num" dir="ltr" data-count="${Number(u.balance) || 0}"><span class="cur">$</span><span class="wal-whole">${whole}</span><span class="cts">.${cents}</span></div>
       <button class="wal-id" data-act="copy" data-v="${esc(u.id)}">ID ${esc(u.id)} ${ic.copy}</button>
       <div class="wal-acts">
         <button class="wact main" data-act="funds"><span class="wact-ic">${S.nav.funds ? ceH(S.nav.funds, ic.plus) : ic.plus}</span><span>${esc(t('addFunds'))}</span></button>
@@ -6191,7 +6308,7 @@ function vWallet() {
         <button class="wact" data-act="wallet-refresh"><span class="wact-ic">${slotH('refresh', ic.refresh)}</span><span>${esc(t('refresh'))}</span></button>
       </div>
       <div class="tk-perf" aria-hidden="true"></div>
-      <div class="wal-stub" aria-hidden="true"><span class="wal-bc"></span><span class="wal-pass"><b>LARA PASS</b><i dir="ltr">${esc(String(u.id || '').replace(/^(\d{4})\d+(\d{4})$/, '$1 •••• $2'))}</i></span></div>
+      <div class="wal-stub" aria-hidden="true"><span class="wal-bc"></span><i class="wal-scan"></i><span class="wal-pass"><b>LARA PASS</b><i dir="ltr">${esc(String(u.id || '').replace(/^(\d{4})\d+(\d{4})$/, '$1 •••• $2'))}</i></span></div>
     </section>
     <div class="wal-sums">
       <div><small><i class="dot ok"></i>${esc(t('deposited'))}</small><b class="num">${usd(sums.deposits != null ? sums.deposits : u.deposited || 0)}</b></div>
@@ -6683,7 +6800,7 @@ function vProfile() {
       ${acc.email ? `<span class="un acc-mail" dir="ltr">${esc(acc.email)}</span>` : ''}
       </div></div>
       ${DEMO ? `<button class="linked-chip pvm" data-act="pv-how">${ic.info}${esc(t('notLinked'))}</button>` : acc.web_only ? `<button class="linked-chip pvm" data-act="acc-link">${ic.link}${esc(t('lkChip'))}</button>` : S.store.bot ? `<span class="linked-chip"><i class="live-dot"></i>${esc(t('linked'))} <bdi dir="ltr">@${esc(S.store.bot)}</bdi></span>` : ''}
-      <div class="pp-mrz" dir="ltr" aria-hidden="true"><span>${esc(ppL1)}</span><span>${esc(ppL2)}</span></div>
+      <div class="pp-mrz" dir="ltr" aria-hidden="true"><i class="pp-scan"></i><span>${esc(ppL1)}</span><span>${esc(ppL2)}</span></div>
       ${ppVip ? `<div class="pp-stamp" aria-hidden="true"><b>VIP ${S.vip.level}</b><small>${esc((() => { const tr = (S.vip.tiers || []).find(x => x.level === S.vip.level); return tr ? (isAr() ? 'خصم ' : 'Save ') + (tr.lo === tr.hi ? tr.hi : tr.lo + '–' + tr.hi) + '%' : 'LARA'; })())}</small></div>` : ''}
     </div>
     ${acc.web_only && S.store.bot ? `<div class="lk-card"><div class="lk-ic">${TG_PLANE}</div><div><b>${esc(t('lkT'))}</b><p>${esc(t('lkCard'))}</p></div><button class="btn primary sm" data-act="acc-link">${esc(t('lkShort'))}</button></div>` : ''}
@@ -6916,8 +7033,8 @@ function vApi() {
   const ui = S.apiUi;
   if (!A.has_key) return `<div class="api-wrap">
     <section class="api-hero">
-      <div class="api-orb">${slot('api', 'key')}</div>
-      <span class="ct-eye" dir="ltr">CONTROL TOWER</span><h1>${esc(at('title'))}</h1><p>${esc(at('sub'))}</p>${vipApiNote()}
+      <div class="api-orb"><i class="api-radar" aria-hidden="true"></i>${slot('api', 'key')}</div>
+      <span class="ct-eye" dir="ltr">CONTROL TOWER</span><span class="ct-lights" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span><h1>${esc(at('title'))}</h1><p>${esc(at('sub'))}</p>${vipApiNote()}
       <div class="api-feats">${[['f1', 'bolt'], ['f2', 'rocket'], ['f3', 'gem'], ['f4', 'sparkles']].map(([k, e]) => `<div class="api-feat">${ae(e)}<span>${esc(at(k))}</span></div>`).join('')}</div>
       <div class="tk-perf" aria-hidden="true"></div>
       <button class="btn primary full api-cta" data-act="api-gen">${bem('api', ae('key'))}${esc(at('gen'))}</button>
@@ -6929,8 +7046,8 @@ function vApi() {
   const ep0 = EP[0];
   return `<div class="api-wrap">
     <section class="api-top">
-      <span class="ct-eye" dir="ltr">CONTROL TOWER</span>
-      <div class="api-head"><div class="api-ttl"><span class="api-orb sm">${slot('api', 'key')}</span><div><h1>${esc(at('title'))}</h1>${DEMO ? `<span class="api-pill pvm">${ic.info}${esc(at('preview'))} · v1</span>` : `<span class="api-pill"><i class="live-dot"></i>${esc(at('active'))} · v1</span>`}</div></div>
+      <span class="ct-eye" dir="ltr">CONTROL TOWER</span><span class="ct-lights" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <div class="api-head"><div class="api-ttl"><span class="api-orb sm"><i class="api-radar" aria-hidden="true"></i>${slot('api', 'key')}</span><div><h1>${esc(at('title'))}</h1>${DEMO ? `<span class="api-pill pvm">${ic.info}${esc(at('preview'))} · v1</span>` : `<span class="api-pill"><i class="live-dot"></i>${esc(at('active'))} · v1</span>`}</div></div>
         <button class="api-bal" data-act="funds"><small>${esc(t('yourBal'))}</small><b class="num">${usd(A.balance)}</b></button></div>
       ${vipApiNote()}
       <div class="api-stats">
@@ -8359,7 +8476,7 @@ document.addEventListener('click', async e => {
     case 'clear': S.q = ''; S.cat = 'all'; S.onlyStock = false; updateStore(); break;
     case 'order': S.openOrder = S.openOrder === el.dataset.v ? null : el.dataset.v; hap('select'); renderView(); break;
     case 'pending': openPayment(S.pending); break;
-    case 'wallet-refresh': { const b = el.querySelector('.wact-ic'); if (b) b.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(360deg)' }], { duration: 700, easing: 'cubic-bezier(.2,.8,.2,1)' }); refreshMe(); loadHistory(S.hist.page || 1); break; }
+    case 'wallet-refresh': { const b = el.querySelector('.wact-ic'); if (b) b.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(360deg)' }], { duration: 700, easing: 'cubic-bezier(.2,.8,.2,1)' }); walCoins(); refreshMe(); loadHistory(S.hist.page || 1); break; }
     case 'hist-type': if (S.hist.type !== el.dataset.v) { S.hist.type = el.dataset.v; S.hist.page = 1; hap('select'); loadHistory(1); } break;
     case 'hist-page': { const pg = +el.dataset.v; if (pg >= 1) { hap('select'); loadHistory(pg); const hh = $('#hist'); if (hh) hh.scrollIntoView({ behavior: 'smooth', block: 'start' }); } break; }
     case 'hist-jump': { const hh = $('#hist'); if (hh) hh.scrollIntoView({ behavior: 'smooth', block: 'start' }); break; }
