@@ -7757,9 +7757,40 @@ def _desc_too_long(d):
     return len(_desc_plain(d)) > _DESC_MAX
 
 
+_TG_TAG_OK = re.compile(r'</?(b|strong|i|em|u|ins|s|strike|del|code|pre|tg-spoiler)>'
+                        r'|<blockquote(\s+expandable)?>|</blockquote>'
+                        r'|<a\s+href\s*=\s*"[^"<>]*"\s*>|<a\s+href\s*=\s*\'[^\'<>]*\'\s*>|</a>'
+                        r'|<tg-emoji\s+emoji-id\s*=\s*"\d+"\s*>|</tg-emoji>'
+                        r'|<span\s+class\s*=\s*"tg-spoiler"\s*>|</span>', re.I)
+_TG_ENT_OK = re.compile(r'&(amp|lt|gt|quot|#\d{1,7}|#x[0-9a-fA-F]{1,6});')
+
+
+def _tg_html_safe(d):
+    """Keep only HTML that Telegram understands; any other '<', '>' or '&' (e.g. "<3", "a<b",
+    "Q&A", "<email>") is escaped so the message can't fail with "can't parse entities"."""
+    d = re.sub(r'<br\s*/?>', '\n', str(d or ''), flags=re.I)
+    out, pos = [], 0
+    for m in re.finditer(r'<[^<>]*>', d):
+        out.append(d[pos:m.start()])
+        tag = m.group(0)
+        out.append(tag if _TG_TAG_OK.fullmatch(tag) else '\x00lt' + tag[1:-1] + '\x00gt')
+        pos = m.end()
+    out.append(d[pos:])
+    d = ''.join(out)
+    d = re.sub(r'&(?!(amp|lt|gt|quot|#\d{1,7}|#x[0-9a-fA-F]{1,6});)', '&amp;', d)
+    # stray < or > that are not part of a kept tag
+    pos, res = 0, []
+    for m in re.finditer(r'<[^<>]*>', d):
+        res.append(d[pos:m.start()].replace('<', '&lt;').replace('>', '&gt;'))
+        res.append(m.group(0))
+        pos = m.end()
+    res.append(d[pos:].replace('<', '&lt;').replace('>', '&gt;'))
+    return ''.join(res).replace('\x00lt', '&lt;').replace('\x00gt', '&gt;')
+
+
 def _desc_box(d):
     """📝 وصف المنتج داخل إطار (blockquote) — والروابط تصير قابلة للنسخ بلمسة (code)."""
-    d = str(d or '').strip()
+    d = _tg_html_safe(str(d or '').strip())
     if not d:
         return ''
 
@@ -13586,6 +13617,13 @@ def _show_product_page(chat_id, message_id, full_text, short_text, title_html, d
             if 'not modified' in str(ex):
                 return
             logger.warning(f"product page edit failed: {ex}")
+            if "parse entities" in str(ex):         # broken formatting somewhere: show it as plain text
+                plain = html.unescape(re.sub(r'<[^>]+>', '', text))
+                try:
+                    bot.edit_message_text(plain, chat_id, message_id, reply_markup=mk, disable_web_page_preview=True)
+                    return
+                except Exception:
+                    return bot.send_message(chat_id, plain, reply_markup=mk, disable_web_page_preview=True)
             bot.send_message(chat_id, text, reply_markup=mk, parse_mode="HTML", disable_web_page_preview=True)
     if _vis_len(full_text) <= 4000:
         return _edit_or_send(full_text, markup)
