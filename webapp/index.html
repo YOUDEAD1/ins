@@ -3110,6 +3110,11 @@ html[data-page="login"] main {
 .art-logo{position:absolute;left:50%;top:15%;width:32%;aspect-ratio:1;transform:translateX(-50%);object-fit:contain;pointer-events:none}
 .art.mini .art-logo{top:14%;width:72%}
 .feat-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+/* long names: smaller type, whole words only, at most 3 lines */
+.feat-name{overflow-wrap:normal;word-break:normal;hyphens:none;max-width:100%}
+.feat-nt{min-width:0;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+.feat-name.fz2{font-size:clamp(18px,5vw,24px)}
+.feat-name.fz3{font-size:clamp(15px,4.2vw,20px)}
 .feat-logo{width:1.2em;height:1.2em;object-fit:contain;flex:none}
 
 /* ═════════ v4 screens (Figma): passport · metal wallet · boarding pass · control tower — static, iPhone-light ═════════ */
@@ -4452,13 +4457,14 @@ function featHtml() {
   const list = featList(); if (!list.length) return '';
   const slides = list.map((p, i) => {
     const L = artLook(p), name = L.brand + (L.tier ? ' ' + L.tier : '');
+    const lw = Math.max(...name.split(/\s+/).map(w => w.length)), fz = (lw > 11 || name.length > 26) ? ' fz3' : (lw > 7 || name.length > 15) ? ' fz2' : '';
     const price = vipUnit(p, p.price);
     return `<button class="feat" data-act="product" data-v="${esc(p.id)}" style="--c1:${L.col[0]};--c2:${L.col[1]}" aria-label="${esc(nm(p))}">
       <span class="feat-art" aria-hidden="true">${artBannerSVG(p)}</span>
       <span class="feat-in">
         <span class="feat-main">
           <span class="feat-badge">${FEAT_IC.star}${esc(t(p._top ? 'featTop' : 'featPick'))}${p._top ? ' #' + p._top : ''}</span>
-          <b class="feat-name" dir="auto">${brandIcon(p) || autoLogo(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(autoLogo(p) || logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}${esc(name)}</b>
+          <b class="feat-name${fz}" dir="auto">${brandIcon(p) || autoLogo(p) || hasLogo(p) ? `<img class="feat-logo" src="${esc(autoLogo(p) || logoUrl(p.emoji_id))}" alt="" decoding="async">` : `<span class="feat-emb" aria-hidden="true">${esc((() => { const c = [...L.brand][0] || '?'; return AR_RE.test(c) ? c : c.toUpperCase(); })())}</span>`}<span class="feat-nt">${esc(name)}</span></b>
           <span class="feat-sub" dir="auto">${L.dur ? esc(L.dur) + ' · ' : ''}${esc(t('featInstant'))}</span>
           <span class="feat-perks"><i>${FEAT_IC.bolt}${esc(t('featAuto'))}</i><i>${FEAT_IC.shield}${esc(t('featSafe'))}</i></span>
         </span>
