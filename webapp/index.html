@@ -2379,38 +2379,25 @@ img.ae {
 
 /* ═══ 33. PRINCIPAL DIRECTOR LOGIN PORTAL & SLOW-MOTION PAGE CHOREOGRAPHY ═══ */
 /* Macro Page-to-Page Slow-Motion View Transitions */
-::view-transition-old(root) {
-  animation: laraVtOut .46s cubic-bezier(.32, 0, .2, 1) both;
-}
-::view-transition-new(root) {
-  animation: laraVtIn .92s cubic-bezier(.16, 1, .3, 1) both;
-}
-:root[data-vt-dir="out"]::view-transition-new(root) {
-  animation: laraVtBackIn .88s cubic-bezier(.16, 1, .3, 1) both;
-}
-@keyframes laraVtOut {
-  from { opacity: 1; transform: scale(1); filter: blur(0px); }
-  to   { opacity: 0; transform: scale(.955); filter: blur(12px); }
-}
-@keyframes laraVtIn {
-  from { opacity: 0; transform: translateY(28px) scale(.975); filter: blur(14px); }
-  to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
-}
-@keyframes laraVtBackIn {
-  from { opacity: 0; transform: translateY(-22px) scale(.975); filter: blur(12px); }
-  to   { opacity: 1; transform: translateY(0) scale(1); filter: blur(0px); }
-}
+/* page change: short and light (opacity + small slide only — no full-page blur, which lags on iPhone) */
+::view-transition-old(root) { animation: laraVtOut .16s ease-out both; }
+::view-transition-new(root) { animation: laraVtIn .3s cubic-bezier(.2, .8, .2, 1) both; }
+:root[data-vt-dir="out"]::view-transition-new(root) { animation: laraVtBackIn .3s cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes laraVtOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes laraVtIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes laraVtBackIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+
 
 /* Upgraded Silky Slow-Motion Dock Tab Glides */
-#view.sw-r { animation: laraTabR .74s cubic-bezier(.16, 1, .3, 1) both; }
-#view.sw-l { animation: laraTabL .74s cubic-bezier(.16, 1, .3, 1) both; }
+#view.sw-r { animation: laraTabR .3s cubic-bezier(.2, .8, .2, 1) both; }
+#view.sw-l { animation: laraTabL .3s cubic-bezier(.2, .8, .2, 1) both; }
 @keyframes laraTabR {
-  from { opacity: 0; transform: translateX(26px) scale(.99); filter: blur(6px); }
-  to   { opacity: 1; transform: none; filter: blur(0px); }
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: none; }
 }
 @keyframes laraTabL {
-  from { opacity: 0; transform: translateX(-26px) scale(.99); filter: blur(6px); }
-  to   { opacity: 1; transform: none; filter: blur(0px); }
+  from { opacity: 0; transform: translateX(-18px); }
+  to   { opacity: 1; transform: none; }
 }
 
 /* Center Login Portal Vertically & Horizontally Without Dock Padding */
@@ -2489,11 +2476,11 @@ html[data-page="login"] main {
   grid-template-columns: minmax(0, 1fr);
   gap: 28px;
   align-items: center;
-  animation: wlPortalRise .95s cubic-bezier(.16, 1, .3, 1) both;
+  animation: wlPortalRise .4s cubic-bezier(.2, .8, .2, 1) both;
 }
 @keyframes wlPortalRise {
-  from { opacity: 0; transform: translateY(28px) scale(.975); filter: blur(10px); }
-  to   { opacity: 1; transform: none; filter: blur(0px); }
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
 }
 .wl-hero { display: none; }
 
@@ -2678,8 +2665,8 @@ html[data-page="login"] main {
 
 /* Staggered Choreographed Slow-Motion Entrance Inside Stage */
 .wl-stagger {
-  animation: wlChildIn .78s cubic-bezier(.16, 1, .3, 1) both;
-  animation-delay: calc(var(--st, 0) * 65ms);
+  animation: wlChildIn .36s cubic-bezier(.2, .8, .2, 1) both;
+  animation-delay: calc(var(--st, 0) * 40ms);
 }
 @keyframes wlChildIn {
   from { opacity: 0; transform: translateY(14px); }
@@ -3227,6 +3214,16 @@ html[data-skin="cobalt"][data-theme="dark"] .btn.primary{background:#2340ff!impo
 html[data-skin="cobalt"][data-theme="dark"] .dock-in{background:#0f1642!important;box-shadow:0 18px 44px -18px rgba(0,0,0,.7)!important}
 html[data-skin="cobalt"][data-theme="dark"] .chip.on,html[data-skin="cobalt"][data-theme="dark"] .chips .on{background:#2340ff!important}
 /* ═══ Sign in — boarding pass (Figma "Sign in") ═══ */
+
+/* Google: placeholder in the same size until Google's own button is ready (no jump) */
+.g-wrap{position:relative;min-height:44px}
+.g-wrap .g-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:10px;border-radius:999px;border:1px solid var(--line-2);background:var(--surface);color:var(--fg);font:600 14px/1 var(--f-body);transition:opacity .2s}
+.g-wrap.g-ready .g-ph{opacity:0;pointer-events:none}
+.g-wrap .g-btn{position:relative;z-index:1;width:100%;display:flex;justify-content:center;min-height:44px}
+.wl-bp .g-wrap{border:0!important;background:none!important;min-height:44px!important;border-radius:0!important;overflow:visible!important;display:block!important}
+.wl-bp .g-wrap .g-ph{background:#fff;border:1.5px solid #e3e7fb;color:#0b1033}
+.wl-bp .wl-tg-btn{min-height:46px!important;border-radius:999px!important}
+
 html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp) body{background:linear-gradient(180deg,#2c4cff 0%,#2340ff 45%,#1a30d6 100%)!important;min-height:100%}
 .wl-bp{position:relative;isolation:isolate;min-height:100vh;min-height:100dvh;margin:-20px 0 0;box-sizing:border-box;padding:0 0 28px;display:block;background:none;color:#fff}
 .wl-bp .wl-cosmos,.wl-bp .wl-hero{display:none!important}
@@ -3269,8 +3266,6 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
 .wl-bp .wf-or::after{content:""!important;position:absolute;inset:0;height:auto!important;flex:none;pointer-events:none;
   background:radial-gradient(circle at 0 50%,#2340ff 10px,transparent 10.5px),radial-gradient(circle at 100% 50%,#2340ff 10px,transparent 10.5px)!important}
 .wl-bp .wf-or span{display:none}
-.wl-bp .wl-alt{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.wl-bp .wl-alt>:only-child{grid-column:1/-1}
 .wl-bp .wl-tg-btn{background:#fff!important;color:#0b1033!important;border:1.5px solid #e3e7fb!important;border-radius:14px!important;box-shadow:none!important;min-height:52px}
 .wl-bp .wl-tg-btn .wl-tg-ic{color:#fff;background:#2aa3e0;border-radius:50%;width:26px;height:26px;display:grid;place-items:center}
 .wl-bp .wl-tg-btn .wl-tg-ic svg{width:15px;height:15px}
@@ -3287,6 +3282,51 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
 .wl-bp .wl-sonar i{border-color:rgba(35,64,255,.35)!important}
 @media (min-width:900px){.bp-col{padding-top:300px}.bp-sky svg.bp-plane{top:120px;width:120px!important;height:120px!important}.bp-sky svg.bp-path{height:360px!important}}
 @media (prefers-reduced-motion:reduce){.bp-plane{animation:none}}
+
+/* ═══ Sign in v2 (Figma "Sign in v2"): top bar, compact sky, social row, desktop 2-column ═══ */
+.wl.wl3.wl-bp{display:block!important;max-width:none!important;padding-left:0;padding-right:0}
+.bp-bar{position:relative;z-index:2;display:flex;align-items:center;gap:8px;max-width:1180px;margin:0 auto;padding:14px 4px 0}
+.bp-gap{flex:1}
+.bp-mark{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:rgba(255,255,255,.16)}
+.bp-mark img{width:28px;height:28px;object-fit:contain}
+.bp-pill{display:inline-flex;align-items:center;gap:6px;height:38px;padding:0 13px;border-radius:999px;border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.16);color:#fff;font:600 13px/1 var(--f-body);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.bp-pill:active{transform:scale(.96)}
+.bp-pill .flag,.bp-pill img{width:18px;height:18px;border-radius:50%}
+.bp-browse{background:#fff;color:#2340ff;border-color:#fff}
+.wl-bp .wl-foot{display:none!important}
+.bp-col{padding-top:150px!important}
+.bp-hello b{font-size:32px!important}
+.bp-hello p{display:none}
+.bp-sky svg.bp-path{top:40px!important;height:170px!important}
+.bp-sky svg.bp-plane{left:14%!important;top:96px!important;width:46px!important;height:46px!important;margin-left:0!important}
+.bp-terms{margin-top:14px}
+/* social: Telegram + Google side by side, our own pills; Google's real button sits invisibly on top to receive the tap */
+.wl-tg-s{display:none!important}
+.wl-bp .wl-tg-l{display:none!important}.wl-bp .wl-tg-s{display:inline!important}
+.wl-bp .wl-alt{display:grid!important;grid-template-columns:1fr 1fr;gap:10px;flex-direction:unset;align-items:center}
+.wl-bp .wl-alt>*{margin:0!important}
+.wl-bp .wl-alt>:only-child{grid-column:1/-1}
+.wl-bp .wl-tg-btn{order:-1;min-height:46px!important;height:46px;border-radius:999px!important;font-size:14px;gap:8px;padding:0 10px}
+.wl-bp .wl-tg-btn .wl-live-dot{display:none}
+.wl-bp .wl-tg-btn .wl-tg-ic{width:22px!important;height:22px!important}
+.wl-bp .g-wrap{position:relative;height:46px;min-height:46px!important;border-radius:999px!important;overflow:hidden!important}
+.wl-bp .g-wrap .g-ph{position:absolute;inset:0;border-radius:999px;opacity:1!important;font-size:14px;gap:8px}
+.wl-bp .g-wrap .g-btn{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;opacity:.011;min-height:0}
+/* divider: perforation with notches, then the "or continue with" line under it */
+.wl-bp .wf-or{display:block!important;position:relative;height:auto!important;margin:16px -20px 10px!important;padding:28px 20px 0!important;text-align:center;font-size:12px!important;color:#8189b3}
+.wl-bp .wf-or span{display:inline!important}
+.wl-bp .wf-or::before{content:""!important;position:absolute;top:9px;left:20px;right:20px;height:0!important;border-top:2px dashed #dde2fa;background:none!important}
+.wl-bp .wf-or::after{content:""!important;position:absolute;left:0;right:0;top:0;height:20px!important;background:radial-gradient(circle at 0 50%,#2340ff 10px,transparent 10.5px),radial-gradient(circle at 100% 50%,#2340ff 10px,transparent 10.5px)!important}
+@media (min-width:960px){
+  .bp-col{max-width:1180px;display:grid;grid-template-columns:1fr 420px;gap:60px;align-items:center;padding-top:40px!important;min-height:calc(100vh - 120px);min-height:calc(100dvh - 120px)}
+  .bp-hello{padding:0}
+  .bp-hello span{font-size:22px}
+  .bp-hello b{font-size:68px!important;line-height:1.05}
+  .bp-hello p{display:block;max-width:440px;margin:14px 0 0;font-size:17px;line-height:1.6;color:rgba(255,255,255,.78)}
+  .bp-sky svg.bp-plane{left:auto!important;inset-inline-start:24%!important;top:120px!important;width:140px!important;height:140px!important}
+  .bp-sky svg.bp-path{top:120px!important;height:420px!important}
+  .bp-c.c1{width:620px;height:620px;top:-300px;inset-inline-end:-200px}
+}
 
 /* sign-up: the ticket is "printed", a check-in stamp lands, the plane takes off along the path */
 .bp-ticket{position:relative}
@@ -4685,19 +4725,16 @@ function screenMorph(mutator, dir = 1) {
   }
   const vw = $('#view');
   if (!vw || typeof vw.animate !== 'function') { mutator(); return; }
-  const outAnim = vw.animate([
-    { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' },
-    { opacity: 0, transform: `scale(${dir >= 0 ? 0.955 : 1.025}) translateY(${dir >= 0 ? -16 : 16}px)`, filter: 'blur(12px)' }
-  ], { duration: 300, easing: 'cubic-bezier(0.32, 0, 0.2, 1)', fill: 'forwards' });
+  const outAnim = vw.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: 'ease-out', fill: 'forwards' });
   outAnim.onfinish = () => {
     outAnim.cancel();
     mutator();
     const vw2 = $('#view');
     if (vw2 && typeof vw2.animate === 'function') {
       vw2.animate([
-        { opacity: 0, transform: `scale(0.975) translateY(${dir >= 0 ? 28 : -22}px)`, filter: 'blur(14px)' },
-        { opacity: 1, transform: 'scale(1) translateY(0)', filter: 'blur(0px)' }
-      ], { duration: 880, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+        { opacity: 0, transform: `translateY(${dir >= 0 ? 12 : -10}px)` },
+        { opacity: 1, transform: 'none' }
+      ], { duration: 280, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
     }
   };
 }
@@ -4707,8 +4744,8 @@ const WL_MARK_IMG = '<img src="logo-mark.webp" alt="" decoding="async" onerror="
 function wfStageHtml() {
   const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
   const go = WL.link
-    ? `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go"><span class="wl-tg-ic">${TG_PLANE}</span><span>${esc(t('wlBtn'))}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`
-    : `<button class="btn wl-tg-btn" disabled aria-busy="true"><i class="wl-spin"></i><span>${esc(t('wlBtn'))}</span></button>`;
+    ? `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go" aria-label="${esc(t('wlBtn'))}"><span class="wl-tg-ic">${TG_PLANE}</span><span class="wl-tg-l">${esc(t('wlBtn'))}</span><span class="wl-tg-s">${esc(isAr() ? 'تيليجرام' : 'Telegram')}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`
+    : `<button class="btn wl-tg-btn" disabled aria-busy="true"><i class="wl-spin"></i><span class="wl-tg-l">${esc(t('wlBtn'))}</span><span class="wl-tg-s">${esc(isAr() ? 'تيليجرام' : 'Telegram')}</span></button>`;
   const note = WL.denyMsg && WL.state === 'denied' ? WL.denyMsg : WL.state === 'expired' ? t('wlExp') : WL.state === 'denied' ? t('wlDen') : WL.err;
   const browse = S.guest ? `<button class="wl-foot-btn primary-link" data-act="wl-browse"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${isRtl(LANG) ? 'M9 18l6-6-6-6' : 'M15 18l-6-6 6-6'}"/></svg><span>${esc(t('wlBrowse'))}</span></button>` : '';
 
@@ -4746,7 +4783,7 @@ function wfStageHtml() {
     ${more ? `<div class="wf-or wl-stagger" style="--st:3"><span>${esc(t('wfOrCont'))}</span></div>` : ''}
     ${note ? `<div class="wl-note wl-stagger" style="--st:3" role="alert">${esc(note)}</div>` : ''}
     <div class="wl-alt wl-stagger" style="--st:4">
-      ${AUTH.google ? `<div class="g-wrap"><div id="g-btn" class="g-btn" aria-label="Google"></div></div>` : ''}
+      ${AUTH.google ? `<div class="g-wrap"><span class="g-ph" aria-hidden="true"><svg viewBox="0 0 48 48" width="18" height="18"><path fill="#4285F4" d="M45.1 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h11.8c-.5 2.8-2.1 5.1-4.4 6.7v5.6h7.2c4.2-3.9 6.5-9.6 6.5-16.3z"/><path fill="#34A853" d="M24 46c6 0 11.1-2 14.8-5.4l-7.2-5.6c-2 1.3-4.6 2.1-7.6 2.1-5.8 0-10.8-3.9-12.5-9.3H4v5.8C7.7 41 15.3 46 24 46z"/><path fill="#FBBC05" d="M11.5 27.8c-.5-1.3-.7-2.7-.7-4.2s.3-2.9.7-4.2v-5.8H4C2.7 16.3 2 19.6 2 23.6s.7 7.3 2 10z"/><path fill="#EA4335" d="M24 10.9c3.3 0 6.2 1.1 8.5 3.3l6.4-6.4C35.1 4.2 30 2 24 2 15.3 2 7.7 7 4 14.6l7.5 5.8c1.7-5.5 6.7-9.5 12.5-9.5z"/></svg><span>Google</span></span><div id="g-btn" class="g-btn" aria-label="Google"></div></div>` : ''}
       ${go}
     </div>
     ${more ? '' : `<small class="wl-how wl-stagger" style="--st:5">${ic.info}<span>${esc(t('wlHow'))}</span></small>`}
@@ -5000,20 +5037,26 @@ function bpTitle() {
   if (WF.mode === 'forgot') return isAr() ? 'نسيت كلمة السر' : 'Reset password';
   return WF.tab === 'up' ? (isAr() ? 'إنشاء حساب' : 'Create account') : (isAr() ? 'تسجيل الدخول' : 'Sign in');
 }
-/* keep the ticket title in step when only the inner form changes (tabs, code step) */
-try {
-  new MutationObserver(() => {
-    const h = document.querySelector('.bp-head h2'); if (!h) return;
-    const v = bpTitle(); if (h.textContent !== v) h.textContent = v;
-    const sec = h.closest('.wl-bp'), up = WF.tab === 'up' && WF.mode === 'home' && WL.state !== 'wait';
-    if (sec && sec.classList.contains('is-up') !== up) {
-      sec.classList.toggle('is-up', up);
-      const tk = sec.querySelector('.bp-ticket'); if (tk) { tk.classList.remove('bp-print'); void tk.offsetWidth; tk.classList.add('bp-print'); }
-      const sp = sec.querySelector('.bp-head span'); if (sp) sp.textContent = up ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN';
-    }
-  })
-    .observe(document.documentElement, { childList: true, subtree: true });
-} catch (e) {}
+/* keep the ticket title in step when only the inner form changes (tabs, code step) —
+   watches the login view only while it is on screen, then stops (no cost elsewhere) */
+let BP_OBS = null;
+function bpSync() {
+  const h = document.querySelector('.bp-head h2');
+  if (!h) { if (BP_OBS) { BP_OBS.disconnect(); BP_OBS = null; } return; }
+  const v = bpTitle(); if (h.textContent !== v) h.textContent = v;
+  const sec = h.closest('.wl-bp'), up = WF.tab === 'up' && WF.mode === 'home' && WL.state !== 'wait';
+  if (sec && sec.classList.contains('is-up') !== up) {
+    sec.classList.toggle('is-up', up);
+    const tk = sec.querySelector('.bp-ticket'); if (tk) { tk.classList.remove('bp-print'); void tk.offsetWidth; tk.classList.add('bp-print'); }
+    const sp = sec.querySelector('.bp-head span'); if (sp) sp.textContent = up ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN';
+  }
+}
+function bpWatch() {
+  const v = document.getElementById('view');
+  if (BP_OBS || !v || typeof MutationObserver !== 'function') return;
+  BP_OBS = new MutationObserver(bpSync);
+  BP_OBS.observe(v, { childList: true, subtree: true });
+}
 function vLogin() {
   const brand = esc((S.store && S.store.name) || store.get('uiBrand', '') || 'LARA STOCK');
   const more = AUTH.email || AUTH.google;
@@ -5023,21 +5066,31 @@ function vLogin() {
   const heroTag = more ? t('wlBAll') : t('wlB');
 
   const tTitle = bpTitle();
+  setTimeout(bpWatch, 0);
+  const chev = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${isRtl(LANG) ? 'M15 18l-6-6 6-6' : 'M9 18l6-6-6-6'}"/></svg>`;
   return `<section class="wl wl3 wl-bp${WF.tab === 'up' && WF.mode === 'home' ? ' is-up' : ''}">
     <div class="bp-sky" aria-hidden="true">
       <span class="bp-c c1"></span><span class="bp-c c2"></span>
-      <i class="bp-st" style="--x:18%;--y:14%"></i><i class="bp-st" style="--x:46%;--y:10%"></i><i class="bp-st" style="--x:77%;--y:27%"></i><i class="bp-st" style="--x:9%;--y:44%"></i>
-      <svg class="bp-path" viewBox="0 0 390 300" preserveAspectRatio="none"><path d="M-10 290 C 90 250, 170 280, 240 190 S 350 150, 400 140" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/></svg>
+      <i class="bp-st" style="--x:15%;--y:12%"></i><i class="bp-st" style="--x:45%;--y:9%"></i><i class="bp-st" style="--x:78%;--y:19%"></i><i class="bp-st" style="--x:8%;--y:24%"></i>
+      <svg class="bp-path" viewBox="0 0 390 160" preserveAspectRatio="none"><path d="M-10 150 C 90 120, 160 140, 220 90 S 330 60, 400 56" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/></svg>
       <svg class="bp-plane" viewBox="0 0 80 80"><path d="M74 10 8 36l24 7 6 26 11-18 18 9z" fill="#fff"/><path d="M32 43 74 10 38 69z" fill="#dfe5ff"/></svg>
     </div>
+    <div class="bp-bar">
+      <span class="bp-mark">${WL_MARK_IMG}</span>
+      <span class="bp-gap"></span>
+      <button class="bp-pill" data-act="lang-open">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></button>
+      ${S.guest ? `<button class="bp-pill bp-browse" data-act="wl-browse"><span>${esc(isAr() ? 'تصفّح المتجر' : 'Browse store')}</span>${chev}</button>` : ''}
+    </div>
     <div class="bp-col">
-      <div class="bp-hello"><span>${esc(isAr() ? 'أهلاً فيك على متن' : 'Welcome aboard')}</span><b>${brand}</b></div>
-      <div class="wl-card wl-wide bp-ticket">
-        <div class="bp-head"><h2>${esc(tTitle)}</h2><span dir="ltr">${WF.tab === 'up' ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN'}</span></div>
-        <div class="bp-stamp" aria-hidden="true"><b>${esc(isAr() ? 'راكب جديد' : 'NEW')}</b><small>CHECK-IN</small></div>
-        <div class="wl-stage" id="wl-stage">${wfStageHtml()}</div>
+      <div class="bp-hello"><span>${esc(isAr() ? 'أهلاً فيك على متن' : 'Welcome aboard')}</span><b>${brand}</b><p>${esc(isAr() ? 'اشتراكاتك وأكوادك تجيك فوراً، ورصيدك واحد بين الموقع وتيليجرام.' : 'Your subscriptions and codes arrive instantly — one balance on the web and in Telegram.')}</p></div>
+      <div class="bp-side">
+        <div class="wl-card wl-wide bp-ticket">
+          <div class="bp-head"><h2>${esc(tTitle)}</h2><span dir="ltr">${WF.tab === 'up' ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN'}</span></div>
+          <div class="bp-stamp" aria-hidden="true"><b>${esc(isAr() ? 'راكب جديد' : 'NEW')}</b><small>CHECK-IN</small></div>
+          <div class="wl-stage" id="wl-stage">${wfStageHtml()}</div>
+        </div>
+        <p class="bp-terms">${esc(isAr() ? 'بالمتابعة توافق على الشروط وسياسة الخصوصية' : 'By continuing you agree to the Terms and Privacy Policy')}</p>
       </div>
-      <p class="bp-terms">${esc(isAr() ? 'بالمتابعة توافق على الشروط وسياسة الخصوصية' : 'By continuing you agree to the Terms and Privacy Policy')}</p>
     </div>
   </section>`;
 }
@@ -5091,20 +5144,35 @@ function webSignedIn() {
   screenMorph(() => { boot(); }, -1);
 }
 /* Google: الزر الرسمي من Google (يفتح نافذة اختيار الحساب) */
-const G = { loading: false, init: false };
+const G = { loading: false, init: false, ready: false, w: 0 };
+/* يحمّل سكربت Google مسبقاً وقت الفراغ (للزوار) — فلما تفتح صفحة الدخول يكون الزر جاهز بدون انتظار */
+function gLoad(cb) {
+  if (window.google && google.accounts && google.accounts.id) { cb && cb(); return; }
+  if (G.loading) { if (cb) (G.cbs = G.cbs || []).push(cb); return; }
+  G.loading = true; if (cb) G.cbs = [cb];
+  const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true; sc.defer = true;
+  const off = () => { G.loading = false; if (!(window.google && google.accounts)) { AUTH.google = ''; if (S.screen === 'login') renderView(); } };   // Google ما فتح (شبكة/حجب) ← نخفي الزر بدل فراغ
+  sc.onload = () => { G.loading = false; const c = G.cbs || []; G.cbs = []; c.forEach(f => { try { f(); } catch (e) {} }); };
+  sc.onerror = off; setTimeout(() => { if (G.loading) off(); }, 9000); document.head.appendChild(sc);
+}
+function gPreload() {
+  if (!WEB || !AUTH.google || G.loading || (window.google && google.accounts)) return;
+  const go = () => gLoad();
+  if ('requestIdleCallback' in window) requestIdleCallback(go, { timeout: 4000 }); else setTimeout(go, 2500);
+}
 function gRender() {
   const el = document.getElementById('g-btn');
   if (!el || !AUTH.google) return;
-  if (!(window.google && google.accounts && google.accounts.id)) {
-    if (G.loading) return; G.loading = true;
-    const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
-    const off = () => { G.loading = false; if (!(window.google && google.accounts)) { AUTH.google = ''; if (S.screen === 'login') renderView(); } };   // Google ما فتح (شبكة/حجب) ← نخفي الزر بدل فراغ
-    sc.onload = () => { G.loading = false; gRender(); }; sc.onerror = off; setTimeout(off, 9000); document.head.appendChild(sc); return;
-  }
+  if (!(window.google && google.accounts && google.accounts.id)) { gLoad(gRender); return; }
   try {
     if (!G.init) { google.accounts.id.initialize({ client_id: AUTH.google, callback: gCred, ux_mode: 'popup', auto_select: false, itp_support: true }); G.init = true; }
+    const w = Math.round(Math.max(200, Math.min(400, (el.parentElement && el.parentElement.clientWidth) || el.clientWidth || 320)));
+    if (el.dataset.w === String(w) && el.firstChild) return;      // already drawn at this size — no flicker on re-render
+    el.dataset.w = String(w);
     el.innerHTML = '';
-    google.accounts.id.renderButton(el, { theme: document.documentElement.dataset.theme === 'light' ? 'outline' : 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'center', width: Math.max(220, Math.min(360, el.clientWidth || 320)), locale: LANG === 'zh' ? 'zh_CN' : LANG });
+    const bp = !!el.closest('.wl-bp');
+    google.accounts.id.renderButton(el, { theme: bp || document.documentElement.dataset.theme === 'light' ? 'outline' : 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', logo_alignment: 'center', width: w, locale: LANG === 'zh' ? 'zh_CN' : LANG });
+    const wrap = el.closest('.g-wrap'); if (wrap) wrap.classList.add('g-ready');
   } catch (e) {}
 }
 async function gCred(resp) {
@@ -5220,7 +5288,7 @@ async function wlPrepare(force) {
     if (stage && WL.state === 'idle') {
       const oldBtn = stage.querySelector('.wl-tg-btn');
       if (oldBtn && WL.link) {
-        oldBtn.outerHTML = `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go"><span class="wl-tg-ic">${TG_PLANE}</span><span>${esc(t('wlBtn'))}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`;
+        oldBtn.outerHTML = `<a class="btn wl-tg-btn ready" href="${esc(WL.link)}" target="_blank" rel="noopener" data-act="wl-go" aria-label="${esc(t('wlBtn'))}"><span class="wl-tg-ic">${TG_PLANE}</span><span class="wl-tg-l">${esc(t('wlBtn'))}</span><span class="wl-tg-s">${esc(isAr() ? 'تيليجرام' : 'Telegram')}</span><i class="wl-live-dot" aria-hidden="true"></i></a>`;
       } else renderView();
     } else renderView();
   }
@@ -8680,6 +8748,7 @@ async function boot() {
     if (g && g.ok) { S.guest = true; r = Object.assign(g, { user: { id: 0, first_name: '', balance: 0, guest: true, ui_lang: LANG, lang: LANG === 'ar' ? 'ar' : 'en' } }); }
   } else if (r.ok) S.guest = false;
   if (WEB && r.auth) Object.assign(AUTH, r.auth);
+  if (WEB && S.guest) gPreload();
   S.account = r.account || null;
   if (r.ok) ldBootData();
   if (!r.ok) {
