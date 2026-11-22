@@ -7743,11 +7743,30 @@ def get_translated_product_name(p, lang, is_cgpt=False):
 _DESC_URL_RE = re.compile(r'(?:https?://|www\.)[^\s<>"\']+', re.I)
 
 
+_DESC_MAX = 2600          # visible characters shown on the product page (a Telegram message holds 4096)
+
+
+def _desc_plain(d):
+    t = re.sub(r'<br\s*/?>', '\n', str(d or ''), flags=re.I)
+    t = re.sub(r'<a\s[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+               lambda m: (re.sub(r'<[^>]+>', '', m.group(2)).strip() + ' ' + m.group(1)).strip(), t, flags=re.I | re.S)
+    return html.unescape(re.sub(r'<[^>]+>', '', t)).strip()
+
+
+def _desc_too_long(d):
+    return len(_desc_plain(d)) > _DESC_MAX
+
+
 def _desc_box(d):
     """📝 وصف المنتج داخل إطار (blockquote) — والروابط تصير قابلة للنسخ بلمسة (code)."""
     d = str(d or '').strip()
     if not d:
         return ''
+    if _desc_too_long(d):        # long description: show the start; "📄 Full description" sends the rest
+        t = _desc_plain(d)[:_DESC_MAX]
+        cut = max(t.rfind('\n'), t.rfind(' '))
+        t = (t[:cut] if cut > _DESC_MAX * 0.8 else t).rstrip() + ' …'
+        d = html.escape(t, quote=False)
     # <a href="X">نص</a> ← النص + الرابط قابل للنسخ
     def _a(m):
         href = html.unescape(m.group(1))
@@ -13467,6 +13486,9 @@ def shop_detail_ui(call):
                 callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}"
             ))
 
+        if _desc_too_long(p_desc):
+            markup.add(InlineKeyboardButton(bil(uid, "📄 الوصف كامل", "📄 Full description"),
+                                            callback_data=f"fdesc_{str(pid).replace('cgpt_main_', '')}"))
         markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
         if is_admin:
             short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
@@ -13476,7 +13498,10 @@ def shop_detail_ui(call):
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
         try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-        except: pass
+        except Exception as _ee:
+            if 'not modified' not in str(_ee):
+                logger.warning(f"cgpt page edit failed: {_ee}")
+                bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
         return
 
     # ── منتج عادي ──
@@ -13521,6 +13546,8 @@ def shop_detail_ui(call):
     if is_manual or st > 0:
         qty_cb = f"buy_qty_{short_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{short_pid}"
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
+    if _desc_too_long(d):
+        markup.add(InlineKeyboardButton(bil(uid, "📄 الوصف كامل", "📄 Full description"), callback_data=f"fdesc_{short_pid}"))
     markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
 
     if _is_admin_check(uid):
@@ -13530,7 +13557,59 @@ def shop_detail_ui(call):
         markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except: pass
+    except Exception as _ee:
+        if 'not modified' not in str(_ee):
+            logger.warning(f"product page edit failed pid={pid}: {_ee}")
+            bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fdesc_"))
+def product_full_desc(call):
+    """📄 Full description of a product whose description is too long for the product page."""
+    uid = call.from_user.id
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    if is_user_banned(uid):
+        return
+    l = get_lang(uid)
+    p = find_product(call.data[len("fdesc_"):])
+    if not p or (not _customer_product_visible(p) and not _is_admin_check(uid)):
+        return
+    d = None
+    if p.get('product_type') == 'cgpt_main' and p.get('cgpt_product_id'):
+        try:
+            parent = db.cgpt_products.find_one({'_id': ObjectId(str(p['cgpt_product_id']))})
+            d = get_translated_product_desc(parent, l, is_cgpt=True) if parent else None
+        except Exception:
+            d = None
+    if d is None:
+        d = get_translated_product_desc(p, l)
+    t = _desc_plain(d)
+    if not t:
+        return
+    parts, cur = [], ''
+    for line in t.split('\n'):
+        while len(line) > 3500:              # one very long line: cut it
+            if cur:
+                parts.append(cur)
+                cur = ''
+            parts.append(line[:3500])
+            line = line[3500:]
+        if cur and len(cur) + len(line) + 1 > 3500:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = (cur + '\n' + line) if cur else line
+    if cur:
+        parts.append(cur)
+    name = clean_name(get_translated_product_name(p, l))
+    for i, part in enumerate(parts):
+        head = f"📄 <b>{html.escape(name)}</b>\n\n" if i == 0 else ''
+        bot.send_message(call.message.chat.id, f"{head}<blockquote expandable>{html.escape(part, quote=False)}</blockquote>",
+                         parse_mode="HTML", disable_web_page_preview=True)
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_qty_"))
 def prompt_quantity(call):
