@@ -43847,6 +43847,9 @@ def _wa_from_extension(location, stack):
     return bool(m and _WA_EXT_SRC.match(m.group(0)))
 
 
+_NET_FAIL_USERS = []
+
+
 def _wa_client_error(identity, body):
     if not _wa_rate_ok(f'client-error:{identity["id"]}', 12):
         return 429, {'error': 'rate_limited'}
@@ -43870,7 +43873,14 @@ def _wa_client_error(identity, body):
         trace = '\n'.join(diagnostic + ([_error_redact(stack, 2000)] if stack else []))
         if not location or location in ('0', ':0', ':0:0'):
             location = 'Browser location unavailable'
-        ref = _error_capture(message, source='browser', level='WARNING' if masked else 'ERROR',
+        level = 'WARNING' if masked else 'ERROR'
+        # 📶 «Network request failed» = نت العميل انقطع لحظة (والسيرفر شغال): نسجله بدون تنبيه —
+        # إلا لو صار عند كثير ناس مختلفين خلال 10 دقائق (يعني الموقع فعلاً ما يوصل) → تنبيه
+        if message.strip().lower().startswith('network request failed'):
+            now_t = time.time()
+            _NET_FAIL_USERS[:] = [(t, u) for t, u in _NET_FAIL_USERS if now_t - t < 600] + [(now_t, identity.get('id'))]
+            level = 'ERROR' if len({u for _, u in _NET_FAIL_USERS}) >= 6 else 'WARNING'
+        ref = _error_capture(message, source='browser', level=level,
                              location=location, browser_trace=trace)
     return 200, {'ok': True, 'reference': ref}
 
