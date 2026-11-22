@@ -39336,11 +39336,11 @@ def _web_email_login(handler, body):
     if not email_addr:
         return 400, {'error': 'bad_email'}
     acc = db.web_accounts.find_one({'_id': email_addr})
-    if acc and not acc.get('pw') and acc.get('google_sub'):
+    if not acc:                                  # no account for this email: tell them and send them to sign-up
+        return 400, {'error': 'no_web_account'}
+    if not acc.get('pw') and acc.get('google_sub'):
         return 400, {'error': 'use_google'}
-    if not acc or not _web_pw_ok(body.get('password'), acc.get('pw')):
-        if not acc:
-            _web_pw_ok('x', 'pbkdf2$240000$00$00')     # نفس الوقت تقريباً، ما يكشف لو الإيميل مسجل
+    if not _web_pw_ok(body.get('password'), acc.get('pw')):
         return 401, {'error': 'bad_login'}
     uid, err = _web_user_ok(acc['user_id'])
     if err:
@@ -39358,7 +39358,9 @@ def _web_email_forgot(handler, body):
     if not email_addr:
         return 400, {'error': 'bad_email'}
     acc = db.web_accounts.find_one({'_id': email_addr}, {'_id': 1})
-    if acc and _wa_rate_ok(f"wefe:{email_addr}", 6, 3600):
+    if not acc:
+        return 400, {'error': 'no_web_account'}
+    if _wa_rate_ok(f"wefe:{email_addr}", 6, 3600):
         out = _web_code_issue(email_addr, 'reset', _web_lang(body))
         if out.get('error'):
             return 429, out
@@ -39376,7 +39378,9 @@ def _web_email_code(handler, body):
     if not email_addr:
         return 400, {'error': 'bad_email'}
     acc = db.web_accounts.find_one({'_id': email_addr}, {'_id': 1})
-    if acc and _wa_rate_ok(f"wece:{email_addr}", 6, 3600):
+    if not acc:
+        return 400, {'error': 'no_web_account'}
+    if _wa_rate_ok(f"wece:{email_addr}", 6, 3600):
         out = _web_code_issue(email_addr, 'login', _web_lang(body))
         if out.get('error'):
             return 429, out
