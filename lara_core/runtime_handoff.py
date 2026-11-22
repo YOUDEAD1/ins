@@ -120,7 +120,7 @@ def _site_page(handler):
         return False
     store = (os.environ.get('WEBAPP_STORE_NAME') or 'LARA STOCK').strip() or 'LARA STOCK'
     from html import escape as e
-    desc = 'Digital codes and subscriptions with instant delivery. اشتراكات وأكواد رقمية بتسليم فوري.'
+    desc = 'Digital subscriptions and codes with instant delivery, 24/7.'
     base = 'https://' + host
     body = ('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -129,10 +129,10 @@ def _site_page(handler):
             f'<meta name="description" content="{e(desc)}">'
             '<meta property="og:type" content="website">'
             f'<meta property="og:site_name" content="{e(store)}">'
-            f'<meta property="og:title" content="{e(store)}">'
+            f'<meta property="og:title" content="{e(store)} — Digital subscriptions &amp; codes">'
             f'<meta property="og:description" content="{e(desc)}">'
             f'<meta property="og:url" content="{e(base)}/">'
-            f'<meta property="og:image" content="{e(base)}/og.png?v=5">'
+            f'<meta property="og:image" content="{e(base)}/og.png?v=6">'
             '<meta property="og:image:type" content="image/png">'
             '<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
             '<meta name="twitter:card" content="summary_large_image">'

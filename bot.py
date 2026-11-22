@@ -40437,7 +40437,7 @@ def _web_head_html(page=None, hl=None):
         desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:200] or f"{store} — digital codes and subscriptions with instant delivery."
         desc = f"{desc} {A[0]}: {A[1]} — {A[3]}."
     q = f"?hl={hl}" if hl else ''
-    og_img = f"{base}/og.png?v=5"
+    og_img = f"{base}/og.png?v=6"
     image, url, wide = og_img, f"{base}/", True
     products = _wa_build_catalog(include_hidden=False)['products']
     plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}" + q
@@ -40483,6 +40483,15 @@ def _web_head_html(page=None, hl=None):
                + ''.join(f'<li><a href="{e(plink(x))}">{e(" | ".join(n for n in dict.fromkeys(names(x)) if n))}</a>'
                          f' — ${_wa_fnum(x.get("price")):.2f}</li>' for x in products[:300])
                + '</ul>')
+    # link preview (Telegram/WhatsApp): English only on the main pages; ?hl= pages keep their language
+    og_t, og_d = title, desc
+    if not hl:
+        if prod:
+            og_t = f"{name} — {price} | {store}"
+            og_d = (f"Buy {name} for {price} with instant delivery. " + plain(prod.get('desc_en') or ''))[:300].strip()
+        else:
+            og_t = f"{store} — Digital subscriptions & codes"
+            og_d = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:200] or "Digital subscriptions and codes with instant delivery, 24/7. Pay with Binance Pay, USDT, TON or Telegram Stars."
     path = f"/p/{urllib.parse.quote(str(prod.get('id')), safe='')}" if prod else '/'
     kw = ', '.join([store, loc_name, A[0], L[4]] + ([n for n in dict.fromkeys(names(prod)) if n] if prod else
                    [n for x in products[:20] for n in dict.fromkeys(names(x)) if n]))[:700]
@@ -40507,8 +40516,8 @@ def _web_head_html(page=None, hl=None):
         f'<link rel="canonical" href="{e(url)}">',
         '<meta property="og:type" content="' + ('product' if prod else 'website') + '">',
         f'<meta property="og:site_name" content="{e(store)}">',
-        f'<meta property="og:title" content="{e(title)}">',
-        f'<meta property="og:description" content="{e(desc)}">',
+        f'<meta property="og:title" content="{e(og_t)}">',
+        f'<meta property="og:description" content="{e(og_d)}">',
         f'<meta property="og:url" content="{e(url)}">',
         f'<meta property="og:image" content="{e(image)}">',
         f'<meta property="og:image:alt" content="{e(store)}">',
