@@ -267,6 +267,88 @@ class CustomInlineButton(InlineKeyboardButton):
         if self.icon_custom_emoji_id: d['icon_custom_emoji_id'] = str(self.icon_custom_emoji_id)
         return d
 
+# ------------------------------------------------------------
+# 📑 Long keyboards → pages, automatically, on every screen.
+# Telegram refuses a keyboard that is too big ("reply markup is too long"), which
+# happens on admin lists once the store has many products. Any inline keyboard
+# over the budget is split into pages: the item rows are paged, the last row
+# (back / actions) stays on every page, and ◀️ n/N ▶️ buttons switch pages.
+# ------------------------------------------------------------
+_KB_BUDGET = 6500                     # bytes of the encoded keyboard (real limit is ~10 KB)
+import collections as _kb_collections
+_KB_PAGES = _kb_collections.OrderedDict()
+_KB_PAGES_LOCK = threading.Lock()
+
+
+def _kb_row_size(row):
+    return len(json.dumps([b.to_dict() for b in row])) + 2
+
+
+def _kb_split(rows):
+    """[item rows], [footer rows] → list of pages (each a list of rows incl. footer)."""
+    footer = rows[-1:] if len(rows) > 1 else []
+    items = rows[:-1] if footer else rows
+    room = _KB_BUDGET - sum(_kb_row_size(r) for r in footer) - 260   # 260: the ◀️ n/N ▶️ row
+    pages, cur, used = [], [], 0
+    for r in items:
+        sz = _kb_row_size(r)
+        if cur and used + sz > room:
+            pages.append(cur)
+            cur, used = [], 0
+        cur.append(r)
+        used += sz
+    if cur or not pages:
+        pages.append(cur)
+    return pages, footer
+
+
+def _kb_page_markup(token, n):
+    with _KB_PAGES_LOCK:
+        hit = _KB_PAGES.get(token)
+    if not hit:
+        return None
+    pages, footer = hit
+    n = max(0, min(n, len(pages) - 1))
+    m = InlineKeyboardMarkup()
+    m._kb_paged = True
+    for r in pages[n]:
+        m.row(*r)
+    nav = []
+    if n > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"kbp:{token}:{n - 1}"))
+    nav.append(InlineKeyboardButton(f"{n + 1}/{len(pages)}", callback_data="noop"))
+    if n < len(pages) - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"kbp:{token}:{n + 1}"))
+    m.row(*nav)
+    for r in footer:
+        m.row(*r)
+    return m
+
+
+_kb_orig_to_json = InlineKeyboardMarkup.to_json
+
+
+def _kb_to_json(self):
+    out = _kb_orig_to_json(self)
+    if len(out) <= _KB_BUDGET or getattr(self, '_kb_paged', False):
+        return out
+    try:
+        pages, footer = _kb_split([list(r) for r in self.inline_keyboard])
+        if len(pages) < 2:
+            return out
+        token = os.urandom(5).hex()
+        with _KB_PAGES_LOCK:
+            _KB_PAGES[token] = (pages, footer)
+            while len(_KB_PAGES) > 400:
+                _KB_PAGES.popitem(last=False)
+        return _kb_orig_to_json(_kb_page_markup(token, 0))
+    except Exception:
+        return out
+
+
+InlineKeyboardMarkup.to_json = _kb_to_json
+
+
 # ============================================================
 # 🌐 4. السيرفر الوهمي وقاعدة البيانات
 # ============================================================
@@ -12452,6 +12534,31 @@ def shop_toggle_mode(call):
         pass
     call.data = "open_shop"
     shop_list_ui(call)
+
+
+@bot.callback_query_handler(func=lambda call: (call.data or '').startswith("kbp:"))
+def kb_page_switch(call):
+    """◀️/▶️ on a keyboard that was split into pages automatically."""
+    try:
+        _, token, n = call.data.split(':', 2)
+        m = _kb_page_markup(token, int(n))
+    except Exception:
+        m = None
+    if m is None:
+        try:
+            bot.answer_callback_query(call.id, bil(call.from_user.id, "↻ افتح القائمة من جديد", "↻ Open the menu again"), show_alert=False)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=m)
+    except Exception as ex:
+        if 'not modified' not in str(ex):
+            raise
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "noop")
