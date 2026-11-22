@@ -43607,10 +43607,35 @@ def _error_resolve_automatic(reference, reason):
         pass
 
 
+_TG_BLIPS = []
+
+
+def _tg_transient(record, exc):
+    """🌐 خلل مؤقت في سيرفرات تيليجرام أثناء استقبال الرسائل (502/503/504/429، انقطاع، مهلة):
+    مكتبة البوت تعيد المحاولة لحالها — ما نرسل تنبيه إلا لو تكرر كثير (أكثر من 8 مرات في 10 دقائق)."""
+    try:
+        if not (record.name == 'TeleBot' or 'polling' in (record.funcName or '') or 'polling' in record.getMessage().lower()):
+            return False
+        code = int(getattr(exc, 'error_code', 0) or 0)
+        ok = code in (429, 500, 502, 503, 504) or isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+        if not ok:
+            return False
+        now_t = time.time()
+        _TG_BLIPS[:] = [t for t in _TG_BLIPS if now_t - t < 600] + [now_t]
+        if len(_TG_BLIPS) > 8:
+            _TG_BLIPS.clear()
+            return False          # تكرر كثير → مشكلة حقيقية، نرسل التنبيه
+        return True
+    except Exception:
+        return False
+
+
 class _ErrorLogHandler(logging.Handler):
     def emit(self, record):
         try:
             exc = record.exc_info[1] if record.exc_info else sys.exc_info()[1]
+            if _tg_transient(record, exc):
+                return
             _error_capture(record.getMessage(), exc=exc, level=record.levelname,
                            location=f'{os.path.basename(record.pathname)}:{record.lineno} in {record.funcName}')
         except Exception:
