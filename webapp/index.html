@@ -3176,6 +3176,56 @@ html[data-page="login"] main {
 /* sign-in as a ticket: perforated divider with notches */
 .wl-card .wf-or{position:relative}
 
+
+/* ═══ Cobalt skin — the sign-in colours across the whole site (preview: ?skin=cobalt) ═══ */
+html:root[data-skin="cobalt"]{
+  --bg:#eef1ff; --bg-glow:rgba(35,64,255,.10); --surface:#ffffff; --surface-2:#f3f5ff; --surface-3:#e6eaff;
+  --line:rgba(35,64,255,.10); --line-2:rgba(35,64,255,.18);
+  --fg:#0b1033; --fg-2:#4a5384; --fg-3:#8189b3;
+  --accent:#2340ff; --accent-2:#4d66ff; --accent-ink:#ffffff; --accent-soft:rgba(35,64,255,.10); --glow:rgba(35,64,255,.30);
+  --ok:#0f9d68; --ok-soft:rgba(15,157,104,.11); --warn:#c77700; --warn-soft:rgba(230,150,20,.13); --bad:#e0334a; --bad-soft:rgba(224,51,74,.10);
+  --dock:rgba(255,255,255,.92); --sheet:#ffffff; --seg:#ffffff; --scrim:rgba(8,14,60,.4); --tile-l:62%; --tile-a:.5;
+  --shadow:0 12px 30px -10px rgba(20,34,140,.22); color-scheme:light;
+}
+html:root[data-skin="cobalt"] body{background:linear-gradient(180deg,#2340ff 0,#2a47ff 180px,#5a71ff 250px,#eef1ff 330px,#eef1ff 100%) no-repeat,#eef1ff}
+html[data-skin="cobalt"] .top{background:linear-gradient(180deg,#2c4cff,#2340ff)!important;color:#fff;border-bottom:0!important;box-shadow:0 8px 24px -14px rgba(6,14,90,.6)}
+html[data-skin="cobalt"] .top .chip-bal{background:rgba(255,255,255,.16)!important;color:#fff!important;border:1px solid rgba(255,255,255,.3)!important;box-shadow:none!important}
+html[data-skin="cobalt"] .top .chip-bal *{color:#fff!important;-webkit-text-fill-color:#fff}
+html[data-skin="cobalt"] .top .bal,html[data-skin="cobalt"] .top .wallet-pill{background:rgba(255,255,255,.16)!important;color:#fff!important;border-color:rgba(255,255,255,.28)!important}
+html[data-skin="cobalt"] .btn.primary{background:#0b1033!important;color:#fff!important;box-shadow:0 10px 22px -10px rgba(11,16,51,.6)!important}
+html[data-skin="cobalt"] .btn.primary svg{color:#ffd43b}
+html[data-skin="cobalt"] .card{background:#fff;box-shadow:0 10px 26px -14px rgba(20,34,140,.35)}
+html[data-skin="cobalt"] .card .add,html[data-skin="cobalt"] .card .plus,html[data-skin="cobalt"] .add-btn{background:#2340ff!important;color:#fff!important}
+html[data-skin="cobalt"] .chip.on,html[data-skin="cobalt"] .chips .on{background:#0b1033!important;color:#fff!important}
+html[data-skin="cobalt"] .dock-in{background:#fff!important;box-shadow:0 18px 44px -18px rgba(20,34,140,.45)!important}
+html[data-skin="cobalt"] .dock .on,html[data-skin="cobalt"] .dock [aria-current="page"]{color:#2340ff!important}
+html[data-skin="cobalt"] .hello h1,html[data-skin="cobalt"] .hello p{color:#fff!important}
+html[data-skin="cobalt"] .hello p{opacity:.8}
+html[data-skin="cobalt"] .hello .cart-launch,html[data-skin="cobalt"] .hello button{color:#fff}
+html[data-skin="cobalt"] .vip-crown,html[data-skin="cobalt"] .crown{color:#e0a800}
+
+.mode-row{cursor:default}
+.mode-seg{margin-inline-start:auto;display:inline-flex;gap:2px;padding:3px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line)}
+.mode-seg button{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 10px;border:0;border-radius:9px;background:none;color:var(--fg-2);font:600 12.5px/1 var(--f-body);cursor:pointer}
+.mode-seg button.on{background:var(--surface);color:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.mode-seg svg{flex:none}
+.mode-row .mlbl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mode-seg button:not(.on) span{display:none}.mode-seg button:not(.on){padding:0 9px}
+/* Cobalt skin — dark mode */
+html:root[data-skin="cobalt"][data-theme="dark"]{
+  --bg:#070b2a; --bg-glow:rgba(35,64,255,.22); --surface:#0f1642; --surface-2:#151e55; --surface-3:#1c2768;
+  --line:rgba(120,140,255,.14); --line-2:rgba(120,140,255,.24);
+  --fg:#eef1ff; --fg-2:#a9b2e6; --fg-3:#6f79b3;
+  --accent:#5b73ff; --accent-2:#8394ff; --accent-soft:rgba(91,115,255,.16); --glow:rgba(91,115,255,.4);
+  --ok:#2fd394; --ok-soft:rgba(47,211,148,.13); --warn:#ffb547; --warn-soft:rgba(255,181,71,.12); --bad:#ff5a6e; --bad-soft:rgba(255,90,110,.13);
+  --dock:rgba(15,22,66,.92); --sheet:#0c1238; --seg:#1c2768; --scrim:rgba(2,4,20,.6); --tile-l:30%; --tile-a:.42;
+  --shadow:0 12px 30px -10px rgba(0,0,0,.5); color-scheme:dark;
+}
+html:root[data-skin="cobalt"][data-theme="dark"] body{background:linear-gradient(180deg,#2340ff 0,#1f38e0 160px,#0f1a7a 250px,#070b2a 340px,#070b2a 100%) no-repeat,#070b2a}
+html[data-skin="cobalt"][data-theme="dark"] .card{background:var(--surface);box-shadow:0 10px 26px -14px rgba(0,0,0,.6)}
+html[data-skin="cobalt"][data-theme="dark"] .btn.primary{background:#2340ff!important;box-shadow:0 10px 24px -10px rgba(35,64,255,.7)!important}
+html[data-skin="cobalt"][data-theme="dark"] .dock-in{background:#0f1642!important;box-shadow:0 18px 44px -18px rgba(0,0,0,.7)!important}
+html[data-skin="cobalt"][data-theme="dark"] .chip.on,html[data-skin="cobalt"][data-theme="dark"] .chips .on{background:#2340ff!important}
 /* ═══ Sign in — boarding pass (Figma "Sign in") ═══ */
 html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp) body{background:linear-gradient(180deg,#2c4cff 0%,#2340ff 45%,#1a30d6 100%)!important;min-height:100%}
 .wl-bp{position:relative;isolation:isolate;min-height:100vh;min-height:100dvh;margin:-20px 0 0;box-sizing:border-box;padding:0 0 28px;display:block;background:none;color:#fff}
@@ -3198,7 +3248,7 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
 .wl-bp .wl-card.bp-ticket::before,.wl-bp .wl-card.bp-ticket::after{display:none!important}
 .bp-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
 .bp-head h2{margin:0;font:800 21px/1.2 var(--f-display);color:#0b1033}
-.bp-head span{font:700 10px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.12em;color:#2340ff;white-space:nowrap}
+.bp-head h2{white-space:nowrap}.bp-head span{min-width:0;overflow:hidden;text-overflow:ellipsis;font:700 10px/1 var(--f-mono,ui-monospace,monospace);letter-spacing:.12em;color:#2340ff;white-space:nowrap}
 .wl-bp .wl-head-emblem,.wl-bp .wl-titles,.wl-bp .wl-how{display:none!important}
 .wl-bp .wf-tabs{background:#eef1ff!important;border:0!important;margin-bottom:12px}
 .wl-bp .wf-tabs button{color:#5a6290!important}.wl-bp .wf-tabs button.on{color:#0b1033!important}
@@ -3237,6 +3287,26 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
 .wl-bp .wl-sonar i{border-color:rgba(35,64,255,.35)!important}
 @media (min-width:900px){.bp-col{padding-top:300px}.bp-sky svg.bp-plane{top:120px;width:120px!important;height:120px!important}.bp-sky svg.bp-path{height:360px!important}}
 @media (prefers-reduced-motion:reduce){.bp-plane{animation:none}}
+
+/* sign-up: the ticket is "printed", a check-in stamp lands, the plane takes off along the path */
+.bp-ticket{position:relative}
+.bp-stamp{position:absolute;inset-inline-end:-6px;top:-46px;width:76px;height:76px;box-shadow:0 8px 18px -6px rgba(6,14,90,.5);border-radius:50%;border:2.5px dashed #2340ff;outline:4px solid #fff;color:#2340ff;
+  display:grid;place-content:center;text-align:center;transform:rotate(-14deg) scale(0);opacity:0;pointer-events:none;z-index:2;background:#fff}
+.bp-stamp b{font:800 12px/1.1 var(--f-display)}.bp-stamp small{font:700 8.5px/1.2 var(--f-mono,monospace);letter-spacing:.12em}
+.is-up .bp-head{padding-inline-end:64px}
+.is-up .bp-stamp{animation:bpStamp .55s cubic-bezier(.2,1.6,.4,1) .35s both}
+@keyframes bpStamp{0%{transform:rotate(-30deg) scale(2.2);opacity:0}70%{opacity:1}100%{transform:rotate(-14deg) scale(1);opacity:1}}
+.bp-ticket.bp-print{animation:bpPrint .6s cubic-bezier(.2,.9,.3,1.15)}
+@keyframes bpPrint{0%{transform:translateY(18px) scale(.97);clip-path:inset(0 0 100% 0 round 24px)}100%{transform:none;clip-path:inset(0 0 0 0 round 24px)}}
+.is-up .bp-sky svg.bp-plane{animation:bpTakeoff 1.4s cubic-bezier(.5,0,.3,1) both,bpFly 5s ease-in-out 1.4s infinite}
+@keyframes bpTakeoff{0%{transform:translate(-160px,140px) rotate(-30deg) scale(.6);opacity:0}30%{opacity:1}100%{transform:translate(0,0) rotate(-6deg) scale(1)}}
+.is-up .bp-sky svg.bp-path path{stroke-dashoffset:0;animation:bpTrail 1.4s linear both}
+@keyframes bpTrail{from{stroke-dashoffset:280}to{stroke-dashoffset:0}}
+.is-up .bp-st{animation:bpTw 1.6s ease-in-out infinite alternate}.is-up .bp-st:nth-child(odd){animation-delay:.6s}
+@keyframes bpTw{from{opacity:.25;transform:scale(.7)}to{opacity:1;transform:scale(1.25)}}
+.is-up .bp-hello b{animation:bpHi .7s cubic-bezier(.2,.9,.3,1.2) both}
+@keyframes bpHi{from{letter-spacing:.2em;opacity:0}to{letter-spacing:-.01em;opacity:1}}
+@media (prefers-reduced-motion:reduce){.is-up .bp-stamp,.bp-ticket.bp-print,.is-up .bp-sky svg.bp-plane,.is-up .bp-st,.is-up .bp-hello b{animation:none}.is-up .bp-stamp{transform:rotate(-14deg);opacity:1}}
 .passport .acc-mail{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .pp-stamp{bottom:6px!important;width:74px!important;height:74px!important}.pp-stamp b{font-size:16px!important}
 .pp-mrz{padding-inline-end:96px!important}
@@ -3350,6 +3420,7 @@ html:has(.wl-bp){background:#2340ff!important;overflow-x:hidden}html:has(.wl-bp)
     var bg = tp ? String(JSON.parse(tp).bg_color || '').replace('#', '') : '';
     if (bg.length === 6) { var n = parseInt(bg, 16); root.dataset.theme = (((n >> 16) * 299 + ((n >> 8 & 255) * 587) + ((n & 255) * 114)) / 1000) > 150 ? 'light' : 'dark'; }
   } catch (e) {}
+  try { var md = ls('mode'); if (md === 'light' || md === 'dark') root.dataset.theme = md; } catch (e) {}
   var brand = String(ls('uiBrand') || 'LARA STOCK').trim().slice(0, 40) || 'LARA STOCK';
   var parts = brand.split(/\s+/), word = parts.shift(), sub = parts.join(' ');
   var w = document.getElementById('ld-word'), su = document.getElementById('ld-sub'), lara = document.getElementById('ld-lara');
@@ -4915,6 +4986,14 @@ function vEmailBox() {
     <div id="wf-form-slot">${wfFormOnlyHtml()}</div>`;
 }
 
+(function () {   /* preview skin: ?skin=cobalt (remembered), ?skin=off to leave */
+  try {
+    const q = new URLSearchParams(location.search).get('skin');
+    if (q) localStorage.setItem('lara:skin', q === 'off' ? '' : q);
+    const k = localStorage.getItem('lara:skin');
+    if (k) document.documentElement.setAttribute('data-skin', k);
+  } catch (e) {}
+})();
 function bpTitle() {
   if (WL.state === 'wait') return 'Telegram';
   if (WF.mode === 'code') return isAr() ? 'كود الدخول' : 'Sign-in code';
@@ -4923,7 +5002,16 @@ function bpTitle() {
 }
 /* keep the ticket title in step when only the inner form changes (tabs, code step) */
 try {
-  new MutationObserver(() => { const h = document.querySelector('.bp-head h2'); if (h) { const v = bpTitle(); if (h.textContent !== v) h.textContent = v; } })
+  new MutationObserver(() => {
+    const h = document.querySelector('.bp-head h2'); if (!h) return;
+    const v = bpTitle(); if (h.textContent !== v) h.textContent = v;
+    const sec = h.closest('.wl-bp'), up = WF.tab === 'up' && WF.mode === 'home' && WL.state !== 'wait';
+    if (sec && sec.classList.contains('is-up') !== up) {
+      sec.classList.toggle('is-up', up);
+      const tk = sec.querySelector('.bp-ticket'); if (tk) { tk.classList.remove('bp-print'); void tk.offsetWidth; tk.classList.add('bp-print'); }
+      const sp = sec.querySelector('.bp-head span'); if (sp) sp.textContent = up ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN';
+    }
+  })
     .observe(document.documentElement, { childList: true, subtree: true });
 } catch (e) {}
 function vLogin() {
@@ -4935,7 +5023,7 @@ function vLogin() {
   const heroTag = more ? t('wlBAll') : t('wlB');
 
   const tTitle = bpTitle();
-  return `<section class="wl wl3 wl-bp">
+  return `<section class="wl wl3 wl-bp${WF.tab === 'up' && WF.mode === 'home' ? ' is-up' : ''}">
     <div class="bp-sky" aria-hidden="true">
       <span class="bp-c c1"></span><span class="bp-c c2"></span>
       <i class="bp-st" style="--x:18%;--y:14%"></i><i class="bp-st" style="--x:46%;--y:10%"></i><i class="bp-st" style="--x:77%;--y:27%"></i><i class="bp-st" style="--x:9%;--y:44%"></i>
@@ -4945,7 +5033,8 @@ function vLogin() {
     <div class="bp-col">
       <div class="bp-hello"><span>${esc(isAr() ? 'أهلاً فيك على متن' : 'Welcome aboard')}</span><b>${brand}</b></div>
       <div class="wl-card wl-wide bp-ticket">
-        <div class="bp-head"><h2>${esc(tTitle)}</h2><span dir="ltr">BOARDING · 10 MIN</span></div>
+        <div class="bp-head"><h2>${esc(tTitle)}</h2><span dir="ltr">${WF.tab === 'up' ? 'CHECK-IN · NEW' : 'BOARDING · 10 MIN'}</span></div>
+        <div class="bp-stamp" aria-hidden="true"><b>${esc(isAr() ? 'راكب جديد' : 'NEW')}</b><small>CHECK-IN</small></div>
         <div class="wl-stage" id="wl-stage">${wfStageHtml()}</div>
       </div>
       <p class="bp-terms">${esc(isAr() ? 'بالمتابعة توافق على الشروط وسياسة الخصوصية' : 'By continuing you agree to the Terms and Privacy Policy')}</p>
@@ -6483,6 +6572,15 @@ function openCgpt() {
   sh.body(cgptSheetHtml(st));
 }
 async function loadRefs() { const r = await api('referrals'); if (r.ok) { S.refs = r; if (S.tab === 'profile') renderView(); } }
+function modeRow() {
+  const m = modePref(), L = isAr() ? ['تلقائي', 'فاتح', 'داكن'] : ['Auto', 'Light', 'Dark'];
+  const SUN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4.5" fill="currentColor"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+  const MOON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a.6.6 0 0 0-.8-.7A9.5 9.5 0 1 0 21.2 15.4a.6.6 0 0 0-.7-.8Z"/></svg>';
+  const AUTO = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path fill="currentColor" d="M12 3.5a8.5 8.5 0 0 1 0 17z"/></svg>';
+  const b = (v, i, svg) => `<button type="button" class="${m === v ? 'on' : ''}" aria-pressed="${m === v}" data-act="mode" data-v="${v}">${svg}<span>${esc(L[i])}</span></button>`;
+  return `<div class="mrow mode-row" role="group" aria-label="${esc(isAr() ? 'المظهر' : 'Appearance')}"><span class="gl mode-gl">${m === 'light' ? SUN : MOON}</span><span class="mlbl">${esc(isAr() ? 'المظهر' : 'Appearance')}</span>
+    <span class="mode-seg">${b('auto', 0, AUTO)}${b('light', 1, SUN)}${b('dark', 2, MOON)}</span></div>`;
+}
 function vProfile() {
   const u = S.user || {}, r = S.refs;
   const refDebt = +(r?.ref_debt ?? u.ref_debt ?? 0);
@@ -6531,6 +6629,7 @@ function vProfile() {
     ${inv}
     <div class="menu">
       <button class="mrow" data-act="lang-open"><span class="gl">${slotH('lang', ic.globe)}</span><span class="mlbl">${esc(t('language'))}</span><span class="val lang-val">${flagH(LANG, false)}<span>${esc(langName(LANG))}</span></span>${ic.chev}</button>
+      ${modeRow()}
       ${S.store.support ? `<button class="mrow" data-act="support">${slot('support', 'speech')}<span class="mlbl">${esc(t('support'))}</span><span class="val" dir="ltr">@${esc(S.store.support)}</span>${ic.chev}</button>` : ''}
       <button class="mrow" data-act="terms">${slot('terms', 'memo')}<span class="mlbl">${esc(t('terms'))}</span>${ic.chev}</button>
       ${S.store.bot ? `<button class="mrow" data-act="openchat"><span class="gl">${TG_PLANE}</span><span class="mlbl">${esc(t('openChat'))}</span><span class="val" dir="ltr">@${esc(S.store.bot)}</span>${ic.chev}</button>` : ''}
@@ -8174,6 +8273,7 @@ document.addEventListener('click', async e => {
     case 'tab': closeAllSheets(); setTab(el.dataset.v, true); break;
     case 'lang': setLang(el.dataset.v); break;
     case 'lang-open': openLang(); break;
+    case 'mode': { const v = ['auto', 'light', 'dark'].includes(el.dataset.v) ? el.dataset.v : 'auto'; store.set('mode', v); hap('select'); applyMode(); renderAll(); break; }
     case 'pv-how': openPvHow(); break;
     case 'funds': openFunds(); break;
     case 'activity': openActivity(); break;
@@ -8545,10 +8645,21 @@ async function dvMark() {
 }
 
 /* ───────────────────────── boot ───────────────────────── */
+/* المظهر: تلقائي (حسب الجوال/تيليجرام) أو فاتح أو داكن — يختاره العميل من البروفايل */
+function modePref() { const m = store.get('mode', 'auto'); return m === 'light' || m === 'dark' ? m : 'auto'; }
+function sysTheme() {
+  if (tg && !WEB) return tg.colorScheme === 'light' ? 'light' : 'dark';
+  try { return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; } catch (e) { return 'dark'; }
+}
+function applyMode() {
+  const m = modePref();
+  document.documentElement.dataset.theme = m === 'auto' ? sysTheme() : m;
+  if (tg && !WEB) applyTheme();
+}
 function applyTheme() {
   if (!tg) return;
   try {
-    document.documentElement.dataset.theme = tg.colorScheme === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = modePref() === 'auto' ? (tg.colorScheme === 'light' ? 'light' : 'dark') : modePref();
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#080b12';
     if (ver('6.1')) { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); }
     if (ver('7.10') && tg.setBottomBarColor) tg.setBottomBarColor(bg);
@@ -8609,7 +8720,7 @@ async function boot() {
 if (WEB) {
   try {
     const mq = matchMedia('(prefers-color-scheme: light)');
-    const ap = () => { document.documentElement.dataset.theme = mq.matches ? 'light' : 'dark'; };
+    const ap = () => { document.documentElement.dataset.theme = modePref() === 'auto' ? (mq.matches ? 'light' : 'dark') : modePref(); };
     ap(); if (mq.addEventListener) mq.addEventListener('change', ap); else if (mq.addListener) mq.addListener(ap);
   } catch (e) {}
 }
