@@ -1202,6 +1202,13 @@ main{padding-left:var(--gutter-l);padding-right:var(--gutter-r);padding-block:6p
 .timer{font:600 17px/1 var(--f-mono);color:var(--warn)}
 .tbar{height:4px;border-radius:999px;background:var(--surface-3);margin-top:10px;overflow:hidden}
 .tbar i{display:block;height:100%;background:var(--warn);transition:width 1s linear}
+#pbar{width:100%!important;transform-origin:var(--pbar-o,left) center;transition:transform 1s linear;will-change:transform}
+[dir="rtl"] #pbar{--pbar-o:right}
+/* iPhone: a blurred scrim over animated pages is re-blurred every frame → lag in the deposit/payment sheets.
+   While a sheet is open the page behind is still (animations paused) and the scrim is a plain dim. */
+.scrim{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html.sheet-open #view *,html.sheet-open #view *::before,html.sheet-open #view *::after,
+html.sheet-open .site-sky *,html.sheet-open .sky-band *{animation-play-state:paused!important}
 .paybox{margin-top:12px;padding:14px;border-radius:var(--r-md);background:var(--surface);border:1px solid var(--line)}
 .paybox .k{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--fg-3)}
 .paybox .v{display:flex;align-items:center;gap:10px;margin-top:8px}
@@ -4622,6 +4629,8 @@ function openSheet(opts) {
   const el = document.createElement('section'); el.className = 'sheet ' + (opts.cls || ''); el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true');
   el.innerHTML = `<div class="grab"><i></i></div><div class="sh-head"><h3></h3><button class="xbtn" data-act="sheet-close" aria-label="${esc(t('close'))}">${ic.x}</button></div><div class="sh-body"></div><div class="sh-foot"></div>`;
   layer.appendChild(scrim); layer.appendChild(el);
+  document.documentElement.classList.add('sheet-open');
+  document.querySelectorAll('.site-sky svg,.sky-band svg,.bp-sky svg').forEach(v => { try { v.pauseAnimations(); } catch (e) {} });
   const sh = {
     el, scrim, onAction: opts.onAction || null, onInput: opts.onInput || null, onClose: opts.onClose || null, onBack: opts.onBack || null, data: opts.data || {},
     title(s) { el.querySelector('.sh-head h3').textContent = s || ''; return sh; },
@@ -4655,6 +4664,8 @@ function closeSheet(sh) {
   if (i < 0) return;
   Sheets.splice(i, 1);
   syncMediaPlayback();
+  if (!Sheets.length) { document.documentElement.classList.remove('sheet-open');
+    document.querySelectorAll('.site-sky svg,.sky-band svg,.bp-sky svg').forEach(v => { try { v.unpauseAnimations(); } catch (e) {} }); }
   sh.el.classList.add('closing'); sh.scrim.classList.add('closing');
   setTimeout(() => { sh.el.remove(); sh.scrim.remove(); pruneMedia(); syncMediaPlayback(); }, 280);
   if (sh.onClose) try { sh.onClose(); } catch (e) {}
@@ -6568,11 +6579,20 @@ function renderFunds(sh, st, dyn) {
   } else {
     const pre = sh.el.querySelector('.fx-pre'); if (pre) pre.innerHTML = presets.map(v => `<button class="${a === v ? 'on' : ''}" data-act="preset" data-v="${v}">$${v}</button>`).join('');
     const mn = sh.el.querySelector('#fxmin span'); if (mn) mn.textContent = minTxt;
-    const g = sh.el.querySelector('#fxgrid'); if (g) { g.innerHTML = methods.map(x => fxTile(x, st, a)).join(''); hydrate(g); }
+    const g = sh.el.querySelector('#fxgrid');
+    if (g) {
+      const tiles = g.querySelectorAll('.fx-m');
+      if (tiles.length === methods.length) tiles.forEach((el, i) => { const x = methods[i], on = st.method === x.id, off = a > 0 && (a < x.min || a > x.max);
+        el.classList.toggle('on', on); el.classList.toggle('dis', off); el.setAttribute('aria-pressed', on); });
+      else { g.innerHTML = methods.map(x => fxTile(x, st, a)).join(''); hydrate(g); }
+    }
     const hb = sh.el.querySelector('#fhint'); if (hb) hb.innerHTML = fundsHint(m, a);
     const ex = sh.el.querySelector('#fexists'); if (ex) ex.innerHTML = st.exists ? existsBox(st.exists) : '';
   }
-  sh.foot(`<button class="btn primary full" data-act="fund-go" ${ok && !st.busy ? '' : 'disabled'}>${st.busy ? `<span class="spin"></span>${esc(t('processing'))}` : `${bem('funds', '')}${esc(t('cont', { p: usd(a) }))}`}</button>`);
+  const fk = (ok ? 1 : 0) + ':' + (st.busy ? 1 : 0), go = sh.el.querySelector('.sh-foot [data-act="fund-go"] .fgo-t');
+  if (dyn && go && st._fk === fk) { go.textContent = t('cont', { p: usd(a) }); return; }
+  st._fk = fk;
+  sh.foot(`<button class="btn primary full" data-act="fund-go" ${ok && !st.busy ? '' : 'disabled'}>${st.busy ? `<span class="spin"></span>${esc(t('processing'))}` : `${bem('funds', '')}<span class="fgo-t">${esc(t('cont', { p: usd(a) }))}</span>`}</button>`);
 }
 function existsBox(p) {
   return `<div class="note warn">${slotH('warn', ic.warn)}<span><b>${esc(t('existsTitle'))}</b><br>${esc(t('existsBody', { p: usd(p.base), m: methodName(p.method) }))}
@@ -6677,7 +6697,7 @@ function tickPay(sh, st) {
   const left = Math.max(0, Math.floor(st.p.display_until - now));
   const el = sh.el.querySelector('#ptimer'), bar = sh.el.querySelector('#pbar'), up = sh.el.querySelector('#ptimeup');
   if (el) el.textContent = String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
-  if (bar) bar.style.width = (left / 1800 * 100).toFixed(1) + '%';
+  if (bar) bar.style.transform = 'scaleX(' + Math.max(0, Math.min(1, left / 1800)).toFixed(4) + ')';
   if (up) up.hidden = left > 0;
 }
 async function pollPay(sh, st) {
