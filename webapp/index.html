@@ -3421,6 +3421,13 @@ html[data-skin="cobalt"]:not([data-theme="dark"]) .site-sky{display:none}
 html[data-skin="cobalt"] .section-row h2{font-weight:800}
 @media (prefers-reduced-motion:reduce){html[data-skin="cobalt"] .sb-st{animation:none}html[data-skin="cobalt"] .sb-svg g{display:none}}
 
+
+html[data-skin="cobalt"] .top,html[data-skin="cobalt"] .dock-in,html[data-skin="cobalt"] .dock{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}   /* solid bars: no live blur over moving content (big GPU cost on iPhone) */
+html[data-skin="cobalt"][data-theme="dark"] .dock-in{background:#0f1642!important}
+/* faster tab switches: cards off screen are not drawn until you scroll to them */
+#view .grid>.card{content-visibility:auto;contain-intrinsic-size:auto 300px}
+#view .sec-list>.card,#view .hlist>*{content-visibility:auto;contain-intrinsic-size:auto 80px}
+
 /* sign-up: the ticket is "printed", a check-in stamp lands, the plane takes off along the path */
 .bp-ticket{position:relative}
 .bp-stamp{position:absolute;inset-inline-end:-6px;top:-46px;width:76px;height:76px;box-shadow:0 8px 18px -6px rgba(6,14,90,.5);border-radius:50%;border:2.5px dashed #2340ff;outline:4px solid #fff;color:#2340ff;
@@ -5453,7 +5460,7 @@ function renderView() {
   else if (S.screen === 'auth') h = vFull('hourglass', t('authT'), t('authB'), tg ? `<button class="btn primary" data-act="tg-close">${esc(t('close'))}</button>` : '');
   else if (S.screen === 'notg') h = vFull('megaphone', t('noTgT'), t('noTgB'), BOT_USER ? `<a class="btn primary" href="https://t.me/${esc(BOT_USER)}" target="_blank" rel="noopener">${TG_PLANE}${esc(t('tgOpen'))}</a>` : '');
   else if (S.screen === 'error') h = vFull('cross', t('e_network'), '', `<button class="btn primary" data-act="retry">${esc(t('retry'))}</button>`);
-  else if (S.tab === 'store') h = vStore();
+  else if (S.tab === 'store') h = keepStore && S.screen === 'app' && !DEMO && $('#view > .view[data-pane="store"]') && $('#view > .view[data-pane="store"]').firstChild ? null : vStore();   // المتجر المحفوظ يرجع فوراً بدون ما نبني صفحته من جديد
   else if (S.tab === 'orders') h = vOrders();
   else if (S.tab === 'balance') h = vWallet();
   else if (S.tab === 'api') h = vApi();
@@ -5474,7 +5481,7 @@ function renderView() {
         return;
       }
       StoreKeep.key = key;
-      sp.innerHTML = h; sp.hidden = false; op.hidden = true; op.innerHTML = '';
+      sp.innerHTML = h == null ? vStore() : h; sp.hidden = false; op.hidden = true; op.innerHTML = '';
     } else {
       op.innerHTML = h; op.hidden = false; sp.hidden = true;
     }
