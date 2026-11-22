@@ -5147,7 +5147,7 @@ function vEmailBox() {
   try {
     const q = new URLSearchParams(location.search).get('skin');
     if (q) localStorage.setItem('lara:skin', q === 'off' ? '' : q);
-    const k0 = localStorage.getItem('lara:skin'), k = k0 === null ? 'cobalt' : k0;   // ستايل تسجيل الدخول للموقع كله (الافتراضي)
+    const k0 = localStorage.getItem('lara:skin'), k = k0 || '';   // الألوان الأصلية افتراضياً؛ ?skin=cobalt يجرب ستايل تسجيل الدخول على هذا الجهاز
     if (k) document.documentElement.setAttribute('data-skin', k);
   } catch (e) {}
 })();
