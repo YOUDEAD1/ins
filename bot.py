@@ -7743,7 +7743,7 @@ def get_translated_product_name(p, lang, is_cgpt=False):
 _DESC_URL_RE = re.compile(r'(?:https?://|www\.)[^\s<>"\']+', re.I)
 
 
-_DESC_MAX = 2600          # visible characters shown on the product page (a Telegram message holds 4096)
+_DESC_MAX = 3500          # longer descriptions are sent in parts (a Telegram message holds 4096)
 
 
 def _desc_plain(d):
@@ -7762,11 +7762,7 @@ def _desc_box(d):
     d = str(d or '').strip()
     if not d:
         return ''
-    if _desc_too_long(d):        # long description: show the start; "📄 Full description" sends the rest
-        t = _desc_plain(d)[:_DESC_MAX]
-        cut = max(t.rfind('\n'), t.rfind(' '))
-        t = (t[:cut] if cut > _DESC_MAX * 0.8 else t).rstrip() + ' …'
-        d = html.escape(t, quote=False)
+
     # <a href="X">نص</a> ← النص + الرابط قابل للنسخ
     def _a(m):
         href = html.unescape(m.group(1))
@@ -13486,9 +13482,6 @@ def shop_detail_ui(call):
                 callback_data=f"cgpt_buy_{cgpt_parent_id}_{dur_id}"
             ))
 
-        if _desc_too_long(p_desc):
-            markup.add(InlineKeyboardButton(bil(uid, "📄 الوصف كامل", "📄 Full description"),
-                                            callback_data=f"fdesc_{str(pid).replace('cgpt_main_', '')}"))
         markup.add(create_btn(uid, 'cg_back', callback_data=back_cb))
         if is_admin:
             short_pid = str(pid).replace("cgpt_main_", "") if str(pid).startswith("cgpt_main_") else str(pid)
@@ -13497,11 +13490,9 @@ def shop_detail_ui(call):
             edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
             markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
-        try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-        except Exception as _ee:
-            if 'not modified' not in str(_ee):
-                logger.warning(f"cgpt page edit failed: {_ee}")
-                bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+        _show_product_page(call.message.chat.id, call.message.message_id, text,
+                           get_text(uid, 'cg_page', icon_html, p_name, '', _seats),
+                           f"{icon_html} <b>{html.escape(str(p_name))}</b>", p_desc, markup)
         return
 
     # ── منتج عادي ──
@@ -13546,8 +13537,6 @@ def shop_detail_ui(call):
     if is_manual or st > 0:
         qty_cb = f"buy_qty_{short_pid}_c_{cat_id_back}" if cat_id_back else f"buy_qty_{short_pid}"
         markup.add(create_btn(uid, 'btn_buy_now', callback_data=qty_cb))
-    if _desc_too_long(d):
-        markup.add(InlineKeyboardButton(bil(uid, "📄 الوصف كامل", "📄 Full description"), callback_data=f"fdesc_{short_pid}"))
     markup.add(create_btn(uid, 'btn_back', callback_data=back_cb))
 
     if _is_admin_check(uid):
@@ -13556,11 +13545,59 @@ def shop_detail_ui(call):
         edit_cb = f"edit_p_{short_pid}_c_{cat_id_back}" if cat_id_back else f"edit_p_{short_pid}"
         markup.add(InlineKeyboardButton("⚙️ ...", callback_data=edit_cb))
 
-    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
-    except Exception as _ee:
-        if 'not modified' not in str(_ee):
-            logger.warning(f"product page edit failed pid={pid}: {_ee}")
-            bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+    short = text.replace(f"\n\n{_desc_box(d)}\n", "\n\n", 1) if d else text
+    _show_product_page(call.message.chat.id, call.message.message_id, text, short,
+                       f"{icon_html} <b>{n}</b>", d, markup)
+
+
+def _vis_len(h):
+    return len(html.unescape(re.sub(r'<[^>]+>', '', h or '')))
+
+
+def _desc_chunks(d, size=3500):
+    t = _desc_plain(d)
+    parts, cur = [], ''
+    for line in t.split('\n'):
+        while len(line) > size:              # one very long line: cut it
+            if cur:
+                parts.append(cur)
+                cur = ''
+            parts.append(line[:size])
+            line = line[size:]
+        if cur and len(cur) + len(line) + 1 > size:
+            parts.append(cur)
+            cur = line
+        else:
+            cur = (cur + '\n' + line) if cur else line
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def _show_product_page(chat_id, message_id, full_text, short_text, title_html, desc, markup):
+    """Product page with the whole description. When it fits one message (4096) it is one message,
+    as before. Otherwise the description comes first in as many messages as needed and the page
+    (price, buttons) follows as the last message, so nothing is cut."""
+    def _edit_or_send(text, mk=None):
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=mk, parse_mode="HTML",
+                                  disable_web_page_preview=True)
+        except Exception as ex:
+            if 'not modified' in str(ex):
+                return
+            logger.warning(f"product page edit failed: {ex}")
+            bot.send_message(chat_id, text, reply_markup=mk, parse_mode="HTML", disable_web_page_preview=True)
+    if _vis_len(full_text) <= 4000:
+        return _edit_or_send(full_text, markup)
+    parts = _desc_chunks(desc)
+    for i, part in enumerate(parts):
+        body = _desc_box(html.escape(part, quote=False))
+        text = (f"{title_html}\n\n" if i == 0 else '') + body
+        if i == 0:
+            _edit_or_send(text)
+        else:
+            bot.send_message(chat_id, text, parse_mode="HTML", disable_web_page_preview=True)
+    bot.send_message(chat_id, short_text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("fdesc_"))
