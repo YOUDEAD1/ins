@@ -40437,7 +40437,7 @@ def _web_head_html(page=None, hl=None):
         desc = (os.getenv('WEBSITE_DESCRIPTION') or '').strip()[:200] or f"{store} — digital codes and subscriptions with instant delivery."
         desc = f"{desc} {A[0]}: {A[1]} — {A[3]}."
     q = f"?hl={hl}" if hl else ''
-    og_img = f"{base}/og.png?v=3"
+    og_img = f"{base}/og.png?v=4"
     image, url, wide = og_img, f"{base}/", True
     products = _wa_build_catalog(include_hidden=False)['products']
     plink = lambda x: f"{base}/p/{urllib.parse.quote(str(x.get('id')), safe='')}" + q
@@ -40514,7 +40514,7 @@ def _web_head_html(page=None, hl=None):
         f'<meta property="og:image:alt" content="{e(store)}">',
     ]
     if wide:
-        tags += ['<meta property="og:image:width" content="1200">', '<meta property="og:image:height" content="630">',
+        tags += ['<meta property="og:image:type" content="image/png">', '<meta property="og:image:width" content="1200">', '<meta property="og:image:height" content="630">',
                  '<meta name="twitter:card" content="summary_large_image">']
     else:
         tags.append('<meta name="twitter:card" content="summary">')
@@ -40574,6 +40574,11 @@ def _web_icon(size, maskable=False, rounded=True):
 def _web_og_image():
     """صورة معاينة الرابط (1200×630) لتيليجرام وواتساب وGoogle: الشعار + اسم المتجر."""
     if 'og' in _WEB_ICON_CACHE:
+        return _WEB_ICON_CACHE['og']
+    cover = os.path.join(WEBAPP_DIR, 'og-cover.png')     # الغلاف المصمم في فيقما (الشعار + الاسم + طرق الدفع)
+    if os.path.exists(cover):
+        with open(cover, 'rb') as f:
+            _WEB_ICON_CACHE['og'] = f.read()
         return _WEB_ICON_CACHE['og']
     from PIL import Image, ImageDraw, ImageFont
     W, H = 1200, 630
