@@ -5146,8 +5146,9 @@ function vEmailBox() {
 (function () {   /* preview skin: ?skin=cobalt (remembered), ?skin=off to leave */
   try {
     const q = new URLSearchParams(location.search).get('skin');
-    if (q) localStorage.setItem('lara:skin', q === 'off' ? '' : q);
-    const k0 = localStorage.getItem('lara:skin'), k = k0 || '';   // الألوان الأصلية افتراضياً؛ ?skin=cobalt يجرب ستايل تسجيل الدخول على هذا الجهاز
+    localStorage.removeItem('lara:skin');                 // اختيار قديم محفوظ في الجوال — نتجاهله، الكل يرجع للألوان الأصلية
+    if (q) localStorage.setItem('lara:skin2', q === 'off' ? '' : q);
+    const k = localStorage.getItem('lara:skin2') || '';   // الألوان الأصلية افتراضياً؛ ?skin=cobalt يجرب ستايل تسجيل الدخول على هذا الجهاز
     if (k) document.documentElement.setAttribute('data-skin', k);
   } catch (e) {}
 })();
