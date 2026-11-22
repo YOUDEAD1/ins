@@ -82,6 +82,72 @@ class RuntimeLease:
         return self.last_confirmed is not None and self.clock() - self.last_confirmed < STOP_AFTER_SECONDS
 
 
+_WEBAPP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'webapp')
+
+
+def _site_host(handler):
+    """The store's own domain (not the hosting address, not an IP)."""
+    host = (handler.headers.get('Host') or '').split(':')[0].strip().lower()
+    if not host or '.' not in host or host.endswith(('.onrender.com', '.render.com')):
+        return ''
+    if host.replace('.', '').isdigit() or host in ('localhost',):
+        return ''
+    return host
+
+
+def _site_page(handler):
+    """While waiting, the store's domain still answers like the site: link previews
+    (Telegram, WhatsApp) get the real title and cover, and visitors reload in a few seconds,
+    instead of a JSON status that apps cache as "file.json 160 B"."""
+    host = _site_host(handler)
+    path = handler.path.split('?', 1)[0]
+    if not host:
+        return False
+    if path == '/og.png':
+        try:
+            with open(os.path.join(_WEBAPP_DIR, 'og-cover.png'), 'rb') as f:
+                data = f.read()
+        except OSError:
+            return False
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'image/png')
+        handler.send_header('Content-Length', str(len(data)))
+        handler.send_header('Cache-Control', 'public, max-age=3600')
+        handler.end_headers()
+        handler.wfile.write(data)
+        return True
+    if not (path in ('', '/') or path.startswith('/p/')):
+        return False
+    store = (os.environ.get('WEBAPP_STORE_NAME') or 'LARA STOCK').strip() or 'LARA STOCK'
+    from html import escape as e
+    desc = 'Digital codes and subscriptions with instant delivery. اشتراكات وأكواد رقمية بتسليم فوري.'
+    base = 'https://' + host
+    body = ('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta http-equiv="refresh" content="5">'
+            f'<title>{e(store)}</title>'
+            f'<meta name="description" content="{e(desc)}">'
+            '<meta property="og:type" content="website">'
+            f'<meta property="og:site_name" content="{e(store)}">'
+            f'<meta property="og:title" content="{e(store)}">'
+            f'<meta property="og:description" content="{e(desc)}">'
+            f'<meta property="og:url" content="{e(base)}/">'
+            f'<meta property="og:image" content="{e(base)}/og.png?v=5">'
+            '<meta property="og:image:type" content="image/png">'
+            '<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
+            '<meta name="twitter:card" content="summary_large_image">'
+            '</head><body style="font-family:sans-serif;text-align:center;padding:40px">'
+            '<p>جار تحديث المتجر تلقائيًا. يرجى الانتظار قليلًا.</p></body></html>').encode()
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Retry-After', '5')
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
+
 class WaitingHealth:
     """Keep Render's port available while waiting for the old owner to stop."""
     def __init__(self, port, *, host='0.0.0.0'):
@@ -95,6 +161,8 @@ class WaitingHealth:
                     self.end_headers()
                     self.wfile.write(('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="5">'
                                       '<title>جار التحديث</title><p dir="rtl">جار تحديث المتجر تلقائيًا. يرجى الانتظار قليلًا.</p>').encode())
+                    return
+                if _site_page(self):
                     return
                 body = json.dumps({'status': 'waiting-for-old-instance',
                                    'runtime_handoff': 'single-active-v1',
