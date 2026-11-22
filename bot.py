@@ -290,13 +290,16 @@ def _kb_split(rows):
     items = rows[:-1] if footer else rows
     room = _KB_BUDGET - sum(_kb_row_size(r) for r in footer) - 260   # 260: the ◀️ n/N ▶️ row
     pages, cur, used = [], [], 0
+    fbtn = sum(len(r) for r in footer) + 3
+    nbtn = 0
     for r in items:
         sz = _kb_row_size(r)
-        if cur and used + sz > room:
+        if cur and (used + sz > room or nbtn + len(r) + fbtn > 100):   # Telegram: ≤100 buttons too
             pages.append(cur)
-            cur, used = [], 0
+            cur, used, nbtn = [], 0, 0
         cur.append(r)
         used += sz
+        nbtn += len(r)
     if cur or not pages:
         pages.append(cur)
     return pages, footer
@@ -330,7 +333,7 @@ _kb_orig_to_json = InlineKeyboardMarkup.to_json
 
 def _kb_to_json(self):
     out = _kb_orig_to_json(self)
-    if len(out) <= _KB_BUDGET or getattr(self, '_kb_paged', False):
+    if (len(out) <= _KB_BUDGET and sum(len(r) for r in self.inline_keyboard) <= 100) or getattr(self, '_kb_paged', False):
         return out
     try:
         pages, footer = _kb_split([list(r) for r in self.inline_keyboard])
@@ -11074,7 +11077,10 @@ def catalog_view_helper(chat_id, uid, cat_id, lang, message_id_to_edit=None):
         
         if message_id_to_edit:
             try: bot.edit_message_text(txt, chat_id, message_id_to_edit, reply_markup=markup, parse_mode="HTML")
-            except: pass
+            except Exception as _ee:
+                if 'not modified' not in str(_ee):
+                    logger.warning(f"catalog_view_helper edit failed cat={cat_id}: {_ee}")
+                    bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="HTML")
         else:
             bot.send_message(chat_id, txt, reply_markup=markup, parse_mode="HTML")
         return True
