@@ -3405,6 +3405,22 @@ html:has(.wl-bp) .site-sky,html[data-page="login"] .site-sky{display:none}
 @keyframes ppPlane{0%,100%{transform:translate(0,0) rotate(0)}50%{transform:translate(3px,-3px) rotate(-6deg)}}
 @media (prefers-reduced-motion:reduce){.wal-holo,.wal-chip::after,.wal-scan,.api-radar,.ct-lights i,.pp-scan,.pp-stamp,.passport .avatar::before,.pp-plane,.wl-bp .bp-st{animation:none!important}}
 
+
+/* ═══ Cobalt v2 (Figma "Cobalt v2"): the sign-in sky on top of every page ═══ */
+.sky-band{display:none}
+html[data-skin="cobalt"] .sky-band{display:block;position:absolute;left:0;right:0;top:0;height:330px;z-index:0;pointer-events:none;overflow:hidden}
+html[data-skin="cobalt"] .sb-c{position:absolute;width:300px;height:300px;border-radius:50%;inset-inline-end:-120px;top:-150px;background:rgba(255,255,255,.08)}
+html[data-skin="cobalt"] .sb-svg{position:absolute;left:0;right:0;top:40px;width:100%;height:200px}
+@media (min-width:820px){html[data-skin="cobalt"] .sb-svg{height:260px;top:20px}}
+html[data-skin="cobalt"] .sb-st{position:absolute;left:var(--x);top:var(--y);width:4px;height:4px;border-radius:50%;background:#fff;opacity:.8;animation:skTw 3.4s ease-in-out infinite}
+html[data-skin="cobalt"] .sb-st:nth-of-type(2n){animation-delay:-1.6s}
+html:has(.wl-bp) .sky-band{display:none!important}
+/* light cobalt: clean page (no starfield), the sky is the top band only */
+html[data-skin="cobalt"]:not([data-theme="dark"]) .site-sky{display:none}
+/* section titles sit on the light page; the band area keeps white text (hello) */
+html[data-skin="cobalt"] .section-row h2{font-weight:800}
+@media (prefers-reduced-motion:reduce){html[data-skin="cobalt"] .sb-st{animation:none}html[data-skin="cobalt"] .sb-svg g{display:none}}
+
 /* sign-up: the ticket is "printed", a check-in stamp lands, the plane takes off along the path */
 .bp-ticket{position:relative}
 .bp-stamp{position:absolute;inset-inline-end:-6px;top:-46px;width:76px;height:76px;box-shadow:0 8px 18px -6px rgba(6,14,90,.5);border-radius:50%;border:2.5px dashed #2340ff;outline:4px solid #fff;color:#2340ff;
@@ -3570,6 +3586,12 @@ html:has(.wl-bp) .site-sky,html[data-page="login"] .site-sky{display:none}
     <g class="sk-plane" opacity="0" transform="scale(1.4)"><path d="M12 0 -9 -8 -4 0 -9 8z" fill="currentColor"/><path d="M12 0 -4 0 -9 8z" fill="currentColor" opacity=".55"/><animateMotion dur="22s" repeatCount="indefinite" rotate="auto" keyPoints="0;1;1" keyTimes="0;.6;1" calcMode="linear"><mpath href="#skd1"/></animateMotion><animate attributeName="opacity" values="0;.9;.9;0;0" keyTimes="0;.05;.54;.6;1" dur="22s" repeatCount="indefinite"/></g>
   </svg>
   <i class="sk-st" style="--x:10%;--y:14%;--d:0s"></i><i class="sk-st" style="--x:78%;--y:11%;--d:1.4s"></i><i class="sk-st" style="--x:52%;--y:44%;--d:2.6s"></i><i class="sk-st" style="--x:18%;--y:62%;--d:.8s"></i><i class="sk-st" style="--x:86%;--y:82%;--d:2s"></i><i class="sk-st" style="--x:40%;--y:92%;--d:3.1s"></i>
+</div>
+<div class="sky-band" aria-hidden="true">
+  <span class="sb-c"></span>
+  <svg class="sb-svg" viewBox="0 0 390 200" preserveAspectRatio="xMidYMid slice"><path id="sbRoute" d="M-10 170 C 90 130, 160 160, 230 110 S 340 70, 400 66" fill="none" stroke="#fff" stroke-opacity=".38" stroke-width="2" stroke-dasharray="5 9" stroke-linecap="round"/>
+    <g opacity="0"><path d="M12 0 -9 -8 -4 0 -9 8z" fill="#fff"/><path d="M12 0 -4 0 -9 8z" fill="#dfe5ff"/><animateMotion dur="12s" repeatCount="indefinite" rotate="auto" keyPoints="0;1;1" keyTimes="0;.55;1" calcMode="spline" keySplines=".45 0 .55 1;0 0 1 1"><mpath href="#sbRoute"/></animateMotion><animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.05;.5;.56;1" dur="12s" repeatCount="indefinite"/></g></svg>
+  <i class="sb-st" style="--x:12%;--y:22%"></i><i class="sb-st" style="--x:46%;--y:12%"></i><i class="sb-st" style="--x:82%;--y:40%"></i><i class="sb-st" style="--x:24%;--y:64%"></i>
 </div>
 <header class="top" id="top" hidden></header>
 <main id="view" aria-live="polite"></main>
@@ -5118,7 +5140,7 @@ function vEmailBox() {
   try {
     const q = new URLSearchParams(location.search).get('skin');
     if (q) localStorage.setItem('lara:skin', q === 'off' ? '' : q);
-    const k = localStorage.getItem('lara:skin');
+    const k0 = localStorage.getItem('lara:skin'), k = k0 === null ? 'cobalt' : k0;   // ستايل تسجيل الدخول للموقع كله (الافتراضي)
     if (k) document.documentElement.setAttribute('data-skin', k);
   } catch (e) {}
 })();
@@ -8845,7 +8867,7 @@ function applyTheme() {
   if (!tg) return;
   try {
     document.documentElement.dataset.theme = modePref() === 'auto' ? (tg.colorScheme === 'light' ? 'light' : 'dark') : modePref();
-    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#080b12';
+    const bg = document.documentElement.dataset.skin === 'cobalt' ? (document.documentElement.dataset.theme === 'dark' ? '#2340ff' : '#2c4cff') : (getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#080b12');
     if (ver('6.1')) { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); }
     if (ver('7.10') && tg.setBottomBarColor) tg.setBottomBarColor(bg);
   } catch (e) {}
