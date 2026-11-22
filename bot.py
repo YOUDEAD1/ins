@@ -29590,7 +29590,8 @@ def admin_stock_list_ui(call):
         return
     
     # Telegram rejects very long keyboards ("reply markup is too long"): show the list in pages
-    per = 30
+    # (the limit counts the encoded JSON, where each Arabic letter takes 6 bytes, so keep pages small)
+    per = 20
     pages = max(1, (len(prods) + per - 1) // per)
     page = min(page, pages - 1)
     for p in prods[page * per:(page + 1) * per]:
@@ -29601,7 +29602,9 @@ def admin_stock_list_ui(call):
         if not p_name:
             p_name = p.get('name_ar') or p.get('name_en') or 'بدون اسم'
         
-        btn_text = f"📦 {clean_name(p_name)} ({stk_count})"
+        short = clean_name(p_name)
+        short = short if len(short) <= 34 else short[:33] + '…'
+        btn_text = f"📦 {short} ({stk_count})"
         btn_kwargs = {'text': btn_text, 'callback_data': f"ad_s_opts_{pid}"}
         
         # إيموجي مميز
