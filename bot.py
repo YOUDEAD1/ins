@@ -39845,7 +39845,20 @@ def _web_account_view(uid):
         unread = db.web_inbox.count_documents({'user_id': int(uid), 'read': False}, limit=99)
     except Exception:
         pass
-    return {'web_only': _web_is_uid(uid), 'emails': [_web_mask_email(a['_id']) for a in accs],
+    uid = int(uid)
+    site_id, tg_id = None, None
+    if _web_is_uid(uid):
+        site_id = uid                                   # حساب موقع فقط
+    else:
+        tg_id = uid                                     # حساب تيليجرام
+        try:                                            # حساب موقع انربط بتيليجرام ← رقمه القديم في الموقع
+            wu = db.users.find_one({'web_merged_into': uid}, {'user_id': 1}, sort=[('_id', 1)])
+            if wu and _web_is_uid(wu.get('user_id')):
+                site_id = int(wu['user_id'])
+        except Exception:
+            pass
+    return {'site_id': str(site_id) if site_id else None, 'tg_id': str(tg_id) if tg_id else None,
+            'web_only': _web_is_uid(uid), 'emails': [_web_mask_email(a['_id']) for a in accs],
             'email': accs[0]['_id'] if accs else '', 'password': any(a.get('pw') for a in accs),
             'google': any(a.get('google_sub') for a in accs), 'unread': unread,
             'sessions': db.web_sessions.count_documents({'user_id': int(uid), 'expires_at': {'$gt': int(time.time())}})}
