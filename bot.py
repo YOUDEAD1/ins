@@ -40653,11 +40653,23 @@ def _brand_img_ok(data, ctype):
 
 
 def _brand_fetch(url, limit=600000, timeout=6):
+    # 🛡 public addresses only, and every redirect hop is re-checked (no fetching internal/private hosts)
     try:
-        r = requests.get(url, headers={'User-Agent': _BRAND_UA, 'Accept': '*/*'}, timeout=timeout,
-                         stream=True, allow_redirects=True)
-        if r.status_code != 200:
-            r.close()
+        r = None
+        for _hop in range(5):
+            if not _url_is_public(url):
+                return None, '', ''
+            r = requests.get(url, headers={'User-Agent': _BRAND_UA, 'Accept': '*/*'}, timeout=timeout,
+                             stream=True, allow_redirects=False)
+            if r.status_code in (301, 302, 303, 307, 308) and r.headers.get('Location'):
+                nxt = urllib.parse.urljoin(url, r.headers['Location'])
+                r.close()
+                url = nxt
+                continue
+            break
+        if r is None or r.status_code != 200:
+            if r is not None:
+                r.close()
             return None, '', ''
         buf = b''
         for ch in r.iter_content(16384):
@@ -40787,6 +40799,19 @@ def _brand_guess_domain(q):
     return found or None
 
 
+_BRAND_SVG_CSP = {'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
+                  'X-Frame-Options': 'DENY'}
+
+
+def _brand_svg_safe(data):
+    """SVG fetched from another site is never served as-is: it is embedded as an <image>, where browsers run no
+    scripts or event handlers, so a hostile icon cannot run code on our domain."""
+    b64 = base64.b64encode(bytes(data)).decode('ascii')
+    return ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 192 192" width="192" height="192">'
+            f'<image width="192" height="192" preserveAspectRatio="xMidYMid meet" href="data:image/svg+xml;base64,{b64}" '
+            f'xlink:href="data:image/svg+xml;base64,{b64}"/></svg>').encode('ascii')
+
+
 def _wa_brand_logo_get(handler, parsed):
     try:
         qs = urllib.parse.parse_qs(parsed.query or '')
@@ -40812,11 +40837,13 @@ def _wa_brand_logo_get(handler, parsed):
                     out = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 192 192" width="192" height="192">'
                            '<defs><clipPath id="r"><rect width="192" height="192" rx="42"/></clipPath></defs>'
                            f'<image clip-path="url(#r)" width="192" height="192" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,{b64}" xlink:href="data:image/png;base64,{b64}"/></svg>')
-                    return _wa_send(handler, 200, out.encode('ascii'), 'image/svg+xml', cache='public, max-age=86400')
-                return _wa_send(handler, 200, ic[1], ic[0], cache='public, max-age=86400')
+                    return _wa_send(handler, 200, out.encode('ascii'), 'image/svg+xml', cache='public, max-age=86400', extra=_BRAND_SVG_CSP)
+                if 'svg' in str(ic[0]):
+                    return _wa_send(handler, 200, _brand_svg_safe(ic[1]), 'image/svg+xml', cache='public, max-age=86400', extra=_BRAND_SVG_CSP)
+                return _wa_send(handler, 200, ic[1], ic[0], cache='public, max-age=86400', extra=_BRAND_SVG_CSP)
     if not svg:   # آخر حل فقط: شعار مرسوم من الاسم
         svg = _brand_gen_logo(ql, tint if re.fullmatch(r'[0-9a-fA-F]{6}', str(tint or '')) else '')
-    return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400')
+    return _wa_send(handler, 200, svg.encode('utf-8'), 'image/svg+xml', cache='public, max-age=86400', extra=_BRAND_SVG_CSP)
 
 
 
