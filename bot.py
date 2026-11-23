@@ -24364,6 +24364,7 @@ def admin_main_ui(call):
     l = get_lang(call.from_user.id)
     markup = InlineKeyboardMarkup(row_width=2)
     if l == 'en':
+        markup.add(CustomInlineButton("📣 Payment update post (temp)", callback_data="pay_ann", style='success'))
         markup.add(InlineKeyboardButton("📦 Product Management", callback_data="ad_prod_manage"))
         markup.add(InlineKeyboardButton("🔎 Find order / code / user", callback_data="ad_find"))
         markup.add(InlineKeyboardButton("👥 Users & Balances", callback_data="ad_users_main"),
@@ -24393,6 +24394,7 @@ def admin_main_ui(call):
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_refresh"))
         text = "👑 <b>Admin Dashboard:</b>"
     else:
+        markup.add(CustomInlineButton("📣 إعلان طرق الدفع (مؤقت)", callback_data="pay_ann", style='success'))
         markup.add(InlineKeyboardButton("📦 إدارة المنتجات", callback_data="ad_prod_manage"))
         markup.add(InlineKeyboardButton("🔎 بحث عن طلب / كود / مستخدم", callback_data="ad_find"))
         markup.add(InlineKeyboardButton("👥 إدارة العملاء", callback_data="ad_users_main"),
@@ -31590,6 +31592,113 @@ def admin_bc_exe(call):
     bot.send_message(uid, '📢 أُضيف البرودكاست إلى طابور الإرسال. سيصلك تقرير عند الانتهاء.')
 
 
+# ═══ 📣 إعلان مؤقت: نقل طرق الدفع للموقع (صورة + نص إنجليزي + أزرار خضراء) ═══
+_PAY_ANN_IMG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'webapp', 'promo', 'payment-update.jpg')
+
+
+def _pay_ann_caption():
+    site = (_web_public_url() or 'https://larastock.store/').rstrip('/')
+    host = urllib.parse.urlparse(site).hostname or 'larastock.store'
+    return (
+        "📢 <b>Payment Update</b>\n\n"
+        "Due to Telegram’s policies, all <b>crypto payment methods</b> have moved to our website 🌐\n\n"
+        "🤖 <b>Bot</b> & 📱 <b>Mini App</b> now accept ⭐️ <b>Telegram Stars only</b>.\n\n"
+        "💳 Want to pay with <b>Binance Pay, Bybit, USDT, TON, LTC</b> or another method?\n"
+        f"Top up on our website 👉 <a href=\"{html.escape(site, quote=True)}\">{html.escape(host)}</a>\n\n"
+        "💡 <i>Sign in on the website with Telegram to keep the same account and balance.</i>\n\n"
+        "Thank you for your trust 💙\n<b>— LARA STOCK</b>"
+    )
+
+
+def _pay_ann_markup():
+    bot_u = get_bot_username()
+    site = (_web_public_url() or 'https://larastock.store/').rstrip('/') + '/'
+    mk = InlineKeyboardMarkup(row_width=3)
+    mk.row(CustomInlineButton('🤖 Bot', url=f'https://t.me/{bot_u}', style='success'),
+           CustomInlineButton('📱 Mini App', url=f'https://t.me/{bot_u}?startapp', style='success'),
+           CustomInlineButton('🌐 Website', url=site, style='success'))
+    return mk
+
+
+def _pay_ann_send(chat_id):
+    with open(_PAY_ANN_IMG, 'rb') as f:
+        return bot.send_photo(chat_id, f, caption=_pay_ann_caption(), parse_mode='HTML',
+                              reply_markup=_pay_ann_markup())
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "pay_ann")
+@admin_required
+def pay_ann_preview(call):
+    """يرسل الإعلان للأدمن: يقدر يسوي له Forward للقناة، أو ينشره لكل أعضاء البوت."""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    uid = call.from_user.id
+    try:
+        msg = _pay_ann_send(uid)
+    except Exception as e:
+        logger.exception('pay_ann preview failed')
+        bot.send_message(uid, f"❌ تعذّر إرسال الإعلان: {html.escape(str(e)[:200])}", parse_mode='HTML')
+        return
+    n = db.users.count_documents({})
+    mk = InlineKeyboardMarkup(row_width=1)
+    mk.add(CustomInlineButton(f"📤 نشر لكل أعضاء البوت ({n})", callback_data=f"pay_ann_bc_{msg.message_id}", style='success'))
+    mk.add(InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel_main"))
+    bot.send_message(uid,
+        "☝️ <b>هذا الإعلان جاهز.</b>\n\n"
+        "• للقناة: اضغط مطوّلًا على الرسالة ← <b>Forward</b> ← اختر قناتك (الأزرار تنتقل معها).\n"
+        "• للأعضاء: اضغط الزر تحت لنشره لكل أعضاء البوت.",
+        parse_mode='HTML', reply_markup=mk, reply_to_message_id=msg.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_ann_bc_"))
+@admin_required
+def pay_ann_bc_confirm(call):
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    mid = call.data[len("pay_ann_bc_"):]
+    if not mid.isdigit():
+        return
+    n = db.users.count_documents({})
+    mk = InlineKeyboardMarkup(row_width=2)
+    mk.add(CustomInlineButton("✅ نعم، انشر", callback_data=f"pay_ann_go_{mid}", style='success'),
+           InlineKeyboardButton("❌ إلغاء", callback_data="admin_panel_main"))
+    bot.send_message(call.from_user.id,
+        f"📋 سيُرسل الإعلان (الصورة + النص + الأزرار) إلى <b>{n}</b> عضو في البوت.\n\nمتأكد؟",
+        parse_mode='HTML', reply_markup=mk)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_ann_go_"))
+@admin_required
+def pay_ann_bc_go(call):
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    mid = call.data[len("pay_ann_go_"):]
+    if not mid.isdigit():
+        return
+    uid = call.from_user.id
+    token = f"pay_ann:{uid}:{mid}"            # نفس الزر مرتين ما ينشر مرتين
+    job = {'_id': token, 'kind': 'manual', 'preset': 'pay_update', 'status': 'queued', 'owner_id': uid,
+           'created_at': time.time(), 'source_message': int(mid), 'source_chat': uid,
+           'product_id': None, 'catalog_id': None, 'label': 'Payment update', 'content': None}
+    res = db.ext_broadcast_approvals.update_one({'_id': token}, {'$setOnInsert': job}, upsert=True)
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    if not res.upserted_id:
+        bot.send_message(uid, 'ℹ️ هذا الإعلان أُضيف للنشر من قبل — ما راح يتكرر.')
+        return
+    _ext_start_broadcast_worker()
+    _EXT_BC_WAKE.set()
+    bot.send_message(uid, '📢 بدأ نشر الإعلان لكل الأعضاء. يوصلك تقرير لما يخلص.')
+
+
 def _bc_capture(message):
     """نص/تعليق رسالة البرودكاست بصيغة HTML (يحفظ الإيموجي البريميوم والتنسيق)."""
     try:
@@ -31640,7 +31749,9 @@ def _run_manual_broadcast_job(job):
         tuid = user['user_id']
         try:
             markup = None
-            if product_id:
+            if job.get('preset') == 'pay_update':
+                markup = _pay_ann_markup()
+            elif product_id:
                 p = find_product(product_id)
                 if p:
                     lang = get_lang(tuid)

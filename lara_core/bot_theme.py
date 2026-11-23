@@ -284,6 +284,8 @@ class BotThemeAndMediaUpgrade:
             Btn = ns['InlineKeyboardButton']
             prot_on = ns['is_amount_protection_enabled']()
             if l == 'en':
+                _pa = ns.get('CustomInlineButton')
+                if _pa: mk.add(_pa('📣 Payment update post (temp)', callback_data='pay_ann', style='success'))
                 mk.add(Btn('📦 Products & Stock', callback_data='ad_prod_manage'),
                        Btn('🔎 Smart Lookup', callback_data='ad_find'))
                 mk.add(Btn('👥 Customers', callback_data='ad_users_main'),
@@ -315,6 +317,8 @@ class BotThemeAndMediaUpgrade:
                     '<blockquote>Manage inventory, live on-chain payments, unified security bans, and storefront settings:</blockquote>'
                 )
             else:
+                _pa = ns.get('CustomInlineButton')
+                if _pa: mk.add(_pa('📣 إعلان طرق الدفع (مؤقت)', callback_data='pay_ann', style='success'))
                 mk.add(Btn('📦 إدارة المنتجات والمخزون', callback_data='ad_prod_manage'),
                        Btn('🔎 البحث الذكي الشامل', callback_data='ad_find'))
                 mk.add(Btn('👥 العملاء والأرصدة', callback_data='ad_users_main'),
