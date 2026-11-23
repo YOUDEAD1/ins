@@ -6993,6 +6993,7 @@ DEFAULT_BUTTONS = {
         'btn_terms': '📜 شروط الاستخدام',
         'terms_content': "📜 <b>شروط استخدام المتجر</b>\n\n━━━━━━━━━━━━━━\n\n<i>لم يتم إضافة شروط الاستخدام بعد.</i>\n\n<i>سيتم تحديث هذه الصفحة قريباً من قبل الإدارة.</i>\n\n━━━━━━━━━━━━━━\n\n💬 <i>لأي استفسار، تواصل مع الإدارة.</i>",
         'btn_stars': '⭐️ نجوم تيليجرام',
+        'btn_other_pay': '💳 طرق دفع أخرى',
         'btn_binance': '🟡 Binance Pay',
         'btn_usdt_trc20': '🟢 USDT (TRC-20)',
         'btn_usdt_bep20': '🟡 USDT (BEP-20)',
@@ -7034,6 +7035,7 @@ DEFAULT_BUTTONS = {
         'btn_terms': '📜 Terms of Use',
         'terms_content': "📜 <b>Store Terms of Use</b>\n\n━━━━━━━━━━━━━━\n\n<i>Terms of use have not been added yet.</i>\n\n<i>This page will be updated soon by the administration.</i>\n\n━━━━━━━━━━━━━━\n\n💬 <i>For any inquiries, contact support.</i>",
         'btn_stars': '⭐️ Telegram Stars',
+        'btn_other_pay': '💳 Other payment methods',
         'btn_binance': '🟡 Binance Pay',
         'btn_usdt_trc20': '🟢 USDT (TRC-20)',
         'btn_usdt_bep20': '🟡 USDT (BEP-20)',
@@ -14896,6 +14898,15 @@ def toggle_coin_visibility(call):
     hide_coins_menu(call)
 
 
+def _other_pay_url():
+    """رابط صفحة الشحن في الموقع (فيه Binance والكريبتو وباقي الطرق). None لو ما فيه موقع مضبوط."""
+    try:
+        base = _web_public_url()
+    except Exception:
+        base = None
+    return (base.rstrip('/') + '/?open=deposit') if base else None
+
+
 @bot.callback_query_handler(func=lambda call: call.data == "open_deposit")
 def dep_init_ui(call):
     bot.answer_callback_query(call.id)
@@ -14943,6 +14954,16 @@ def dep_init_ui(call):
     markup = InlineKeyboardMarkup(row_width=1)
     if not is_coin_hidden('stars'):
         markup.add(create_btn(uid, 'btn_stars', callback_data="dep_stars"))
+    # 🌐 البوت: نجوم تيليجرام فقط — باقي الطرق (Binance / كريبتو…) في الموقع
+    _other_pay = _other_pay_url()
+    if _other_pay:
+        markup.add(create_btn(uid, 'btn_other_pay', url=_other_pay))
+        markup.add(create_btn(uid, 'btn_back', callback_data="main_menu_refresh"))
+        try:
+            bot.edit_message_text(wallet_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            bot.send_message(uid, wallet_text, reply_markup=markup, parse_mode="HTML")
+        return
     if not is_coin_hidden('binance'):
         markup.add(create_btn(uid, 'btn_binance', callback_data="dep_binance"))
     # 🟠 Bybit — تحت Binance مباشرة (تظهر فقط لو فيه طريقة مفعّلة وغير مخفية)
@@ -35561,7 +35582,8 @@ def _wa_bootstrap(identity, body):
                       'lang': lang, 'ui_lang': u.get('ui_lang') if u.get('ui_lang') in _wa_site_langs() else None,
                       'is_admin': is_admin}, **_wa_user_stats(uid)),
         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
-                  'support': OWNER_USER or '', 'stars_rate': STARS_RATE},
+                  'support': OWNER_USER or '', 'stars_rate': STARS_RATE,
+                  'other_pay': _other_pay_url()},
         'deposit': {'methods': methods, 'protection': bool(is_amount_protection_enabled())},
         'nav': nav, 'texts': _wa_texts(), 'vip': _wa_vip_view(uid, u),
         'forced': _wa_forced_info(uid),
