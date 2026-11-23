@@ -7018,7 +7018,8 @@ DEFAULT_BUTTONS = {
         'btn_buy_now': '✅ شراء الآن',
         'btn_check_sub': '🔄 تحقق من الاشتراك',
         'btn_api': '🤖 لوحة تحكم API',
-        'btn_webapp': '🛍 افتح المتجر'
+        'btn_webapp': '🛍 افتح المتجر',
+        'btn_website': '🌐 افتح الموقع'
     },
     'en': {
         'btn_products': '🔵 Products',
@@ -7060,7 +7061,8 @@ DEFAULT_BUTTONS = {
         'btn_buy_now': '✅ Buy Now',
         'btn_check_sub': '🔄 Verify Sub',
         'btn_api': '🤖 API Control Panel',
-        'btn_webapp': '🛍 Open Store'
+        'btn_webapp': '🛍 Open Store',
+        'btn_website': '🌐 Open Website'
     }
 }
 
@@ -41698,7 +41700,23 @@ def ad_notify_open_cb(call):
 
 
 def _wa_start_button(uid):
-    """زر فتح الواجهة أعلى قائمة /start (نصه وإيموجيه قابلان للتعديل من CMS: btn_webapp)."""
+    """زر أعلى قائمة /start: يفتح الموقع الرسمي (نصه قابل للتعديل من CMS: btn_website)."""
+    site = None
+    try:
+        site = _web_public_url()
+    except Exception:
+        site = None
+    if site and str(get_setting('webapp_start_button', 'on')) != 'off':
+        text, emj = get_btn_data(uid, 'btn_website')
+        kwargs = {'text': _parse_btn_label(text)[0] or '🌐 Open Website', 'url': site, 'style': 'primary'}
+        if emj:
+            kwargs['icon_custom_emoji_id'] = emj
+        return CustomInlineButton(**kwargs)
+    return _wa_store_button(uid)
+
+
+def _wa_store_button(uid):
+    """(قبل) زر فتح الميني آب — يُستخدم فقط لو ما فيه موقع مضبوط."""
     url = _wa_public_url()
     if not url or str(get_setting('webapp_start_button', 'on')) == 'off':
         return None
