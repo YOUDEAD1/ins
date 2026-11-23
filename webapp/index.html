@@ -4375,6 +4375,26 @@ function artStars(R, n, W, H) {
   const r = v => Math.round(v * 10) / 10;
   return Array.from({ length: n }, () => { const x = r(16 + R() * (W - 32)), y = r(12 + R() * H), s = r(2 + R() * 4); return `<path d="M${x} ${y - s * 2}Q${x} ${y} ${x + s * 2} ${y}Q${x} ${y} ${x} ${y + s * 2}Q${x} ${y} ${x - s * 2} ${y}Q${x} ${y} ${x} ${y - s * 2}z" fill="#fff" opacity="${r(.35 + R() * .55)}"/>`; }).join('');
 }
+/* product logos: if one fails to load (e.g. during a short server update) retry it by itself a few times instead of
+   leaving the browser's broken-image "?" box until the customer refreshes */
+(function () {
+  const RETRY = [3000, 8000, 20000], LOGO_RE = /\/webapp\/(blogo|ce\/|img\/)/;
+  document.addEventListener('error', e => {
+    const el = e.target; if (!el || !el.getAttribute) return;
+    const svgImg = el.tagName && el.tagName.toLowerCase() === 'image';
+    const src = svgImg ? (el.getAttribute('href') || el.getAttribute('xlink:href') || '') : (el.tagName === 'IMG' ? el.getAttribute('src') || '' : '');
+    if (!src || !LOGO_RE.test(src)) return;
+    const n = +(el.dataset ? el.dataset.lr || 0 : 0); if (n >= RETRY.length) return;
+    if (el.dataset) el.dataset.lr = n + 1;
+    if (svgImg) el.style && (el.style.opacity = '0');
+    setTimeout(() => {
+      if (!el.isConnected) return;
+      const next = src.replace(/([?&])lr=\d+/, '$1lr=' + (n + 1)) + (/[?&]lr=\d+/.test(src) ? '' : (src.includes('?') ? '&' : '?') + 'lr=' + (n + 1));
+      if (svgImg) { el.setAttribute('href', next); el.addEventListener('load', () => { el.style.opacity = ''; }, { once: true }); }
+      else el.setAttribute('src', next);
+    }, RETRY[n]);
+  }, true);
+})();
 function artSVG(p, mini, logo) {
   const L = artLook(p), { brand, tier, dur } = L;
   const id = 'la' + (++ART_N), r = n => Math.round(n * 10) / 10;

@@ -162,6 +162,17 @@ class WaitingHealth:
                     self.wfile.write(('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="5">'
                                       '<title>جار التحديث</title><p dir="rtl">جار تحديث المتجر تلقائيًا. يرجى الانتظار قليلًا.</p>').encode())
                     return
+                path = self.path.split('?', 1)[0]
+                if path.startswith(('/webapp/blogo', '/webapp/ce/', '/webapp/img/', '/webapp/dl/')) or \
+                        path.lower().endswith(('.png', '.webp', '.jpg', '.jpeg', '.svg', '.gif', '.ico', '.js', '.css', '.woff2')):
+                    # images/files during the short handoff: a clear "try again" (never a JSON/HTML body that the
+                    # browser would show as a broken image), and the page retries them by itself.
+                    self.send_response(503)
+                    self.send_header('Retry-After', '5')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
                 if _site_page(self):
                     return
                 body = json.dumps({'status': 'waiting-for-old-instance',
