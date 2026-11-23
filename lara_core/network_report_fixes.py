@@ -210,10 +210,10 @@ class NetworkReportFixes:
         return original(uid)
 
     def button(self, original, lang, key):
-        if not self.in_fanout() or key not in ('btn_notice_site', 'btn_notice_bot'):
+        if not self.in_fanout() or key not in ('btn_notice_site', 'btn_notice_bot', 'btn_notice_app'):
             return original(lang, key)
         rows = self.cached(('notice_buttons',), ('notice_buttons',), lambda: list(self.db.custom_buttons.find(
-            {'key': {'$in': ['btn_notice_site', 'btn_notice_bot']}, 'lang': {'$in': ['ar', 'en']}})))
+            {'key': {'$in': ['btn_notice_site', 'btn_notice_bot', 'btn_notice_app']}, 'lang': {'$in': ['ar', 'en']}})))
         return next((row for row in rows if row.get('key') == key and row.get('lang') == lang), None)
 
     def send(self, original, *args, **kwargs):

@@ -31598,7 +31598,7 @@ def admin_bc_exe(call):
 _PAY_ANN_IMG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'webapp', 'promo', 'payment-update.jpg')
 
 
-def _pay_ann_caption():
+def _pay_ann_default_caption():
     site = (_web_public_url() or 'https://larastock.store/').rstrip('/')
     host = urllib.parse.urlparse(site).hostname or 'larastock.store'
     return (
@@ -31612,13 +31612,34 @@ def _pay_ann_caption():
     )
 
 
+def _pay_ann_caption():
+    """النص اللي عدّله الأدمن (بتنسيقه وإيموجياته) — وإلا النص الافتراضي."""
+    custom = get_setting('pay_ann_caption', None)
+    return custom if isinstance(custom, str) and custom.strip() else _pay_ann_default_caption()
+
+
+def _pay_ann_emoji(key):
+    """إيموجي Premium نفسه اللي على أزرار إشعارات توفّر المنتج / التخفيض."""
+    for lang in ('en', 'ar'):
+        try:
+            row = _custom_button_for_view(lang, key) or {}
+        except Exception:
+            row = {}
+        if row.get('emoji_id'):
+            return str(row['emoji_id'])
+    return None
+
+
 def _pay_ann_markup():
     bot_u = get_bot_username()
     site = (_web_public_url() or 'https://larastock.store/').rstrip('/') + '/'
-    mk = InlineKeyboardMarkup(row_width=3)
-    mk.row(CustomInlineButton('🤖 Bot', url=f'https://t.me/{bot_u}', style='success'),
-           CustomInlineButton('📱 Mini App', url=f'https://t.me/{bot_u}?startapp', style='success'),
-           CustomInlineButton('🌐 Website', url=site, style='success'))
+    mk = InlineKeyboardMarkup(row_width=1)
+    for key, plain, label, url in (('btn_notice_bot', '🤖', 'Open Bot', f'https://t.me/{bot_u}'),
+                                   ('btn_notice_app', '📱', 'Open Mini App', f'https://t.me/{bot_u}?startapp'),
+                                   ('btn_notice_site', '🌐', 'Open Website', site)):
+        emj = _pay_ann_emoji(key)
+        mk.add(CustomInlineButton(label if emj else f'{plain} {label}', url=url, style='success',
+                                  icon_custom_emoji_id=emj))   # كل زر بسطر لحاله
     return mk
 
 
@@ -31626,6 +31647,29 @@ def _pay_ann_send(chat_id):
     with open(_PAY_ANN_IMG, 'rb') as f:
         return bot.send_photo(chat_id, f, caption=_pay_ann_caption(), parse_mode='HTML',
                               reply_markup=_pay_ann_markup())
+
+
+def _pay_ann_preview_to(uid):
+    try:
+        msg = _pay_ann_send(uid)
+    except Exception as e:
+        logger.exception('pay_ann preview failed')
+        bot.send_message(uid, f"❌ تعذّر إرسال الإعلان: {html.escape(str(e)[:200])}", parse_mode='HTML')
+        return None
+    n = db.users.count_documents({})
+    mk = InlineKeyboardMarkup(row_width=1)
+    mk.add(CustomInlineButton(f"📤 نشر لكل أعضاء البوت ({n})", callback_data=f"pay_ann_bc_{msg.message_id}", style='success'))
+    mk.add(InlineKeyboardButton("✏️ تعديل نص الرسالة", callback_data="pay_ann_edit"))
+    if isinstance(get_setting('pay_ann_caption', None), str):
+        mk.add(InlineKeyboardButton("↩️ رجوع للنص الأصلي", callback_data="pay_ann_reset"))
+    mk.add(InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel_main"))
+    bot.send_message(uid,
+        "☝️ <b>هذا الإعلان جاهز.</b>\n\n"
+        "• للقناة: اضغط مطوّلًا على الرسالة ← <b>Forward</b> ← اختر قناتك (الأزرار تنتقل معها).\n"
+        "• للأعضاء: اضغط «نشر لكل أعضاء البوت».\n"
+        "• تبي تغيّر الكلام؟ اضغط «تعديل نص الرسالة».",
+        parse_mode='HTML', reply_markup=mk, reply_to_message_id=msg.message_id)
+    return msg
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "pay_ann")
@@ -31636,22 +31680,64 @@ def pay_ann_preview(call):
         bot.answer_callback_query(call.id)
     except Exception:
         pass
-    uid = call.from_user.id
+    _pay_ann_preview_to(call.from_user.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "pay_ann_edit")
+@admin_required
+def pay_ann_edit(call):
     try:
-        msg = _pay_ann_send(uid)
-    except Exception as e:
-        logger.exception('pay_ann preview failed')
-        bot.send_message(uid, f"❌ تعذّر إرسال الإعلان: {html.escape(str(e)[:200])}", parse_mode='HTML')
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    uid = call.from_user.id
+    bot.clear_step_handler_by_chat_id(chat_id=uid)
+    msg = bot.send_message(uid,
+        "✏️ <b>أرسل النص الجديد للإعلان</b>\n\n"
+        "اكتبه بالتنسيق اللي تبيه (عريض، مائل، روابط، إيموجي Premium) — ينحفظ مثل ما هو.\n"
+        "الحد: 1024 حرف (حد تيليجرام لتعليق الصورة).\n\n"
+        "النص الحالي تحت ⬇️ تقدر تنسخه وتعدّل عليه. للإلغاء أرسل: <code>الغاء</code>",
+        parse_mode='HTML')
+    try:
+        bot.send_message(uid, _pay_ann_caption(), parse_mode='HTML', disable_web_page_preview=True)
+    except Exception:
+        pass
+    bot.register_next_step_handler(msg, _pay_ann_edit_save)
+
+
+@safe_next_step
+def _pay_ann_edit_save(message):
+    uid = message.from_user.id
+    if not _is_admin_check(uid):
         return
-    n = db.users.count_documents({})
-    mk = InlineKeyboardMarkup(row_width=1)
-    mk.add(CustomInlineButton(f"📤 نشر لكل أعضاء البوت ({n})", callback_data=f"pay_ann_bc_{msg.message_id}", style='success'))
-    mk.add(InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="admin_panel_main"))
-    bot.send_message(uid,
-        "☝️ <b>هذا الإعلان جاهز.</b>\n\n"
-        "• للقناة: اضغط مطوّلًا على الرسالة ← <b>Forward</b> ← اختر قناتك (الأزرار تنتقل معها).\n"
-        "• للأعضاء: اضغط الزر تحت لنشره لكل أعضاء البوت.",
-        parse_mode='HTML', reply_markup=mk, reply_to_message_id=msg.message_id)
+    text = message.text or ''
+    if not text.strip() or text.strip().startswith('/'):
+        return
+    if text.strip().lower() in ('الغاء', 'إلغاء', 'cancel'):
+        bot.send_message(uid, '❌ تم الإلغاء.')
+        return
+    if len(text) > 1024:
+        msg = bot.send_message(uid, f"❌ النص طويل ({len(text)} حرف). الحد 1024. أرسله أقصر:")
+        bot.register_next_step_handler(msg, _pay_ann_edit_save)
+        return
+    try:
+        new_html = message.html_text
+    except Exception:
+        new_html = html.escape(text)
+    db.settings.update_one({'key': 'pay_ann_caption'}, {'$set': {'value': new_html}}, upsert=True)
+    bot.send_message(uid, '✅ انحفظ النص الجديد. هذي المعاينة:')
+    _pay_ann_preview_to(uid)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "pay_ann_reset")
+@admin_required
+def pay_ann_reset(call):
+    try:
+        bot.answer_callback_query(call.id, '↩️ رجع النص الأصلي')
+    except Exception:
+        pass
+    db.settings.delete_one({'key': 'pay_ann_caption'})
+    _pay_ann_preview_to(call.from_user.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_ann_bc_"))
@@ -44826,11 +44912,11 @@ _ADM_OPEN_OK.add('ad_cart_settings')
 # ============================================================
 # 📢 25. Channel publishing: verified destination, immutable preview, explicit consent
 # ============================================================
-NOTICE_CMS_BUTTONS = {'btn_notice_site', 'btn_notice_bot'}
+NOTICE_CMS_BUTTONS = {'btn_notice_site', 'btn_notice_bot', 'btn_notice_app'}
 for _notice_lang, _notice_labels in {
-        'ar': ('🛍 فتح عبر الموقع', '🤖 شراء عبر البوت'),
-        'en': ('🛍 Open website', '🤖 Buy via bot')}.items():
-    DEFAULT_BUTTONS[_notice_lang].update(dict(zip(('btn_notice_site', 'btn_notice_bot'), _notice_labels)))
+        'ar': ('🛍 فتح عبر الموقع', '🤖 شراء عبر البوت', '📱 فتح الميني آب'),
+        'en': ('🛍 Open website', '🤖 Buy via bot', '📱 Open Mini App')}.items():
+    DEFAULT_BUTTONS[_notice_lang].update(dict(zip(('btn_notice_site', 'btn_notice_bot', 'btn_notice_app'), _notice_labels)))
 SHOP_CMS_BUTTONS.update(NOTICE_CMS_BUTTONS)
 _ADMIN_CB_PREFIXES += ('chbc_',)
 _ADM_SECTIONS.append(('notice_cms', '📢', 'تخصيص أزرار النشر', 'Publishing button settings', 'ad_cms_notice'))
@@ -44860,7 +44946,14 @@ def _notice_links(pid=None, cat=None):
     public = _wa_public_url()
     q = {'p': site_pid} if site_pid else ({'c': str(cat)} if cat and cat != 'nocat' else {})
     webapp = (public + (('&' if '?' in public else '?') + urllib.parse.urlencode(q) if q else '')) if public else None
-    return {'site': site_link, 'bot': bot_link, 'webapp': webapp}
+    try:
+        web = _web_public_url()          # الموقع الرسمي (الدومين) على المنتج أو المجلد
+    except Exception:
+        web = None
+    if web:
+        web = web.rstrip('/') + ('/p/' + urllib.parse.quote(site_pid, safe='') if site_pid else
+                                 ('/?' + urllib.parse.urlencode({'c': str(cat)}) if cat and cat != 'nocat' else '/'))
+    return {'site': site_link, 'bot': bot_link, 'webapp': webapp, 'web': web}
 
 
 def _notice_button(lang, key, **destination):
@@ -44877,15 +44970,31 @@ def _notice_pair(uid, pid=None, cat=None, channel=False, lang=None, fallback_cb=
     lang = lang or get_lang(uid)
     links = _notice_links(pid, cat)
     mk = InlineKeyboardMarkup(row_width=1)
+    if not links.get('web'):          # ما فيه موقع مضبوط: الشكل القديم (الميني آب + البوت)
+        if channel:
+            mk.add(_notice_button(lang, 'btn_notice_site', url=links['site']))
+            mk.add(_notice_button(lang, 'btn_notice_bot', url=links['bot']))
+        else:
+            if links['webapp']:
+                mk.add(_notice_button(lang, 'btn_notice_site', web_app=types.WebAppInfo(url=links['webapp'])))
+            cb = fallback_cb or (('vext_' + str(pid)[4:]) if str(pid or '').startswith('ext_') else
+                 ('vi_p_' + str(pid)) if pid else ('cat_' + str(cat)) if cat and cat != 'nocat' else 'open_shop')
+            mk.add(_notice_button(lang, 'btn_notice_bot', callback_data=cb))
+        return mk
+    # الترتيب: 1) البوت  2) الميني آب  3) الموقع الرسمي — كل زر بسطر (يبان كامل)
     if channel:
-        mk.add(_notice_button(lang, 'btn_notice_site', url=links['site']))
         mk.add(_notice_button(lang, 'btn_notice_bot', url=links['bot']))
+        mk.add(_notice_button(lang, 'btn_notice_app', url=links['site']))
     else:
-        if links['webapp']:
-            mk.add(_notice_button(lang, 'btn_notice_site', web_app=types.WebAppInfo(url=links['webapp'])))
         cb = fallback_cb or (('vext_' + str(pid)[4:]) if str(pid or '').startswith('ext_') else
              ('vi_p_' + str(pid)) if pid else ('cat_' + str(cat)) if cat and cat != 'nocat' else 'open_shop')
         mk.add(_notice_button(lang, 'btn_notice_bot', callback_data=cb))
+        if links['webapp']:
+            mk.add(_notice_button(lang, 'btn_notice_app', web_app=types.WebAppInfo(url=links['webapp'])))
+        else:
+            mk.add(_notice_button(lang, 'btn_notice_app', url=links['site']))
+    if links.get('web'):
+        mk.add(_notice_button(lang, 'btn_notice_site', url=links['web']))   # إيموجي «فتح عبر الموقع» البريميوم يبقى على زر الموقع
     return mk
 
 
@@ -44900,7 +45009,7 @@ def _notice_admin_links(pid):
 def ad_cms_notice(call):
     bot.answer_callback_query(call.id)
     mk = InlineKeyboardMarkup(row_width=1)
-    for key in ('btn_notice_site', 'btn_notice_bot'):
+    for key in ('btn_notice_bot', 'btn_notice_app', 'btn_notice_site'):
         mk.add(InlineKeyboardButton(get_btn_data(call.from_user.id, key)[0], callback_data='edit_btn_' + key))
     mk.add(InlineKeyboardButton('🔙 رجوع', callback_data='ad_bc'))
     _cms_status_snapshot(mk, 'button')
