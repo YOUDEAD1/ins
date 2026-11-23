@@ -274,21 +274,27 @@ class CustomInlineButton(InlineKeyboardButton):
 # over the budget is split into pages: the item rows are paged, the last row
 # (back / actions) stays on every page, and ◀️ n/N ▶️ buttons switch pages.
 # ------------------------------------------------------------
-_KB_BUDGET = 6500                     # bytes of the encoded keyboard (real limit is ~10 KB)
+_KB_BUDGET = 9000                     # UTF-8 bytes of the compact keyboard JSON (real limit is ~10 KB)
 import collections as _kb_collections
 _KB_PAGES = _kb_collections.OrderedDict()
 _KB_PAGES_LOCK = threading.Lock()
 
 
+def _kb_dumps(obj):
+    # Compact UTF-8 JSON: Arabic/emoji stay 2–4 bytes instead of 6–12 as \\uXXXX escapes,
+    # so a whole folder fits in one keyboard instead of being split into pages.
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
 def _kb_row_size(row):
-    return len(json.dumps([b.to_dict() for b in row])) + 2
+    return len(_kb_dumps([b.to_dict() for b in row]).encode('utf-8')) + 2
 
 
-def _kb_split(rows):
+def _kb_split(rows, budget=None):
     """[item rows], [footer rows] → list of pages (each a list of rows incl. footer)."""
     footer = rows[-1:] if len(rows) > 1 else []
     items = rows[:-1] if footer else rows
-    room = _KB_BUDGET - sum(_kb_row_size(r) for r in footer) - 260   # 260: the ◀️ n/N ▶️ row
+    room = (budget or _KB_BUDGET) - sum(_kb_row_size(r) for r in footer) - 260   # 260: the ◀️ n/N ▶️ row
     pages, cur, used = [], [], 0
     fbtn = sum(len(r) for r in footer) + 3
     nbtn = 0
@@ -328,25 +334,58 @@ def _kb_page_markup(token, n):
     return m
 
 
-_kb_orig_to_json = InlineKeyboardMarkup.to_json
+def _kb_orig_to_json(self):
+    return _kb_dumps(self.to_dict())
+
+
+def _kb_paginate(self, budget=None):
+    pages, footer = _kb_split([list(r) for r in self.inline_keyboard], budget)
+    if len(pages) < 2:
+        return None
+    token = os.urandom(5).hex()
+    with _KB_PAGES_LOCK:
+        _KB_PAGES[token] = (pages, footer)
+        while len(_KB_PAGES) > 400:
+            _KB_PAGES.popitem(last=False)
+    return _kb_orig_to_json(_kb_page_markup(token, 0))
 
 
 def _kb_to_json(self):
     out = _kb_orig_to_json(self)
-    if (len(out) <= _KB_BUDGET and sum(len(r) for r in self.inline_keyboard) <= 100) or getattr(self, '_kb_paged', False):
+    if (len(out.encode('utf-8')) <= _KB_BUDGET and sum(len(r) for r in self.inline_keyboard) <= 100) or getattr(self, '_kb_paged', False):
         return out
     try:
-        pages, footer = _kb_split([list(r) for r in self.inline_keyboard])
-        if len(pages) < 2:
-            return out
-        token = os.urandom(5).hex()
-        with _KB_PAGES_LOCK:
-            _KB_PAGES[token] = (pages, footer)
-            while len(_KB_PAGES) > 400:
-                _KB_PAGES.popitem(last=False)
-        return _kb_orig_to_json(_kb_page_markup(token, 0))
+        return _kb_paginate(self) or out
     except Exception:
         return out
+
+
+class _KbRawBtn:
+    def __init__(self, d):
+        self._d = d
+
+    def to_dict(self):
+        return self._d
+
+
+def _kb_retry_smaller(params):
+    """Safety net: Telegram said «reply markup is too long» → resend the same keyboard in smaller pages."""
+    try:
+        rm = json.loads(params.get('reply_markup') or '')
+        rows = rm.get('inline_keyboard') if isinstance(rm, dict) else None
+        if not rows:
+            return None
+        m = InlineKeyboardMarkup()
+        for r in rows:
+            m.row(*[_KbRawBtn(b) for b in r])
+        paged = _kb_paginate(m, budget=4000)
+        if not paged:
+            return None
+        out = dict(params)
+        out['reply_markup'] = paged
+        return out
+    except Exception:
+        return None
 
 
 InlineKeyboardMarkup.to_json = _kb_to_json
@@ -9387,7 +9426,15 @@ def _bx_make_request(token, method_name, method='get', params=None, files=None):
         bypass = _web_tg_bypass(method_name, params)
         if bypass is not None:
             return bypass
-    return _bx_orig_make_request(token, method_name, method=method, params=params, files=files)
+    try:
+        return _bx_orig_make_request(token, method_name, method=method, params=params, files=files)
+    except telebot.apihelper.ApiTelegramException as exc:
+        if params and 'reply markup is too long' in str(exc).lower():
+            smaller = _kb_retry_smaller(params)
+            if smaller:
+                logger.warning(f'{method_name}: keyboard too long for Telegram — resent in pages')
+                return _bx_orig_make_request(token, method_name, method=method, params=smaller, files=files)
+        raise
 
 
 telebot.apihelper._make_request = _bx_make_request
