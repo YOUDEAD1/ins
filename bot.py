@@ -11428,6 +11428,9 @@ def start_handler(message):
                 logger.info(f"[DEEPLINK] shop_detail_ui_helper returned: {result}")
                 if result:
                     return
+            elif deeplink_param == "deposit" and chat_id == uid and not is_coin_hidden('stars'):
+                _stars_deposit_prompt(uid)   # ⭐ من زر «نجوم تيليجرام» في الموقع
+                return
             elif deeplink_param.startswith("c_"):
                 target_cat_id = deeplink_param[2:]
                 logger.info(f"[DEEPLINK] Catalog deep link: cat_id={target_cat_id}")
@@ -14990,7 +14993,11 @@ def dep_init_ui(call):
 @bot.callback_query_handler(func=lambda call: call.data == "dep_stars")
 def dep_stars_ui(call):
     bot.answer_callback_query(call.id)
-    uid = call.from_user.id
+    _stars_deposit_prompt(call.from_user.id)
+
+
+def _stars_deposit_prompt(uid):
+    """يطلب مبلغ الشحن بالنجوم (من زر البوت أو من رابط الموقع t.me/bot?start=deposit)."""
     l = get_lang(uid)
     
     bot.clear_step_handler_by_chat_id(chat_id=uid)
@@ -35583,7 +35590,7 @@ def _wa_bootstrap(identity, body):
                       'is_admin': is_admin}, **_wa_user_stats(uid)),
         'store': {'name': WEBAPP_STORE_NAME, 'bot': get_bot_username(),
                   'support': OWNER_USER or '', 'stars_rate': STARS_RATE,
-                  'other_pay': _other_pay_url()},
+                  'other_pay': _other_pay_url(), 'stars_on': not is_coin_hidden('stars')},
         'deposit': {'methods': methods, 'protection': bool(is_amount_protection_enabled())},
         'nav': nav, 'texts': _wa_texts(), 'vip': _wa_vip_view(uid, u),
         'forced': _wa_forced_info(uid),
